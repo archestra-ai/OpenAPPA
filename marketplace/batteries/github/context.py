@@ -36,7 +36,7 @@ A recognized call costs one GraphQL query. The answer carries facts
 only: who wrote the pull request or issue, every comment and review on
 it, who edited them, and whether a connection had more pages than were
 read (`truncated`). A command this provider cannot follow (a shell, a
-subshell, a computed target, a setting that moves git), a repository the
+computed target, a setting that moves git), a repository the
 token cannot see, or any GitHub error exits nonzero: the runtime hands
 the annotator an error entry, and the call itself is never refused here.
 Every GitHub and git wait ends inside APPA_CONSULT_TIMEOUT_MS, the budget
@@ -69,7 +69,10 @@ ANSWER_MARGIN_SECONDS = 0.5
 STARTED = time.monotonic()
 
 OPERATORS = "();<>&|\n"
-PREFIXES = {"sudo", "env", "command", "exec", "nohup", "time", "then", "do", "else", "!", "{"}
+PREFIXES = {"sudo", "env", "command", "exec", "nohup", "time", "if", "elif", "while", "until", "then", "do", "else", "!", "{"}
+# Programs that run the command after them as it is: their options that take a value, and
+# how many operands stand before that command.
+WRAPPERS = {"timeout": ({"-s", "--signal", "-k", "--kill-after"}, 1), "nice": ({"-n", "--adjustment"}, 0)}
 INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "mksh", "csh", "tcsh", "fish", "pwsh", "busybox", "eval", "source", ".", "xargs"}
 GLOB = set("*?[")
 SETTERS = {"declare", "typeset", "local", "readonly", "read", "mapfile", "readarray", "getopts", "alias", "unset"}
@@ -85,7 +88,7 @@ CHECKOUT_API_PATH = re.compile(r"^/?repos/\{owner\}/\{repo\}(?:/(?:issues|pulls)
 URL = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 SLUG = re.compile(r"^[\w.-]+/[\w.-]+$")
 NUMBER = re.compile(r"^#?(\d+)$")
-SUBSTITUTION = re.compile(r"\$\(([^)]*)|`([^`]*)", re.DOTALL)
+BACKTICKS = re.compile(r"`([^`]*)")
 INVOCATION = re.compile(r"\b(git|gh)\s")
 MENTIONS_GIT = re.compile(r"\b(git|gh)\b")
 
@@ -181,26 +184,60 @@ class Target:
 
 
 def segments_of(command):
-    """The command's simple commands, split at every shell operator and newline."""
+    """The command's simple commands, split at every shell operator and newline, with
+    `(` and `)` where a subshell or an unquoted command substitution opens and closes.
+    An array's values (`name=(...)`) are left out of its assignment."""
     lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATORS)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    segment, previous = [], ""
+    segment, array, previous = [], False, ""
     try:
         for token in lexer:
-            if token == "(" and not previous.endswith("$"):
-                raise Unfollowable("a subshell's directory and settings do not reach the rest of the command")
-            previous = token
-            if set(token) <= set(OPERATORS):
-                if segment:
-                    yield segment
-                segment = []
-            else:
-                segment.append(token)
+            if not set(token) <= set(OPERATORS):
+                if "$(" in token and (array or MENTIONS_GIT.search(token)):
+                    raise Unfollowable("a quoted command substitution runs a git or gh call this provider cannot follow")
+                if not array:
+                    segment.append(token)
+                previous = token
+                continue
+            if "()" in token and segment and not array and not segment[-1].endswith("="):
+                raise Unfollowable(f"{segment[-1]}() defines a function whose calls this provider cannot follow")
+            for character in token:
+                match character:
+                    case ")" if array:
+                        array = False
+                    case _ if array:
+                        raise Unfollowable("an array's values run commands this provider cannot follow")
+                    case "(" if segment and segment[-1].endswith("="):
+                        array = True
+                    # Bash has no empty subshell: `( )` can only define a function.
+                    case ")" if previous == "(":
+                        raise Unfollowable("( ) defines a function whose calls this provider cannot follow")
+                    case _:
+                        if segment:
+                            yield segment
+                        segment = []
+                        if character in "()":
+                            yield character
+                previous = character
     except ValueError as error:
         raise Unfollowable(f"the command does not parse: {error}") from None
+    if array:
+        raise Unfollowable("the command does not parse: an array is never closed")
     if segment:
         yield segment
+
+
+def unwrapped(words):
+    """The command a `timeout`- or `nice`-style wrapper runs; the words as they are for
+    any other program."""
+    while words and words[0] in WRAPPERS:
+        with_value, operands = WRAPPERS[words[0]]
+        index = 1
+        while index < len(words) and words[index].startswith("-"):
+            index += 1 + (words[index] in with_value)
+        words = words[index + operands :]
+    return words
 
 
 def computed(word):
@@ -399,13 +436,29 @@ def gh_targets(words, environment, directory):
 
 
 def bash_targets(command, cwd):
-    """Every place on GitHub the command reaches."""
-    if any(INVOCATION.search("".join(inner)) for inner in SUBSTITUTION.findall(command)):
+    """Every place on GitHub the command reaches. A subshell or an unquoted command
+    substitution is followed inside; its directory and settings end where it closes."""
+    if any(MENTIONS_GIT.search(inner) for inner in BACKTICKS.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this provider cannot follow")
-    targets, exported, assigned, directory = [], {}, set(), cwd
+    targets, exported, assigned, directory, scopes = [], {}, set(), cwd, []
     for words in segments_of(command):
+        match words:
+            case "(":
+                scopes.append((exported, set(assigned), directory))
+                continue
+            case ")":
+                # A `)` that closes no subshell ends a `case` pattern.
+                if scopes:
+                    exported, assigned, directory = scopes.pop()
+                continue
         environment = dict(exported)
-        exporting = words[0] == "export"
+        while words and words[0] in PREFIXES:
+            words = words[1:]
+        if scopes and "case" in words:
+            raise Unfollowable("a case inside a subshell closes patterns this provider cannot tell from the subshell")
+        if words[:1] == ["function"]:
+            raise Unfollowable("function defines a function whose calls this provider cannot follow")
+        exporting = words[:1] == ["export"]
         if exporting:
             words = words[1:]
         while words and ("=" in words[0] and not words[0].startswith(("=", "-")) or words[0] in PREFIXES):
@@ -421,7 +474,13 @@ def bash_targets(command, cwd):
         if not words:
             assigned |= {name for name, value in environment.items() if exported.get(name) != value}
             continue
+        wrapper, words = words[0], unwrapped(words)
+        if not words:
+            continue
         program = os.path.basename(words[0])
+        # A wrapper runs a builtin as a child, whose directory ends with it.
+        if wrapper in WRAPPERS and program in ("cd", "pushd", "popd"):
+            continue
         if program in ("git", "gh") and program != words[0]:
             raise Unfollowable(f"{words[0]} may not be the {program} this provider follows")
         if program in ("git", "gh") and (settings := assigned | environment.keys() - HARMLESS_VARIABLES):
@@ -439,7 +498,9 @@ def bash_targets(command, cwd):
             case _ if program in INTERPRETERS:
                 raise Unfollowable(f"{program} runs commands this provider cannot follow")
             case _ if program in SETTERS or program == "printf" and any(word.startswith("-v") for word in words):
-                raise Unfollowable(f"{program} sets a variable this provider cannot follow")
+                assigned.add(f"a variable {program} sets")
+            case "[" | "[[" | "test":
+                pass
             case _ if (
                 GLOB & set(program)
                 or "$" in program

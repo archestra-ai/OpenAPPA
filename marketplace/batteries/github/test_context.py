@@ -309,6 +309,68 @@ class GitTargets(unittest.TestCase):
         self.assertEqual(self.targets(command, None), slug("acme/public", None, None) + slug("acme/private", None, None))
 
 
+class ShellShapes(unittest.TestCase):
+    """Shell structure whose git and gh calls are still named in the command itself."""
+
+    def targets(self, command, cwd="/w"):
+        return CONTEXT.bash_targets(command, cwd)
+
+    def test_a_subshell_is_followed_inside_and_its_directory_and_settings_end_with_it(self):
+        self.assertEqual(self.targets("(cd ../public && git push origin)"), [Target("remote", "origin", "/w/../public")])
+        self.assertEqual(
+            self.targets("(cd sub && git push origin) && git push upstream"),
+            [Target("remote", "origin", "/w/sub"), Target("remote", "upstream", "/w")],
+        )
+        self.assertEqual(self.targets("(files=(a.ts 'b c.ts'); echo $files) && git push origin"), [Target("remote", "origin", "/w")])
+        self.assertEqual(
+            self.targets(
+                "cd /home/node/workspace && (test -d repo && cd repo && git fetch -q origin 4bdea9bd || "
+                "git clone -q https://github.com/archestra-ai/archestra.git repo) && cd repo && "
+                "git fetch -q origin 4bdea9bd 2>&1 | tail -2; git checkout -q --detach 4bdea9bd && git log --oneline -1"
+            ),
+            [],
+        )
+
+    def test_an_unquoted_command_substitution_is_followed_inside(self):
+        self.assertEqual(
+            self.targets(
+                "cd /home/node/workspace/repo && cd platform && pnpm exec biome check "
+                "$(git diff --name-only 08990b98 da951e19 -- '*.ts' '*.tsx')"
+            ),
+            [],
+        )
+        self.assertEqual(self.targets("echo $(gh pr view 12 --json title)"), checkout(12))
+
+    def test_a_condition_or_a_loop_runs_the_command_after_its_keyword(self):
+        self.assertEqual(
+            self.targets(
+                'cd /home/node/workspace/repo && for path in docs/AGENTS.md platform/AGENTS.md; do '
+                'if git cat-file -e "97e0da1c:$path" 2>/dev/null; then git show "97e0da1c:$path"; fi; done'
+            ),
+            [],
+        )
+        self.assertEqual(self.targets("if git diff --quiet; then git push origin; fi"), [Target("remote", "origin", "/w")])
+        self.assertEqual(self.targets("if [ -d sub ]; then cd sub; fi; [[ -n $X ]] && test -f y && git push origin"), [Target("remote", "origin", "/w/sub")])
+        self.assertEqual(
+            self.targets(
+                "git -C /home/node/workspace/repo ls-tree -r --name-only d193fa87 | while IFS= read -r file; do "
+                "case \"$file\" in */AGENTS.md|*/CLAUDE.md) printf '%s\\n' \"$file\" ;; esac; done"
+            ),
+            [],
+        )
+        self.assertEqual(self.targets("until gh pr checks 12; do sleep 5; done"), checkout(12))
+
+    def test_a_wrapper_runs_the_command_after_its_operands(self):
+        for command in (
+            "timeout 30 gh api repos/archestra-ai/archestra/pulls/10007 --jq .title",
+            "timeout -k 5 --preserve-status 40 gh api repos/archestra-ai/archestra/pulls/10007",
+            "nice -n 5 timeout 30s gh pr view 10007 --repo archestra-ai/archestra",
+        ):
+            self.assertEqual(self.targets(command), slug("archestra-ai/archestra", 10007), command)
+        self.assertEqual(self.targets("timeout 30 cd /other; gh pr view 12"), checkout(12))
+        self.assertEqual(self.targets("git push origin; files=()"), [Target("remote", "origin", "/w")])
+
+
 class Unfollowable(unittest.TestCase):
     def test_a_command_this_provider_cannot_follow_is_refused(self):
         for command in (
@@ -339,7 +401,24 @@ class Unfollowable(unittest.TestCase):
             "GH_REPO=acme/secret; gh pr create",
             "gh api --hostname ghe.example repos/acme/api",
             "python3 -c \"import os; os.system('git push https://github.com/acme/public.git')\"",
-            "(cd ../public && git push origin)",
+            'GH_TOKEN="$CODE_REVIEW_GITHUB_TOKEN" timeout 30 gh api repos/archestra-ai/archestra/pulls/10007',
+            "(export GH_TOKEN=other; gh pr view 1 --repo acme/api)",
+            "timeout 30 bash -c 'git push origin'",
+            "remotes=($(git push origin))",
+            "files=(\"$('gh' pr view 12 --repo acme/private)\")",
+            "echo \"$('gh' pr view 12 --repo acme/private)\"",
+            "(cd /private; case x in x) git push origin;; esac)",
+            "f() { cd /other; }; gh pr view 12",
+            "f ( ) { cd /other; }; git push origin",
+            "f () { cd /other; }; git push origin",
+            "(time -p case x in x) cd /other;; esac); git push origin",
+            "function f { cd /other; }; gh pr view 12",
+            'if [ -n "$CODE_REVIEW_GITHUB_TOKEN" ]; then export GH_TOKEN="$CODE_REVIEW_GITHUB_TOKEN"; fi\n'
+            "gh api repos/archestra-ai/archestra/commits/cd4138ba/check-runs",
+            "while read -r GIT_DIR; do git push origin; done",
+            "gh pr view $(git branch --show-current)",
+            "if [ -n \"${CODE_REVIEW_GITHUB_TOKEN:-}\" ]; then git config --global --add credential.https://github.com.helper ''; fi; "
+            "cd /home/node/workspace/repo && git fetch origin",
             "cd && git push origin",
             "cd - && git push origin",
             "popd && git push origin",
