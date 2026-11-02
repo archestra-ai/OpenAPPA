@@ -85,10 +85,13 @@ HARMLESS_VARIABLES = {"GH_REPO", "GH_PROMPT_DISABLED", "GH_PAGER", "GIT_PAGER", 
 TOKEN_VARIABLES = {"GH_TOKEN", "GITHUB_TOKEN"}
 # Shell variables that git, gh, or the shell itself read, as they are or once exported.
 READ_PREFIXES = ("GIT_", "GH_", "GITHUB_", "XDG_", "LD_", "DYLD_")
-READ_VARIABLES = {"HOME", "PATH", "CDPATH", "PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV"}
-# git config sections and variables that change which repository a push or the checkout's
-# remotes name (git-config(1), git-push(1)), or run commands in a push's place.
-MOVING_SECTIONS = {"remote", "url", "push", "branch", "include", "includeif"}
+READ_VARIABLES = {
+    "HOME", "PATH", "CDPATH", "PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV", "http_proxy", "https_proxy", "all_proxy",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+}
+# git config sections and variables that change which repository or host a push or the
+# checkout's remotes reach (git-config(1), git-push(1)), or run commands in a push's place.
+MOVING_SECTIONS = {"remote", "url", "push", "branch", "include", "includeif", "http"}
 MOVING_VARIABLES = {
     ("core", "sshcommand"), ("core", "gitproxy"), ("core", "hookspath"), ("credential", "url"), ("extensions", "worktreeconfig"),
 }
@@ -109,12 +112,12 @@ NUMBER = re.compile(r"^#?(\d+)$")
 BACKTICKS = re.compile(r"`([^`]*)")
 INVOCATION = re.compile(r"\b(git|gh)\s")
 MENTIONS_GIT = re.compile(r"\b(git|gh)\b")
-QUOTING = re.compile(r"[\"'\\]")
+QUOTING = re.compile(r"\\\n|[\"'\\]")
 RUNS_GIT = re.compile(r"(?<![\w.-])(git|gh)(?![\w@.:/-])")
-# A word that names a file git reads its settings or hooks from.
-GIT_FILE = re.compile(r"(?:^|[/=])(?:\.git(?:/|$)|\.gitconfig$|git/config$)")
+# Text that names a file or directory git reads its settings or hooks from.
+GIT_FILE = re.compile(r"(?<![\w-])\.git(?![\w-])|\.gitconfig\b|\bgit/config\b")
 REFERENCE = re.compile(r"\$\{?[#!]?([A-Za-z_]\w*)")
-HEREDOC = re.compile(r"<<(-?)[ \t]*([^\s;&|<>()]+)")
+HEREDOC = re.compile(r"<<(-?)[ \t]*")
 
 # gh commands that act on one repository: `--repo`/`-R`, `GH_REPO`, or the checkout.
 CHECKOUT_COMMANDS = {"api", "browse", "cache", "issue", "label", "pr", "release", "repo", "ruleset", "run", "secret", "variable", "workflow"}
@@ -429,8 +432,9 @@ def git_target(words, directory):
             unfollowable = option
             index += option in GIT_OPTIONS_WITH_VALUE
             # A setting such as core.pager runs its value in the call it applies to.
-            if index < len(words) and runs_git(words[index]):
-                raise Unfollowable(f"git {option} {words[index]} runs a git or gh call this provider cannot follow")
+            value = words[index] if index < len(words) else option
+            if option.startswith("--config-env") or runs_git(value) or "$" in value or "`" in value:
+                raise Unfollowable(f"git {option} {value} sets what the call runs, which this provider cannot follow")
         index += 1
     if index < len(words):
         computed(words[index])
@@ -608,6 +612,39 @@ def body_of(command, index, delimiter, tabs):
     return "\n".join(lines), index
 
 
+def delimiter_at(command, index):
+    """A here-document's delimiter word at `index`, as bash compares body lines with it
+    after quote removal; where the word ends; and whether any of it was quoted."""
+    delimiter, quoted, start = [], False, index
+    while index < len(command) and command[index] not in " \t\n;&|<>()":
+        match command[index]:
+            case "'":
+                end = command.find("'", index + 1)
+                if end < 0:
+                    raise Unfollowable("the command does not parse: a here-document delimiter is never closed")
+                delimiter.append(command[index + 1 : end])
+                index, quoted = end + 1, True
+            case '"':
+                index, quoted = index + 1, True
+                while index < len(command) and command[index] != '"':
+                    if command[index] == "\\" and command[index + 1 : index + 2] in ('"', "\\", "$", "`"):
+                        index += 1
+                    delimiter.append(command[index : index + 1])
+                    index += 1
+                if index >= len(command):
+                    raise Unfollowable("the command does not parse: a here-document delimiter is never closed")
+                index += 1
+            case "\\":
+                delimiter.append(command[index + 1 : index + 2])
+                index, quoted = index + 2, True
+            case character:
+                delimiter.append(character)
+                index += 1
+    if index == start:
+        raise Unfollowable("the command does not parse: a here-document has no delimiter")
+    return "".join(delimiter), index, quoted
+
+
 def without_heredocs(command):
     """The command with each here-document's body left out: it is text a command reads,
     not shell. A body naming git or gh is refused, as the command reading it may run it."""
@@ -637,10 +674,10 @@ def without_heredocs(command):
                 index += 3
                 continue
             case "<" if not arithmetic and (heredoc := HEREDOC.match(command, index)):
-                word = heredoc.group(2)
-                pending.append((QUOTING.sub("", word), bool(heredoc.group(1)), word != QUOTING.sub("", word)))
-                kept.append(heredoc.group(0))
-                index = heredoc.end()
+                delimiter, end, literal = delimiter_at(command, heredoc.end())
+                pending.append((delimiter, bool(heredoc.group(1)), literal))
+                kept.append(command[index:end])
+                index = end
                 continue
             case "\n" if pending:
                 kept.append(character)
@@ -649,9 +686,9 @@ def without_heredocs(command):
                     body, index = body_of(command, index, delimiter, tabs)
                     if names_git(body):
                         raise Unfollowable("a here-document hands a command text naming git or gh, which it may run")
-                    # An unquoted delimiter leaves the body's substitutions to run.
-                    if not literal and ("$(" in body or "`" in body):
-                        raise Unfollowable("a here-document runs command substitutions this provider cannot follow")
+                    # An unquoted delimiter leaves the body's substitutions and line joins to the shell.
+                    if not literal and ("$(" in body or "`" in body or "\\\n" in f"{body}\n"):
+                        raise Unfollowable("a here-document's body is expanded in a way this provider cannot follow")
                 pending = []
                 continue
         kept.append(character)
@@ -677,10 +714,12 @@ def unsafe_settings(words, environment, assigned, deployment):
 def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
     """Every place on GitHub the command reaches. A subshell or an unquoted command
     substitution is followed inside; its directory and settings end where it closes."""
+    # Any program may write a file git reads, by any path the text names.
+    moves = [Moves(f"{found.group(0)} names a file git reads settings or hooks from") for found in GIT_FILE.finditer(command)][:1]
     command = without_heredocs(command)
     if any(names_git(inner) for inner in BACKTICKS.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this provider cannot follow")
-    targets, moves, pushed, exported, assigned, directory, scopes = [], [], False, {}, set(), cwd, []
+    targets, pushed, exported, assigned, directory, scopes = [], False, {}, set(), cwd, []
     for words in segments_of(command):
         match words:
             case "(":
@@ -714,7 +753,6 @@ def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
         if not words:
             assigned |= {name for name, value in environment.items() if exported.get(name) != value}
             continue
-        moves += [Moves(f"{word} names a file git reads settings or hooks from") for word in words if GIT_FILE.search(word)]
         wrapper, words = words[0], unwrapped(words)
         if not words:
             continue
