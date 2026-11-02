@@ -505,6 +505,8 @@ class Unfollowable(unittest.TestCase):
             "uv run - <<EOF\nimport os\nos.system('gh pr create --repo acme/public')\nEOF",
             "cat <<EOF\n$(g''h issue create --repo acme/public --title x)\nEOF\ngit status",
             "cat <<true\ntr\\\nue\nexport GIT_CONFIG_COUNT=1\ntrue\ngit push origin",
+            "cat <<$'EOF'\nhello\nEOF\ncd /other\n$EOF\ngit push origin",
+            "git -c alias.p='push https://github.com/acme/other.git HEAD' p && gh pr view 1 -R acme/api",
         ):
             with self.assertRaises(CONTEXT.Unfollowable, msg=command):
                 CONTEXT.call_targets(bash(command, "/w"))
@@ -551,6 +553,8 @@ class FollowedSettings(unittest.TestCase):
         self.assertEqual(self.targets("cat <<': X'\n: X\ncd /other\n:\ngit push origin"), [Target("remote", "origin", "/other")])
         self.assertEqual(self.targets("cat <<'\\true'\nhello\n\\true\ncd /other\ntrue\ngit push origin"), [Target("remote", "origin", "/other")])
         self.assertEqual(self.targets('cat <<"E\\"F"\nx\nE"F\ncd /other\ngit push origin'), [Target("remote", "origin", "/other")])
+        self.assertEqual(self.targets(": <<c''d /other\ncd\ngit push origin"), [Target("remote", "origin", "/w")])
+        self.assertEqual(self.targets("echo x > cd /other; git push origin 2>&1 | tail -2"), [Target("remote", "origin", "/w")])
         self.assertEqual(self.targets("g''h issue create --repo acme/public --title x"), slug("acme/public"))
 
     def test_a_single_user_call_with_its_own_token_is_refused(self):

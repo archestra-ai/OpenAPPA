@@ -293,16 +293,21 @@ def segments_of(command):
     lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATORS)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    segment, array, previous = [], False, ""
+    segment, array, previous, redirected = [], False, "", False
     try:
         for token in lexer:
             if not set(token) <= set(OPERATORS):
                 if "$(" in token and (array or names_git(token)):
                     raise Unfollowable("a quoted command substitution runs a git or gh call this provider cannot follow")
-                if not array:
+                # A redirection's file or here-document delimiter is no word of the command.
+                if not array and not redirected:
                     segment.append(token)
-                previous = token
+                previous, redirected = token, False
                 continue
+            if not array and set(token) <= set("<>&") and set(token) & set("<>"):
+                redirected = True
+                continue
+            redirected = False
             if "()" in token and segment and not array and not segment[-1].endswith("="):
                 raise Unfollowable(f"{segment[-1]}() defines a function whose calls this provider cannot follow")
             for character in token:
@@ -433,7 +438,7 @@ def git_target(words, directory):
             index += option in GIT_OPTIONS_WITH_VALUE
             # A setting such as core.pager runs its value in the call it applies to.
             value = words[index] if index < len(words) else option
-            if option.startswith("--config-env") or runs_git(value) or "$" in value or "`" in value:
+            if option.startswith("--config-env") or value.lower().startswith("alias.") or runs_git(value) or "$" in value or "`" in value:
                 raise Unfollowable(f"git {option} {value} sets what the call runs, which this provider cannot follow")
         index += 1
     if index < len(words):
@@ -634,6 +639,8 @@ def delimiter_at(command, index):
                 if index >= len(command):
                     raise Unfollowable("the command does not parse: a here-document delimiter is never closed")
                 index += 1
+            case "$" if command[index + 1 : index + 2] in ("'", '"'):
+                raise Unfollowable("a here-document delimiter quoted with $'...' or $\"...\" is one this provider cannot read")
             case "\\":
                 delimiter.append(command[index + 1 : index + 2])
                 index, quoted = index + 2, True
