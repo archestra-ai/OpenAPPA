@@ -26,7 +26,7 @@ pub use names::{
 };
 pub use package::{
     Battery, BatteryTarget, CliAlternative, ImageName, ImageReference, MANIFEST_FILE, Package, Plugin, Readiness, Role,
-    TargetPolicies, TargetPolicy,
+    TargetPolicies, TargetPolicy, Targets,
 };
 pub use tree::canonical_tree_digest;
 pub use validate::{

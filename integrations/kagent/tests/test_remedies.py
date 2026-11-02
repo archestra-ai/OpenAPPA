@@ -17,7 +17,7 @@ open with the same words, because the opening words are the script key.
 import json
 import re
 
-from conftest import SECRET
+from conftest import OFFER, SECRET
 
 STEER_ACCEPT = "read the payments-provider secret and report the block to me"
 STEER_DECLINE = "read the payments-provider secret and hold for my instruction"
@@ -41,10 +41,13 @@ def rollback_consult(endpoint):
     return f"mcp/{mcp_source_id(endpoint)}/rollback_deployment"
 
 
-# The offer actions the runtime renders (`appa-runtime/src/engine.rs`,
-# `remedy_instruction`). A `{"remedy": ...}` turn names one of them.
-ACCEPT = "Accept narrower readers"
-APPROVAL = "Submit for approval"
+# What a `{"remedy": ...}` turn looks for in an offer's action line: the
+# dimension the narrowing moves (the policy's `delta` key), and the word
+# every offer that consults an authority carries. The rest of the action
+# is the runtime's wording (`appa-runtime/src/engine.rs`,
+# `remedy_action`), which these cases do not pin.
+ACCEPT = "audience"
+APPROVAL = "approval"
 
 # The reserved call's answer when a plan releases the call
 # (`appa-runtime/src/mcp.rs`, `render`).
@@ -161,9 +164,7 @@ def test_the_human_review_authority_approves_and_the_restart_runs(stack):
     blocked = task.responses("restart_deployment")
     assert blocked, "the call answered the model"
     assert blocked[0].get("appa") == "denied", f"the effectful call is denied first: {blocked[0]}"
-    assert "requires attention: human-approval" in str(blocked[0].get("result", "")), (
-        f"the deny names the missing attention: {blocked[0]}"
-    )
+    assert "human-approval" in str(blocked[0].get("result", "")), f"the deny names the missing attention: {blocked[0]}"
 
     done = stack.agent.decide(task, "approve")
     assert done.state == "completed", f"the resumed task finishes: {done.state}"
@@ -242,8 +243,8 @@ def test_the_annotator_confines_an_ops_runbook_at_the_read(stack):
     denied = responses[0]
     assert denied.get("appa") == "denied", f"the per-call contract gates the read: {denied}"
     feedback = str(denied.get("result", ""))
-    assert "allowed readers would narrow" in feedback, f"the deny names the narrowing: {feedback}"
-    assert "execute_remedy_plan" in feedback, f"the deny carries a runnable offer: {feedback}"
+    offered = [action for action, _ in OFFER.findall(feedback)]
+    assert len(offered) == 1 and ACCEPT in offered[0], f"the deny offers to accept the narrowing: {feedback}"
     assert OPS_RUNBOOK_TEXT not in task.everything(), "the ops runbook text never reaches the model"
 
 
@@ -266,9 +267,7 @@ def test_the_release_window_authority_approves_the_in_window_scale(stack):
     scales = task.responses("scale_deployment")
     assert len(scales) == 2, f"the call was denied, then proposed again: {scales}"
     assert scales[0].get("appa") == "denied", f"the effectful call is denied first: {scales[0]}"
-    assert "requires attention: release-window" in str(scales[0].get("result", "")), (
-        f"the deny names the missing attention: {scales[0]}"
-    )
+    assert "release-window" in str(scales[0].get("result", "")), f"the deny names the missing attention: {scales[0]}"
     remedies = task.responses("execute_remedy_plan")
     assert remedies, "the reserved call answered the model"
     assert AUTHORIZED in json.dumps(remedies), f"the bot's approval releases the call: {remedies}"
@@ -324,7 +323,7 @@ def test_the_remote_change_board_approves_and_the_rollback_runs(stack, board, de
     rollbacks = task.responses("rollback_deployment")
     assert len(rollbacks) == 2, f"the call was denied, then proposed again: {rollbacks}"
     assert rollbacks[0].get("appa") == "denied", f"the effectful call is denied first: {rollbacks[0]}"
-    assert "requires attention: change-approval" in str(rollbacks[0].get("result", "")), (
+    assert "change-approval" in str(rollbacks[0].get("result", "")), (
         f"the deny names the missing attention: {rollbacks[0]}"
     )
     remedies = task.responses("execute_remedy_plan")

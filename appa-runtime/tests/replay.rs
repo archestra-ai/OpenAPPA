@@ -10,10 +10,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-use appa_runtime::api::{OfferKind, Runtime};
+use appa_runtime::api::{OfferKind, Remedies, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime::replay::{
-    Expect, Got, StepOutcome, Summary, Trace, TraceReport, Verdict, collect, parse, render, run,
+    Expect, Got, StepOutcome, Summary, Taken, Trace, TraceReport, Verdict, collect, parse, render, render_json, run,
 };
 use axum::Router;
 use axum::routing::post;
@@ -26,7 +26,7 @@ fn runtime(dir: &tempfile::TempDir, policy: &str, bindings: &str) -> Runtime {
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, format!("[policy]\nversion = 2\n{policy}{EXTERNALS}{bindings}")).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
-    Runtime::open_in_memory(config, None).expect("the deployment opens in memory")
+    Runtime::open_in_memory(config, None, Remedies::StandIn).expect("the deployment opens in memory")
 }
 
 /// [`runtime`], serving `appa/do_something` as `appa replay` does.
@@ -34,7 +34,8 @@ fn serving(dir: &tempfile::TempDir, policy: &str, bindings: &str) -> Runtime {
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, format!("[policy]\nversion = 2\n{policy}{EXTERNALS}{bindings}")).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
-    Runtime::open_in_memory(config.with_do_something(), None).expect("the deployment opens in memory")
+    Runtime::open_in_memory(config.with_do_something(), None, Remedies::StandIn)
+        .expect("the deployment opens in memory")
 }
 
 /// An `appa/do_something` step whose `requires` is the given JSON object.
@@ -52,14 +53,35 @@ fn outcomes(report: &TraceReport) -> Vec<(usize, &StepOutcome)> {
 
 fn rendered(reports: &[TraceReport]) -> (String, Summary) {
     let mut out = Vec::new();
-    let summary = render(reports, false, &mut out).expect("renders");
+    let summary = render(reports, Remedies::StandIn, false, &mut out).expect("renders");
     (String::from_utf8(out).expect("utf-8"), summary)
 }
 
-const PASSED: StepOutcome = StepOutcome::Passed { taken: None };
+const ALLOWED: StepOutcome = StepOutcome::Passed {
+    got: Got::Allowed,
+    taken: None,
+};
+const DENIED: StepOutcome = StepOutcome::Passed {
+    got: Got::Blocked(BTreeSet::new()),
+    taken: None,
+};
 
 fn taken(kind: OfferKind) -> StepOutcome {
-    StepOutcome::Passed { taken: Some(kind) }
+    StepOutcome::Passed {
+        got: Got::Blocked(BTreeSet::from([kind.clone()])),
+        taken: Some(Taken {
+            offer: kind,
+            rewritten: None,
+        }),
+    }
+}
+
+/// A step that passed on an offer it did not take.
+fn offered(kind: OfferKind) -> StepOutcome {
+    StepOutcome::Passed {
+        got: Got::Blocked(BTreeSet::from([kind])),
+        taken: None,
+    }
 }
 
 /// An email leaves the company; a deploy needs a backup that never comes.
@@ -87,8 +109,8 @@ async fn one_allow_and_one_deny_pass() {
         trace("deny.appa", "mcp/ops/deploy {}\nexpect deny\n"),
     ];
     let reports = run(&runtime, &traces).await;
-    assert_eq!(outcomes(&reports[0]), vec![(1, &PASSED)]);
-    assert_eq!(outcomes(&reports[1]), vec![(1, &PASSED)]);
+    assert_eq!(outcomes(&reports[0]), vec![(1, &ALLOWED)]);
+    assert_eq!(outcomes(&reports[1]), vec![(1, &DENIED)]);
     let (text, summary) = rendered(&reports);
     assert_eq!(
         text,
@@ -139,9 +161,63 @@ async fn a_narrowing_read_denies_the_later_email() {
     let reports = run(&runtime, &traces).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Accept)), (6, &PASSED), (11, &PASSED)]
+        vec![(1, &taken(OfferKind::Accept)), (6, &DENIED), (11, &ALLOWED)]
     );
     assert_eq!(reports[1].verdict(), Verdict::Ok);
+}
+
+fn observed(got: Got, taken: Option<OfferKind>) -> StepOutcome {
+    StepOutcome::Observed {
+        got,
+        taken: taken.map(|offer| Taken { offer, rewritten: None }),
+    }
+}
+
+/// Steps without `expect` report what they got and never end the file. The HR read is
+/// accepted as `expect allow` would; the email it denies takes nothing; the post still runs.
+/// A denied call never ran, so its narrowing `delta` does not land on the trajectory.
+#[tokio::test]
+async fn observed_steps_report_and_never_end_the_file() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let policy = format!(
+        "{NARROWING_POLICY}\n[[policy.tool]]\nname = \"mcp/ops/deploy\"\nrequires = {{ effects = {{ contains = [\"backup.completed\"] }} }}\ndelta = {{ audience = [\"hr\"] }}\n"
+    );
+    let runtime = runtime(&dir, &policy, "");
+    let email = "mcp/mail/send {\n  to: \"x@other.com\"\n}\n";
+    let traces = [
+        trace(
+            "observe.appa",
+            &format!(
+                "mcp/files/read {{\n  path: \"/hr/salaries.csv\"\n}}\n{email}mcp/slack/post_message {{\n  text: \"reviewed\"\n}}\n{email}expect deny\n"
+            ),
+        ),
+        trace("unlanded.appa", &format!("mcp/ops/deploy {{}}\n{email}")),
+    ];
+    let reports = run(&runtime, &traces).await;
+    assert_eq!(
+        outcomes(&reports[0]),
+        vec![
+            (
+                1,
+                &observed(
+                    Got::Blocked(BTreeSet::from([OfferKind::Accept])),
+                    Some(OfferKind::Accept)
+                )
+            ),
+            (4, &observed(Got::Blocked(BTreeSet::new()), None)),
+            (7, &observed(Got::Allowed, None)),
+            (10, &DENIED),
+        ]
+    );
+    assert_eq!(
+        outcomes(&reports[1]),
+        vec![
+            (1, &observed(Got::Blocked(BTreeSet::new()), None)),
+            (2, &observed(Got::Allowed, None)),
+        ]
+    );
+    let (_, summary) = rendered(&reports);
+    assert_eq!((summary.ok, summary.exit_code()), (2, std::process::ExitCode::SUCCESS));
 }
 
 /// A wipe needs a person's sign-off; a deploy needs a backup that never comes.
@@ -186,7 +262,7 @@ async fn an_authority_offer_is_taken_as_approved() {
         trace("wipe-other.appa", "mcp/ops/wipe {}\nexpect authority cto\n"),
     ];
     let reports = run(&runtime, &traces).await;
-    assert_eq!(outcomes(&reports[0]), vec![(1, &taken(approver())), (4, &PASSED)]);
+    assert_eq!(outcomes(&reports[0]), vec![(1, &taken(approver())), (4, &DENIED)]);
     assert_eq!(outcomes(&reports[1]), vec![(1, &taken(approver()))]);
     assert!(matches!(
         &reports[2].steps[0].outcome,
@@ -248,6 +324,103 @@ async fn a_sanitizer_offer_is_taken_with_the_value_unchanged() {
             (11, &taken(redactor)),
         ]
     );
+}
+
+/// The stand-in never rewrites, and the report never credits the redactor with a rewrite.
+/// Under `Remedies::Live` the bound redactor answers: the call is released with its rewritten
+/// arguments, and the report shows them. An authority nothing binds then has nobody to answer.
+#[tokio::test]
+async fn the_stand_in_owns_its_answers_and_live_remedies_rewrite() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let policy = format!("{REDACTION_POLICY}{ATTENTION_POLICY}");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(
+        &path,
+        format!("[policy]\nversion = 2\n{policy}{EXTERNALS}{REDACTOR_BINDING}"),
+    )
+    .expect("the fixture writes");
+    let open = |remedies| {
+        Runtime::open_in_memory(Config::load(&path).expect("the fixture validates"), None, remedies)
+            .expect("the deployment opens in memory")
+    };
+    let text = "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect allow\n\nmcp/reports/export {\n  body: \"write to bob@example.com today\"\n}\nexpect sanitizer redactor\n";
+    let traces = [
+        trace("export.appa", text),
+        trace("wipe.appa", "mcp/ops/wipe {}\nexpect authority approver\n"),
+    ];
+    let render_text = |reports: &[TraceReport], remedies| {
+        let mut out = Vec::new();
+        render(reports, remedies, true, &mut out).expect("renders");
+        String::from_utf8(out).expect("utf-8")
+    };
+
+    let stood_in = run(&open(Remedies::StandIn), &traces).await;
+    assert_eq!(outcomes(&stood_in[0])[1], (6, &taken(redactor())));
+    let shown = render_text(&stood_in, Remedies::StandIn);
+    assert!(
+        shown.contains("export.appa:6 mcp/reports/export sanitizer redactor (the stand-in answered for redactor: value unchanged)\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("wipe.appa:1 mcp/ops/wipe authority approver (the stand-in approved for approver)\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("note: a stand-in answered 2 authority or sanitizer consults"),
+        "{shown}"
+    );
+    assert!(
+        !shown.contains("rewrote") && !shown.contains("after approver"),
+        "{shown}"
+    );
+
+    let live = run(&open(Remedies::Live), &traces).await;
+    let (line, outcome) = outcomes(&live[0])[1];
+    let StepOutcome::Passed {
+        got: Got::Blocked(blocked),
+        taken: Some(Taken {
+            offer,
+            rewritten: Some(rewritten),
+        }),
+    } = outcome
+    else {
+        panic!("the live redactor rewrites the export: {outcome:?}");
+    };
+    assert_eq!((line, blocked, offer), (6, &BTreeSet::from([redactor()]), &redactor()));
+    // What the redactor writes in place of the address is its own choice; the address is gone.
+    let body = rewritten["body"].as_str().expect("the rewrite keeps the body a string");
+    assert_eq!(rewritten, &serde_json::json!({"body": body}));
+    assert!(!body.contains("bob@example.com"), "{rewritten}");
+    assert!(matches!(&live[1].steps[0].outcome, StepOutcome::CannotRun(_)));
+    let shown = render_text(&live, Remedies::Live);
+    assert!(
+        shown.contains(&format!(
+            "export.appa:6 mcp/reports/export sanitizer redactor (after redactor rewrote it)\n    rewritten arguments: {rewritten}\n"
+        )),
+        "{shown}"
+    );
+    assert!(!shown.contains("stand-in"), "{shown}");
+
+    let mut out = Vec::new();
+    render_json(&live, Remedies::Live, &mut out).expect("renders");
+    let export: serde_json::Value = serde_json::from_str(
+        String::from_utf8(out)
+            .expect("utf-8")
+            .lines()
+            .nth(1)
+            .expect("the export step"),
+    )
+    .expect("one JSON value");
+    assert_eq!(
+        (&export["answered_by"], &export["rewritten"]),
+        (&serde_json::json!("live"), rewritten)
+    );
+}
+
+fn redactor() -> OfferKind {
+    OfferKind::Sanitizer {
+        name: "redactor".into(),
+    }
 }
 
 /// A read that restricts nothing; an email leaves the company; a deploy needs a backup
@@ -405,7 +578,7 @@ async fn a_bound_annotator_decides_the_step() {
     let reports = run(&runtime, &[trace("annotated.appa", text)]).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Accept)), (6, &PASSED)]
+        vec![(1, &taken(OfferKind::Accept)), (6, &DENIED)]
     );
 
     *answer.lock().unwrap() = false;
@@ -437,11 +610,11 @@ async fn do_something_asks_what_the_trajectory_allows() {
     assert_eq!(
         outcomes(&reports[0]),
         vec![
-            (1, &PASSED),
+            (1, &ALLOWED),
             (6, &taken(OfferKind::Accept)),
-            (11, &PASSED),
-            (16, &PASSED),
-            (21, &PASSED),
+            (11, &DENIED),
+            (16, &ALLOWED),
+            (21, &DENIED),
         ]
     );
 
@@ -474,7 +647,11 @@ async fn do_something_never_takes_its_offer() {
     let reports = run(&runtime, &[trace("signoff.appa", &text)]).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &PASSED), (6, &PASSED), (11, &taken(approver()))]
+        vec![
+            (1, &offered(approver())),
+            (6, &offered(approver())),
+            (11, &taken(approver()))
+        ]
     );
 
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -491,7 +668,11 @@ async fn do_something_never_takes_its_offer() {
     };
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &taken(OfferKind::Accept)), (6, &PASSED), (11, &taken(redactor))]
+        vec![
+            (1, &taken(OfferKind::Accept)),
+            (6, &offered(redactor.clone())),
+            (11, &taken(redactor))
+        ]
     );
 }
 
@@ -511,7 +692,7 @@ async fn do_something_asks_about_trust() {
     let reports = run(&runtime, &[trace("trust.appa", &text)]).await;
     assert_eq!(
         outcomes(&reports[0]),
-        vec![(1, &PASSED), (6, &taken(OfferKind::Accept)), (11, &PASSED)]
+        vec![(1, &ALLOWED), (6, &taken(OfferKind::Accept)), (11, &DENIED)]
     );
 }
 
@@ -522,7 +703,7 @@ async fn do_something_is_denied_when_nothing_is_offered() {
     let runtime = serving(&dir, ATTENTION_POLICY, "");
     let text = do_something(r#"{"effects": {"contains": ["backup.completed"]}}"#, "deny");
     let reports = run(&runtime, &[trace("backup.appa", &text)]).await;
-    assert_eq!(outcomes(&reports[0]), vec![(1, &PASSED)]);
+    assert_eq!(outcomes(&reports[0]), vec![(1, &DENIED)]);
 }
 
 /// A requirement the policy cannot state is a step that cannot run, never a deny that would
@@ -540,10 +721,7 @@ async fn a_requirement_the_policy_cannot_state_cannot_run() {
             "names an audience the policy does not",
         ),
         (r#"{"audience": {"contains": ["$to"]}}"#, "names a call argument"),
-        (
-            r#"{"audiences": {"contains": ["public"]}}"#,
-            "unknown field `audiences`",
-        ),
+        (r#"{"audiences": {"contains": ["public"]}}"#, "audiences"),
     ] {
         let reports = run(&runtime, &[trace("refused.appa", &do_something(requires, "deny"))]).await;
         assert!(
@@ -601,7 +779,7 @@ fn a_policy_cannot_declare_do_something() {
         let path = dir.path().join("appa.toml");
         std::fs::write(&path, format!("[policy]\nversion = 2\n{policy}{EXTERNALS}")).expect("the fixture writes");
         let refused = |config: Config| {
-            Runtime::open_in_memory(config, None)
+            Runtime::open_in_memory(config, None, Remedies::StandIn)
                 .err()
                 .map(|error| error.to_string())
         };
@@ -635,7 +813,7 @@ async fn every_shipped_example_passes() {
     assert!(dirs.len() >= 7, "the shipped examples were found: {dirs:?}");
     for dir in dirs {
         let config = Config::load(&dir.join("appa.toml")).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
-        let runtime = Runtime::open_in_memory(config.with_do_something(), None)
+        let runtime = Runtime::open_in_memory(config.with_do_something(), None, Remedies::StandIn)
             .unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
         let files = collect(std::slice::from_ref(&dir)).unwrap_or_else(|error| panic!("{}: {error}", dir.display()));
         let traces: Vec<Trace> = files

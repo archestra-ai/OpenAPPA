@@ -26,6 +26,8 @@ package appakagentadk
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"slices"
 )
 
 // Protocol is the hook wire version this plugin speaks.
@@ -201,8 +203,10 @@ type Decision struct {
 	// Text rides a context: what the harness hands the actor the event
 	// names, which at a child's start is the return contract it works
 	// under.
-	Text         string
-	Detail       string
+	Text   string
+	Detail string
+	// Class rides a refuse: the class of the fault Detail names.
+	Class        RefusalClass
 	SpawnBinding string
 	// Review rides a deny_call: the offers whose plans consult a human
 	// authority, with the review as the person reads it.
@@ -239,13 +243,43 @@ type Offer struct {
 	Sanitizer string
 }
 
-// describe names the decision in a fail-closed message: the runtime's
-// detail when it carries one, the kind otherwise.
-func (d Decision) describe() string {
-	if d.Detail != "" {
-		return d.Detail
-	}
-	return d.Kind
+// RefusalClass is which operational fault a refuse names, as the
+// runtime spells it (RefusalClass in appa-runtime-api). A refuse with any
+// other class is outside the wire.
+type RefusalClass string
+
+const (
+	RefusalStorage            RefusalClass = "storage"
+	RefusalUntrustedLog       RefusalClass = "untrusted_log"
+	RefusalPolicyUnavailable  RefusalClass = "policy_unavailable"
+	RefusalPolicyMoved        RefusalClass = "policy_moved"
+	RefusalLegacyFamily       RefusalClass = "legacy_family"
+	RefusalInventoryRefused   RefusalClass = "inventory_refused"
+	RefusalEngineInvariant    RefusalClass = "engine_invariant"
+	RefusalContended          RefusalClass = "contended"
+	RefusalResolutionDiverged RefusalClass = "resolution_diverged"
+	RefusalAnnotationRefused  RefusalClass = "annotation_refused"
+	RefusalUndeclaredTool     RefusalClass = "undeclared_tool"
+	RefusalUndeclaredSpawn    RefusalClass = "undeclared_spawn"
+	RefusalPeerMessage        RefusalClass = "peer_message"
+	RefusalPrincipal          RefusalClass = "principal"
+	RefusalOutstandingCall    RefusalClass = "outstanding_call"
+	RefusalCallIDReused       RefusalClass = "call_id_reused"
+	RefusalTrajectoryEnded    RefusalClass = "trajectory_ended"
+	RefusalTrajectory         RefusalClass = "trajectory"
+	RefusalDispatch           RefusalClass = "dispatch"
+	RefusalRemedy             RefusalClass = "remedy"
+	RefusalSpawnNotTaken      RefusalClass = "spawn_not_taken"
+	RefusalSpawn              RefusalClass = "spawn"
+)
+
+// refusalClasses is the closed set, in the runtime's declaration order.
+var refusalClasses = []RefusalClass{
+	RefusalStorage, RefusalUntrustedLog, RefusalPolicyUnavailable, RefusalPolicyMoved,
+	RefusalLegacyFamily, RefusalInventoryRefused, RefusalEngineInvariant, RefusalContended, RefusalResolutionDiverged,
+	RefusalAnnotationRefused, RefusalUndeclaredTool, RefusalUndeclaredSpawn, RefusalPeerMessage,
+	RefusalPrincipal, RefusalOutstandingCall, RefusalCallIDReused, RefusalTrajectoryEnded,
+	RefusalTrajectory, RefusalDispatch, RefusalRemedy, RefusalSpawnNotTaken, RefusalSpawn,
 }
 
 // decisionPayloads maps each decision kind to the payload field it
@@ -325,6 +359,13 @@ func parseDecision(body []byte) (Decision, error) {
 		}
 		decision.Offers = offers
 	}
+	if kind == "refuse" {
+		class, err := parseRefusalClass(parsed["class"])
+		if err != nil {
+			return Decision{}, err
+		}
+		decision.Class = class
+	}
 	if kind == "allow_call" {
 		if binding, present := parsed["spawn_binding"]; present {
 			bound, ok := binding.(string)
@@ -333,6 +374,34 @@ func parseDecision(body []byte) (Decision, error) {
 			}
 			decision.SpawnBinding = bound
 		}
+	}
+	return decision, nil
+}
+
+func parseRefusalClass(raw any) (RefusalClass, error) {
+	spelled, ok := raw.(string)
+	if !ok {
+		return "", wireErrorf("a refuse decision without its class")
+	}
+	if !slices.Contains(refusalClasses, RefusalClass(spelled)) {
+		return "", wireErrorf("a refuse decision with a class outside the wire: %q", spelled)
+	}
+	return RefusalClass(spelled), nil
+}
+
+// parseAnswer parses the runtime's answer to a gated event; anything
+// else is a *WireError. A 409 carries a refuse, a 200 any other
+// decision, and every other status fails closed.
+func parseAnswer(status int, body []byte) (Decision, error) {
+	if status != http.StatusOK && status != http.StatusConflict {
+		return Decision{}, wireErrorf("appa answered %d: %s", status, truncate(body, 500))
+	}
+	decision, err := parseDecision(body)
+	if err != nil {
+		return Decision{}, err
+	}
+	if (decision.Kind == "refuse") != (status == http.StatusConflict) {
+		return Decision{}, wireErrorf("a %d answer carrying a %s decision", status, decision.Kind)
 	}
 	return decision, nil
 }

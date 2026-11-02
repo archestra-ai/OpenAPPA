@@ -188,6 +188,28 @@ impl SelectorPlaceholder {
         &self.provider
     }
 
+    /// The same collection keyed by renamed call arguments: each `$argument` segment renamed
+    /// through `arguments`.
+    pub fn respelled(
+        &self,
+        arguments: &std::collections::BTreeMap<String, String>,
+    ) -> Result<SelectorPlaceholder, crate::registry::RespellError> {
+        let segments = self
+            .segments
+            .iter()
+            .map(|segment| match segment {
+                Segment::Literal(literal) => Ok(Segment::Literal(literal.clone())),
+                Segment::Argument(argument) => {
+                    crate::registry::respelled_argument(arguments, argument).map(Segment::Argument)
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(SelectorPlaceholder {
+            provider: self.provider.clone(),
+            segments,
+        })
+    }
+
     /// The call arguments this placeholder reads, in written order.
     pub(crate) fn arguments(&self) -> impl Iterator<Item = &str> {
         self.segments.iter().filter_map(|segment| match segment {
@@ -705,6 +727,33 @@ mod tests {
             public
         );
         assert!(serde_json::from_value::<Delta>(serde_json::json!({ "audience": "@slack:user-group/eng" })).is_err());
+    }
+
+    #[test]
+    fn a_respelled_placeholder_names_the_same_collections_from_renamed_arguments() {
+        let placeholder = SelectorPlaceholder::parse("slack:$kind/$id").expect("a placeholder spelling");
+        let renames = BTreeMap::from([
+            ("kind".to_string(), "type".to_string()),
+            ("id".to_string(), "channel".to_string()),
+        ]);
+        let respelled = placeholder.respelled(&renames).expect("every argument is mapped");
+        assert_eq!(respelled.to_string(), "@slack:$type/$channel");
+        assert_eq!(
+            respelled.instantiate(&serde_json::json!({ "type": "channel", "channel": "C1" })),
+            placeholder.instantiate(&serde_json::json!({ "kind": "channel", "id": "C1" }))
+        );
+        assert_eq!(
+            placeholder.respelled(&BTreeMap::from([("kind".to_string(), "type".to_string())])),
+            Err(crate::registry::RespellError::Unmapped("id".to_string()))
+        );
+        let reshaping = BTreeMap::from([
+            ("kind".to_string(), "x/y".to_string()),
+            ("id".to_string(), "id".to_string()),
+        ]);
+        assert_eq!(
+            placeholder.respelled(&reshaping),
+            Err(crate::registry::RespellError::Unspellable("x/y".to_string()))
+        );
     }
 
     /// Every instantiation is a mention the policy could have written and the log can carry:

@@ -193,8 +193,13 @@ pub enum RouteError {
     MembershipNeeded(Vec<SymbolicAtom>),
     #[error(transparent)]
     Evidence(#[from] EvidenceRefusal),
-    #[error("the view was built under another policy")]
-    ForeignView,
+    #[error("the view stands at policy revision {view}, later than revision {engine} this engine decides at")]
+    NewerRevision {
+        view: crate::profile::PolicyRevision,
+        engine: crate::profile::PolicyRevision,
+    },
+    #[error("the engine decides at no policy revision of a deployment")]
+    NoRevision,
 }
 
 impl From<MembershipNeeded> for RouteError {
@@ -211,6 +216,7 @@ pub(crate) struct BlockContext {
     call: ResolvedCall,
     stage: CallStage,
     role: CallRole,
+    declaring: plan::Declaring,
     floor: Option<plan::Floor>,
     denied: BTreeSet<AuthorityName>,
     expansions: Expansions,
@@ -261,6 +267,7 @@ impl BlockContext {
         let denied = views.denied_authorities(&call.digest()).cloned().unwrap_or_default();
         let floor = plan::floor_of(registry, views);
         Ok(BlockContext {
+            declaring: plan::Declaring::of(role, views, &call),
             contract,
             call,
             stage,
@@ -509,6 +516,8 @@ impl<'a> Search<'a> {
                 &context.call,
                 &context.stage,
                 context.role,
+                context.declaring,
+                &context.denied,
                 context.floor.as_ref(),
                 &membership,
             )? {
@@ -1087,7 +1096,6 @@ mod tests {
             trajectory: traj(),
             dispatch: DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
-            declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
             proposed_label: Label::new(TRUSTED, Audience::public()),
             receiving: Label::new(TRUSTED, Audience::public()),
@@ -1096,6 +1104,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: crate::fact::ReleaseTerms::none(),
         }
     }
 
@@ -1148,6 +1157,7 @@ mod tests {
             call: call.clone(),
             stage: CallStage::default(),
             role: CallRole::Ordinary,
+            declaring: plan::Declaring::No,
             floor: None,
             denied: views.denied_authorities(&call.digest()).cloned().unwrap_or_default(),
             expansions: registry

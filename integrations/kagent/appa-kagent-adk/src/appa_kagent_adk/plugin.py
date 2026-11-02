@@ -119,6 +119,19 @@ _TURN_END_TIMEOUT_SECONDS = 30.0
 _REMEDY_TIMEOUT_SECONDS = 300.0
 
 
+def decided(status: int, body: bytes) -> wire.Decision:
+    """The runtime's ruling on a gated event. A refuse, and an answer
+    outside `wire.parse_answer`, raise `AppaFailClosed` here, so no
+    caller sees either."""
+    try:
+        decision = wire.parse_answer(status, body)
+    except wire.WireError as error:
+        raise AppaFailClosed(str(error)) from error
+    if decision.kind == "refuse":
+        raise AppaFailClosed(f"appa refused: {decision.detail} ({decision.refusal_class.value})")
+    return decision
+
+
 class AppaFailClosed(RuntimeError):
     """The runtime blocked, refused, or could not answer. The action stops."""
 
@@ -223,17 +236,12 @@ class AppaPluginKagent(BasePlugin):
         return self._client
 
     async def _post(self, event: dict[str, Any]) -> wire.Decision:
-        """Post one gated event; anything but a 200 decision fails closed."""
+        """Post one gated event; a refuse or an answer outside the wire fails closed."""
         try:
             answer = await self._live_client().post(self._hook_url, json=event)
         except httpx.HTTPError as error:
             raise AppaFailClosed(f"the appa /hook channel is down: {error}") from error
-        if answer.status_code != 200:
-            raise AppaFailClosed(f"appa answered {answer.status_code}: {answer.text[:500]}")
-        try:
-            return wire.parse_decision(answer.content)
-        except wire.WireError as error:
-            raise AppaFailClosed(str(error)) from error
+        return decided(answer.status_code, answer.content)
 
     async def _post_quiet(self, event: dict[str, Any]) -> None:
         """Post a turn end; a finished turn never blocks the harness."""
@@ -441,7 +449,7 @@ class AppaPluginKagent(BasePlugin):
                 # that request stands unchanged.
                 contract = self._for_model(decision.text, invocation_context)
             elif decision.kind != "ack":
-                raise AppaFailClosed(f"appa refused the session: {decision.detail or decision.kind}")
+                raise AppaFailClosed(f"appa refused the session: {decision.kind}")
             if child_id is not None:
                 # A child_start for a pair the runtime already holds open
                 # answers ack too, so a repeat after a plugin restart
@@ -453,7 +461,7 @@ class AppaPluginKagent(BasePlugin):
         if decision.kind == "block":
             raise AppaFailClosed(f"appa blocked the prompt: {decision.reason}")
         if decision.kind != "ack":
-            raise AppaFailClosed(f"appa answered the prompt with {decision.detail or decision.kind}")
+            raise AppaFailClosed(f"appa answered the prompt with {decision.kind}")
         if contract is None:
             return None
         return _with_contract(contract, user_message)
@@ -509,7 +517,7 @@ class AppaPluginKagent(BasePlugin):
         child_id = _local_child_id(callback_context.invocation_id, agent.name)
         decision = await self._post(wire.child_start(root_id, child_id))
         if decision.kind != "ack":
-            raise AppaFailClosed(f"appa refused the child scope: {decision.detail or decision.kind}")
+            raise AppaFailClosed(f"appa refused the child scope: {decision.kind}")
         return None
 
     async def after_agent_callback(self, *, agent, callback_context):
@@ -710,7 +718,7 @@ class AppaPluginKagent(BasePlugin):
             # why the call was blocked, or the remedy offer it quotes.
             return {"result": self._for_model(decision.feedback, tool_context), _DENY_KEY: _DENIED}
         self._release_tool_dispatch(tool_context)
-        raise AppaFailClosed(f"appa answered the tool call with {decision.detail or decision.kind}")
+        raise AppaFailClosed(f"appa answered the tool call with {decision.kind}")
 
     async def after_tool_callback(self, *, tool, tool_args, tool_context, result):
         if tool is self._return_tool:
@@ -780,7 +788,7 @@ class AppaPluginKagent(BasePlugin):
                     return {"result": self._for_model(decision.output, tool_context)}
                 if decision.kind == "block":
                     return _withheld(self._for_model(decision.reason, tool_context))
-                raise AppaFailClosed(f"appa answered the spawn result with {decision.detail or decision.kind}")
+                raise AppaFailClosed(f"appa answered the spawn result with {decision.kind}")
             decision = await self._post(wire.tool_result(root_id, spelled, arguments, outcome, child_id))
             if decision.kind == "ack":
                 if rejected:
@@ -797,7 +805,7 @@ class AppaPluginKagent(BasePlugin):
                 return {"result": self._for_model(decision.output, tool_context)}
             if decision.kind == "block":
                 return _withheld(self._for_model(decision.reason, tool_context))
-            raise AppaFailClosed(f"appa answered the tool result with {decision.detail or decision.kind}")
+            raise AppaFailClosed(f"appa answered the tool result with {decision.kind}")
         finally:
             self._release_tool_dispatch(tool_context)
 
@@ -836,7 +844,7 @@ class AppaPluginKagent(BasePlugin):
                 return {"result": self._for_model(decision.output, tool_context)}
             if decision.kind == "block":
                 return _withheld(self._for_model(decision.reason, tool_context))
-            raise AppaFailClosed(f"appa answered the tool failure with {decision.detail or decision.kind}")
+            raise AppaFailClosed(f"appa answered the tool failure with {decision.kind}")
         finally:
             self._release_tool_dispatch(tool_context)
 
@@ -886,13 +894,13 @@ class AppaPluginKagent(BasePlugin):
             value = decision.value or ""
             echo = await self._post(wire.child_end(root_id, child_id, value or None))
             if echo.kind != "ack":
-                raise AppaFailClosed(f"appa answered the returned bytes with {echo.detail or echo.reason or echo.kind}")
+                raise AppaFailClosed(f"appa answered the returned bytes with {echo.reason or echo.kind}")
             return self._crossing(tool_context.invocation_id, value)
         if decision.kind == "ack":
             return self._crossing(tool_context.invocation_id, text)
         if decision.kind == "block":
             return {"result": _RETURN_BLOCKED.format(reason=self._for_model(decision.reason, tool_context))}
-        raise AppaFailClosed(f"appa answered the child end with {decision.detail or decision.kind}")
+        raise AppaFailClosed(f"appa answered the child end with {decision.kind}")
 
     def _crossing(self, invocation_id: str, value: str) -> dict[str, Any]:
         """Hold what crossed for this run and tell the model to stop with it."""

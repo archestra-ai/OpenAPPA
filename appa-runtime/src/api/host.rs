@@ -120,9 +120,10 @@ impl HostState {
         }
     }
 
-    /// Whether what this key names is being executed right now.
-    pub(crate) fn claimed(&self, key: &PermitKey) -> bool {
-        self.claims.contains_key(key)
+    /// Until when what this key names is being executed, if it is right now. The bound also
+    /// names the claim: an execution renewing or releasing its own finds it here unchanged.
+    pub(crate) fn claimed(&self, key: &PermitKey) -> Option<SystemTime> {
+        self.claims.get(key).map(|claim| claim.until)
     }
 
     fn end(&mut self, actor: &Actor, key: &PermitKey) {

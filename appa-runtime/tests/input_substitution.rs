@@ -37,7 +37,6 @@ builtin = "redact-email"
 "#;
 
 const RAW_BODY: &str = "mail alice@corp.example today";
-const REDACTED_BODY: &str = "mail [redacted-email] today";
 
 fn read_hr() -> ProposedCall {
     ProposedCall {
@@ -153,6 +152,24 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId
     (runtime, hop)
 }
 
+/// Takes the input sanitizer's hop and returns the `send` body it derived. The body is checked
+/// only against the raw one: what the redactor writes in place of the address is its own choice.
+async fn take_hop(runtime: &Runtime, hop: OfferId) -> String {
+    let RemedyOutcome::Authorized { call } = runtime.execute_remedy(&actor(), hop).await else {
+        panic!("the input sanitizer's hop approves the substituted call");
+    };
+    assert_eq!(call.tool, "send");
+    let arguments = serde_json::from_str::<serde_json::Value>(call.arguments.get()).expect("canonical JSON");
+    let body = arguments["body"]
+        .as_str()
+        .expect("the substituted call carries a body")
+        .to_string();
+    assert_eq!(arguments, serde_json::json!({"body": body}));
+    assert_ne!(body, RAW_BODY, "the sanitizer rewrote the body");
+    assert!(!body.contains("alice@corp.example"), "the address is gone: {body}");
+    body
+}
+
 /// No `send` was released and no effect of one committed: the remedy staged a derivation and
 /// decided nothing in advance. Asserted before every re-proposal, so a regression that went back
 /// to releasing the call at remedy time cannot hide behind the later assertions.
@@ -170,14 +187,7 @@ async fn the_replaced_call_runs_through_the_hooks_and_closes() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
 
-    let RemedyOutcome::Authorized { call } = runtime.execute_remedy(&actor(), hop.clone()).await else {
-        panic!("the input sanitizer's hop approves the substituted call");
-    };
-    assert_eq!(call.tool, "send");
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(call.arguments.get()).expect("canonical JSON"),
-        serde_json::json!({"body": REDACTED_BODY}),
-    );
+    let derived = take_hop(&runtime, hop.clone()).await;
     assert!(
         nothing_ran(&runtime),
         "the remedy stages a derivation and runs nothing: {:?}",
@@ -185,10 +195,10 @@ async fn the_replaced_call_runs_through_the_hooks_and_closes() {
     );
 
     assert_eq!(
-        propose(&runtime, send(REDACTED_BODY)).await,
+        propose(&runtime, send(&derived)).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(report(&runtime, send(REDACTED_BODY), "sent").await, HookDecision::Ack);
+    assert_eq!(report(&runtime, send(&derived), "sent").await, HookDecision::Ack);
 
     assert!(matches!(
         runtime.execute_remedy(&actor(), hop).await,
@@ -225,10 +235,7 @@ async fn the_replaced_call_runs_through_the_hooks_and_closes() {
 async fn another_call_leaves_the_staged_derivation_alone() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
-    assert!(matches!(
-        runtime.execute_remedy(&actor(), hop).await,
-        RemedyOutcome::Authorized { .. }
-    ));
+    let derived = take_hop(&runtime, hop).await;
     assert!(nothing_ran(&runtime), "the remedy runs nothing of its own");
 
     assert_eq!(
@@ -248,7 +255,7 @@ async fn another_call_leaves_the_staged_derivation_alone() {
         "nothing was abandoned: {entries:?}"
     );
     assert_eq!(
-        propose(&runtime, send(REDACTED_BODY)).await,
+        propose(&runtime, send(&derived)).await,
         HookDecision::AllowCall { spawn: None },
         "the derivation still stands and the proposal takes it"
     );
@@ -258,18 +265,15 @@ async fn another_call_leaves_the_staged_derivation_alone() {
 async fn the_staged_derivation_survives_a_reopen() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (runtime, hop) = narrowed_and_blocked(&dir).await;
-    assert!(matches!(
-        runtime.execute_remedy(&actor(), hop).await,
-        RemedyOutcome::Authorized { .. }
-    ));
+    let derived = take_hop(&runtime, hop).await;
     assert!(nothing_ran(&runtime), "the remedy runs nothing of its own");
     drop(runtime);
 
     let config = Config::load(&dir.path().join("appa.toml")).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment reopens"));
     assert_eq!(
-        propose(&runtime, send(REDACTED_BODY)).await,
+        propose(&runtime, send(&derived)).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(report(&runtime, send(REDACTED_BODY), "sent").await, HookDecision::Ack);
+    assert_eq!(report(&runtime, send(&derived), "sent").await, HookDecision::Ack);
 }

@@ -29,13 +29,18 @@ fn shell(tool: &str, command: &str) -> ProposedCall {
 /// The shipped default and battery under a failing `claude`: a static credential
 /// rule narrows without consulting the Bash Annotator.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let target = dir.path().join("batteries/claude-code");
-    std::fs::create_dir_all(&target).unwrap();
-    std::fs::copy(
-        repo_root().join("marketplace/batteries/claude-code/appa.toml"),
-        target.join("appa.toml"),
-    )
-    .unwrap();
+    for battery in ["coding", "claude-code"] {
+        let target = dir.path().join("batteries").join(battery);
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::copy(
+            repo_root()
+                .join("marketplace/batteries")
+                .join(battery)
+                .join("appa.toml"),
+            target.join("appa.toml"),
+        )
+        .unwrap();
+    }
     let command = fake_claude(dir.path(), "exit 1");
     let path = dir.path().join("appa.toml");
     let root_policy =
@@ -43,7 +48,7 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
     std::fs::write(
         &path,
         format!(
-            "include = [\"batteries/claude-code/appa.toml\"]\n{root_policy}\n[externals.claude_code]\ncommand = \"{command}\"\n",
+            "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{root_policy}\n[externals.claude_code]\ncommand = \"{command}\"\n",
             command = command.display(),
         ),
     )

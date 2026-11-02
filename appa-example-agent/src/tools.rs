@@ -152,7 +152,9 @@ impl ToolShim {
                 body: OutcomeBody::Available(String::from_utf8_lossy(&body).into_owned()),
             },
             Ok(_) => ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
+                body: OutcomeBody::TooLarge {
+                    limit_bytes: Some(self.body_cap_bytes),
+                },
             },
             Err(_) => ToolOutcome::Indeterminate,
         }

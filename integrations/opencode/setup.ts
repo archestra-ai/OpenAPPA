@@ -35,10 +35,13 @@ export async function configuration(config: string, binary: string) {
   const store = process.env.APPA_OPENCODE_BATTERIES || join(dirname(config), 'batteries')
   const catalog = await Promise.all((await readdir(store)).sort().filter(name => !name.includes('.')).map(async name => {
     const manifest = Bun.TOML.parse(await readFile(join(store, name, 'appa-package.toml'), 'utf8')) as any
+    const targets = manifest.battery.targets
+    const policy = targets?.[target]?.policy
     return { name, description: manifest.description, hosts: manifest.battery.hosts,
       namespaces: manifest.battery.namespaces ?? [], path: `batteries/${name}/appa.toml`,
-      target_policy: manifest.battery.targets?.[target]?.policy }
-  })).then(items => items.filter(item => item.hosts.includes('opencode')))
+      supported: !targets || policy !== undefined,
+      target_policy: policy === manifest.battery.policy ? undefined : policy }
+  })).then(items => items.filter(item => item.hosts.includes('opencode') && item.supported))
   let publishing = false
   async function describe(path: string, tools: string[] = []) {
     const process = Bun.spawn([binary, 'describe', '--adapter', 'opencode', '--config', path, '--check',
@@ -92,7 +95,7 @@ export async function configuration(config: string, binary: string) {
           if (digest(await readFile(config, 'utf8')) !== input.expected_digest) throw new Error('Policy changed during validation; inspect and propose again.')
           await rename(candidate, config)
           return JSON.stringify({ state: 'saved', description, inventory,
-            next: 'Close setup. Restart the protected runtime and start a fresh OpenCode session. Existing sessions retain their opening policy.' })
+            next: 'Close setup. Restart the protected runtime and start a fresh OpenCode session. Existing sessions use the saved policy for their next tool call.' })
         } finally {
           publishing = false
           await rm(candidate, { force: true })
@@ -151,10 +154,15 @@ if (import.meta.main) {
   await install(settingsDirectory, config, runtimeURL, binary)
   if (!values['install-only']) {
     const temporary = await mkdtemp(join(tmpdir(), 'appa-opencode-setup-'))
+    const setupGuide = join(await realpath(temporary), 'guide.md')
+    const guideText = await guide()
+    await writeFile(setupGuide, guideText, { mode: 0o444, flag: 'wx' })
+    // Escape the selector grammar, then the TOML string. Never authorize a glob.
+    const selector = JSON.stringify(`host/opencode/read(path:${setupGuide.replace(/[\\*),]/g, '\\$&')})`)
     const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() })
     const port = reservation.port!
     reservation.stop(true)
-    await writeFile(join(temporary, 'appa.toml'), '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/appa_setup"\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n')
+    await writeFile(join(temporary, 'appa.toml'), `[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/appa_setup"\n[[policy.tool]]\nname = ${selector}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 1048576\n`)
     const runtime = Bun.spawn([binary, 'runtime', '--adapter', 'opencode', '--listen', `127.0.0.1:${port}`,
       '--config', join(temporary, 'appa.toml'), '--db', join(temporary, 'appa.db')],
     { stdout: 'ignore', stderr: Bun.file(join(temporary, 'runtime.log')) })
@@ -168,13 +176,14 @@ if (import.meta.main) {
       // Keep normal global and project discovery. Inline overrides take precedence
       // without copying project settings or pinning the global guide to one project.
       const setupSettings = JSON.stringify({
-        commands: { 'appa-guide': { template: await guide() } },
+        commands: { 'appa-guide': { template: guideText } },
         mcp: { servers: { appa: { type: 'remote', url: `http://127.0.0.1:${port}/mcp`, oauth: false } } } })
       console.log('Operator setup session: configuration access only. Review the proposal before approving. Close it before protected coding.')
       const session = Bun.spawn([join(import.meta.dir, 'node_modules/.bin/opencode'), '--standalone', project,
         '--prompt', 'Run /appa-guide init. Inspect and propose; wait for my approval before publishing.'],
       { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit', env: { ...process.env,
         OPENCODE_CONFIG_PROJECT_DISABLE: '', OPENCODE_CONFIG_CONTENT: setupSettings,
+        APPA_OPENCODE_SETUP_GUIDE: setupGuide,
         APPA_OPENCODE_SETUP_CONFIG: config, APPA_OPENCODE_SETUP_BINARY: binary, APPA_OPENCODE_RUNTIME_URL: `http://127.0.0.1:${port}` } })
       const stop = () => { session.kill() }
       process.once('SIGINT', stop)

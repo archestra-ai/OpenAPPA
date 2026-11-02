@@ -122,7 +122,7 @@ jobs:
       # required for pull_request events generated with GITHUB_TOKEN.
       - name: Generate release PR token
         id: release-pr-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        uses: archestra-ai/.github/actions/github-app-token@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
         with:
           app-id: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
           private-key: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
@@ -152,7 +152,7 @@ jobs:
 
       - name: Synchronize release version
         if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
-        uses: ./.github/actions/check-release-versions
+        uses: $/.github/actions/check-release-versions
         with:
           relock: "true"
 
@@ -169,7 +169,7 @@ jobs:
           fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add Cargo.lock marketplace/marketplace.toml
+          git add Cargo.lock scripts/mixed-version/Cargo.lock marketplace/marketplace.toml
           git commit -m "chore: synchronize release version"
           git -c credential.helper= \
             -c 'credential.helper=!f() { test "$1" = get && printf "%s\n" "username=x-access-token" "password=$RELEASE_PUSH_TOKEN"; }; f' \
@@ -196,7 +196,7 @@ jobs:
           fetch-depth: 1
 
       - name: Verify and checkout release source
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -248,7 +248,7 @@ jobs:
       - batteries-artifact
     permissions:
       contents: read # Required to verify and check out the release tag.
-    uses: ./.github/workflows/build-appa-runtime-binaries.yml
+    uses: $/.github/workflows/build-appa-runtime-binaries.yml
     with:
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -298,7 +298,7 @@ jobs:
       actions: read # Required to download image digest artifacts.
       contents: read # Required to check out the release source.
       id-token: write # Required for Workload Identity Federation when pushing images.
-    uses: ./.github/workflows/publish-oci-images.yml
+    uses: $/.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.oci-tags.outputs.tags }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -328,16 +328,14 @@ jobs:
           fetch-depth: 1
 
       - name: Authenticate to Artifact Registry
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-
-      - name: Set up Google Cloud
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+          setup_gcloud: "true"
 
       - name: Verify and checkout release source
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -415,7 +413,7 @@ jobs:
           fetch-depth: 1
 
       - name: Verify and checkout release source
-        uses: ./.github/actions/verify-release-source
+        uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
@@ -534,7 +532,7 @@ jobs:
     permissions:
       contents: read
       actions: read # Allow the updater to download its prepared Cargo bundle.
-    uses: ./.github/workflows/update-archestra.yml
+    uses: $/.github/workflows/update-archestra.yml
     with:
       release_tag: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}

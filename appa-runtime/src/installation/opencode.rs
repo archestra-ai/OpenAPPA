@@ -242,7 +242,39 @@ fn profile_lock(path: &Path) -> Result<File, InstallError> {
     Ok(file)
 }
 
+/// The major version in `opencode --version` output: V1 prints `1.19.3`, V2 `opencode v2.0.28`.
+fn opencode_major(output: &str) -> Option<u32> {
+    output
+        .split_whitespace()
+        .last()?
+        .trim_start_matches('v')
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// AppenCode loads only in OpenCode V2. V1 ignores the plugin, so its sessions would run
+/// unprotected behind a verified runtime. Refuse an `opencode` on PATH that is not V2;
+/// an absent one is allowed, because the operator may install OpenCode afterwards.
+fn require_opencode_v2() -> Result<(), InstallError> {
+    let output = match crate::child_process::output(std::process::Command::new("opencode").arg("--version")) {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(invalid(format!("cannot run `opencode --version`: {error}"))),
+    };
+    let reported = String::from_utf8_lossy(&output.stdout);
+    match opencode_major(&reported) {
+        Some(major) if output.status.success() && major >= 2 => Ok(()),
+        _ => Err(invalid(format!(
+            "AppenCode requires OpenCode V2, but `opencode --version` reported {:?}; install it with `npm i -g @opencode/cli`",
+            reported.trim()
+        ))),
+    }
+}
+
 pub(super) fn verify(installation: &Installation, selection: &Selection) -> Result<(), InstallError> {
+    require_opencode_v2()?;
     let root = installation.version_marketplace(selection).join("plugins/opencode");
     Profile::read(&installation.config)?.plan(&installation.config, &root, endpoint()?.url())?;
     Ok(())
@@ -389,8 +421,31 @@ pub fn setup(args: Setup) -> ExitCode {
 
 async fn operator(binary: &Path, config: &Path, project: &Path, marketplace: &Path) -> Result<u8, InstallError> {
     let temporary = tempfile::tempdir().map_err(invalid)?;
+    let root = marketplace.join("plugins/opencode/guide");
+    let guide = ["SKILL.md", "references/core.md", "references/opencode.md"]
+        .into_iter()
+        .map(|path| fs::read_to_string(root.join(path)).map_err(invalid))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n\n");
+    let guide_path = fs::canonicalize(temporary.path()).map_err(invalid)?.join("guide.md");
+    fs::write(&guide_path, &guide).map_err(invalid)?;
+    let mut permissions = fs::metadata(&guide_path).map_err(invalid)?.permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&guide_path, permissions).map_err(invalid)?;
+    // Escape selector syntax separately from TOML string syntax. No wildcard
+    // contract may turn this compatibility reader into general file access.
+    let literal = guide_path
+        .to_str()
+        .ok_or_else(|| invalid("setup guide path is not UTF-8"))?
+        .replace('\\', "\\\\")
+        .replace('*', "\\*")
+        .replace(')', "\\)")
+        .replace(',', "\\,");
+    let selector = json!(format!("host/opencode/read(path:{literal})")).to_string();
     let policy = temporary.path().join("appa.toml");
-    fs::write(&policy, "[policy]\nversion = 2\n[[policy.tool]]\nname = 'host/opencode/appa_setup'\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n").map_err(invalid)?;
+    // Administrative results include complete batteries and the policy reference,
+    // duplicated in the host's output/content envelope. Keep a bounded 1 MiB cap.
+    fs::write(&policy, format!("[policy]\nversion = 2\n[[policy.tool]]\nname = 'host/opencode/appa_setup'\n[[policy.tool]]\nname = {selector}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 1048576\n")).map_err(invalid)?;
     // The runtime itself allocates the port and prints its actual endpoint.
     let mut command = tokio::process::Command::new(binary);
     command
@@ -417,9 +472,6 @@ async fn operator(binary: &Path, config: &Path, project: &Path, marketplace: &Pa
         tokio::time::timeout(Duration::from_secs(20), output.read_line(&mut url)).await.map_err(invalid)?.map_err(invalid)?;
         let url = url.trim();
         Endpoint::parse(url).map_err(invalid)?;
-        let root = marketplace.join("plugins/opencode/guide");
-        let guide = ["SKILL.md", "references/core.md", "references/opencode.md"].into_iter()
-            .map(|path| fs::read_to_string(root.join(path)).map_err(invalid)).collect::<Result<Vec<_>, _>>()?.join("\n\n");
         let settings = json!({
             "plugins":[{"package":marketplace.join("plugins/opencode"), "options":{"runtimeURL":url}}],
             "commands":{"appa-guide":{"template":guide}},
@@ -431,6 +483,7 @@ async fn operator(binary: &Path, config: &Path, project: &Path, marketplace: &Pa
             .env("OPENCODE_CONFIG_PROJECT_DISABLE", "")
             .env("OPENCODE_CONFIG_CONTENT", settings.to_string())
             .env("APPA_OPENCODE_SETUP_CONFIG", config).env("APPA_OPENCODE_SETUP_BINARY", binary)
+            .env("APPA_OPENCODE_SETUP_GUIDE", &guide_path)
             .env("APPA_OPENCODE_BATTERIES", marketplace.join("batteries"))
             .env("APPA_OPENCODE_RUNTIME_URL", url).kill_on_drop(true);
         let mut session = crate::child_process::spawn_async(&mut command).map_err(invalid)?;
@@ -457,4 +510,16 @@ async fn interrupted() {
         }
     }
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn opencode_major_reads_both_version_spellings() {
+        // Outputs observed from the opencode.ai V1 installer and npm's @opencode/cli.
+        assert_eq!(super::opencode_major("1.19.3\n"), Some(1));
+        assert_eq!(super::opencode_major("opencode v2.0.28\n"), Some(2));
+        assert_eq!(super::opencode_major("opencode v12.0.0"), Some(12));
+        assert_eq!(super::opencode_major(""), None);
+    }
 }

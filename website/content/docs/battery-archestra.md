@@ -7,7 +7,7 @@ sidebar: false
 breadcrumb: Archestra
 ---
 
-The Archestra battery covers the sharing tools of Archestra's built-in MCP server, and builds audiences from Archestra's organization, teams, and members.
+The Archestra battery covers the sharing, discovery, reporting, and agent run tools of Archestra's built-in MCP server, and builds audiences from Archestra's organization, teams, and members.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/archestra).
 
@@ -28,6 +28,17 @@ This covers projects, apps, knowledge bases, knowledge connectors, plugins, agen
 ## Reporting
 
 `yell` files a guardrails report with the organization's admins. It is how an agent escalates a block, so it adds no label and requires nothing: no label the session picked up can refuse it.
+
+## Agent runs
+
+A run and its workspace are one container the organization may read, because admins can open any run. The same rules apply on every host, including a host whose calls carry no LLM Proxy proof. On such a host, data written into a run is read back with the run's trust, so suspicious data steered into an unbound run can return trusted. Through the LLM Proxy, the run's return crossing labels it.
+
+- `start_agent_run`, `steer_agent_run`, `write_workspace_file`, and a `transfer_workspace_file` upload put session data into the run. They require data sharable with `internal`.
+- `get_agent_run`, `read_workspace_file`, and a `transfer_workspace_file` download bring the run's data into the session. They add `internal` and keep the session's trust.
+- `cancel_agent_run` returns only the run's state. It adds no label and requires nothing.
+- `list_agent_runs` adds `internal`, because it names the organization's agents, requesters, and channels.
+
+The tools that post to a run's messaging thread have no rule in this battery. The deployment's annotator labels them.
 
 ## Audiences
 

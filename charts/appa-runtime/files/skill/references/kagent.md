@@ -620,5 +620,5 @@ paths, or TOML. Name ungated agents as a remaining limitation.
 
 If the config changed, add:
 
-> Start a new chat with a gated agent to use the updated policy; this
-> chat keeps the policy it started with.
+> The updated policy is in effect: every chat with a gated agent decides
+> its next tool call under it.

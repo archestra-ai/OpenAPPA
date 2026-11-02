@@ -493,45 +493,19 @@ static PROFILE: Table = Table {
     ],
 };
 
-static OPEN_VECTOR_TOOL: Table = Table {
-    name: "OpenVector::tool",
-    entries: &[("tool", Rule::VouchedTool)],
-};
-
-static OPEN_VECTOR_SURFACE: Table = Table {
-    name: "OpenVector::surface",
-    entries: &[("surface", Rule::Token(Class::Surface))],
-};
-
-static OPEN_VECTOR_RULE: Table = Table {
-    name: "OpenVector::rule",
-    entries: &[("rule", Rule::Token(Class::Tool))],
-};
-
-static OPEN_VECTOR: Table = Table {
-    name: "OpenVector",
-    entries: &[
-        ("AssumedExecutor", Rule::Table(&OPEN_VECTOR_TOOL)),
-        ("ProviderRunDispatch", Rule::Table(&OPEN_VECTOR_TOOL)),
-        ("AssumedExecutorRule", Rule::Table(&OPEN_VECTOR_RULE)),
-        ("ProviderRunRule", Rule::Table(&OPEN_VECTOR_RULE)),
-        ("OpenProviderSurface", Rule::Table(&OPEN_VECTOR_SURFACE)),
-    ],
-};
-
 // ---------------------------------------------------------------- the facts themselves
 
 static TRAJECTORY_OPENED: Table = Table {
     name: "TrajectoryOpened",
     entries: &[
         ("trajectory", TRAJECTORY),
-        ("dialect", NUMBER),
         ("profile", Rule::Table(&PROFILE)),
-        // Neither names a person, but together they fingerprint the deployment, which is
-        // exactly what a pseudonymized report must not carry from one report to the next.
-        ("policy_digest", Rule::Fingerprint),
+        // It names no person, but it fingerprints the deployment, which is exactly what a
+        // pseudonymized report must not carry from one report to the next.
         ("policy_file_key", Rule::Fingerprint),
-        ("open_vectors", Rule::Each(&Rule::Table(&OPEN_VECTOR))),
+        // The deployment names a tenant; the revision is a counter within it.
+        ("deployment", Rule::Fingerprint),
+        ("revision", NUMBER),
         ("forked_from", Rule::Table(&ROOT_FORK_ORIGIN)),
         // The person the family acts for.
         ("principal", Rule::Token(Class::Reader)),
@@ -561,7 +535,13 @@ static DISPATCH_OPENED: Table = Table {
         ("annotation", Rule::Table(&PINNED_ANNOTATION)),
         ("evidence", Rule::Table(&EVIDENCE)),
         ("subject", Rule::Table(&SUBJECT_KEY)),
+        ("terms", Rule::Table(&RELEASE_TERMS)),
     ],
+};
+
+static RELEASE_TERMS: Table = Table {
+    name: "ReleaseTerms",
+    entries: &[("delta", Rule::Table(&DELTA)), ("tags", Rule::Elements(Class::Tag))],
 };
 
 static OBSERVED_RESULT: Table = Table {
@@ -774,6 +754,7 @@ static BASIS_ADVANCED: Table = Table {
         ("trajectory", TRAJECTORY),
         ("act", Rule::Table(&DECIDED_ACT)),
         ("advance", Rule::Table(&BASIS_ADVANCE)),
+        ("revision", NUMBER),
     ],
 };
 
@@ -959,12 +940,13 @@ static CONTROL_EVENT: Table = Table {
     ],
 };
 
-static RELOAD_EVENT: Table = Table {
-    name: "RuntimeEvent::Reload",
+static POLICY_PUBLISHED_EVENT: Table = Table {
+    name: "RuntimeEvent::PolicyPublished",
     entries: &[
         ("kind", Rule::Keep),
+        ("deployment", Rule::Fingerprint),
+        ("revision", NUMBER),
         ("policy_key", Rule::Fingerprint),
-        ("changed", Rule::Keep),
     ],
 };
 
@@ -986,7 +968,7 @@ pub(crate) fn event_table(event: &Value) -> Option<&'static Table> {
             _ => None,
         },
         "control" => Some(&CONTROL_EVENT),
-        "reload" => Some(&RELOAD_EVENT),
+        "policy_published" => Some(&POLICY_PUBLISHED_EVENT),
         "store_error" => Some(&STORE_ERROR_EVENT),
         _ => None,
     }
@@ -1061,9 +1043,10 @@ mod tests {
                 outcome: ControlOutcome::Declined,
                 duration_ms: 7,
             },
-            RuntimeEvent::Reload {
+            RuntimeEvent::PolicyPublished {
+                deployment: "default".to_string(),
+                revision: 2,
                 policy_key: "a91f".to_string(),
-                changed: true,
             },
             RuntimeEvent::StoreError {
                 operation: StoreOperation::Append,

@@ -268,7 +268,10 @@ async fn an_uncarried_output_crosses_as_the_engine_s_account_of_it() {
         "an uncarried body must not reach the model. Got {} bytes",
         shown.len(),
     );
-    assert_eq!(shown, "[appa] the result was not carried; nothing was admitted");
+    assert_eq!(
+        shown,
+        "[appa] the tool ran, but its output is not shown: it is over the 65536-byte limit"
+    );
     assert_eq!(host.calls().len(), 1, "the call ran; only its body did not cross");
 }
 
@@ -332,6 +335,38 @@ async fn a_child_runs_its_own_trajectory_and_its_final_message_crosses_back() {
         provider.tool_result(5, "call_2"),
         "Alice Chen is a Staff Engineer.",
         "the parent's spawn call is answered with what crossed the return channel",
+    );
+}
+
+#[tokio::test]
+async fn a_return_declared_ahead_releases_the_spawn_at_once() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let provider = Provider::default();
+    provider
+        .calls("execute_remedy_plan", serde_json::json!({"label": {}}))
+        .calls("delegate", serde_json::json!({"task": "Look up Alice."}))
+        .calls("read_hr", serde_json::json!({"who": "alice"}))
+        .says("Alice Chen is a Staff Engineer.")
+        .says("The lookup says: Alice Chen is a Staff Engineer.");
+    let host = ToolHost::default();
+    host.answers("read_hr", "Alice Chen, Staff Engineer");
+
+    let agent = delegating(agent(runtime(&dir, FORKING, ""), &provider, &host, &["delegate", "read_hr"]).await);
+    let outcome = agent.run(root(), "Find out about Alice.", Default::default()).await;
+
+    assert_eq!(
+        outcome,
+        Outcome::Answer("The lookup says: Alice Chen is a Staff Engineer.".to_string()),
+    );
+    let declared = provider.tool_result(1, "call_0");
+    assert!(
+        declared.starts_with("[appa] Declared."),
+        "the control call that quotes no offer declares: {declared}"
+    );
+    assert_eq!(
+        provider.tool_result(4, "call_1"),
+        "Alice Chen is a Staff Engineer.",
+        "the spawn meets no block and its child's return crosses",
     );
 }
 

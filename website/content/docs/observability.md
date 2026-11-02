@@ -129,6 +129,7 @@ Filter structured logs with `appa.event.name`:
 | Event | Exported event fields |
 |---|---|
 | `appa.policy.decision` | `appa.tool.name`, `appa.outcome`, `appa.offer.ids`, `appa.duration.seconds` |
+| `appa.policy.published` | `appa.policy.id`, `appa.policy.deployment`, `appa.policy.revision` |
 | `appa.external.completed` | `appa.trajectory.root`, `appa.external.name`, `appa.external.role`, `appa.outcome`, `appa.error.type`, `appa.duration.ms` |
 | `appa.remedy.completed` | `appa.trajectory.root`, `appa.offer.id`, `appa.outcome`, `appa.duration.ms` |
 | `appa.hook.completed` | `appa.trajectory.root`, `appa.hook.event`, `appa.outcome` |
@@ -141,7 +142,7 @@ APPA bounds caller-controlled exported identifiers and names to 256 UTF-8 bytes.
 
 ## Traces and correlation
 
-OTEL logs correlate with spans through their native `trace_id` and `span_id`. The `appa.policy.check` span carries `appa.trajectory.root`, `appa.trajectory.id`, `appa.tool.call.id`, the tool name, and outcome. `appa.policy.id` identifies the trajectory's pinned policy when the check reaches policy evaluation. A host that supplies no call ID leaves that field empty.
+OTEL logs correlate with spans through their native `trace_id` and `span_id`. The `appa.policy.check` span carries `appa.trajectory.root`, `appa.trajectory.id`, `appa.tool.call.id`, the tool name, and outcome. `appa.policy.id` names the policy revision that decided the check, as `<deployment>@<revision>`, once the check reaches policy evaluation. A host that supplies no call ID leaves that field empty.
 
 A blocked check records `appa.policy.gaps` and `appa.policy.narrowing` on its span. Gap classes are `trust_floor`, `includes`, `cap`, `prior`, `no_prior`, and `attention`. These explain the restriction without exporting audience members or call values. A marked spawn can need a return declaration without a gap or narrowing.
 

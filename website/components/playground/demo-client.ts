@@ -3,25 +3,9 @@
 // whose body is read as a stream and split on SSE frames. The service holds
 // the OpenRouter key; the browser never handles one.
 
-export const DEMO_URL = process.env.NEXT_PUBLIC_APPA_DEMO_URL ?? "";
+import type { WireEvent } from "./wire-events";
 
-/** Events the service emits for one turn, mirroring `appa_demo::events::WireEvent`. */
-export type DemoEvent =
-  | { type: "says"; trajectory: string; text: string }
-  | { type: "tool_proposed"; trajectory: string; call_id: string; tool: string; arguments: Record<string, unknown> }
-  | { type: "blocked"; trajectory: string; call_id: string; text: string }
-  | { type: "tool_closed"; trajectory: string; outcome: string; effects: string[] }
-  | { type: "tool_result"; trajectory: string; body: string }
-  | { type: "label"; trajectory: string; trust: string; audience: string }
-  | { type: "remedy"; trajectory: string; text: string }
-  | { type: "sanitized"; trajectory: string; sanitizer: string }
-  | { type: "fork"; parent: string; child: string }
-  | { type: "merge"; trajectory: string }
-  | { type: "approval_requested"; id: string; tool: string; detail: Record<string, unknown> }
-  | { type: "approval_resolved"; id: string; approved: boolean; expired: boolean }
-  | { type: "answer"; text: string }
-  | { type: "stopped"; text: string }
-  | { type: "error"; message: string };
+export const DEMO_URL = process.env.NEXT_PUBLIC_APPA_DEMO_URL ?? "";
 
 export type SessionInfo = {
   session: string;
@@ -125,7 +109,7 @@ export function deleteSession(session: string): void {
 export async function streamTurn(
   session: string,
   text: string,
-  onEvent: (event: DemoEvent) => void,
+  onEvent: (event: WireEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch(`${DEMO_URL}/session/${session}/message`, {
@@ -157,7 +141,7 @@ export async function streamTurn(
         .join("");
       if (payload) {
         try {
-          onEvent(JSON.parse(payload) as DemoEvent);
+          onEvent(JSON.parse(payload) as WireEvent);
         } catch {
           // A frame we cannot parse is not worth killing the turn over.
         }

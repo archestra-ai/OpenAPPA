@@ -1,7 +1,7 @@
 # Archestra battery
 
-Rules for the sharing tools of Archestra's built-in MCP server, plus the
-`archestra` audience source.
+Rules for the sharing, discovery, reporting, and agent run tools of
+Archestra's built-in MCP server, plus the `archestra` audience source.
 
 ## Files
 
@@ -21,6 +21,11 @@ wins:
 | `add_team_member` | the added member | `@archestra:user/$user` |
 | `search_tools`, `search_files`, `load_skill` | nothing: they list tools and files, and load a skill | nothing |
 | `yell` | nothing: it files a guardrails report, the way out of a block | nothing |
+| `start_agent_run`, `steer_agent_run`, `write_workspace_file`, `transfer_workspace_file` upload | the run and its workspace | `internal` |
+| `get_agent_run`, `read_workspace_file`, `transfer_workspace_file` download | nothing: adds `internal` to the session | nothing |
+| `transfer_workspace_file` without a `direction` | both: adds `internal` | `internal` |
+| `cancel_agent_run` | nothing: it returns only the run's state | nothing |
+| `list_agent_runs` | nothing: adds `internal`, since it names the organization's agents, requesters, and channels | nothing |
 
 Every widening share also requires `trusted` data. Values that keep a
 resource personal or private, and updates that send no scope and no
@@ -34,6 +39,18 @@ system's own ACLs, which this source cannot read, so such a connector
 must be sharable with anyone. Every rule of a tool declares its lists as
 arrays of strings, so a malformed list is refused rather than read as no
 list.
+
+A run and its workspace are one container the organization may read,
+since admins can open any run. What enters it must be sharable with
+`internal`, and what leaves it adds `internal` and keeps its trust. This
+holds on every host, including one whose calls carry no LLM Proxy proof
+and so cross no label of their own. On such a host, data written into a run
+is read back with the run's trust, so suspicious data steered into an
+unbound run can return trusted; through the LLM Proxy, the run's return
+crossing labels it. The run's posts
+(`post_agent_run_message`, `post_agent_run_file`) have no rule here and
+fall to the deployment's annotator: a post reaches a messaging thread
+whose readers this source cannot list.
 
 A team list names one collection per team, and OpenAPPA reads at most 100
 of them per call.

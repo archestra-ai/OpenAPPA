@@ -361,7 +361,10 @@ async fn reload(State(state): State<AppState>) -> Result<axum::Json<Reloaded>, (
     // The matcher holds this lock while reading policy metadata. Keep it
     // across the synchronous policy swap so no response can describe the
     // old policy after the new one starts serving.
-    let reloaded = state.runtime.install(prepared);
+    let reloaded = state
+        .runtime
+        .install(prepared)
+        .map_err(|refusal| refused(refusal.to_string()))?;
     *published = battery_state;
     Ok(axum::Json(reloaded))
 }

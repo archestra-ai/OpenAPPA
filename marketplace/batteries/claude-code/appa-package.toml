@@ -1,10 +1,16 @@
 schema = 1
 name = "claude-code"
-description = "Claude Code tool rules: credential paths and commands narrow to self, writes into them require a trusted session, Bash and PowerShell results remain confined for sanitization, and every other Bash, PowerShell and Monitor call is labeled per call by the Claude Code Annotator."
+description = "Claude Code tool rules: the map that binds the coding battery's canonical tools to Claude Code's Bash, PowerShell, Read, Grep, Write, Edit, WebFetch and WebSearch, rules for the built-in tools only Claude Code offers, and Monitor calls labeled per call by the Claude Code Annotator."
 
 [battery]
 policy = "appa.toml"
 hosts = ["claude-code"]
 namespaces = ["claude-code"]
 helpers = []
-benefit = "Rules for Claude Code's built-in tools: reads of credential files and secret commands stay with you, and a secret-masking sanitizer lets Bash output flow after it masks secrets."
+benefit = "Applies the coding battery's rules to Claude Code's built-in tools, and covers the session, plan, task and messaging tools only Claude Code offers."
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

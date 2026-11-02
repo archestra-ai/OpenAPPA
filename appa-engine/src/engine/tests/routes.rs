@@ -79,15 +79,27 @@ fn only_a_blocked_standing_call_has_routes() {
     };
 
     assert_eq!(at(&subject("never")), Err(RouteError::UnknownSubject));
-    assert_eq!(
-        engine(vec![plain_tool("read_note")]).recovery_routes(
-            &view,
+    let newer = e.clone().at(DeploymentName::new("default"), PolicyRevision::new(2));
+    let newer_log = vec![opened_root(&newer, &traj())];
+    let newer_view = newer
+        .view(&traj(), newer_log.clone(), newer_log.len() as u64)
+        .expect("the log replays");
+    let older = e.clone().at(DeploymentName::new("default"), PolicyRevision::FIRST);
+    let routes = |engine: &Engine| {
+        engine.recovery_routes(
+            &newer_view,
             &subject("never"),
             &crate::audience::AudienceEvidence::default(),
-            RouteDepth::ONE
-        ),
-        Err(RouteError::ForeignView),
-        "a view built under another policy is refused before anything is read"
+            RouteDepth::ONE,
+        )
+    };
+    assert_eq!(
+        routes(&older),
+        Err(RouteError::NewerRevision {
+            view: PolicyRevision::new(2),
+            engine: PolicyRevision::FIRST,
+        }),
+        "a view a later revision stamped is refused before anything is read"
     );
     assert_eq!(
         at(&crate::basis::SubjectKey::Return(ChildReturnId::new(

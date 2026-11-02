@@ -8,3 +8,9 @@ hosts = ["opencode"]
 namespaces = ["opencode"]
 helpers = []
 benefit = "Private reads cannot reach public tools. Web results cannot drive trusted-only edits. Other shell commands need explicit contracts."
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

@@ -8,18 +8,20 @@ The integration test suite in `../tests/` verifies twenty-four policy and adapte
 
 OpenAPPA gates a flow at the point where a trajectory's label changes, not only at the final sink.
 
-When a tool call is blocked, OpenAPPA returns structured feedback with a remedy offer:
+When a tool call is blocked, OpenAPPA returns feedback in a fixed shape: a `Why:` section that names the label change, such as trust falling from `trusted` to `suspicious`, and a `Continue:` section with one line per remedy offer:
 
 ```text
-[appa] Blocked: get_pod_logs cannot run yet.
+[appa] Blocked: get_pod_logs …
+
 Why:
-  - session trust would fall: trusted -> suspicious
+  - …: trusted -> suspicious
+
 Continue:
-  - Accept lower trust for the rest of this session:
+  - …:
     execute_remedy_plan(offer_id: "…")
 ```
 
-The agent can accept the label change or execute an alternative remedy plan.
+The agent can accept the label change or execute an alternative remedy plan, such as a sanitizer. The [showcase sessions](chart/files/showcase-sessions.json) record the full feedback for each scenario.
 
 ## Scenario 1: Confidential read and sanitization
 

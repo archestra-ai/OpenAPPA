@@ -504,6 +504,7 @@ mod tests {
         let refused = Answer {
             status: 409,
             body: serde_json::to_vec(&WireDecision::of(&HookDecision::Refuse {
+                class: appa_runtime_api::RefusalClass::Storage,
                 detail: "storage failure: disk full".to_string(),
             }))
             .expect("the fixture serializes"),
@@ -631,6 +632,7 @@ mod tests {
         assert!(matches!(event, HookEvent::ToolResult { .. }));
 
         let operational = HookDecision::Refuse {
+            class: appa_runtime_api::RefusalClass::Storage,
             detail: "storage failure: disk full".to_string(),
         };
         for answered in [Some(operational), None] {
@@ -660,6 +662,7 @@ mod tests {
             .expect("the event parses")
             .expect("PreToolUse is gated");
         let refuse = HookDecision::Refuse {
+            class: appa_runtime_api::RefusalClass::Storage,
             detail: "storage failure: disk full".to_string(),
         };
         assert_eq!(

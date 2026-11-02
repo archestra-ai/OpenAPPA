@@ -50,8 +50,9 @@ use serde_json::value::RawValue;
 
 use crate::{
     Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, LaunchStart, LaunchToken, OfferedInputSanitizer,
-    OfferedRemedy, OfferedReturn, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, Review,
-    ReviewChannel, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
+    OfferedRemedy, OfferedReturn, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall,
+    RefusalClass, Review, ReviewChannel, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind,
+    ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -334,11 +335,13 @@ fn checked_principal(
 /// The status a wire outcome carries. `success_without_body` is the
 /// success whose body the wire does not carry, so that an available
 /// body is exactly the `body` field — JSON `null` included.
+/// `success_too_large` is the success whose body was over a byte cap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutcomeStatus {
     Success,
     SuccessWithoutBody,
+    SuccessTooLarge,
     Failure,
     Indeterminate,
 }
@@ -348,6 +351,7 @@ fn status_name(status: OutcomeStatus) -> &'static str {
     match status {
         OutcomeStatus::Success => "success",
         OutcomeStatus::SuccessWithoutBody => "success_without_body",
+        OutcomeStatus::SuccessTooLarge => "success_too_large",
         OutcomeStatus::Failure => "failure",
         OutcomeStatus::Indeterminate => "indeterminate",
     }
@@ -356,7 +360,9 @@ fn status_name(status: OutcomeStatus) -> &'static str {
 /// A dispatched tool's outcome as the host observed it. Each status has
 /// exactly one shape: `success` carries `body` and no `message`,
 /// `failure` carries `message` and no `body`, and
-/// `success_without_body` and `indeterminate` carry neither. Any other
+/// `success_without_body` and `indeterminate` carry neither, and
+/// `success_too_large` carries neither but may carry `limit_bytes`, the cap
+/// the body was over. Any other
 /// combination is malformed — a field the status has no place for is an
 /// observation the host made, and dropping it would lose it from the
 /// trajectory.
@@ -383,6 +389,8 @@ pub struct WireOutcome {
         skip_serializing_if = "Option::is_none"
     )]
     pub message: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_bytes: Option<usize>,
 }
 
 /// `Option`'s own deserializer reads a present `null` as absent, which
@@ -413,6 +421,7 @@ impl WireOutcome {
                         .map_err(|error| malformed(format!("a success outcome whose body is not JSON: {error}")))?,
                 ),
                 message: None,
+                limit_bytes: None,
             },
             ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
@@ -420,16 +429,27 @@ impl WireOutcome {
                 status: OutcomeStatus::SuccessWithoutBody,
                 body: None,
                 message: None,
+                limit_bytes: None,
+            },
+            ToolOutcome::Success {
+                body: OutcomeBody::TooLarge { limit_bytes },
+            } => Self {
+                status: OutcomeStatus::SuccessTooLarge,
+                body: None,
+                message: None,
+                limit_bytes: *limit_bytes,
             },
             ToolOutcome::Failure { message } => Self {
                 status: OutcomeStatus::Failure,
                 body: None,
                 message: Some(Some(message.clone())),
+                limit_bytes: None,
             },
             ToolOutcome::Indeterminate => Self {
                 status: OutcomeStatus::Indeterminate,
                 body: None,
                 message: None,
+                limit_bytes: None,
             },
         })
     }
@@ -447,6 +467,9 @@ impl WireOutcome {
         let without = |field: &str| malformed(format!("a {status} outcome without its {field}"));
         let carrying = |field: &str| malformed(format!("a {status} outcome carrying a {field}"));
         let spelled_null = |field: &str| malformed(format!("a {status} outcome whose {field} is null"));
+        if self.limit_bytes.is_some() && self.status != OutcomeStatus::SuccessTooLarge {
+            return Err(carrying("limit_bytes"));
+        }
         match (self.status, self.body, self.message) {
             // The body is the largest thing on this path: it moves out of
             // its box as the string it already is, rather than being copied
@@ -461,6 +484,13 @@ impl WireOutcome {
             }),
             (OutcomeStatus::SuccessWithoutBody, Some(_), _) => Err(carrying("body")),
             (OutcomeStatus::SuccessWithoutBody, None, Some(_)) => Err(carrying("message")),
+            (OutcomeStatus::SuccessTooLarge, None, None) => Ok(ToolOutcome::Success {
+                body: OutcomeBody::TooLarge {
+                    limit_bytes: self.limit_bytes,
+                },
+            }),
+            (OutcomeStatus::SuccessTooLarge, Some(_), _) => Err(carrying("body")),
+            (OutcomeStatus::SuccessTooLarge, None, Some(_)) => Err(carrying("message")),
             (OutcomeStatus::Failure, None, Some(Some(message))) => Ok(ToolOutcome::Failure { message }),
             (OutcomeStatus::Failure, None, Some(None)) => Err(spelled_null("message")),
             (OutcomeStatus::Failure, Some(_), _) => Err(carrying("body")),
@@ -1239,6 +1269,8 @@ pub struct WireDecision {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<RefusalClass>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
@@ -1255,6 +1287,7 @@ impl WireDecision {
             output: None,
             value: None,
             text: None,
+            class: None,
             detail: None,
         }
     }
@@ -1324,7 +1357,8 @@ impl WireDecision {
                 text: Some(text.clone()),
                 ..Self::bare(DecisionName::Context)
             },
-            HookDecision::Refuse { detail } => Self {
+            HookDecision::Refuse { class, detail } => Self {
+                class: Some(*class),
                 detail: Some(detail.clone()),
                 ..Self::bare(DecisionName::Refuse)
             },
@@ -1341,9 +1375,8 @@ impl WireDecision {
             )));
         }
         let name = self.decision;
-        let required = |field: &str, value: Option<String>| {
-            value.ok_or_else(|| malformed(format!("{name:?} without its {field}")))
-        };
+        let missing = |field: &str| malformed(format!("{name:?} without its {field}"));
+        let required = |field: &str, value: Option<String>| value.ok_or_else(|| missing(field));
         Ok(match name {
             DecisionName::Ack => HookDecision::Ack,
             DecisionName::AllowCall => HookDecision::AllowCall {
@@ -1396,6 +1429,7 @@ impl WireDecision {
                 text: required("text", self.text)?,
             },
             DecisionName::Refuse => HookDecision::Refuse {
+                class: self.class.ok_or_else(|| missing("class"))?,
                 detail: required("detail", self.detail)?,
             },
         })
@@ -1536,13 +1570,30 @@ mod tests {
 
     #[test]
     fn inventory_on_an_event_that_does_not_consume_it_is_refused() {
-        for event in ["ping", "prompt", "turn_end", "tool_result", "child_end"] {
-            let body = serde_json::json!({"protocol":1,"adapter":"kagent","event":event,"root_id":"r1","inventory":{}});
-            assert!(
-                WireEvent::read(&serde_json::to_vec(&body).unwrap())
+        for (event, fields) in [
+            ("ping", serde_json::json!({})),
+            ("prompt", serde_json::json!({"text":"hi"})),
+            ("turn_end", serde_json::json!({})),
+            (
+                "tool_result",
+                serde_json::json!({"tool":"read","arguments":{},"outcome":{"status":"success","body":{"content":"done"}}}),
+            ),
+            ("child_end", serde_json::json!({"child_id":"c1"})),
+        ] {
+            let mut body = serde_json::json!({"protocol":1,"adapter":"kagent","event":event,"root_id":"r1"});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let parsed = |body: &serde_json::Value| {
+                WireEvent::read(&serde_json::to_vec(body).unwrap())
                     .unwrap()
                     .into_event(&SERVED, PrincipalSource::None)
-                    .is_err()
+            };
+            assert!(parsed(&body).is_ok(), "{event} is accepted without the inventory");
+            body["inventory"] = serde_json::json!({});
+            assert!(
+                matches!(parsed(&body), Err(ParseRefusal::Malformed { detail }) if detail.contains("inventory")),
+                "{event} is refused for its inventory"
             );
         }
     }
@@ -2264,6 +2315,14 @@ mod tests {
             ToolOutcome::Success {
                 body: OutcomeBody::Unavailable,
             },
+            ToolOutcome::Success {
+                body: OutcomeBody::TooLarge { limit_bytes: None },
+            },
+            ToolOutcome::Success {
+                body: OutcomeBody::TooLarge {
+                    limit_bytes: Some(65_536),
+                },
+            },
             ToolOutcome::Failure {
                 message: "connection refused".to_string(),
             },
@@ -2334,43 +2393,58 @@ mod tests {
                 r#"{{"protocol":1,"adapter":"kagent","event":"tool_result","root_id":"r1","tool":"read","arguments":{{}},"outcome":{outcome}}}"#
             )
         };
-        for status in ["success", "success_without_body", "failure", "indeterminate"] {
+        for status in [
+            "success",
+            "success_without_body",
+            "success_too_large",
+            "failure",
+            "indeterminate",
+        ] {
             for body in [None, Some("null"), Some(r#"{"content":"done"}"#)] {
                 for message in [None, Some("null"), Some(r#""connection refused""#)] {
-                    let mut outcome = format!(r#"{{"status":"{status}""#);
-                    if let Some(body) = body {
-                        outcome.push_str(&format!(r#","body":{body}"#));
-                    }
-                    if let Some(message) = message {
-                        outcome.push_str(&format!(r#","message":{message}"#));
-                    }
-                    outcome.push('}');
-                    let expected = match (status, body, message) {
-                        ("success", Some(body), None) => Some(ToolOutcome::Success {
-                            body: OutcomeBody::Available(body.to_string()),
-                        }),
-                        ("success_without_body", None, None) => Some(ToolOutcome::Success {
-                            body: OutcomeBody::Unavailable,
-                        }),
-                        ("failure", None, Some(r#""connection refused""#)) => Some(ToolOutcome::Failure {
-                            message: "connection refused".to_string(),
-                        }),
-                        ("indeterminate", None, None) => Some(ToolOutcome::Indeterminate),
-                        _ => None,
-                    };
-                    let read = WireEvent::read(posted(&outcome).as_bytes())
-                        .expect("reads")
-                        .into_event(&SERVED, PrincipalSource::None);
-                    match (expected, read) {
-                        (Some(expected), Ok(Some(accepted))) => match accepted.event {
-                            HookEvent::ToolResult { outcome: crossed, .. } => {
-                                assert_eq!(crossed, expected, "{outcome}")
-                            }
-                            other => panic!("{outcome} crossed as {other:?}"),
-                        },
-                        (Some(_), other) => panic!("{outcome} is admitted, got {other:?}"),
-                        (None, Err(ParseRefusal::Malformed { .. })) => {}
-                        (None, other) => panic!("{outcome} is refused, got {other:?}"),
+                    for limit in [None, Some(65_536)] {
+                        let mut outcome = format!(r#"{{"status":"{status}""#);
+                        if let Some(body) = body {
+                            outcome.push_str(&format!(r#","body":{body}"#));
+                        }
+                        if let Some(message) = message {
+                            outcome.push_str(&format!(r#","message":{message}"#));
+                        }
+                        if let Some(limit) = limit {
+                            outcome.push_str(&format!(r#","limit_bytes":{limit}"#));
+                        }
+                        outcome.push('}');
+                        let expected = match (status, body, message, limit) {
+                            ("success_too_large", None, None, limit) => Some(ToolOutcome::Success {
+                                body: OutcomeBody::TooLarge { limit_bytes: limit },
+                            }),
+                            (_, _, _, Some(_)) => None,
+                            ("success", Some(body), None, None) => Some(ToolOutcome::Success {
+                                body: OutcomeBody::Available(body.to_string()),
+                            }),
+                            ("success_without_body", None, None, None) => Some(ToolOutcome::Success {
+                                body: OutcomeBody::Unavailable,
+                            }),
+                            ("failure", None, Some(r#""connection refused""#), None) => Some(ToolOutcome::Failure {
+                                message: "connection refused".to_string(),
+                            }),
+                            ("indeterminate", None, None, None) => Some(ToolOutcome::Indeterminate),
+                            _ => None,
+                        };
+                        let read = WireEvent::read(posted(&outcome).as_bytes())
+                            .expect("reads")
+                            .into_event(&SERVED, PrincipalSource::None);
+                        match (expected, read) {
+                            (Some(expected), Ok(Some(accepted))) => match accepted.event {
+                                HookEvent::ToolResult { outcome: crossed, .. } => {
+                                    assert_eq!(crossed, expected, "{outcome}")
+                                }
+                                other => panic!("{outcome} crossed as {other:?}"),
+                            },
+                            (Some(_), other) => panic!("{outcome} is admitted, got {other:?}"),
+                            (None, Err(ParseRefusal::Malformed { .. })) => {}
+                            (None, other) => panic!("{outcome} is refused, got {other:?}"),
+                        }
                     }
                 }
             }
@@ -2556,6 +2630,11 @@ mod tests {
             HookDecision::ChildReturn { value: "v".to_string() },
             HookDecision::Context { text: "t".to_string() },
             HookDecision::Refuse {
+                class: RefusalClass::UntrustedLog,
+                detail: "d".to_string(),
+            },
+            HookDecision::Refuse {
+                class: RefusalClass::SpawnNotTaken,
                 detail: "d".to_string(),
             },
         ];
@@ -2581,6 +2660,15 @@ mod tests {
         let valueless: WireDecision =
             serde_json::from_str(r#"{"protocol":1,"decision":"deliver_value"}"#).expect("reads");
         assert!(matches!(valueless.into_decision(), Err(ParseRefusal::Malformed { .. })));
+        let classless: WireDecision =
+            serde_json::from_str(r#"{"protocol":1,"decision":"refuse","detail":"d"}"#).expect("reads");
+        assert!(matches!(classless.into_decision(), Err(ParseRefusal::Malformed { .. })));
+        let classed = serde_json::to_value(WireDecision::of(&HookDecision::Refuse {
+            class: RefusalClass::PolicyUnavailable,
+            detail: "d".to_string(),
+        }))
+        .expect("serializes");
+        assert_eq!(classed["class"], "policy_unavailable");
         let foreign: WireDecision = serde_json::from_str(r#"{"protocol":9,"decision":"ack"}"#).expect("reads");
         assert!(matches!(foreign.into_decision(), Err(ParseRefusal::Malformed { .. })));
     }

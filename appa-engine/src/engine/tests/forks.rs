@@ -150,7 +150,7 @@ fn one_fan_out_declaration_backs_a_member_fork_per_child() {
         )
         .expect("a started child addressed again resumes");
     assert!(matches!(
-        appended_facts(again).as_slice(),
+        declared_records(&appended_facts(again)),
         [Fact::Boundary {
             kind: BoundaryKind::Resume { .. },
             ..
@@ -320,7 +320,7 @@ fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
         .expect("the child binds");
     assert_eq!(bound.follow_up, FollowUp::Fork { child: child.clone() });
     let opened = bound.append.expect("the binding appends").facts().to_vec();
-    assert!(matches!(opened.as_slice(), [Fact::ForkOpened { .. }]));
+    assert!(matches!(declared_records(&opened), [Fact::ForkOpened { .. }]));
 
     let after = e
         .view(&traj(), [log.clone(), opened].concat(), log.len() as u64 + 1)
@@ -332,7 +332,7 @@ fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
     let resumed = e.handle(&after, bind(fork.clone(), child.clone())).unwrap();
     assert!(
         matches!(
-            resumed.append.as_ref().map(ValidatedFactBatch::facts),
+            resumed.append.as_ref().map(|batch| declared_records(batch.facts())),
             Some([Fact::Boundary {
                 kind: crate::fact::BoundaryKind::Resume { .. },
                 ..
@@ -461,26 +461,44 @@ fn a_fork_preparation_replays_only_as_its_marked_release() {
         .iter()
         .position(|fact| matches!(fact, Fact::ForkPrepared { .. }))
         .expect("the release prepares the fork");
+    // The first fact of a batch the sequence refuses, with the refusal.
+    let refused_at = |facts: &[Fact]| {
+        let mut sequence = crate::transition::Sequence::resuming(&e, &view);
+        facts
+            .iter()
+            .enumerate()
+            .find_map(|(at, fact)| sequence.admit(fact).err().map(|refusal| (at, refusal)))
+    };
 
-    let mut unmarked = batch.clone();
-    let decided_at = unmarked
-        .iter()
-        .position(|fact| matches!(fact, Fact::ProposalBatchDecided { .. }))
-        .expect("the release records its decision");
-    if let Fact::ProposalBatchDecided { spawn, .. } = &mut unmarked[decided_at] {
-        *spawn = None;
-    }
-    let unmarked = e.validate_replay(&[records.clone(), unmarked].concat());
-    assert!(unmarked.is_err(), "an unmarked release backs no fork, got {unmarked:?}");
-    let mut displaced = batch.clone();
-    displaced.insert(
-        prepared_at,
-        stray_admission(&traj(), Label::new(SUSPICIOUS, Audience::public())),
+    let unmarked = e
+        .handle(&view, spawn_batch("b1", None))
+        .expect("an unmarked spawn releases")
+        .append
+        .expect("the release appends")
+        .facts()
+        .to_vec();
+    assert_eq!(e.validate_replay(&[records.clone(), unmarked.clone()].concat()), Ok(()));
+    let unmarked = [unmarked, vec![batch[prepared_at].clone()]].concat();
+    assert_eq!(
+        refused_at(&unmarked),
+        Some((
+            unmarked.len() - 1,
+            crate::transition::TransitionRefusal::UnbackedDecision
+        )),
+        "an unmarked release backs no fork"
     );
-    let displaced = e.validate_replay(&[records, displaced].concat());
-    assert!(
-        displaced.is_err(),
-        "a preparation lands in its release's batch, got {displaced:?}"
+
+    let opened_at = batch
+        .iter()
+        .position(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+        .expect("the release opens its dispatch");
+    let mut displaced = batch.clone();
+    let preparation = displaced.remove(prepared_at);
+    displaced.insert(opened_at, preparation);
+    assert_eq!(
+        refused_at(&displaced),
+        Some((opened_at, crate::transition::TransitionRefusal::UnbackedDecision)),
+        "a preparation lands only in its release's fork slot, after the opening"
     );
 }
 
@@ -492,9 +510,9 @@ fn a_spawn_mark_takes_declared_context_control() {
     let e = Engine::open(DeploymentPolicy {
         registry: config,
         planner_cap: crate::registry::PlannerCap::default(),
-        dialect: PolicyDialectVersion::new(1),
         profile: declaration,
     })
+    .map(placed)
     .expect("an uncontrolled deployment opens");
     let view = e.view(&traj(), vec![opened(&e)], 1).unwrap();
     assert_eq!(

@@ -130,6 +130,29 @@ impl ClientHandler for Silent {
     }
 }
 
+/// A reviewer that has the review on screen and never answers it.
+#[derive(Clone)]
+struct Held {
+    open: Arc<tokio::sync::Notify>,
+}
+
+impl ClientHandler for Held {
+    fn get_info(&self) -> rmcp::model::ClientConfig {
+        let mut info = rmcp::model::ClientConfig::default();
+        info.capabilities.elicitation = Some(Default::default());
+        info
+    }
+
+    async fn create_elicitation(
+        &self,
+        _request: ElicitRequestParams,
+        _context: RequestContext<RoleClient>,
+    ) -> Result<ElicitResult, rmcp::ErrorData> {
+        self.open.notify_one();
+        std::future::pending().await
+    }
+}
+
 struct Deployment {
     url: String,
     offer: String,
@@ -424,7 +447,10 @@ async fn accepting_authorizes_the_exact_call() {
     let review = &reviews[0];
     // A harness may show only the first few lines, so the question leads, beside APPA's mark.
     assert!(
-        review.starts_with("▄█▄▄▄█▄  ▀▀█  Approve this call?\n██▄█▄██   ▄   "),
+        review
+            .lines()
+            .next()
+            .is_some_and(|line| line.ends_with("Approve this call?")),
         "the review opens with APPA's question: {review}",
     );
     assert!(review.contains("publish"), "the review names the tool: {review}");
@@ -577,9 +603,11 @@ async fn no_review_channel_reads_differently_from_an_unanswered_review() {
         !unreachable.contains("Authorized"),
         "no channel is not an approval: {unreachable}"
     );
-    assert_ne!(
-        unreachable, dismissed,
-        "the model can tell a session no retry helps from a review worth asking again",
+    // The model can tell a session no retry helps from a review worth asking again.
+    assert!(unreachable.contains("cannot be reached"), "{unreachable}");
+    assert!(
+        dismissed.contains("may be executed again") && !dismissed.contains("cannot be reached"),
+        "{dismissed}"
     );
 
     let reached = execute_by_round_trip(&deployment, Reviewer::new(ElicitationAction::Accept)).await;
@@ -602,10 +630,12 @@ async fn an_authority_the_deployment_binds_nothing_to_reads_as_a_configuration_g
         !unregistered.contains("Authorized"),
         "an authority nothing implements rules nothing: {unregistered}"
     );
-    assert_ne!(
-        unregistered, unreachable,
-        "a configuration gap is not told to the model as a session without a review channel",
+    // A configuration gap is not told to the model as a session without a review channel.
+    assert!(
+        unregistered.contains("[externals.authorities]") && !unregistered.contains("cannot be reached"),
+        "{unregistered}"
     );
+    assert!(unreachable.contains("cannot be reached"), "{unreachable}");
 }
 
 #[tokio::test]
@@ -636,6 +666,10 @@ async fn declining_denies_and_retires_the_offer() {
     let deployment = deployment().await;
     let answer = execute(&deployment, Reviewer::new(ElicitationAction::Decline)).await;
     assert!(!answer.contains("Authorized"), "a denial authorizes nothing: {answer}");
+    assert!(
+        answer.contains("[appa] authority operator denied this plan."),
+        "the denial names the authority that denied the plan: {answer}"
+    );
 
     let again = execute(&deployment, Reviewer::new(ElicitationAction::Accept)).await;
     assert!(
@@ -816,10 +850,140 @@ async fn a_harness_ruling_denies_and_retires_the_offer() {
     let deployment = deployment().await;
     let answer = execute_with(&deployment, Absent, Some(Ruling::Deny)).await;
     assert!(!answer.contains("Authorized"), "a denial authorizes nothing: {answer}");
+    assert!(
+        answer.contains("[appa] authority operator denied this plan."),
+        "the denial names the authority that denied the plan: {answer}"
+    );
 
     let again = execute_with(&deployment, Absent, Some(Ruling::Approve)).await;
     assert!(
         !again.contains("Authorized"),
         "a denied offer is gone; a later approval cannot revive it: {again}",
     );
+}
+
+/// Publish the deployment's next policy revision. `publish` still needs the signoff, so only the
+/// revision moves.
+fn publish_next_revision(deployment: &Deployment) {
+    let path = deployment._dir.path().join("appa.toml");
+    let next = policy(5000).replace(
+        "name = \"read_notes\"",
+        "name = \"read_notes\"\ndescription = \"Read the team's notes.\"",
+    );
+    std::fs::write(&path, next).expect("the revision writes");
+    let reloaded = deployment
+        .runtime
+        .reload(Config::load(&path).expect("the revision validates"))
+        .expect("the revision publishes");
+    assert!(reloaded.changed);
+}
+
+/// The embedded host's path: a ruling the harness obtained for an offer recorded under an earlier
+/// revision authorizes nothing, though the head still asks the same signoff. The call blocks
+/// afresh at the head, and a ruling for the head's own offer authorizes it.
+#[tokio::test]
+async fn a_harness_ruling_for_an_offer_from_an_earlier_revision_authorizes_nothing() {
+    let deployment = deployment().await;
+    publish_next_revision(&deployment);
+    let actor = Actor {
+        root: deployment.root.clone(),
+        child: None,
+    };
+    let vouch = |offer: String| {
+        let actor = actor.clone();
+        let runtime = Arc::clone(&deployment.runtime);
+        async move {
+            let args = serde_json::json!({ "offer_id": offer });
+            let gate = hooks::handle(
+                &runtime,
+                HookEvent::ToolCall {
+                    actor: actor.clone(),
+                    call: ProposedCall {
+                        tool: appa_runtime_api::CONTROL_TOOL.into(),
+                        arguments: raw(args.clone()),
+                        cwd: None,
+                    },
+                    call_id: None,
+                    spawn: None,
+                    prompt: None,
+                    ruling: Some(Ruling::Approve),
+                },
+            )
+            .await;
+            assert!(matches!(gate, HookDecision::PassControl), "{gate:?}");
+            runtime
+                .execute_embedded_remedy(&actor, serde_json::from_value(args).expect("the arguments parse"))
+                .await
+        }
+    };
+
+    assert_eq!(
+        vouch(deployment.offer.clone()).await,
+        appa_runtime::api::RemedyOutcome::Refused {
+            reason: appa_runtime::api::RemedyRefusal::UnknownOffer
+        },
+        "the offer no longer stands, so the ruling is never spent"
+    );
+
+    let blocked = hooks::handle(
+        &deployment.runtime,
+        HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: ProposedCall {
+                tool: "publish".to_string(),
+                arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
+                cwd: None,
+            },
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { feedback, .. } = blocked else {
+        panic!("the head still asks the signoff: {blocked:?}");
+    };
+    let fresh = offer_id(&feedback);
+    assert_ne!(fresh, deployment.offer, "the head records an offer of its own");
+    assert!(matches!(
+        vouch(fresh).await,
+        appa_runtime::api::RemedyOutcome::Authorized { .. }
+    ));
+}
+
+/// A reviewer is never asked about an offer recorded under an earlier revision.
+#[tokio::test]
+async fn no_reviewer_is_asked_about_an_offer_from_an_earlier_revision() {
+    let deployment = deployment().await;
+    publish_next_revision(&deployment);
+    let reviewer = Reviewer::new(ElicitationAction::Accept);
+    let answer = execute(&deployment, reviewer.clone()).await;
+    assert!(!answer.contains("Authorized"), "{answer}");
+    assert!(reviewer.reviews().is_empty(), "nobody reviews a stale offer");
+}
+
+/// A review outlasting every machine-consult budget still holds the offer: a second
+/// attempt meanwhile puts no second review in front of anyone.
+#[tokio::test]
+async fn a_review_held_past_the_claim_bound_keeps_the_offer_claimed() {
+    let short_consults = policy(30_000).replace("\ntimeout_ms = 1000", "\ntimeout_ms = 1")
+        + "\n[externals.claude_code]\ntimeout_ms = 1\n";
+    let deployment = Arc::new(deployment_from(short_consults).await);
+    let open = Arc::new(tokio::sync::Notify::new());
+    let first = tokio::spawn({
+        let deployment = Arc::clone(&deployment);
+        let held = Held {
+            open: Arc::clone(&open),
+        };
+        async move { execute(&deployment, held).await }
+    });
+    open.notified().await;
+    tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+
+    let reviewer = Reviewer::new(ElicitationAction::Accept);
+    let second = execute(&deployment, reviewer.clone()).await;
+    assert!(!second.contains("Authorized"), "{second}");
+    assert!(reviewer.reviews().is_empty(), "one offer is on one screen at a time");
+    first.abort();
 }

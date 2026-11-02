@@ -136,6 +136,11 @@ pub struct ExecutableRemedyPlan {
 }
 
 impl ExecutableRemedyPlan {
+    /// Does this plan only declare a marked spawn's return? Such a plan asks no authority.
+    pub fn declares_only(&self) -> bool {
+        matches!(self.steps.as_slice(), [RemedyStep::Return(_)])
+    }
+
     /// The narrowing this plan asks the agent to accept, where its route carries one.
     /// A raw release path orders that acceptance before its rulings; an output-sanitizer path
     /// accepts no residual up front and has none here.
@@ -267,15 +272,14 @@ pub struct PlannedBlock {
 }
 
 /// How a narrowing moves the policy's argument-free tools, judged on the current history:
-/// of `tools` analysed, `sign_off` start needing an authority and `blocked` lose every
-/// authority and input sanitizer that could clear them. `recipient_checked` names the tools
+/// `sign_off` names the tools that start needing an authority and `blocked` the tools that
+/// lose every authority and input sanitizer that could clear them. `recipient_checked` names the tools
 /// with a declared variant that checks recipients from its arguments against an audience this
 /// narrowing reduces; they are not judged, since the verdict depends on the recipients.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarrowingImpact {
-    pub tools: usize,
-    pub sign_off: usize,
-    pub blocked: usize,
+    pub sign_off: Vec<ToolName>,
+    pub blocked: Vec<ToolName>,
     pub recipient_checked: Vec<ToolName>,
 }
 
@@ -365,6 +369,8 @@ pub(crate) fn plan(
         call,
         stage,
         role,
+        Declaring::of(role, views, call),
+        denied,
         floor.as_ref(),
         context,
     )?
@@ -497,9 +503,8 @@ fn narrowing_impact(
         standing
     };
     let mut impact = NarrowingImpact {
-        tools: 0,
-        sign_off: 0,
-        blocked: 0,
+        sign_off: Vec::new(),
+        blocked: Vec::new(),
         recipient_checked: Vec::new(),
     };
     let audience_narrows = narrowing.to.audience != narrowing.from.audience;
@@ -526,21 +531,80 @@ fn narrowing_impact(
         else {
             continue;
         };
-        impact.tools += 1;
         match after {
             _ if after <= before => {}
-            Standing::Blocked => impact.blocked += 1,
-            Standing::SignOff => impact.sign_off += 1,
+            Standing::Blocked => impact.blocked.push(name.clone()),
+            Standing::SignOff => impact.sign_off.push(name.clone()),
             Standing::Clear => {}
         }
     }
-    (impact.sign_off + impact.blocked > 0 || !impact.recipient_checked.is_empty()).then_some(impact)
+    (!impact.sign_off.is_empty() || !impact.blocked.is_empty() || !impact.recipient_checked.is_empty())
+        .then_some(impact)
+}
+
+/// How a call's return declaration enters its plans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Declaring {
+    /// An ordinary call, or a marked spawn whose declaration stands: no plan declares.
+    No,
+    /// A marked spawn with no declaration: each plan is one return route, with no authority
+    /// and no settlement. The retry is planned on whatever else blocks it.
+    Separately(crate::transition::SpawnKind),
+    /// Every gap plan with every return route: the menu an earlier planner recorded for a
+    /// marked spawn. Read only to replay those offers.
+    Bundled(crate::transition::SpawnKind),
+}
+
+impl Declaring {
+    pub(crate) fn of(role: CallRole, views: &Views, call: &ResolvedCall) -> Declaring {
+        match role {
+            CallRole::MarkedSpawn(kind) if views.declaration(call).is_none() => Declaring::Separately(kind),
+            CallRole::MarkedSpawn(_) | CallRole::Ordinary => Declaring::No,
+        }
+    }
+}
+
+/// The menu an earlier planner recorded for a marked spawn with no declaration: each gap plan
+/// bundled with each return route. Replay reads it for offers recorded under that planner; no
+/// block offers it.
+pub(crate) fn bundled_spawn_menu(
+    registry: &Registry,
+    views: &Views,
+    blocked: BlockedCall<'_>,
+    context: &MembershipContext<'_>,
+) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
+    let CallRole::MarkedSpawn(kind) = blocked.role else {
+        return Ok(Vec::new());
+    };
+    let no_denials = BTreeSet::new();
+    let denied = views.denied_authorities(&blocked.call.digest()).unwrap_or(&no_denials);
+    Ok(enumerate_plans(
+        registry,
+        blocked.contract,
+        &views.current_label(),
+        &|kind| views.has_effect(kind),
+        &|kind| views.has_reservation(kind),
+        blocked.call,
+        blocked.stage,
+        blocked.role,
+        Declaring::Bundled(kind),
+        denied,
+        floor_of(registry, views).as_ref(),
+        context,
+    )?
+    .into_iter()
+    .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
+    .collect())
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
 /// history predicates. The log supplies them for a live block; a recovery route supplies the
 /// state it has reached (RMD-20). A membership read no pinned answer decides refuses the
 /// whole enumeration with the union of every undecided atom, never a smaller menu.
+///
+/// A marked spawn's return declaration is never bundled with a gap's authority: an undeclared
+/// spawn is offered the declarations alone, and once one stands its retry is planned on its
+/// remaining gaps (see [`Declaring`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enumerate_plans(
     registry: &Registry,
@@ -551,6 +615,8 @@ pub(crate) fn enumerate_plans(
     call: &ResolvedCall,
     stage: &CallStage,
     role: CallRole,
+    declaring: Declaring,
+    denied: &BTreeSet<AuthorityName>,
     floor: Option<&Floor>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
@@ -563,7 +629,7 @@ pub(crate) fn enumerate_plans(
         stage,
         context,
     )?;
-    if role == CallRole::Ordinary && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
+    if declaring == Declaring::No && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
         return Ok(Vec::new());
     }
 
@@ -598,10 +664,13 @@ pub(crate) fn enumerate_plans(
             context,
             &mut needs,
         );
-        // An ordinary call declares no return policy; a marked spawn declares exactly one.
-        let returns: Vec<Option<ReturnRoute>> = match role {
-            CallRole::Ordinary => vec![None],
-            CallRole::MarkedSpawn(kind) => return_options(registry, floor, kind).into_iter().map(Some).collect(),
+        // Only the bundled menu declares beside a gap plan.
+        let returns: Vec<Option<ReturnRoute>> = match declaring {
+            Declaring::No | Declaring::Separately(_) => vec![None],
+            Declaring::Bundled(kind) => return_options(registry, current, floor, kind)
+                .into_iter()
+                .map(Some)
+                .collect(),
         };
         for required in assignments {
             for settlement in &settlements {
@@ -627,6 +696,27 @@ pub(crate) fn enumerate_plans(
         }
     }
     needs.refuse_if_any()?;
+    // An undeclared spawn is offered its declarations alone, where its other gaps have a plan.
+    // A plan naming an authority that denied this call does not count: the caller drops it.
+    if let Declaring::Separately(kind) = declaring {
+        let unblocked = block.requirement_gaps.is_empty() && block.narrowing.is_none();
+        let planned = candidates.iter().any(|candidate| {
+            !candidate
+                .required
+                .iter()
+                .any(|ruling| denied.contains(&ruling.authority))
+        });
+        if !unblocked && !planned {
+            return Ok(Vec::new());
+        }
+        candidates = return_options(registry, current, floor, kind)
+            .into_iter()
+            .map(|route| PlanCandidate {
+                steps: vec![RemedyStep::Return(route)],
+                required: Vec::new(),
+            })
+            .collect();
+    }
     Ok(least_mandate_first(
         registry,
         &block.requirement_gaps,
@@ -1216,16 +1306,26 @@ pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
 /// The return routes a marked spawn may declare here: the bare floor, then in registry name order
 /// the reserved attestation when it is registered and every untagged output sanitizer, then no
 /// return. Under a floor, a sanitizer whose mandate lands below it is not offered — the
-/// grandchild's return could never cross the child. A fan-out spawn is not offered the
+/// grandchild's return could never cross the child. The attestation is offered only where
+/// `current` covers its trust rank, the condition its declaration is checked against, so no
+/// offered route is one the declaration then refuses. A fan-out spawn is not offered the
 /// attestation: it holds only for a child started while the parent is trusted, which the
 /// declaration checks once and a fan-out's later children need not meet.
-fn return_options(registry: &Registry, floor: Option<&Floor>, kind: crate::transition::SpawnKind) -> Vec<ReturnRoute> {
+fn return_options(
+    registry: &Registry,
+    current: &Label,
+    floor: Option<&Floor>,
+    kind: crate::transition::SpawnKind,
+) -> Vec<ReturnRoute> {
     let mut options = vec![ReturnRoute::Raw];
     options.extend(
         registry
             .sanitizers()
             .filter(|sanitizer| sanitizer.on.output && sanitizer.applies_to(&[]))
-            .filter(|sanitizer| kind == crate::transition::SpawnKind::Single || !sanitizer.name.is_attest_schema())
+            .filter(|sanitizer| {
+                !sanitizer.name.is_attest_schema()
+                    || (kind == crate::transition::SpawnKind::Single && attest_fits(&sanitizer.transition, current))
+            })
             .filter(|sanitizer| {
                 floor.is_none_or(|floor| {
                     Floor::new(floor.label().clone(), None).holds(&sanitizer.transition.applied().derive(floor.label()))
@@ -1279,13 +1379,12 @@ fn preserving_return_exists(
     context: &MembershipContext<'_>,
 ) -> bool {
     let unchanged = Floor::new(current.clone(), None);
-    return_options(registry, floor, crate::transition::SpawnKind::Single)
+    return_options(registry, current, floor, crate::transition::SpawnKind::Single)
         .into_iter()
         .filter_map(|route| match route {
             ReturnRoute::Sanitized(name) => registry.sanitizer(&name),
             ReturnRoute::Raw | ReturnRoute::Void => None,
         })
-        .filter(|sanitizer| !sanitizer.name.is_attest_schema() || attest_fits(&sanitizer.transition, current))
         .any(|sanitizer| {
             sanitizer
                 .derive_output(&narrowing.to, &[], context)
@@ -2069,22 +2168,30 @@ mod tests {
                 "the sanitizer covers no gap: the ruling is still required"
             );
         }
+        let accept = executables
+            .iter()
+            .find(|plan| plan.narrowing().is_some())
+            .expect("an accept plan is offered");
+        let sanitize = executables
+            .iter()
+            .find(|plan| plan.sanitizer().is_some())
+            .expect("a sanitize plan is offered");
         assert!(
-            executables[1]
+            sanitize
                 .steps
                 .contains(&RemedyStep::Authorize(AuthorityName::new("steward")))
         );
         assert_eq!(executables[0].id, PlanId::new(0));
         assert_eq!(executables[1].id, PlanId::new(1));
         assert_eq!(
-            executables[0].steps,
+            accept.steps,
             vec![
                 RemedyStep::Accept(planned.raw.narrowing.clone().expect("the block narrows")),
                 RemedyStep::Authorize(AuthorityName::new("steward")),
             ]
         );
         assert_eq!(
-            executables[1].steps,
+            sanitize.steps,
             vec![
                 RemedyStep::Authorize(AuthorityName::new("steward")),
                 RemedyStep::Sanitize(SanitizerName::new("declassify")),
@@ -2737,7 +2844,6 @@ mod tests {
             trajectory: traj(),
             dispatch: crate::value::DispatchId::new(traj(), seed.digest(), 0),
             tool: seed.tool().clone(),
-            declaration: seed.declaration_id(),
             arguments: seed.canonical_arguments().clone(),
             proposed_label: Label::new(TRUSTED, Audience::public()),
             receiving: Label::new(TRUSTED, Audience::public()),
@@ -2746,6 +2852,7 @@ mod tests {
             file_basis: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
+            terms: crate::fact::ReleaseTerms::none(),
         }
     }
 
@@ -3123,7 +3230,7 @@ mod tests {
     }
 
     #[test]
-    fn a_narrowing_counts_the_tools_it_moves_to_sign_off_or_blocked() {
+    fn a_narrowing_names_the_tools_it_moves_to_sign_off_or_blocked() {
         let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
         let insider = || DeclaredAudience::restricted([ReaderId::new("insider")]);
         let tool = |name: &str, tags: &[&str], recipients: Vec<RecipientSpec>| ToolAnnotation {
@@ -3203,9 +3310,8 @@ mod tests {
         assert_eq!(
             plan_of(&registry, &log, &call("fetch", json!({}))).narrowing_impact,
             Some(NarrowingImpact {
-                tools: 5,
-                sign_off: 1,
-                blocked: 2,
+                sign_off: vec![ToolName::new("post")],
+                blocked: vec![ToolName::new("drain"), ToolName::new("read")],
                 recipient_checked: vec![ToolName::new("post"), ToolName::new("reply")],
             }),
             "post needs desk; read's org variant has no remedy, and drain's consumed is committed by accepting \
@@ -3300,9 +3406,8 @@ mod tests {
         assert_eq!(
             impact(None),
             Some(NarrowingImpact {
-                tools: 3,
-                sign_off: 2,
-                blocked: 0,
+                sign_off: vec![ToolName::new("lookup"), ToolName::new("post")],
+                blocked: vec![],
                 recipient_checked: vec![],
             }),
             "audit's org variant is blocked before and after, so its other variant's move is no news"
@@ -3310,9 +3415,8 @@ mod tests {
         assert_eq!(
             impact(Some(&Floor::new(Label::new(TRUSTED, insider()), None))),
             Some(NarrowingImpact {
-                tools: 3,
-                sign_off: 1,
-                blocked: 0,
+                sign_off: vec![ToolName::new("post")],
+                blocked: vec![],
                 recipient_checked: vec![],
             }),
             "under a trusted floor lookup's drop to suspicious never settles, before or after"
@@ -4169,23 +4273,12 @@ mod tests {
                 }
                 strictly_less
             };
-            let mut expected: Vec<Vec<(AuthorityName, Vec<Gap>)>> = Vec::with_capacity(enumerated.len());
-            let mut used = vec![false; enumerated.len()];
-            for _ in 0..enumerated.len() {
-                let next = (0..enumerated.len())
-                    .filter(|&i| !used[i])
-                    .find(|&i| (0..enumerated.len())
-                        .filter(|&j| !used[j] && j != i)
-                        .all(|j| !precedes(&enumerated[j], &enumerated[i])))
-                    .expect("a finite strict partial order has a minimal element");
-                used[next] = true;
-                expected.push(enumerated[next].clone());
-            }
+            let mut expected = enumerated;
             if raw.narrowing.is_some() && !contract.emits.is_empty() {
                 expected = expected.into_iter().flat_map(|assignment| [assignment.clone(), assignment]).collect();
             }
 
-            let actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
+            let mut actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
                 .filter_map(RemedyPlan::executable)
                 .map(|p| p.required.iter().map(|r| (r.authority.clone(), r.covers.clone())).collect())
                 .collect();
@@ -4195,6 +4288,10 @@ mod tests {
                         "presented order inverts a dominance edge: {:?} precedes {:?}", actual[j], actual[i]);
                 }
             }
+            // The menu is checked as a multiset: presentation order is constrained only by the
+            // dominance loop above, not by the reference's enumeration order.
+            actual.sort_by_cached_key(|assignment| format!("{assignment:?}"));
+            expected.sort_by_cached_key(|assignment| format!("{assignment:?}"));
             prop_assert_eq!(actual, expected);
         }
     }

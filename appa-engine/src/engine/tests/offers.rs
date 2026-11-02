@@ -1172,7 +1172,7 @@ fn a_repeat_of_an_unapproved_acceptance_answers_a_refusal() {
     for fact in &unpaired {
         projection.fold(fact);
     }
-    let view = crate::transition::EngineView::validated(projection, e.identity, traj());
+    let view = crate::transition::EngineView::validated(projection, &e, traj());
     assert_eq!(
         e.handle(
             &view,

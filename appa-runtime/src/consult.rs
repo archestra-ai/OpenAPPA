@@ -16,7 +16,7 @@ use serde::ser::SerializeStruct as _;
 use serde::{Deserialize, Serialize};
 
 use appa_engine::authority::{Authority, DeclaredTransition, Sanitizer};
-use appa_engine::check::Gap;
+use appa_engine::check::{Gap, Narrowing};
 use appa_engine::contract::AnnotationContext;
 use appa_engine::label::{Clause, DeclaredAudience, Trust};
 use appa_engine::plan::RequiredRuling;
@@ -24,6 +24,8 @@ use appa_engine::registry::AudienceVocabulary;
 use appa_engine::registry::TrustChain;
 use appa_engine::value::ResolvedCall;
 use appa_runtime_api::Ruling;
+
+use crate::engine::SessionNarrowing;
 
 /// Which registered external a consult addresses. Closed: the wire
 /// format is per kind, not per deployment.
@@ -282,11 +284,21 @@ pub struct AuthorityArtifact {
     pub tool: String,
     pub arguments: serde_json::Value,
     pub requirements: Vec<Requirement>,
+    /// What approving also does to this session, for the human review only: the wire
+    /// artifact names what the ruling covers, not what the offer accepts beside it.
+    #[serde(skip)]
+    pub(crate) narrows: Option<SessionNarrowing>,
 }
 
 impl AuthorityArtifact {
-    pub fn of(call: &ResolvedCall, requirement: &RequiredRuling, chain: &TrustChain) -> AuthorityArtifact {
+    pub fn of(
+        call: &ResolvedCall,
+        requirement: &RequiredRuling,
+        narrowing: Option<&Narrowing>,
+        chain: &TrustChain,
+    ) -> AuthorityArtifact {
         AuthorityArtifact {
+            narrows: narrowing.and_then(|narrowing| SessionNarrowing::of(narrowing, Some(chain))),
             tool: call.tool().as_str().to_string(),
             arguments: call.arguments().clone(),
             requirements: requirement
@@ -300,8 +312,7 @@ impl AuthorityArtifact {
 
 /// One requirement a ruling covers, projected from the gap the engine assigned. The
 /// projection carries no state: a trust requirement names the floor, not the current
-/// rank; an audience requirement names how many readers are required, never who; the
-/// recipients may be a directory group's expansion and stay the engine's.
+/// rank; an audience requirement names the required recipients, not the current readers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Requirement {
@@ -311,18 +322,22 @@ pub enum Requirement {
     Attention { mark: String },
 }
 
-/// The required audience of an `includes` gap by shape only.
+/// The required audience of an `includes` gap: `public`, or one union clause's entries in
+/// [`clause_entries`] order. Each entry is spelled as the policy, the tool call's own
+/// arguments, or its annotation wrote it — a static recipient, or what a placeholder or
+/// selector resolved to. A group stays its `@` reference: an entry never comes from a
+/// directory group's members.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudienceRequirement {
     Public,
-    Readers(usize),
+    Readers(Vec<String>),
 }
 
 impl Serialize for AudienceRequirement {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             AudienceRequirement::Public => serializer.serialize_str("public"),
-            AudienceRequirement::Readers(count) => serializer.serialize_u64(*count as u64),
+            AudienceRequirement::Readers(entries) => entries.serialize(serializer),
         }
     }
 }
@@ -338,9 +353,7 @@ impl Requirement {
             Gap::Includes { recipients } => Requirement::Audience {
                 required: match recipients {
                     DeclaredAudience::Public => AudienceRequirement::Public,
-                    DeclaredAudience::Union(clause) => AudienceRequirement::Readers(
-                        clause.readers().len() + clause.groups().count() + usize::from(clause.chain().is_some()),
-                    ),
+                    DeclaredAudience::Union(clause) => AudienceRequirement::Readers(clause_entries(clause)),
                 },
             },
             Gap::NoPrior(effect) => Requirement::Effect {
@@ -565,7 +578,9 @@ fn invalid_shape() -> String {
 impl AnnotationAnswer {
     /// Read one annotation answer strictly: top-level exactly `delta`, `requires`, and
     /// `emits`, and optionally `forwards` with `delta`'s shape; `requires` carries its `history` and `attention` arrays always; every other
-    /// leaf is optional and means the identity when omitted. A `null`, an unknown key, an
+    /// leaf is optional and means the identity when omitted. A `null` `trust` or `audience`
+    /// of `delta`, `forwards` or `requires` is that leaf omitted, as a strict-mode schema
+    /// spells it. Any other `null`, an unknown key, an
     /// empty `audience` object, a duplicate `emits` kind, an audience list outside the one
     /// written-audience grammar, or any value outside the declared mandate vocabulary is no
     /// answer — whatever transport produced it: the mandate is closed, so a directory-derived
@@ -583,7 +598,13 @@ impl AnnotationAnswer {
                 _ => true,
             }
         }
-        if !no_nulls(answer) {
+        let mut answer = answer.clone();
+        for field in ["delta", "forwards", "requires"] {
+            if let Some(leaves) = answer.get_mut(field).and_then(serde_json::Value::as_object_mut) {
+                leaves.retain(|key, value| !(matches!(key.as_str(), "trust" | "audience") && value.is_null()));
+            }
+        }
+        if !no_nulls(&answer) {
             return Err(invalid_shape());
         }
         let mut top = answer.as_object().ok_or_else(invalid_shape)?.clone();
@@ -898,14 +919,26 @@ fn dynamic_audience_schema(audiences: &[String]) -> serde_json::Value {
     match closed_enum(audiences) {
         None => public,
         Some(items) => serde_json::json!({
-            "oneOf": [public, {"type": "array", "items": items, "minItems": 1}]
+            "anyOf": [public, {"type": "array", "items": items, "minItems": 1}]
         }),
     }
 }
 
-/// The strict-mode-compatible schema for one annotation answer: every accepted shape is a
-/// variant with all its properties required, so an OpenAI-compatible provider can enforce
-/// it as written. A shape that needs a rank is offered only when the mandate names one.
+/// `schema` or `null`, the one way a strict-mode schema states an optional key; the
+/// decoder reads the `null` as the key left out.
+fn nullable(schema: &serde_json::Value) -> serde_json::Value {
+    let none = serde_json::json!({"type": "null"});
+    match schema.get("anyOf").and_then(serde_json::Value::as_array) {
+        Some(variants) => serde_json::json!({"anyOf": variants.iter().chain([&none]).collect::<Vec<_>>()}),
+        None => serde_json::json!({"anyOf": [schema, none]}),
+    }
+}
+
+/// The strict-mode-compatible schema for one annotation answer: every property is
+/// required, and an optional `trust` or `audience` is nullable, so an OpenAI-compatible
+/// provider can enforce it as written. One object per field, never one variant per
+/// combination of present keys: a grammar-compiling provider refuses that product as too
+/// large. `trust` is offered only when the mandate names a rank.
 fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
     let trust = closed_enum(&declaration.trust_ranks);
     let audience = dynamic_audience_schema(&declaration.audiences.entries().collect::<Vec<_>>());
@@ -926,39 +959,25 @@ fn annotation_schema(declaration: &AnnotationDeclaration) -> serde_json::Value {
     };
     let history = serde_json::json!({
         "type": "array",
-        "items": {"oneOf": [object(&[("contains", &effect)]), object(&[("excludes", &effect)])]}
+        "items": {"anyOf": [object(&[("contains", &effect)]), object(&[("excludes", &effect)])]}
     });
-    let required_audience = object(&[("contains", &audience)]);
+    let trust = trust.as_ref().map(nullable);
+    let required_audience = nullable(&object(&[("contains", &audience)]));
+    let audience = nullable(&audience);
     let attention = serde_json::json!({"type": "array", "items": array_items(&declaration.attention_marks)});
-    let mut delta = vec![object(&[]), object(&[("audience", &audience)])];
-    let mut requires = vec![
-        object(&[("history", &history), ("attention", &attention)]),
-        object(&[
-            ("audience", &required_audience),
-            ("history", &history),
-            ("attention", &attention),
-        ]),
-    ];
-    if let Some(trust) = &trust {
-        delta.push(object(&[("trust", trust)]));
-        delta.push(object(&[("trust", trust), ("audience", &audience)]));
-        requires.push(object(&[
-            ("trust", trust),
-            ("history", &history),
-            ("attention", &attention),
-        ]));
-        requires.push(object(&[
-            ("trust", trust),
-            ("audience", &required_audience),
-            ("history", &history),
-            ("attention", &attention),
-        ]));
-    }
-    let delta = serde_json::json!({"oneOf": delta});
-    let requires = serde_json::json!({"oneOf": requires});
+    let ranked = |rest: &[(&str, &serde_json::Value)]| match &trust {
+        Some(trust) => object(&[&[("trust", trust)], rest].concat()),
+        None => object(rest),
+    };
+    let delta = ranked(&[("audience", &audience)]);
+    let requires = ranked(&[
+        ("audience", &required_audience),
+        ("history", &history),
+        ("attention", &attention),
+    ]);
     let emits = serde_json::json!({"type": "array", "items": effect});
     // `forwards` is optional on the wire; strict mode requires every property, so the model
-    // always writes one and answers `{}` when the call sends only its arguments.
+    // always writes one, its leaves `null` when the call sends only its arguments.
     object(&[
         ("delta", &delta),
         ("forwards", &delta),
@@ -1038,8 +1057,8 @@ mod tests {
     #[test]
     fn requirements_project_assigned_gaps_without_state() {
         use appa_engine::fact::EffectKind;
-        use appa_engine::label::ReaderId;
-        use appa_engine::names::MarkName;
+        use appa_engine::label::ChainAudience;
+        use appa_engine::names::{GroupName, MarkName};
 
         let chain = chain();
         let projected = [
@@ -1049,6 +1068,16 @@ mod tests {
             },
             Gap::Includes {
                 recipients: DeclaredAudience::restricted([ReaderId::new("alice"), ReaderId::new("bob")]),
+            },
+            Gap::Includes {
+                recipients: DeclaredAudience::Union(
+                    Clause::new(
+                        [ChainAudience::Internal],
+                        [GroupRef::Named(GroupName::new("finance"))],
+                        [ReaderId::new("carol")],
+                    )
+                    .expect("a mixed clause"),
+                ),
             },
             Gap::Includes {
                 recipients: DeclaredAudience::Public,
@@ -1063,7 +1092,8 @@ mod tests {
             projected,
             vec![
                 serde_json::json!({"kind": "trust", "required": "trusted"}),
-                serde_json::json!({"kind": "audience", "required": 2}),
+                serde_json::json!({"kind": "audience", "required": ["alice", "bob"]}),
+                serde_json::json!({"kind": "audience", "required": ["internal", "@finance", "carol"]}),
                 serde_json::json!({"kind": "audience", "required": "public"}),
                 serde_json::json!({"kind": "effect", "excludes": "network"}),
                 serde_json::json!({"kind": "attention", "mark": "review"}),
@@ -1202,10 +1232,13 @@ mod tests {
             })
         );
         for malformed in [
-            // A missing top-level key, an extra one, and a null leaf.
+            // A missing top-level key, an extra one, and nulls where no leaf is optional.
             serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}}),
             serde_json::json!({"delta": {}, "requires": {"history": [], "attention": []}, "emits": [], "note": "x"}),
-            serde_json::json!({"delta": {"trust": null}, "requires": {"history": [], "attention": []}, "emits": []}),
+            serde_json::json!({"delta": null, "requires": {"history": [], "attention": []}, "emits": []}),
+            serde_json::json!({"delta": {}, "requires": {"history": null, "attention": []}, "emits": []}),
+            serde_json::json!({"delta": {"note": null}, "requires": {"history": [], "attention": []}, "emits": []}),
+            serde_json::json!({"delta": {}, "requires": {"audience": {"contains": null}, "history": [], "attention": []}, "emits": []}),
             // `requires` without its mandatory arrays, an empty audience object, and an
             // audience key beside `contains`.
             serde_json::json!({"delta": {}, "requires": {"attention": []}, "emits": []}),
@@ -1312,7 +1345,7 @@ mod tests {
                 outside_mandate("forwards.audience", "audiences"),
             ),
             (serde_json::json!({"note": "x"}), invalid_shape()),
-            (serde_json::json!({"trust": null}), invalid_shape()),
+            (serde_json::json!({"note": null}), invalid_shape()),
             (serde_json::json!("public"), invalid_shape()),
         ] {
             let delta_detail = detail.replace("forwards.", "delta.");
@@ -1349,6 +1382,7 @@ mod tests {
                     requirements: vec![Requirement::Trust {
                         required: "trusted".to_string(),
                     }],
+                    narrows: None,
                 },
             },
         };
@@ -1475,7 +1509,8 @@ mod tests {
     fn the_answer_schema_admits_the_public_token_and_arrays_over_the_mandate() {
         let declaration = annotation_declaration();
         let schema = annotation_schema(&declaration);
-        let with_audience = |audience: serde_json::Value| neutral(serde_json::json!({"delta": {"audience": audience}}));
+        let with_audience =
+            |audience: serde_json::Value| strict(neutral(serde_json::json!({"delta": {"audience": audience}})));
         for accepted in [
             serde_json::json!("public"),
             serde_json::json!(["internal"]),
@@ -1617,7 +1652,7 @@ mod tests {
         );
         assert_eq!(prompt.schema["additionalProperties"], serde_json::json!(false));
         assert_eq!(
-            prompt.schema["properties"]["delta"]["oneOf"][2]["properties"]["trust"]["enum"],
+            prompt.schema["properties"]["delta"]["properties"]["trust"]["anyOf"][0]["enum"],
             serde_json::json!(["suspicious", "trusted"])
         );
         assert_eq!(
@@ -1646,6 +1681,47 @@ mod tests {
         );
     }
 
+    /// Strict mode lists every property as required, so an optional leaf is answered as
+    /// `null`: the schema admits the all-`null` answer, and it decodes as the identity.
+    #[test]
+    fn the_answer_schema_requires_every_property_and_its_nulls_decode_as_omitted() {
+        fn every_property_required(schema: &serde_json::Value) -> bool {
+            match schema {
+                serde_json::Value::Object(fields) => {
+                    let own = match (fields.get("properties"), fields.get("required")) {
+                        (Some(serde_json::Value::Object(named)), Some(serde_json::Value::Array(required))) => {
+                            named.keys().all(|key| required.contains(&serde_json::json!(key)))
+                        }
+                        (Some(_), _) => false,
+                        (None, _) => true,
+                    };
+                    own && fields.values().all(every_property_required)
+                }
+                serde_json::Value::Array(items) => items.iter().all(every_property_required),
+                _ => true,
+            }
+        }
+        let declaration = annotation_declaration();
+        let schema = annotation_schema(&declaration);
+        assert!(every_property_required(&schema), "{schema}");
+        let all_null = strict(neutral(serde_json::json!({})));
+        assert!(jsonschema::is_valid(&schema, &all_null));
+        assert!(
+            !jsonschema::is_valid(&schema, &neutral(serde_json::json!({}))),
+            "an omitted leaf is outside the strict schema"
+        );
+        assert_eq!(
+            AnnotationAnswer::from_wire(&all_null, &declaration),
+            AnnotationAnswer::from_wire(&neutral(serde_json::json!({})), &declaration)
+        );
+        let required = strict(neutral(serde_json::json!({"audience": {"contains": ["audit"]}})));
+        assert!(jsonschema::is_valid(&schema, &required));
+        assert_eq!(
+            AnnotationAnswer::from_wire(&required, &declaration).map(|answer| answer.required_audience),
+            Ok(Some(DeclaredAudience::restricted([ReaderId::new("audit")])))
+        );
+    }
+
     /// Every `enum` member list and every property name in a rendered schema, at any depth.
     fn walk(schema: &serde_json::Value, enums: &mut Vec<Vec<String>>, properties: &mut Vec<String>) {
         match schema {
@@ -1669,6 +1745,18 @@ mod tests {
             serde_json::Value::Array(items) => items.iter().for_each(|item| walk(item, enums, properties)),
             _ => {}
         }
+    }
+
+    /// `answer` as strict mode writes it: every omitted `trust` and `audience` leaf `null`.
+    fn strict(mut answer: serde_json::Value) -> serde_json::Value {
+        for field in ["delta", "forwards", "requires"] {
+            for leaf in ["trust", "audience"] {
+                if answer[field].get(leaf).is_none() {
+                    answer[field][leaf] = serde_json::Value::Null;
+                }
+            }
+        }
+        answer
     }
 
     fn neutral(extra: serde_json::Value) -> serde_json::Value {

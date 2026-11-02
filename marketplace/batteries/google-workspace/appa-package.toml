@@ -20,3 +20,7 @@ setup = [
 
 [battery.readiness]
 required_executables = ["python3"]
+
+# A shared token cannot see what each person sees, so no multi-user target.
+[battery.targets.single-user]
+policy = "appa.toml"

@@ -838,13 +838,12 @@ fn a_rewrite_that_selects_another_declaration_may_carry_a_file_basis() {
             Fact::CandidateDerived {
                 derived: DerivedCandidate::Call { call, .. },
                 ..
-            } => Some(call.declaration_id()),
+            } => Some(call.clone()),
             _ => None,
         })
         .expect("the hop derives a call candidate");
-    assert_ne!(
-        derived,
-        proposal.declaration_id(),
+    assert!(
+        !e.registry.selects_alike(&derived, &proposal),
         "the rewrite selects the other declaration"
     );
     assert_eq!(e.validate_replay(&[log.clone(), hopped.clone()].concat()), Ok(()));
@@ -852,4 +851,89 @@ fn a_rewrite_that_selects_another_declaration_may_carry_a_file_basis() {
         e.validate_replay(&[log, with_pinned_file_basis(hopped)].concat()),
         Ok(())
     );
+}
+
+/// A send to bob whose `redact` hop staged it at `@b` while bob sat in `@b`, then proposed
+/// again after bob moved from `@b` to `@a`: the staged stage now blocks, the default stage
+/// (the trajectory's own `@a`) allows. Returns the log before that proposal and its decision.
+fn staged_call_after_membership_moves() -> (Engine, Vec<Fact>, Result<EngineDecision, TransitionError>) {
+    let mut send = plain_tool("send");
+    send.parameters = crate::params::test_string_argument_schema("to");
+    send.requires = Requires {
+        label: LabelRequirements {
+            trust_floor: None,
+            audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+        },
+        ..Requires::default()
+    };
+    let redact = crate::authority::Sanitizer {
+        name: crate::names::SanitizerName::new("redact"),
+        on: crate::authority::SanitizerPoints {
+            input: true,
+            output: false,
+        },
+        transition: crate::authority::DeclaredTransition::Audience {
+            from_includes: group_audience("a"),
+            to: group_audience("b"),
+        },
+        scope: crate::authority::Scope::default(),
+        hint: None,
+    };
+    let e = open_engine_at(
+        RegistryConfig {
+            sanitizers: vec![redact],
+            audience: slack_groups(&["a", "b"]),
+            ..test_config(vec![send])
+        },
+        Label::new(TRUSTED, Audience::of_declared(&group_audience("a"))),
+    );
+    let bob = || slack_member("slack:UB", Some("bob@corp.com"));
+    let bob_in_b = source_evidence(vec![user_group("a", vec![]), user_group("b", vec![bob()])]);
+    let bob_in_a = source_evidence(vec![user_group("a", vec![bob()]), user_group("b", vec![])]);
+    let proposal = call("send", json!({ "to": "bob@corp.com" }));
+
+    let log = vec![opened(&e)];
+    let blocked = appended_facts(
+        proposed_with(&e, &log, "b1", nonce(), proposal.clone(), bob_in_b.clone()).expect("the batch decides"),
+    );
+    let hop = hop_named(&blocked, "redact");
+    let log = [log, blocked].concat();
+    let hopped = execute_offer_with(
+        &e,
+        &log,
+        hop,
+        OfferOutcome::Derived(crate::transition::Evidence::Rewrite {
+            sanitizer: crate::names::SanitizerName::new("redact"),
+            source: crate::value::RawResultDigest::of(proposal.canonical_arguments().canonical_bytes()),
+            derived: ValueBody::new(r#"{"to":"bob@corp.com"}"#),
+            annotation: None,
+        }),
+        bob_in_b,
+    )
+    .expect("the hop runs");
+    let log = [log, appended_facts(hopped)].concat();
+    let decided = proposed_with(&e, &log, "b2", nonce(), proposal, bob_in_a);
+    (e, log, decided)
+}
+
+#[test]
+fn a_staged_call_the_default_stage_clears_releases_without_taking_the_derivation() {
+    let (_, _, decided) = staged_call_after_membership_moves();
+    let decided = decided.expect("the batch decides");
+    let (released, blocked) = answered(&decided);
+    assert_eq!((released.len(), blocked.len()), (1, 0));
+    let facts = appended_facts(decided);
+    assert!(
+        !facts
+            .iter()
+            .any(|fact| matches!(fact, Fact::CandidateConsumed { .. } | Fact::CallApprovalConsumed { .. })),
+        "the release stands on the default stage and spends nothing"
+    );
+}
+
+#[test]
+fn a_call_released_under_the_default_stage_over_a_standing_derivation_replays() {
+    let (e, log, decided) = staged_call_after_membership_moves();
+    let facts = appended_facts(decided.expect("the batch decides"));
+    assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
 }

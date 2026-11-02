@@ -68,6 +68,65 @@ pub enum AdmitError {
     NoCandidate,
 }
 
+/// What a dispatch's outcome is judged under: the contract its release pinned, met with what the
+/// judging policy declares for the call now.
+///
+/// A release pins the call's delta, tags and effects on its `DispatchOpened`. A result that
+/// arrives after a later revision was published is labelled by the meet of the pinned output label
+/// and the one the judging policy declares for the call, where it still declares it, and commits
+/// the effects the release reserved.
+pub(crate) struct OutcomeContract<'a> {
+    /// The contract with the release's delta, tags and effects: the judging policy's
+    /// declaration of the call, or one made from the pin where it declares the call no longer.
+    pub(crate) contract: std::borrow::Cow<'a, crate::contract::ToolAnnotation>,
+    /// The judging policy's declared output label for the call, where it still declares it.
+    head_output: Option<Label>,
+}
+
+impl OutcomeContract<'_> {
+    /// The declared output label a result of this dispatch carries, before its file basis.
+    pub(crate) fn output_label(&self) -> Label {
+        let pinned = self.contract.output_label();
+        match &self.head_output {
+            Some(head) => pinned.combine(head),
+            None => pinned,
+        }
+    }
+}
+
+/// The contract `call`'s outcome is judged under: see [`OutcomeContract`]. `None` for a dispatch
+/// the family never released.
+pub(crate) fn outcome_contract<'a>(
+    registry: &'a Registry,
+    call: &'a ResolvedCall,
+    pinned: Option<&(crate::fact::ReleaseTerms, EffectSet)>,
+) -> Option<OutcomeContract<'a>> {
+    let (terms, emits) = pinned?;
+    let head = registry.annotation_of(call);
+    let head_output = head.as_ref().map(|head| head.output_label());
+    let mut contract = head
+        .map(std::borrow::Cow::into_owned)
+        .unwrap_or_else(|| crate::contract::ToolAnnotation {
+            name: call.tool().clone(),
+            tags: Vec::new(),
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            delta: crate::contract::Delta::NONE,
+            // `forwards` labels what the call sends before dispatch, checked at release.
+            // The outcome uses the pinned result delta, never that outbound label.
+            forwards: crate::contract::Delta::NONE,
+            emits: EffectSet::default(),
+            requires: crate::contract::Requires::default(),
+        });
+    contract.delta = terms.delta.clone();
+    contract.tags = terms.tags.clone();
+    contract.emits = emits.clone();
+    Some(OutcomeContract {
+        contract: std::borrow::Cow::Owned(contract),
+        head_output,
+    })
+}
+
 pub(crate) fn observe_success(
     registry: &Registry,
     views: &Views,
@@ -75,9 +134,7 @@ pub(crate) fn observe_success(
     call: &ResolvedCall,
     observed: ObservedResult,
 ) -> Result<Vec<Fact>, AdmitError> {
-    let contract = registry
-        .annotation_of(call)
-        .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
+    let contract = outcome_contract(registry, call, views.release_terms(dispatch)).ok_or(AdmitError::NotOpen)?;
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
     }
@@ -93,7 +150,7 @@ pub(crate) fn observe_success(
     Ok(vec![Fact::DispatchSucceeded {
         trajectory: views.trajectory().clone(),
         dispatch: dispatch.clone(),
-        effects: contract.emits.clone(),
+        effects: contract.contract.emits.clone(),
         observed,
     }])
 }
@@ -115,7 +172,7 @@ pub(crate) fn bound_candidate(
     views: &Views,
     dispatch: &DispatchId,
     call: &ResolvedCall,
-    contract: &crate::contract::ToolAnnotation,
+    contract: &OutcomeContract<'_>,
     sanitizer: &SanitizerName,
     raw_digest: RawResultDigest,
     body: ValueBody,
@@ -129,7 +186,11 @@ pub(crate) fn bound_candidate(
         .ok_or_else(|| AdmitError::UnknownTool(sanitizer.as_str().to_string()))?;
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let derived = registered
-        .derive_output(&call.output_label(contract, receiving), &contract.tags, context)
+        .derive_output(
+            &call.output_label_from(&contract.output_label(), receiving),
+            &contract.contract.tags,
+            context,
+        )
         .map_err(AdmitError::MembershipNeeded)?
         .ok_or(AdmitError::SanitizerTransitionUnmet)?;
     let residual = confined_residual(receiving, &derived);
@@ -156,9 +217,7 @@ pub(crate) fn admit_result(
     context: &MembershipContext<'_>,
     evidence: &AudienceEvidence,
 ) -> Result<Vec<Fact>, AdmitError> {
-    let contract = registry
-        .annotation_of(call)
-        .ok_or_else(|| AdmitError::UnknownTool(call.tool().as_str().to_string()))?;
+    let contract = outcome_contract(registry, call, views.release_terms(dispatch)).ok_or(AdmitError::NotOpen)?;
     if dispatch.digest() != &call.digest() {
         return Err(AdmitError::DigestMismatch);
     }
@@ -191,7 +250,7 @@ pub(crate) fn admit_result(
 
     let trajectory = views.trajectory().clone();
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
-    let output_label = || call.output_label(&contract, receiving);
+    let output_label = || call.output_label_from(&contract.output_label(), receiving);
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
@@ -199,7 +258,7 @@ pub(crate) fn admit_result(
             effects: if checkpointed {
                 EffectSet::default()
             } else {
-                contract.emits.clone()
+                contract.contract.emits.clone()
             },
         },
     };
@@ -213,7 +272,12 @@ pub(crate) fn admit_result(
     let admit_value = |label: Label, body: ValueBody| admit_derived(LabeledValue::new(body, label));
 
     let bound = views.bound_sanitizer(dispatch);
-    if bound.is_some() && matches!(admission, ResultAdmission::SuccessRaw { .. }) {
+    if bound.is_some()
+        && matches!(
+            admission,
+            ResultAdmission::SuccessRaw { .. } | ResultAdmission::FailureWithBody { .. }
+        )
+    {
         return Err(AdmitError::OutputSanitizerBound);
     }
 
@@ -476,10 +540,10 @@ mod tests {
     fn dispatch_opened(call: &ResolvedCall) -> (Fact, DispatchId) {
         let dispatch = DispatchId::new(traj(), call.digest(), 0);
         let record = Fact::DispatchOpened {
+            terms: crate::fact::ReleaseTerms::none(),
             trajectory: traj(),
             dispatch: dispatch.clone(),
             tool: call.tool().clone(),
-            declaration: call.declaration_id(),
             arguments: call.canonical_arguments().clone(),
             proposed_label: Label::top(),
             receiving: Label::top(),
@@ -854,6 +918,45 @@ mod tests {
                 },
             ),
             Err(AdmitError::ConfinedResidual)
+        );
+    }
+
+    #[test]
+    fn a_bound_dispatch_admits_no_raw_failure_body() {
+        let reg = registry();
+        let call = get_call();
+        let (mut log, dispatch) = open_log(&call);
+        let t = traj();
+        let parts = crate::label::TestContext::default();
+        log.push(Fact::OutputSanitizerBound {
+            trajectory: t.clone(),
+            dispatch: dispatch.clone(),
+            plan: crate::plan::PlanId::new(1),
+            sanitizer: crate::names::SanitizerName::new("declassify"),
+            contribution: crate::plan::bound_contribution(
+                &reg,
+                &reg.annotation_of(&call).expect("the fixture registers the tool"),
+                &released_output(&reg, &log, &dispatch, &call),
+                &crate::names::SanitizerName::new("declassify"),
+                &parts.context(),
+            )
+            .expect("the fixture's audiences are literal")
+            .expect("declassify applies to this output"),
+            evidence: crate::audience::AudienceEvidence::default(),
+        });
+        let p = views_of(&log);
+
+        assert_eq!(
+            admit(
+                &reg,
+                &p.view(&t),
+                &dispatch,
+                &call,
+                ResultAdmission::FailureWithBody {
+                    body: ValueBody::new("ENOENT"),
+                },
+            ),
+            Err(AdmitError::OutputSanitizerBound)
         );
     }
 

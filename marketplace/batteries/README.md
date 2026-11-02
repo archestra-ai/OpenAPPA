@@ -8,7 +8,8 @@ so a deployment can customize its hint without editing the battery.
 
 | Battery | Covers | Externals |
 | --- | --- | --- |
-| `claude-code/` | seven built-in tools of a Claude Code session: `host/claude-code/Bash`, `Monitor`, `PowerShell`, `Read`, `Grep`, `Write` and `Edit` | The Claude Code model annotates Bash, PowerShell and Monitor calls; the stock `redact-secrets` sanitizer masks each withheld Bash and PowerShell result; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
+| `coding/` | canonical coding-agent tools under `tool/coding/`: `shell`, `powershell`, `read_file`, `search_files`, `write_file`, `edit_file`, `fetch_url`, `web_search`; a client battery's `[aliases.tool.coding]` map binds them | The Claude Code model annotates shell and PowerShell calls; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
+| `claude-code/` | Claude Code's built-in tools: the map binding `coding`'s canonical tools to `Bash`, `PowerShell`, `Read`, `Grep`, `Write`, `Edit`, `WebFetch` and `WebSearch`, and rules for `Monitor` and the tools only Claude Code offers; include it with `coding` | The Claude Code model annotates Monitor calls |
 | `opencode/` | selected OpenCode V2 file, web, shell, and foreground delegation tools; shell starts with `pwd` only | none |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | an annotator asking Slack whether a conversation is shared through Slack Connect; the `slack` audience source: viewer, full members, user groups, one conversation's members |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | two annotators asking GitHub for a repository's visibility; the `github` audience source: viewer, org members, teams, a repository's collaborators |
@@ -25,7 +26,7 @@ so a deployment can customize its hint without editing the battery.
 | `pagerduty/` | the PagerDuty-hosted MCP server, all 18 tools: 11 `browse_*` reads of incidents, schedules, teams, status pages and activity, 7 `manage_*` writes; internal reads, every write reviewed | none |
 | `huggingface/` | the hosted Hugging Face MCP server, all 11 built-in tools: account, search, repository reads and writes, Spaces, Jobs, sandbox; each repository's Hub visibility decides its readers, code run with the token reviewed | two annotators asking the Hub for each named repository's visibility and resource group; the `huggingface` audience source: viewer, one resource group's members |
 | `databricks/` | Databricks' managed MCP servers Genie One (5 tools) and Databricks SQL (`execute_sql`), one namespace bound to both host servers; internal Genie reads, each SQL statement classified before it runs | the Claude Code model classifies each statement; the `databricks` audience source: viewer, active users, a group with nested groups expanded, a Genie space's readers |
-| `archestra/` | Archestra's built-in sharing tools and the discovery tools `search_tools`, `search_files` and `load_skill`, and `yell` (15 tools, 47 rules): projects, apps, knowledge bases and connectors, plugins, agents, MCP gateways, team membership, guardrails reports | the `archestra` audience source: organization members, a team, one member |
+| `archestra/` | Archestra's built-in sharing tools, the discovery tools `search_tools`, `search_files` and `load_skill`, `yell`, and the agent run and workspace tools (23 tools, 57 rules): projects, apps, knowledge bases and connectors, plugins, agents, MCP gateways, team membership, guardrails reports, agent runs and their workspaces | the `archestra` audience source: organization members, a team, one member |
 | `xmemory/` | the hosted xmemory instance (15 tools) and admin (17 tools) MCP servers, one namespace bound to both; internal reads, writes from trusted input only, trusted admin and schema changes, reviewed schema migrations and instance deletion | none |
 | `jev/` | no tools; one Annotator a deployment routes its own tools to | TypeSafe's Jev model annotates each routed call's audience and trust; the call's name, description, and arguments are sent to the TypeSafe API |
 
@@ -34,11 +35,11 @@ replaces the deployment's battery store beside the root config, so the line it
 writes reads:
 
 ```toml
-include = ["batteries/claude-code/appa.toml"]
+include = ["batteries/coding/appa.toml", "batteries/claude-code/appa.toml"]
 ```
 
 A battery names each tool by its canonical tool id (`mcp/<server>/<tool>`,
-`host/claude-code/<name>`), never by the host's own spelling.
+`host/claude-code/<name>`, `tool/<namespace>/<tool>`), never by the host's own spelling.
 
 Each battery's `command` bindings run in the battery's own directory.
 [`examples/README.md`](../../examples/README.md) explains how a root

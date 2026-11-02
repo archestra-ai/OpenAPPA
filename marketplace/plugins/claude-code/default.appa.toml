@@ -140,6 +140,21 @@ trust_below = "trusted"
 audience_missing = ["public"]
 attention = ["*"]
 
+# A call bound for `public` readers after this session read `self` or
+# `internal` data can go out rewritten instead of approved: this sanitizer
+# asks a model to remove from the call's arguments everything the public may
+# not read. The rewritten call is checked again before it runs, and the
+# consult record keeps both the original and the rewrite. Registering it is a
+# trust decision: APPA does not verify what the model removed. Remove this
+# entry to leave such calls to `hitl`.
+[[policy.sanitizer]]
+name = "redact-for-public"
+on = ["tool_input"]
+hint = "These arguments leave for readers outside this organization. Remove every piece of information not intended for the public: credentials and secrets, personal data, and the organization's internal details such as private code, unreleased plans, customer records and internal discussions. Keep everything else, so the call still does its job."
+
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["public"] }
+
 [externals]
 timeout_ms = 5000
 review_timeout_ms = 600000
@@ -147,6 +162,9 @@ max_body_bytes = 65536
 
 [externals.authorities.hitl]
 builtin = "hitl"
+
+[externals.sanitizers.redact-for-public]
+builtin = "claude-code"
 
 # Who `self` and `internal` are, read from a directory when a decision needs
 # actual membership: a rule naming an individual recipient

@@ -8,3 +8,9 @@ hosts = ["claude-code", "kagent"]
 namespaces = ["pagerduty"]
 helpers = []
 benefit = "Rules for the 18 tools of the PagerDuty server: APPA keeps incident, schedule, and activity reads internal, and asks a person before each `manage_*` write."
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

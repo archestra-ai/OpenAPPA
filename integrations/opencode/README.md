@@ -28,8 +28,9 @@ appa opencode setup
 ```
 
 This opens a private operator session with your merged global and project-local
-tool inventory. Only `appa_setup` reaches the setup model. Review the proposed
-policy before approving publication. Close setup, run `appa plugin install opencode`
+tool inventory. The model receives `appa_setup` and a guide-only native `read`.
+Review the proposed policy before approving publication. Close setup, run
+`appa plugin install opencode`
 to reload the protected runtime, then start a fresh coding session. The same
 install command starts the runtime after a reboot; no separate service is required.
 
@@ -126,13 +127,33 @@ report observed inventory, not complete tool coverage. Inspect again if a newly
 connected server's tools have not appeared. Configuration validation does not
 prove that every configured tool was discovered.
 
-Only `appa_setup` is exposed to the setup model. A separate APPA runtime gates
-that tool; ordinary shell, file, MCP, and delegation calls are not authorized.
-The tool can inspect the fixed deployment, read catalog batteries, and publish
-its root policy. It cannot choose another target or run arbitrary commands.
+Setup exposes `appa_setup` and the actual native `read` tool. The latter can
+read only a fixed, read-only guide in the launcher's private temporary directory.
+Aliases, other files, and directory listings are refused before filesystem probing.
+The guide must be outside both the OpenCode Location and its project/worktree
+to avoid unchecked nearby instructions. If the project contains the temporary
+directory, set `TMPDIR` to an external directory before launching setup.
+A separate APPA runtime admits both tools' calls and results. Its read contract
+matches only the guide's exact path. `appa_setup` can inspect the fixed deployment,
+read catalog batteries, and publish its root policy. It cannot choose another
+target or run arbitrary commands. Other shell, file, MCP, and delegation calls
+are not authorized.
+
+This native reader also preserves compatibility with OpenCode 2.0.28's
+`opencode/ll-alpha-free` provider. Real OpenCode requests with only `appa_setup`
+received `403 FreeTierError`; adding the bounded native reader received `200`.
+The hosted eligibility rules are not public, so this is not a guarantee for
+every free model or future provider version. No identity headers are changed.
+Setup admits administrative result envelopes up to 1 MiB and disables native
+output truncation for `appa_setup`; battery responses must reach the model
+without requiring access to arbitrary spool files. Ordinary coding limits
+remain unchanged. These checks assume a trusted local launcher and filesystem;
+they do not provide OS confinement against another process running as the user.
+
 Approval is an agent instruction, not a separately authenticated human decision.
 Treat setup as an administrative session and close it before coding. Never set
-`APPA_OPENCODE_SETUP_CONFIG` or `APPA_OPENCODE_SETUP_BINARY` on ordinary servers.
+`APPA_OPENCODE_SETUP_CONFIG`, `APPA_OPENCODE_SETUP_BINARY`, or
+`APPA_OPENCODE_SETUP_GUIDE` on ordinary servers.
 
 After setup, start or restart the protected runtime using the command printed
 by the launcher, then start a fresh OpenCode session in the project. Setup saves

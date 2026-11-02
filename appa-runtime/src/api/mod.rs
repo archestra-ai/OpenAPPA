@@ -7,6 +7,7 @@ mod host;
 mod launch;
 pub(crate) mod peer;
 mod session;
+mod spawn_hold;
 
 /// The fixture-only `Value` → raw-bytes helper, shared with the other
 /// modules' test suites.
@@ -51,7 +52,7 @@ use crate::external::{ConsultGates, ExternalServices};
 #[cfg(feature = "daemon")]
 use crate::yell;
 use appa_engine::label::ReaderId;
-use appa_eventlog::{Backend, HostObservation, Log, LogStore};
+use appa_eventlog::{Backend, DeploymentName, HostObservation, Log, LogStore};
 use appa_runtime_api::{Adapter, AdapterName};
 use host::{HostState, host_actor, inventory_at};
 
@@ -326,9 +327,13 @@ pub enum RemedyRefusal {
     InvalidOfferId(OfferIdRefusal),
     /// No preceding control hook vouched for this offer.
     Unvouched,
+    /// No preceding control hook vouched for this declaration ahead of the spawn, under the
+    /// call the request names.
+    UnvouchedDeclaration,
     /// The offer belongs to a different session or actor.
     ActorMismatch,
-    /// The offer is expired, already terminal, or from another trajectory.
+    /// The offer no longer stands (expired, already terminal, or recorded under an earlier
+    /// policy revision), or is from another trajectory.
     UnknownOffer,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,
@@ -341,11 +346,23 @@ impl RemedyRefusal {
         match self {
             Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
             Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
+            Self::UnvouchedDeclaration => {
+                "[appa] This declaration was not tied to your session, so nothing was declared. Call the subagent \
+                 tool now, and apply the declaration plan its block offers."
+            }
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
             Self::Runtime { detail } => detail,
         }
     }
+}
+
+/// A return declaration made ahead of the spawn: the arguments the control call passed, and
+/// the label it was checked at. A spawn proposed at any other label finds it lapsed.
+#[derive(Clone, Debug)]
+struct HeldReturn {
+    arguments: RemedyArguments,
+    label: appa_engine::label::Label,
 }
 
 /// What one whole `execute_remedy_plan` act produced: the engine's
@@ -370,6 +387,18 @@ impl From<EventError> for RemedyOutcome {
             },
         }
     }
+}
+
+/// Who answers the authorities and sanitizers a remedy consults in an in-memory deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remedies {
+    /// An in-process stand-in answers each one, whatever the configuration binds: every
+    /// authority approves, and every sanitizer returns the body unchanged. Nothing leaves
+    /// the process and nobody is asked.
+    StandIn,
+    /// The parties the configuration binds answer, exactly as a served deployment consults
+    /// them. A `hitl` authority has nobody to ask and abstains.
+    Live,
 }
 
 /// Whom taking an offer involves: nobody but the model (the plain narrowing acceptance), the
@@ -480,6 +509,21 @@ pub enum OpenError {
     Schema(String),
     #[error("storage failure: {0}")]
     Storage(String),
+    #[error("the policy cannot be published: {0}")]
+    Publish(String),
+    #[error(
+        "deployment {deployment} moved to policy revision {head}; read the policy again before publishing",
+        head = .head.map_or_else(|| "none".to_owned(), |revision| revision.to_string())
+    )]
+    PolicyHeadMoved {
+        deployment: DeploymentName,
+        head: Option<appa_engine::profile::PolicyRevision>,
+    },
+    #[error("the prepared policy does not match deployment {deployment} revision {revision}")]
+    PolicyRevisionMismatch {
+        deployment: DeploymentName,
+        revision: appa_engine::profile::PolicyRevision,
+    },
 }
 
 /// Why a deployment refused to serve after loading: a source the policy references gave no
@@ -507,7 +551,10 @@ pub enum ProbeError {
 pub(crate) enum EventError {
     #[error("a call without a host id is already outstanding; this host must propose one unidentified call at a time")]
     CallOutstanding,
-    #[error("a subagent spawn is already waiting to be bound; start one subagent at a time")]
+    #[error(
+        "an earlier subagent spawn is still waiting for its subagent to start; this spawn consumed nothing and can \
+         be proposed again once that subagent has started"
+    )]
     SpawnOutstanding,
     #[error("a fan-out spawn released under this prompt still starts subagents; wait for it to finish")]
     FanOutOutstanding,
@@ -527,6 +574,8 @@ pub(crate) enum EventError {
         "this session started under an APPA version whose database could not be upgraded, so its label is unknown; start a new session"
     )]
     RootArchived,
+    #[error("this trajectory family was opened before live policy revisions; open a new one")]
+    LegacyFamily,
     #[error("the session principal {0:?} is not an address")]
     MalformedPrincipal(String),
     #[error("the session already acts for another principal")]
@@ -545,6 +594,21 @@ pub(crate) enum EventError {
     SpawnAmbiguous,
     #[error("the fork and the child are already bound elsewhere")]
     BindingMismatch,
+    /// The harness reported the spawn call as failed and named no child: the subagent ended
+    /// before it returned. The spawn closes, so the parent can spawn again. The text is the
+    /// model's next step.
+    #[error(
+        "the subagent stopped before it returned a result. This subagent call is closed. You can start the subagent again. If it stops again, tell the user that the subagent could not finish."
+    )]
+    SpawnStopped,
+    /// The harness reported the spawn call as failed, named no child, and no child ever bound
+    /// to its fork: the subagent failed before it started, such as on a provider error at its
+    /// first request. The spawn closes, so the parent can spawn again. The text is the model's
+    /// next step.
+    #[error(
+        "the subagent did not start, so it returned no result. This subagent call is closed. You can start the subagent again. If it does not start again, tell the user that the subagent could not start."
+    )]
+    SpawnNeverStarted,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
     #[error("external resolution did not settle after {rounds} rounds")]
@@ -553,8 +617,12 @@ pub(crate) enum EventError {
     UnexpectedDecision,
     #[error("the persisted log is refused: {0}")]
     UntrustedLog(String),
-    #[error("the opening policy is unavailable: {0}")]
+    #[error("the policy is unavailable: {0}")]
     PolicyUnavailable(String),
+    /// The deployment published a revision this event was not read under. Nothing is appended;
+    /// the event decides again once this view serves the head.
+    #[error("deployment {deployment} moved to policy revision {head} while this event was decided; retry it")]
+    PolicyMoved { deployment: String, head: String },
     #[error("host tool inventory is invalid: {0}")]
     InventoryRefused(String),
     #[error("engine invariant breach: {0}")]
@@ -595,6 +663,45 @@ impl EventError {
         }
     }
 
+    /// The closed class a host routes this failure on, and the one telemetry counts it under.
+    pub(crate) fn class(&self) -> appa_runtime_api::RefusalClass {
+        use appa_runtime_api::RefusalClass;
+        match self {
+            EventError::Storage(_) => RefusalClass::Storage,
+            EventError::UntrustedLog(_) => RefusalClass::UntrustedLog,
+            EventError::PolicyUnavailable(_) => RefusalClass::PolicyUnavailable,
+            EventError::PolicyMoved { .. } => RefusalClass::PolicyMoved,
+            EventError::LegacyFamily => RefusalClass::LegacyFamily,
+            EventError::InventoryRefused(_) => RefusalClass::InventoryRefused,
+            EventError::EngineInvariant(_) | EventError::UnexpectedDecision => RefusalClass::EngineInvariant,
+            EventError::Contended { .. } => RefusalClass::Contended,
+            EventError::ResolutionDiverged { .. } => RefusalClass::ResolutionDiverged,
+            EventError::AnnotationRefused { .. } => RefusalClass::AnnotationRefused,
+            EventError::UndeclaredTool { .. } => RefusalClass::UndeclaredTool,
+            EventError::UndeclaredSpawn { .. } => RefusalClass::UndeclaredSpawn,
+            EventError::PeerMessageTooLarge { .. } => RefusalClass::PeerMessage,
+            EventError::MalformedPrincipal(_) | EventError::PrincipalMismatch => RefusalClass::Principal,
+            EventError::CallOutstanding
+            | EventError::SpawnOutstanding
+            | EventError::FanOutOutstanding
+            | EventError::ChildDispatchOpen => RefusalClass::OutstandingCall,
+            EventError::CallIdReused => RefusalClass::CallIdReused,
+            EventError::TrajectoryEnded => RefusalClass::TrajectoryEnded,
+            EventError::UnknownTrajectory | EventError::TrajectoryExists | EventError::RootArchived => {
+                RefusalClass::Trajectory
+            }
+            EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
+            EventError::UnknownOffer | EventError::RemedyArguments { .. } => RefusalClass::Remedy,
+            EventError::SpawnNotTaken => RefusalClass::SpawnNotTaken,
+            EventError::NotAChild
+            | EventError::FanOutUnkeyed
+            | EventError::SpawnAmbiguous
+            | EventError::BindingMismatch
+            | EventError::SpawnStopped
+            | EventError::SpawnNeverStarted => RefusalClass::Spawn,
+        }
+    }
+
     /// Whether this failure is the deployment's problem rather than
     /// something the model or the harness can act on. An operational
     /// failure refuses wherever it happens, so the harness fails closed
@@ -606,6 +713,8 @@ impl EventError {
             EventError::Storage(_)
             | EventError::UntrustedLog(_)
             | EventError::PolicyUnavailable(_)
+            | EventError::PolicyMoved { .. }
+            | EventError::LegacyFamily
             | EventError::InventoryRefused(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
@@ -634,7 +743,9 @@ impl EventError {
             | EventError::SpawnAmbiguous
             | EventError::UndeclaredSpawn { .. }
             | EventError::PeerMessageTooLarge { .. }
-            | EventError::BindingMismatch => false,
+            | EventError::BindingMismatch
+            | EventError::SpawnStopped
+            | EventError::SpawnNeverStarted => false,
         }
     }
 }
@@ -646,6 +757,12 @@ impl From<EngineRefusal> for EventError {
             // keeps the operator-facing detail.
             EngineRefusal::UntrustedLog { detail, .. } => EventError::UntrustedLog(detail),
             EngineRefusal::OpeningMismatch { detail, .. } => EventError::PolicyUnavailable(detail),
+            // The engine knows the revision that moved under it, not the line's name; the
+            // message reads "deployment of this family moved to policy revision N".
+            EngineRefusal::PolicyMoved { revision } => EventError::PolicyMoved {
+                deployment: "of this family".to_string(),
+                head: revision.to_string(),
+            },
             EngineRefusal::Invariant { detail } => EventError::EngineInvariant(detail),
             EngineRefusal::Ended => EventError::TrajectoryEnded,
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
@@ -662,11 +779,14 @@ impl From<EngineRefusal> for EventError {
 
 /// Everything one policy file settles: the file itself, the engine
 /// compiled from it, and the implementations its `[externals]` bind.
-/// A reload replaces the whole value; no field ever changes alone.
+/// A reload replaces the whole value; no field ever changes alone. A deployment
+/// that serves decides at one policy revision of its line, the revision its
+/// engine stamps every batch with; the same file published again is another
+/// deployment value sharing these externals.
 pub(crate) struct Deployment {
     config: Config,
     resident: RuntimeEngine,
-    externals: ExternalServices,
+    externals: Arc<ExternalServices>,
 }
 
 /// One Annotator's answer to one call, as `appa runtime annotate` reports it. `admitted`
@@ -765,27 +885,60 @@ impl Deployment {
         Ok(Deployment {
             config,
             resident: RuntimeEngine::from_policy(&policy, naming),
-            externals,
+            externals: Arc::new(externals),
         })
     }
 
-    /// Answer every authority and sanitizer the policy declares in process — approve, and
-    /// the body unchanged — as if the bound party had. `appa replay`'s deployment only.
-    fn stand_in_for_remedies(&mut self) {
+    /// This deployment serving `revision` of `line`: the same file and externals, with an
+    /// engine that stamps what it decides with `revision`.
+    fn at(&self, line: &DeploymentName, revision: u64) -> Deployment {
+        Deployment {
+            config: self.config.clone(),
+            resident: self.resident.at(line, revision),
+            externals: Arc::clone(&self.externals),
+        }
+    }
+
+    /// The policy revision this deployment decides at; `None` before it serves a line.
+    pub(crate) fn revision(&self) -> Option<u64> {
+        self.resident.revision()
+    }
+
+    /// The policy revision this deployment decides at. A view serves only a deployment published
+    /// on its line, so one at no revision is the runtime's own fault.
+    fn serving_revision(&self) -> Result<u64, EventError> {
+        self.revision()
+            .ok_or_else(|| EventError::EngineInvariant("the serving deployment decides at no policy revision".into()))
+    }
+
+    /// The content key of this deployment's policy file.
+    fn key(&self) -> String {
+        crate::engine::policy_file_key(self.config.policy_file().bytes())
+    }
+
+    /// Under [`Remedies::StandIn`], answer every authority and sanitizer the policy declares
+    /// in process: approve, and the body unchanged. `appa replay`'s deployment only.
+    fn answer_remedies(&mut self, remedies: Remedies) {
+        match remedies {
+            Remedies::Live => return,
+            Remedies::StandIn => {}
+        }
         let registry = self.resident.registry();
-        self.externals.stand_in_for_remedies(
-            registry
-                .authorities()
-                .iter()
-                .map(|authority| authority.name.as_str().to_string()),
-            registry
-                .sanitizers()
-                .map(|sanitizer| sanitizer.name.as_str().to_string()),
-        );
+        Arc::get_mut(&mut self.externals)
+            .expect("a deployment stands in for its remedies before anything shares its externals")
+            .stand_in_for_remedies(
+                registry
+                    .authorities()
+                    .iter()
+                    .map(|authority| authority.name.as_str().to_string()),
+                registry
+                    .sanitizers()
+                    .map(|sanitizer| sanitizer.name.as_str().to_string()),
+            );
     }
 
     fn resident(&self) -> PolicyEngine<'_> {
-        PolicyEngine::Resident(&self.resident)
+        PolicyEngine::resident(&self.resident, Vec::new())
     }
 
     /// Read every selector the policy references once, through the bound sources, and ask
@@ -909,14 +1062,16 @@ impl Deployment {
     }
 }
 
-/// What a reload installed. The key identifies the exact file bytes;
-/// the identity is what a root's opening record names.
+/// What a reload installed. The key identifies the exact file bytes, the identity the compiled
+/// policy, and the revision where the file stands in this runtime's deployment line.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Reloaded {
     pub policy_key: String,
     pub policy_identity: String,
-    /// `false` when the new file's bytes are the ones already serving:
-    /// the reload still ran every gate, and swapped an equal deployment.
+    pub policy_revision: u64,
+    /// `false` when the line's head already stood at the new file's revision, so nothing was
+    /// published: the reload still ran every gate, and swapped an equal deployment. `true` when
+    /// the reload published the file as the line's next revision.
     pub changed: bool,
 }
 
@@ -935,6 +1090,26 @@ impl PreparedDeployment {
     /// [`Runtime::probe_sources`] over the prepared deployment.
     pub async fn probe_sources(&self) -> Result<(), ProbeError> {
         self.deployment.probe_sources().await
+    }
+}
+
+/// A prepared deployment serving a published revision of a deployment line: what
+/// [`Runtime::publish`] or [`Runtime::at_revision`] returns and [`Runtime::pinned`] serves.
+/// It decides at the revision it was published as, and
+/// a view serving it refuses with a retryable error once the line moves past that revision.
+#[derive(Clone)]
+pub struct PublishedDeployment {
+    runtime: std::sync::Weak<Shared>,
+    line: DeploymentName,
+    deployment: Arc<Deployment>,
+}
+
+impl PublishedDeployment {
+    /// The policy revision this deployment decides at.
+    pub fn revision(&self) -> u64 {
+        self.deployment
+            .revision()
+            .expect("a published deployment decides at a revision of its line")
     }
 }
 
@@ -1005,15 +1180,22 @@ impl Prepared {
                 "the database was too old to upgrade; it was moved aside and its sessions cannot resume"
             );
         }
-        Ok(self.with_store(Arc::new(store), state_path))
+        self.with_store(Arc::new(store), state_path, DeploymentName::new(SERVING_LINE))
     }
 
-    fn with_store(self, store: Arc<LogStore>, state_path: Option<PathBuf>) -> Runtime {
-        Runtime {
+    fn with_store(
+        self,
+        store: Arc<LogStore>,
+        state_path: Option<PathBuf>,
+        line: DeploymentName,
+    ) -> Result<Runtime, OpenError> {
+        let (deployment, _) = serve(&store, &line, &self.deployment)?;
+        Ok(Runtime {
             inner: Arc::new(Inner {
                 shared: Arc::new(Shared {
-                    deployment: std::sync::RwLock::new(Arc::new(self.deployment)),
-                    retired: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                    deployment: std::sync::RwLock::new(Arc::new(deployment)),
+                    line,
+                    revisions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                     modules: self.modules,
                     events: std::sync::Mutex::new(crate::events::EventLog::default()),
                     gates: self.gates,
@@ -1021,6 +1203,8 @@ impl Prepared {
                     files: None,
                     state_path,
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    held_returns: std::sync::Mutex::new(std::collections::HashMap::new()),
+                    spawn_holds: spawn_hold::SpawnHolds::default(),
                 }),
                 store,
                 recorder: None,
@@ -1028,8 +1212,51 @@ impl Prepared {
                 archestra_context: None,
                 pinned: None,
             }),
+        })
+    }
+}
+
+/// The deployment line a runtime serves when no view pins another: the one line of a
+/// standalone runtime.
+const SERVING_LINE: &str = "default";
+
+/// How many times serving a deployment reads the head again after another publisher moved it.
+const PUBLISH_ATTEMPTS: u32 = 8;
+
+/// `deployment` serving the head of `line`: at the head's revision when the head already names
+/// its policy file, or published as the line's next revision when it does not. A publish
+/// another publisher won is read again, so the deployment serves whatever revision its own
+/// file stands at.
+/// `deployment` at the revision of `line` that names its policy file: the head when it already
+/// does, a newly published head otherwise. The flag says whether this call published it.
+fn serve(store: &LogStore, line: &DeploymentName, deployment: &Deployment) -> Result<(Deployment, bool), OpenError> {
+    let bytes = deployment.config.policy_file().bytes();
+    let key = appa_engine::profile::PolicyFileKey::of(bytes);
+    let refused = |error: &dyn std::fmt::Display| OpenError::Publish(error.to_string());
+    for _ in 0..PUBLISH_ATTEMPTS {
+        let head = store.head(line).map_err(|error| refused(&error))?;
+        if let Some(head) = &head
+            && head.key == key
+        {
+            return Ok((deployment.at(line, head.revision.value()), false));
+        }
+        match store.publish(line, head.map(|head| head.revision), bytes) {
+            Ok(published) => {
+                tracing::info!(
+                    deployment = %line,
+                    policy_revision = published.revision.value(),
+                    policy_key = %published.key.as_str(),
+                    "published the policy as the deployment's head"
+                );
+                return Ok((deployment.at(line, published.revision.value()), true));
+            }
+            Err(appa_eventlog::PublishError::Moved { .. }) => continue,
+            Err(error) => return Err(refused(&error)),
         }
     }
+    Err(OpenError::Publish(format!(
+        "the head of deployment {line} moved under {PUBLISH_ATTEMPTS} publishes in a row"
+    )))
 }
 
 struct Inner {
@@ -1040,7 +1267,29 @@ struct Inner {
     #[cfg(feature = "archestra")]
     archestra_context: Option<String>,
     /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
-    pinned: Option<Arc<Deployment>>,
+    pinned: Option<Pinned>,
+}
+
+/// A view's own deployment line, and the deployment serving its head.
+#[derive(Clone)]
+struct Pinned {
+    line: DeploymentName,
+    deployment: Arc<Deployment>,
+}
+
+/// One engine this process compiled beside the serving deployment's own: the content key of
+/// the policy file, the revision it stamps, and the digest of the inventory it compiles with.
+/// The file is named by its content and not by its line, so views over different stores whose
+/// lines share a name never share an engine.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RevisionKey {
+    /// The line the engine decides for. A cached engine carries its line and revision, and a
+    /// family's opening is judged against both, so two lines that published the same bytes at
+    /// the same revision number never share one engine.
+    line: String,
+    file: String,
+    revision: u64,
+    inventory: Option<String>,
 }
 
 /// Everything of a runtime but its store: one object, held by the runtime and by every
@@ -1050,7 +1299,13 @@ struct Shared {
     files: Option<files::FileTracking>,
     state_path: Option<PathBuf>,
     deployment: std::sync::RwLock<Arc<Deployment>>,
-    retired: std::sync::Mutex<std::collections::BTreeMap<String, Arc<RuntimeEngine>>>,
+    /// The deployment line the shared deployment serves the head of.
+    line: DeploymentName,
+    /// Engines compiled from stored revisions: the replay-only engines of revisions a family's
+    /// log was decided under, and the head's engine compiled with a family's opening inventory.
+    /// Entries remain until this runtime is dropped. Hosts with frequent publishes or many lines
+    /// must account for that process-memory growth; stored revisions remain replayable on restart.
+    revisions: std::sync::Mutex<std::collections::BTreeMap<RevisionKey, Arc<RuntimeEngine>>>,
     modules: crate::builtins::ModuleRegistry,
     /// What this runtime did, as opposed to what the engine decided: bounded, in this
     /// process, and gone on restart. A diagnostic only — see [`crate::events`].
@@ -1066,6 +1321,13 @@ struct Shared {
     /// not a call's, so a remedy's rewritten call is annotated in it too. In this process
     /// only; after a restart the next proposal reports it again.
     working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
+    /// Return declarations made ahead of a spawn, by the root and trajectory that made them.
+    /// The trajectory's next marked spawn takes one, and a single spawn applies it through its
+    /// block's own declaration offer; the trajectory's turn end drops one it left. In this
+    /// process only: after a restart, or on another replica, the spawn meets that block and
+    /// declares there.
+    held_returns: std::sync::Mutex<std::collections::HashMap<(TrajectoryId, TrajectoryId), HeldReturn>>,
+    spawn_holds: spawn_hold::SpawnHolds,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
@@ -1092,7 +1354,23 @@ impl Runtime {
         store: Arc<LogStore>,
         modules: Option<PathBuf>,
     ) -> Result<Runtime, OpenError> {
-        Ok(Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store, None))
+        Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(
+            store,
+            None,
+            DeploymentName::new(SERVING_LINE),
+        )
+    }
+
+    /// [`Runtime::open_with_store`] serving `line` in place of the default one, for tests that
+    /// share one database: two runtimes serving different policies on one line fence each
+    /// other's decisions, as two processes would.
+    #[cfg(all(test, feature = "postgres"))]
+    pub(crate) fn open_with_store_on(
+        config: Config,
+        store: Arc<LogStore>,
+        line: DeploymentName,
+    ) -> Result<Runtime, OpenError> {
+        Prepared::new(config, None, ToolNaming::AsAuthored)?.with_store(store, None, line)
     }
 
     /// [`Runtime::open_with_store`] for a host that names tools through an adapter of its
@@ -1109,7 +1387,11 @@ impl Runtime {
         if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
             return Err(OpenError::UnspelledControlTool);
         }
-        Ok(Prepared::new(config, modules, ToolNaming::Canonical { adapter })?.with_store(store, None))
+        Prepared::new(config, modules, ToolNaming::Canonical { adapter })?.with_store(
+            store,
+            None,
+            DeploymentName::new(SERVING_LINE),
+        )
     }
 
     /// This runtime over another store: the same deployment, consult gates and diagnostics,
@@ -1137,13 +1419,14 @@ impl Runtime {
         self.view(|view| view.archestra_context = Some(context))
     }
 
-    /// This view serving `deployment` instead of the runtime's serving one: every root it
-    /// opens, event it decides and consult it makes reads this deployment, whatever a
-    /// concurrent [`Runtime::install`] swaps in. A host that serves many policies from one
-    /// runtime dispatches each through a view pinned to that policy's deployment. A
-    /// trajectory opened under another policy decides under its stored policy, as it does
-    /// after a reload. [`Runtime::on`] and [`Runtime::recording`] views of this one keep the
-    /// pin.
+    /// This view serving `deployment`'s line instead of the runtime's serving one: every root it
+    /// opens belongs to that line, and every event it decides and consult it makes reads this
+    /// deployment, whatever a concurrent [`Runtime::install`] swaps in. A host that serves many
+    /// policies from one runtime publishes each to its own line and dispatches each through a
+    /// view pinned to that line's head. Once the line moves past the revision the deployment
+    /// was published as, the view refuses with a retryable error until the host pins the new
+    /// head. A family of another line is refused. [`Runtime::on`] and [`Runtime::recording`]
+    /// views of this one keep the pin.
     ///
     /// A pin selects the policy and its externals, not whose trajectories a view reaches.
     /// A host serving several tenants from one runtime gives each dispatch its tenant's
@@ -1159,9 +1442,145 @@ impl Runtime {
     /// # Panics
     ///
     /// On a deployment another runtime prepared.
-    pub fn pinned(&self, deployment: &PreparedDeployment) -> Runtime {
-        let pinned = self.own(deployment);
+    pub fn pinned(&self, deployment: &PublishedDeployment) -> Runtime {
+        assert!(
+            std::ptr::eq(deployment.runtime.as_ptr(), Arc::as_ptr(&self.inner.shared)),
+            "the deployment was published by another runtime"
+        );
+        let pinned = Pinned {
+            line: deployment.line.clone(),
+            deployment: Arc::clone(&deployment.deployment),
+        };
         self.view(|view| view.pinned = Some(pinned))
+    }
+
+    /// Serve an existing revision with `prepared`'s externals, without publishing anything.
+    /// The prepared policy file must match the file stored for that revision.
+    ///
+    /// A host that freezes publishing reads the head, prepares its stored file with current
+    /// credentials, and pins this handle through [`Runtime::pinned`]. A concurrent publish
+    /// cannot make this operation publish the old file again. If the line has moved past
+    /// `revision`, the pinned view refuses retryably at dispatch and commits nothing.
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared.
+    pub fn at_revision(
+        &self,
+        line: &DeploymentName,
+        prepared: &PreparedDeployment,
+        revision: appa_engine::profile::PolicyRevision,
+    ) -> Result<PublishedDeployment, OpenError> {
+        let deployment = self.own(prepared);
+        let stored = self
+            .inner
+            .store
+            .policy_file(line, revision)
+            .map_err(|error| OpenError::Storage(error.to_string()))?;
+        let key = appa_engine::profile::PolicyFileKey::of(deployment.config.policy_file().bytes());
+        if appa_engine::profile::PolicyFileKey::of(&stored) != key {
+            return Err(OpenError::PolicyRevisionMismatch {
+                deployment: line.clone(),
+                revision,
+            });
+        }
+        Ok(PublishedDeployment {
+            runtime: Arc::downgrade(&self.inner.shared),
+            line: line.clone(),
+            deployment: Arc::new(deployment.at(line, revision.value())),
+        })
+    }
+
+    /// Publish a prepared deployment as the head of `line`: the head's own revision when the
+    /// head already names its policy file, or the line's next revision. Every family of `line`
+    /// decides at that revision from then on: a decision made at an earlier revision no longer
+    /// commits, and is made again at the head.
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared.
+    pub fn publish(
+        &self,
+        line: &DeploymentName,
+        prepared: &PreparedDeployment,
+    ) -> Result<PublishedDeployment, OpenError> {
+        let deployment = self.own(prepared);
+        let (published, new) = serve(&self.inner.store, line, &deployment)?;
+        Ok(self.published(line, published, new))
+    }
+
+    /// Publish only while `line` stands at `expected`, or `None` before its first revision.
+    /// Hosts read the head before validating their current policy inputs, then pass that
+    /// revision here. A competing publish returns [`OpenError::PolicyHeadMoved`]; this call
+    /// never retries against a newer head. The host must read and validate its inputs again.
+    ///
+    /// Matching policy bytes reuse the expected revision without publishing. A later publish
+    /// can fence the returned view at dispatch, as with [`Runtime::at_revision`].
+    /// New revisions record the same publication diagnostic as [`Runtime::publish`].
+    ///
+    /// # Panics
+    ///
+    /// On a deployment another runtime prepared.
+    pub fn publish_if_head(
+        &self,
+        line: &DeploymentName,
+        prepared: &PreparedDeployment,
+        expected: Option<appa_engine::profile::PolicyRevision>,
+    ) -> Result<PublishedDeployment, OpenError> {
+        let deployment = self.own(prepared);
+        let moved = |head| OpenError::PolicyHeadMoved {
+            deployment: line.clone(),
+            head,
+        };
+        let head = self
+            .inner
+            .store
+            .head(line)
+            .map_err(|error| OpenError::Storage(error.to_string()))?;
+        if head.as_ref().map(|head| head.revision) != expected {
+            return Err(moved(head.map(|head| head.revision)));
+        }
+        let bytes = deployment.config.policy_file().bytes();
+        if let Some(head) = head
+            && head.key == appa_engine::profile::PolicyFileKey::of(bytes)
+        {
+            return Ok(self.published(line, deployment.at(line, head.revision.value()), false));
+        }
+        let published = self
+            .inner
+            .store
+            .publish(line, expected, bytes)
+            .map_err(|error| match error {
+                appa_eventlog::PublishError::Moved { head } => moved(head),
+                error => OpenError::Publish(error.to_string()),
+            })?;
+        tracing::info!(
+            deployment = %line,
+            policy_revision = published.revision.value(),
+            policy_key = %published.key.as_str(),
+            "published the policy as the deployment's head"
+        );
+        Ok(self.published(line, deployment.at(line, published.revision.value()), true))
+    }
+
+    fn published(&self, line: &DeploymentName, published: Deployment, new: bool) -> PublishedDeployment {
+        if new {
+            self.record(
+                None,
+                crate::events::RuntimeEvent::PolicyPublished {
+                    deployment: line.to_string(),
+                    revision: published
+                        .revision()
+                        .expect("a served deployment decides at a revision of its line"),
+                    policy_key: published.key(),
+                },
+            );
+        }
+        PublishedDeployment {
+            runtime: Arc::downgrade(&self.inner.shared),
+            line: line.clone(),
+            deployment: Arc::new(published),
+        }
     }
 
     /// Another view of this runtime's shared state: this view's store, recorder and pin,
@@ -1239,6 +1658,22 @@ impl Inner {
         }
     }
 
+    fn hold_return(&self, root: &TrajectoryId, trajectory: &TrajectoryId, held: HeldReturn) {
+        self.shared
+            .held_returns
+            .lock()
+            .expect("the held-return mutex is never poisoned: no panic runs while it is held")
+            .insert((root.clone(), trajectory.clone()), held);
+    }
+
+    fn take_held_return(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<HeldReturn> {
+        self.shared
+            .held_returns
+            .lock()
+            .expect("the held-return mutex is never poisoned: no panic runs while it is held")
+            .remove(&(root.clone(), trajectory.clone()))
+    }
+
     fn working_directory(&self, root: &TrajectoryId) -> Option<String> {
         self.shared
             .working_directories
@@ -1304,9 +1739,17 @@ impl Inner {
             .recent_root(window, selected)
     }
 
+    /// The deployment line this view serves.
+    pub(crate) fn line(&self) -> &DeploymentName {
+        match &self.pinned {
+            Some(pinned) => &pinned.line,
+            None => &self.shared.line,
+        }
+    }
+
     fn deployment(&self) -> Arc<Deployment> {
         match &self.pinned {
-            Some(pinned) => Arc::clone(pinned),
+            Some(pinned) => Arc::clone(&pinned.deployment),
             None => Arc::clone(
                 &self
                     .shared
@@ -1317,68 +1760,135 @@ impl Inner {
         }
     }
 
+    /// The trust chain `log`'s family is judged under: the chain a label it stores outside the
+    /// log is named in, and resolved by when read back.
+    pub(super) fn trust_chain(
+        &self,
+        deployment: &Deployment,
+        log: &Log,
+    ) -> Result<appa_engine::registry::TrustChain, EventError> {
+        Ok(self.resolve_policy(deployment, log)?.engine().trust_chain().clone())
+    }
+
+    /// The engines that judge `log`'s family while `deployment` serves this view's line.
+    ///
+    /// A family that follows the line is judged at the deployment's revision — by the
+    /// deployment's own engine, or by that revision's file compiled with the family's opening
+    /// inventory — with a replay-only engine for every earlier revision the log is stamped with.
+    /// A family of another line, or a log stamped later than this deployment's revision, is
+    /// refused: the second is retryable once this view serves the newer head.
     pub(super) fn resolve_policy<'a>(
         &self,
         deployment: &'a Deployment,
         log: &Log,
     ) -> Result<PolicyEngine<'a>, EventError> {
-        let opened = crate::engine::opened_under(log).ok_or_else(|| {
-            EventError::PolicyUnavailable(format!(
-                "the log of {} does not open with its opening record",
-                log.root().as_str()
-            ))
-        })?;
-        if crate::engine::policy_file_key(log.policy_file()) != opened.policy_file_key {
+        let line = self.line();
+        let followed = log.deployment();
+        if followed != line {
             return Err(EventError::PolicyUnavailable(format!(
-                "the stored policy file does not hash to the key {} its opening names",
-                opened.policy_file_key
-            )));
-        }
-        let policy =
-            if crate::engine::policy_file_key(deployment.config.policy_file().bytes()) == opened.policy_file_key {
-                deployment.resident()
-            } else {
-                PolicyEngine::Retired(self.retired_engine(&opened.policy_file_key, log.policy_file())?)
-            };
-        if !policy.recognizes(&opened.policy_digest) {
-            return Err(EventError::PolicyUnavailable(format!(
-                "the stored policy file compiles to a different identity than the opening of {}",
+                "the family of {} follows deployment {followed}, not {line}",
                 log.root().as_str()
             )));
         }
-        Ok(policy)
+        let revision = deployment.serving_revision()?;
+        if let Some(stamp) = log.stamp().map(|stamp| stamp.value())
+            && stamp > revision
+        {
+            return Err(EventError::PolicyMoved {
+                deployment: line.to_string(),
+                head: stamp.to_string(),
+            });
+        }
+        let inventory = stored_inventory(log.policy_file())?;
+        let earlier = log
+            .revisions()
+            .into_iter()
+            .map(|earlier| earlier.value())
+            .filter(|earlier| *earlier < revision)
+            .map(|earlier| self.replay_engine(earlier, inventory.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(match inventory {
+            None => PolicyEngine::resident(&deployment.resident, earlier),
+            Some(inventory) => PolicyEngine::compiled(self.inventory_engine(deployment, &inventory)?, earlier),
+        })
     }
 
-    /// The engine for a policy this deployment no longer serves, compiled once. The
-    /// compile stays outside the lock — it is the expensive step, and the mutex's
-    /// "no panic runs while it is held" reading must keep holding — so a race can
-    /// still compile twice, but only one result is ever cached and handed out.
-    ///
-    /// A retired policy decides under the identities this deployment identifies now, so it
-    /// meets the naming rule this deployment serves under or the trajectory does not
-    /// reopen: a stored policy naming a tool the served host's raw way confines and
-    /// excepts nothing, while a wildcard contract still permits the call.
-    fn retired_engine(&self, key: &str, bytes: &[u8]) -> Result<Arc<RuntimeEngine>, EventError> {
-        if let Some(engine) = self
-            .shared
-            .retired
-            .lock()
-            .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
-            .get(key)
-        {
+    /// The replay-only engine of `revision` of this view's line, compiled once from the file the
+    /// store holds for it with no externals: it validates the batches that revision decided and
+    /// consults nothing.
+    fn replay_engine(
+        &self,
+        revision: u64,
+        inventory: Option<&appa_runtime_api::inventory::ToolInventory>,
+    ) -> Result<Arc<RuntimeEngine>, EventError> {
+        let line = self.line();
+        let stamp = appa_engine::profile::PolicyRevision::new(revision);
+        let file = self
+            .store
+            .policy_key(line, stamp)
+            .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
+        let key = RevisionKey {
+            line: line.to_string(),
+            file: file.as_str().to_string(),
+            revision,
+            inventory: inventory.map(inventory_digest),
+        };
+        self.compiled(key, || {
+            let bytes = self
+                .store
+                .policy_file(line, appa_engine::profile::PolicyRevision::new(revision))
+                .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
+            compile_stored_with_inventory(&bytes, inventory, self.shared.naming).map_err(EventError::PolicyUnavailable)
+        })
+    }
+
+    /// `deployment`'s file compiled with a family's opening inventory, deciding at the
+    /// deployment's revision beside the deployment's own externals.
+    fn inventory_engine(
+        &self,
+        deployment: &Deployment,
+        inventory: &appa_runtime_api::inventory::ToolInventory,
+    ) -> Result<Arc<RuntimeEngine>, EventError> {
+        let key = RevisionKey {
+            line: self.line().to_string(),
+            file: deployment.key(),
+            revision: deployment.serving_revision()?,
+            inventory: Some(inventory_digest(inventory)),
+        };
+        self.compiled(key, || {
+            let compiled = compile_stored_with_inventory(
+                deployment.config.policy_file().bytes(),
+                Some(inventory),
+                self.shared.naming,
+            )
+            .map_err(EventError::PolicyUnavailable)?;
+            validate_deployment(&compiled, &deployment.config.externals)
+                .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
+            Ok(compiled)
+        })
+    }
+
+    /// The engine `key` names, compiled once. The compile stays outside the lock — it is the
+    /// expensive step, and the mutex's "no panic runs while it is held" reading must keep
+    /// holding — so a race can still compile twice, but only one result is ever cached and
+    /// handed out.
+    fn compiled(
+        &self,
+        key: RevisionKey,
+        compile: impl FnOnce() -> Result<appa_policy::Config, EventError>,
+    ) -> Result<Arc<RuntimeEngine>, EventError> {
+        let cache = || {
+            self.shared
+                .revisions
+                .lock()
+                .expect("the revision-engine mutex is never poisoned: no panic runs while it is held")
+        };
+        if let Some(engine) = cache().get(&key) {
             return Ok(Arc::clone(engine));
         }
         let naming = self.shared.naming;
-        let compiled = compile_stored_for_host(bytes, naming).map_err(EventError::PolicyUnavailable)?;
-        let engine = Arc::new(RuntimeEngine::from_policy(&compiled, naming));
-        Ok(Arc::clone(
-            self.shared
-                .retired
-                .lock()
-                .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
-                .entry(key.to_string())
-                .or_insert(engine),
-        ))
+        let engine = Arc::new(RuntimeEngine::from_policy(&compile()?, naming).at(self.line(), key.revision));
+        Ok(Arc::clone(cache().entry(key).or_insert(engine)))
     }
 
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, EventError> {
@@ -1438,7 +1948,7 @@ impl Inner {
             let Some(observation) = observation else {
                 return Ok(answer);
             };
-            match step.append_host(&log, &[], &observation) {
+            match step.append_host(&log, &observation) {
                 Ok(()) => return Ok(answer),
                 Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
                 Err(error) => {
@@ -1480,8 +1990,13 @@ pub enum RootForkRefusal {
 fn read_refused(error: appa_eventlog::ReadError) -> EventError {
     match error {
         appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
-        appa_eventlog::ReadError::Undecodable(detail) => EventError::UntrustedLog(detail),
-        error @ appa_eventlog::ReadError::PolicyFileMissing { .. } => EventError::PolicyUnavailable(error.to_string()),
+        appa_eventlog::ReadError::LegacyFamily { .. } => EventError::LegacyFamily,
+        error @ (appa_eventlog::ReadError::Undecodable { .. } | appa_eventlog::ReadError::UndecodableKey { .. }) => {
+            EventError::UntrustedLog(error.to_string())
+        }
+        error @ (appa_eventlog::ReadError::PolicyFileMissing { .. }
+        | appa_eventlog::ReadError::PolicyFileMismatch { .. }
+        | appa_eventlog::ReadError::UnknownRevision { .. }) => EventError::PolicyUnavailable(error.to_string()),
         error => EventError::Storage(error.to_string()),
     }
 }
@@ -1560,7 +2075,6 @@ impl Runtime {
                 "file tracking cannot confine the result of a runtime-owned file tool".into(),
             ));
         }
-        let policy_key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
         if deployment
             .resident
             .registry()
@@ -1573,8 +2087,9 @@ impl Runtime {
             ));
         }
         inner.files = Some(files::FileTracking {
+            policy_key: deployment.key(),
             initial,
-            policy_key,
+            deployment: inner.line.to_string(),
             protected_paths,
             process_backend: None,
         });
@@ -1652,24 +2167,29 @@ impl Runtime {
     }
 
     /// The deployment `appa replay` runs: the same session and engine over a log that lives
-    /// only as long as this value, with every authority and sanitizer answered in process —
-    /// approve, and the body unchanged — as if the bound party had. Annotators, audience
-    /// sources, and lookups stay bound as configured. Nothing of the run survives the process.
-    pub fn open_in_memory(config: Config, modules: Option<PathBuf>) -> Result<Runtime, OpenError> {
+    /// only as long as this value, with the authorities and sanitizers answered as `remedies`
+    /// says. Annotators, audience sources, and lookups stay bound as configured. Nothing of
+    /// the run survives the process.
+    pub fn open_in_memory(config: Config, modules: Option<PathBuf>, remedies: Remedies) -> Result<Runtime, OpenError> {
         let mut prepared = Prepared::new(config, modules, ToolNaming::AsAuthored)?;
-        prepared.deployment.stand_in_for_remedies();
+        prepared.deployment.answer_remedies(remedies);
         prepared.assemble(Backend::Memory)
     }
 
     /// [`Runtime::open_in_memory`] for a host that names tools through an adapter of its
     /// own, as [`Runtime::open_with_store_as`] resolves them: the deployment a host's replay
-    /// runs, with the same in-process stand-in for every authority and sanitizer.
-    pub fn open_in_memory_as(config: Config, modules: Option<PathBuf>, adapter: Adapter) -> Result<Runtime, OpenError> {
+    /// runs.
+    pub fn open_in_memory_as(
+        config: Config,
+        modules: Option<PathBuf>,
+        adapter: Adapter,
+        remedies: Remedies,
+    ) -> Result<Runtime, OpenError> {
         if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
             return Err(OpenError::UnspelledControlTool);
         }
         let mut prepared = Prepared::new(config, modules, ToolNaming::Canonical { adapter })?;
-        prepared.deployment.stand_in_for_remedies();
+        prepared.deployment.answer_remedies(remedies);
         prepared.assemble(Backend::Memory)
     }
 
@@ -1757,7 +2277,7 @@ impl Runtime {
     /// names every tool canonically survives the reload, and a refused candidate changes
     /// nothing — the deployment that was serving keeps serving.
     pub fn reload(&self, config: Config) -> Result<Reloaded, OpenError> {
-        Ok(self.install(self.prepare_deployment(config)?))
+        self.install(self.prepare_deployment(config)?)
     }
 
     /// Load the deployment a configuration declares without installing it: every open-time
@@ -1791,13 +2311,16 @@ impl Runtime {
         Arc::clone(&prepared.deployment)
     }
 
-    /// Swap a prepared deployment in as the serving one.
+    /// Publish a prepared deployment as the head of this runtime's line and swap it in as the
+    /// serving one. Every family of the line decides at its revision from then on; a decision
+    /// already made at the revision before it no longer commits, and is made again here.
     ///
     /// # Panics
     ///
     /// On a deployment another runtime prepared.
-    pub fn install(&self, prepared: PreparedDeployment) -> Reloaded {
-        let deployment = self.own(&prepared);
+    pub fn install(&self, prepared: PreparedDeployment) -> Result<Reloaded, OpenError> {
+        let (deployment, new) = serve(&self.inner.store, &self.inner.shared.line, &self.own(&prepared))?;
+        let deployment = Arc::new(deployment);
         let identity = deployment.resident().identity_hex();
         let previous = std::mem::replace(
             &mut *self
@@ -1809,48 +2332,56 @@ impl Runtime {
             Arc::clone(&deployment),
         );
         self.inner.shared.gates.size_by(&deployment.config.externals);
-        // Every reload retires at most one more policy, so clearing here bounds the
+        // Every reload publishes at most one more revision, so clearing here bounds the
         // cache by the reloads since the last one instead of by the life of the
-        // process. A trajectory still replaying under a dropped entry recompiles it.
+        // process. A family still replaying under a dropped entry recompiles it.
         self.inner
             .shared
-            .retired
+            .revisions
             .lock()
-            .expect("the retired-engine mutex is never poisoned: no panic runs while it is held")
+            .expect("the revision-engine mutex is never poisoned: no panic runs while it is held")
             .clear();
 
-        let key = crate::engine::policy_file_key(deployment.config.policy_file().bytes());
-        let changed = crate::engine::policy_file_key(previous.config.policy_file().bytes()) != key;
+        let key = deployment.key();
+        let revision = deployment
+            .revision()
+            .expect("a served deployment decides at a revision of its line");
+        let changed = previous.revision() != Some(revision);
         tracing::info!(
+            deployment = %self.inner.shared.line,
+            policy_revision = revision,
             policy_key = %key,
             policy_identity = %identity,
             changed,
             "reloaded the serving deployment"
         );
-        // Deployment-wide: a reload belongs to no trajectory, and every trajectory alive
-        // across it needs to see that its policy moved under it.
-        self.record(
-            None,
-            crate::events::RuntimeEvent::Reload {
-                policy_key: key.clone(),
-                changed,
-            },
-        );
-        Reloaded {
+        // Deployment-wide: a publish belongs to no trajectory, and every trajectory alive
+        // across it needs to see that its policy moved under it. Installing bytes the head
+        // already names publishes nothing.
+        if new {
+            self.record(
+                None,
+                crate::events::RuntimeEvent::PolicyPublished {
+                    deployment: self.inner.shared.line.to_string(),
+                    revision,
+                    policy_key: key.clone(),
+                },
+            );
+        }
+        Ok(Reloaded {
             policy_key: key,
             policy_identity: identity,
+            policy_revision: revision,
             changed,
-        }
+        })
     }
 
-    /// Opens a fresh root. Refuses an id whose log already exists: a
-    /// reused harness id MUST NOT continue another trajectory's history
-    /// One transaction writes the opening
-    /// record and stores the policy file it names, so the root is bound
-    /// to that file durably or is not opened at all.
+    /// Opens a fresh root in this view's deployment line, decided at the revision its
+    /// deployment serves. Refuses an id whose log already exists: a reused harness id MUST NOT
+    /// continue another trajectory's history.
     pub(crate) fn create_session(&self, id: TrajectoryId, principal: Option<ReaderId>) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
-        self.create_session_under(id, deployment, principal)
+        self.create_session_under(id, deployment, principal, None)
     }
 
     pub(crate) fn create_session_with_inventory(
@@ -1859,20 +2390,20 @@ impl Runtime {
         inventory: appa_runtime_api::inventory::ToolInventory,
         principal: Option<ReaderId>,
     ) -> Result<Session, EventError> {
-        let config = self
-            .inner
-            .deployment()
-            .config
-            .with_inventory(inventory)
-            .map_err(EventError::PolicyUnavailable)?;
-        let deployment = Deployment::load(
-            config,
-            &self.inner.shared.modules,
-            self.inner.shared.gates.clone(),
+        let deployment = self.inner.deployment();
+        // A root opens with an inventory only when the policy it opens under covers every tool
+        // that inventory reports, as a deployment's own inventory must when it loads. A later
+        // revision that stops covering one refuses that tool's calls instead.
+        resolve_served_policy(
+            deployment.config.policy_file().value(),
             self.inner.shared.naming,
+            &inventory,
+            &deployment.config.aliases,
+            Coverage::Required,
         )
-        .map_err(|error| EventError::PolicyUnavailable(error.to_string()))?;
-        self.create_session_under(id, Arc::new(deployment), principal)
+        .map_err(EventError::PolicyUnavailable)?;
+        self.inner.inventory_engine(&deployment, &inventory)?;
+        self.create_session_under(id, deployment, principal, Some(inventory))
     }
 
     /// Reserve identities in the actor's own scope, independently of the immutable
@@ -1985,7 +2516,7 @@ impl Runtime {
         }
     }
 
-    /// Read-only preflight under a pinned family policy, including child startup.
+    /// Read-only preflight under the family's policy, including child startup.
     pub(crate) fn check_inventory(
         &self,
         root: &TrajectoryId,
@@ -2002,9 +2533,12 @@ impl Runtime {
         adapter: Adapter,
         inventory: &appa_runtime_api::inventory::ToolInventory,
     ) -> Result<crate::tool_validation::ValidationReport, EventError> {
-        self.inner.resolve_policy(&self.inner.deployment(), log)?;
+        let deployment = self.inner.deployment();
+        self.inner.resolve_policy(&deployment, log)?;
         let undecodable = || EventError::PolicyUnavailable("stored validation rules do not decode".into());
-        let source = std::str::from_utf8(log.policy_file())
+        // A family is decided under its deployment's head rules.
+        let rules = deployment.config.policy_file().bytes();
+        let source = std::str::from_utf8(rules)
             .map_err(|_| EventError::PolicyUnavailable("stored policy is not UTF-8".into()))?;
         let document: toml::Value = toml::from_str(source).map_err(|_| undecodable())?;
         let policy = document.get("policy").ok_or_else(undecodable)?;
@@ -2015,7 +2549,8 @@ impl Runtime {
     /// Open `new_root` as an independent conversation-root fork of `parent`, a trajectory in the
     /// family rooted at `parent_root`. The new root starts from the parent's current label, its
     /// family's committed effects and unsettled effect reservations, and the parent's denials,
-    /// under the policy the parent's family opened with. After that the two families share
+    /// in the parent family's deployment line, with the inventory the parent family's policy
+    /// compiles with. After that the two families share
     /// nothing: what either admits, emits, settles or is denied never reaches the other, and each
     /// keeps its own dispatches, offers and turns. This creates no same-family spawned child: it
     /// has no prepared spawn, `ChildStart`/`ChildEnd`, or return contract. The embedding integration
@@ -2051,13 +2586,14 @@ impl Runtime {
         })?;
         let policy = self.inner.resolve_policy(&deployment, &log).map_err(refused)?;
         let view = policy
-            .engine()
             .rebuild_view(&log)
             .map_err(|refusal| refused(EventError::from(refusal)))?;
         let origin = policy
             .engine()
             .root_fork_origin(&view, parent)
             .ok_or(RootForkRefusal::ParentUnavailable)?;
+        // The fork opens under its parent's stored file: the same composed file, so the same
+        // inventory. It follows the parent's deployment at the head.
         let opening = policy
             .engine()
             .root_fork_opening(new_root, log.policy_file(), origin)
@@ -2102,12 +2638,31 @@ impl Runtime {
         id: TrajectoryId,
         deployment: Arc<Deployment>,
         principal: Option<ReaderId>,
+        inventory: Option<appa_runtime_api::inventory::ToolInventory>,
     ) -> Result<Session, EventError> {
-        let opening = deployment.root_opening(&id, principal);
+        // A root with an inventory is bound to the composed file — the serving policy with the
+        // inventory embedded — so every revision the family follows compiles with it, and the
+        // previous version reads the family as pinned to that file.
+        let (opening, policy_file) = match inventory {
+            None => (
+                deployment.root_opening(&id, principal),
+                deployment.config.policy_file().bytes().to_vec(),
+            ),
+            Some(inventory) => {
+                let composed = deployment
+                    .config
+                    .with_inventory(inventory.clone())
+                    .map_err(EventError::PolicyUnavailable)?;
+                let bytes = composed.policy_file().bytes().to_vec();
+                let engine = self.inner.inventory_engine(&deployment, &inventory)?;
+                (engine.root_opening(&id, &bytes, principal), bytes)
+            }
+        };
+        let line = self.inner.line();
         let root = self
             .inner
             .store
-            .create_root(opening, deployment.config.policy_file().bytes())
+            .create_root(opening, &policy_file)
             .inspect_err(|error| {
                 self.inner
                     .note_store_error(Some(&id), crate::events::StoreOperation::Open, error)
@@ -2115,6 +2670,10 @@ impl Runtime {
             .map_err(|error| match error {
                 appa_eventlog::CreateError::AlreadyExists { .. } => EventError::TrajectoryExists,
                 appa_eventlog::CreateError::Archived { .. } => EventError::RootArchived,
+                appa_eventlog::CreateError::PolicyMoved { head } => EventError::PolicyMoved {
+                    deployment: line.to_string(),
+                    head: head.map_or_else(|| "none".to_string(), |head| head.to_string()),
+                },
                 error => EventError::Storage(error.to_string()),
             })?;
         Ok(Session::attach(
@@ -2167,7 +2726,7 @@ impl Runtime {
         let log = self.inner.log(root)?;
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
         match policy.engine().liveness(&view, trajectory) {
             Liveness::Unopened => Err(EventError::UnknownTrajectory),
             Liveness::Ended => Err(EventError::TrajectoryEnded),
@@ -2188,7 +2747,7 @@ impl Runtime {
         let log = self.inner.log(root)?;
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.engine().rebuild_view(&log).map_err(EventError::from)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
         Ok(candidates
             .iter()
             .find(|candidate| policy.engine().liveness(&view, candidate) != Liveness::Unopened)
@@ -2228,7 +2787,6 @@ impl Runtime {
             .resolve_policy(&deployment, &log)
             .map_err(|error| StatusReadError::Policy(error.to_string()))?;
         let view = policy
-            .engine()
             .rebuild_view(&log)
             .map_err(|error| StatusReadError::Replay(error.to_string()))?;
         policy
@@ -2245,7 +2803,7 @@ impl Runtime {
     pub fn audit(&self, id: &TrajectoryId) -> Option<Vec<AuditEntry>> {
         let deployment = self.inner.deployment();
         let (policy, log) = self.root_log(&deployment, id, "audit")?;
-        match policy.engine().audit(&log) {
+        match policy.audit(&log) {
             Ok(entries) => entries,
             Err(refusal) => {
                 tracing::warn!(trajectory = %id.0, %refusal, "audit read refused the persisted log");
@@ -2370,7 +2928,7 @@ impl Runtime {
         // Neither is required: without them the facts still export, with the fields a reader
         // cannot be given left empty and the refusal said out loud.
         let policy = self.inner.resolve_policy(&deployment, &log).ok();
-        let rebuilt = policy.as_ref().map(|policy| policy.engine().rebuild_view(&log));
+        let rebuilt = policy.as_ref().map(|policy| policy.rebuild_view(&log));
         let replay_refused = match &rebuilt {
             Some(Err(refusal)) => Some(refusal.class()),
             _ => None,
@@ -2398,7 +2956,7 @@ impl Runtime {
             facts: log.facts(),
             events: self.inner.events(&root),
             trust_chain,
-            policy: policy_section(log.policy_file()),
+            policy: policy_section(deployment.config.policy_file().bytes()),
             vouched,
             parents: yell::branches(log.facts(), view.as_ref(), policy.as_ref()),
             replay_refused,
@@ -2414,7 +2972,7 @@ impl Runtime {
             offer,
             RemedyArguments::default(),
             None,
-            None,
+            Admission::Open,
             EmbeddedPresentationOptions::default(),
         )
         .await
@@ -2433,10 +2991,18 @@ impl Runtime {
             offer,
             arguments,
             None,
-            None,
+            Admission::Open,
             EmbeddedPresentationOptions::default(),
         )
         .await
+    }
+
+    /// Declare, for an authenticated actor, what its next single subagent call's return may
+    /// carry: the call that quotes no offer. The spawn applies it through its block's own
+    /// declaration offer.
+    pub async fn declare_return_ahead(&self, acting: &Actor, arguments: RemedyArguments) -> RemedyOutcome {
+        self.declare_ahead(acting, arguments, EmbeddedPresentationOptions::default())
+            .await
     }
 
     /// Executes an embedded remedy plan for an authenticated actor.
@@ -2457,11 +3023,13 @@ impl Runtime {
             .await
     }
 
-    /// Executes a remedy plan for the MCP daemon, returning an MCP tool reply.
+    /// Executes a remedy plan for the MCP daemon, returning an MCP tool reply. `call` is the
+    /// tool call the request names, where the host's MCP client names one.
     #[cfg(feature = "daemon")]
     pub(crate) async fn execute_remedy_plan(
         &self,
         args: ExecuteRemedyPlanArgs,
+        call: Option<&str>,
         elicitation: Option<&Elicitation>,
         expected_actor: Option<&Actor>,
     ) -> RemedyReply {
@@ -2469,6 +3037,7 @@ impl Runtime {
             self.execute_remedy_outcome(
                 args,
                 RemedyCaller::Daemon {
+                    call,
                     elicitation,
                     expected_actor,
                 },
@@ -2479,20 +3048,36 @@ impl Runtime {
 
     #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
     async fn execute_remedy_outcome(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
-        let (elicitation, expected_actor, presentation, strict_freshness) = match caller {
-            RemedyCaller::Embedded { actor, presentation } => (None, Some(actor), presentation, true),
+        let (call, elicitation, expected_actor, presentation, strict_freshness) = match caller {
+            RemedyCaller::Embedded { actor, presentation } => (None, None, Some(actor), presentation, true),
             #[cfg(feature = "daemon")]
             RemedyCaller::Daemon {
+                call,
                 elicitation,
                 expected_actor,
             } => (
+                call,
                 elicitation,
                 expected_actor,
                 EmbeddedPresentationOptions::default(),
                 false,
             ),
         };
-        let quoted = match OfferId::parse(&args.offer_id) {
+        let Some(offer_id) = args.offer_id.clone() else {
+            // An embedded host authenticated its actor; the daemon spends the vouch the
+            // control hook recorded for the declaration.
+            let acting = match (expected_actor, strict_freshness) {
+                (Some(actor), true) => actor.clone(),
+                _ => match self.declaration_vouch(&args, call, expected_actor) {
+                    Ok(actor) => actor,
+                    Err(reason) => return RemedyOutcome::Refused { reason },
+                },
+            };
+            return self
+                .declare_ahead(&acting, RemedyArguments::from(args), presentation)
+                .await;
+        };
+        let quoted = match OfferId::parse(&offer_id) {
             Ok(quoted) => quoted,
             Err(reason) => {
                 return RemedyOutcome::Refused {
@@ -2501,46 +3086,39 @@ impl Runtime {
             }
         };
         let arguments = RemedyArguments::from(args);
-        let key = PermitKey::offer(&quoted);
-        // Replay an ended offer only for its recorded pursuer. Do not spend another vouch.
-        let mut replaying = false;
-        if let Some(expected) = expected_actor {
-            match self.peek_vouched(&key) {
-                Ok((actor, _)) if actor != *expected => {
-                    return RemedyOutcome::Refused {
-                        reason: RemedyRefusal::ActorMismatch,
-                    };
-                }
-                Ok(_) => {}
-                Err(_) if self.replays_ended_offer(expected, &quoted) => replaying = true,
-                Err(_) => {
-                    return RemedyOutcome::Refused {
-                        reason: RemedyRefusal::Unvouched,
-                    };
-                }
+        // The vouch is only read here: the claim spends it where the claim lands. Taking it
+        // first would write a release that also ends a running execution's claim, because
+        // one session's attempts are one actor.
+        //
+        // A daemon replays an ended offer for its recorded pursuer without spending a vouch:
+        // an MCP delivery retry carries no attempt identity to tell it from another attempt.
+        // An embedded host deduplicates its own retries, so a spent offer answers no other
+        // attempt of it.
+        let (acting, admission) = match (expected_actor, self.peek_vouched(&PermitKey::offer(&quoted))) {
+            (Some(expected), Ok((actor, _))) if actor != *expected => {
+                return RemedyOutcome::Refused {
+                    reason: RemedyRefusal::ActorMismatch,
+                };
             }
-        }
-        let (acting, ruling) = if replaying {
-            (expected_actor.expect("a replay authenticates its actor").clone(), None)
-        } else {
-            match self.take_vouched(&key) {
-                Ok(consumed) => consumed,
-                Err(_) => {
-                    return RemedyOutcome::Refused {
-                        reason: RemedyRefusal::Unvouched,
-                    };
-                }
+            (_, Ok((actor, _))) => (
+                actor,
+                Admission::Vouched {
+                    fresh: strict_freshness,
+                },
+            ),
+            (Some(expected), Err(_)) if !strict_freshness && self.replays_ended_offer(expected, &quoted) => {
+                (expected.clone(), Admission::Open)
+            }
+            (_, Err(_)) => {
+                return RemedyOutcome::Refused {
+                    reason: RemedyRefusal::Unvouched,
+                };
             }
         };
         let started = std::time::Instant::now();
-        let outcome = if strict_freshness && !replaying && self.offer_kind(&acting.root, &quoted).is_none() {
-            RemedyOutcome::Refused {
-                reason: RemedyRefusal::UnknownOffer,
-            }
-        } else {
-            self.remedy(&acting, quoted.clone(), arguments, elicitation, ruling, presentation)
-                .await
-        };
+        let outcome = self
+            .remedy(&acting, quoted.clone(), arguments, elicitation, admission, presentation)
+            .await;
         // Recorded from the typed outcome, before rendering turns it into the text the
         // model reads: a remedy that takes a minute and then declines is the shape of "APPA
         // is in the way", and neither the duration nor the offer it quoted is in the
@@ -2592,26 +3170,66 @@ enum RemedyCaller<'a> {
     },
     #[cfg(feature = "daemon")]
     Daemon {
+        call: Option<&'a str>,
         elicitation: Option<&'a Elicitation>,
         expected_actor: Option<&'a Actor>,
     },
 }
 
+/// What admits an execution where its claim lands.
+#[derive(Clone, Copy)]
+enum Admission {
+    /// The caller authenticated the act itself, and nothing stands behind it to spend.
+    Open,
+    /// A control gate vouched for the offer, and the claim spends that standing. `fresh`
+    /// also requires the offer to still stand there.
+    Vouched { fresh: bool },
+}
+
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
 /// declaring a subagent's return `label` and `return_schema` — for a harness that routes the
-/// control tool itself.
-pub fn parse_control_arguments(arguments: &str) -> Result<(OfferId, RemedyArguments), String> {
+/// control tool itself. No `offer_id` is a declaration ahead of the spawn, which
+/// [`Runtime::declare_return_ahead`] takes.
+pub fn parse_control_arguments(arguments: &str) -> Result<(Option<OfferId>, RemedyArguments), String> {
     let args: ExecuteRemedyPlanArgs =
         serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;
-    let offer = OfferId::parse(&args.offer_id).map_err(|error| format!("execute_remedy_plan offer_id: {error}"))?;
+    let offer = args
+        .offer_id
+        .as_deref()
+        .map(|offer| OfferId::parse(offer).map_err(|error| format!("execute_remedy_plan offer_id: {error}")))
+        .transpose()?;
     Ok((offer, RemedyArguments::from(args)))
+}
+
+/// What a declaration ahead of the spawn tells the model.
+const DECLARED_AHEAD: &str = "[appa] Declared. Call the subagent tool now, before any other tool: your next \
+     subagent call returns under this floor. A call that changes this session's label first lapses the declaration.";
+
+/// The key the control hook vouches a declaration ahead of the spawn under, and the tool spends
+/// it by, since such a call quotes no offer: the declaration as both read it, and the tool call
+/// both name where the host's MCP client names it. Two sessions declaring alike share a key
+/// only where no call is named.
+pub(crate) fn declaration_key(args: &ExecuteRemedyPlanArgs, call: Option<&str>) -> PermitKey {
+    let label = args.label.as_ref().map(|label| {
+        serde_json::json!({
+            "trust": label.trust,
+            "audience": label.audience,
+        })
+    });
+    PermitKey::call(
+        "execute_remedy_plan",
+        &serde_json::json!({ "call": call, "label": label, "return_schema": args.return_schema }),
+    )
 }
 
 /// The arguments the control tool takes. The schema derive is what the MCP tool
 /// declaration is built from, and one reading of them serves every caller.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteRemedyPlanArgs {
-    pub offer_id: String,
+    /// The offer to execute. Omit it to declare, right before a subagent call, what that
+    /// call's return may carry: `label`, and `return_schema` to attest.
+    #[serde(default)]
+    pub offer_id: Option<String>,
     /// For a plan that declares a subagent's return: the lowest label this session accepts
     /// from the return, in the policy's `delta` spelling. An omitted dimension keeps this
     /// session's current value. A plan that takes no return takes no `label`.
@@ -2652,21 +3270,78 @@ pub struct RemedyReply {
 }
 
 impl Runtime {
+    /// The actor a daemon's declaration ahead of the spawn acts for: the one its control hook
+    /// vouched under the declaration's key, held to the actor the connection names. With no
+    /// vouch nothing is declared, whether or not the connection names an actor, as an offer
+    /// with no vouch is not executed.
+    #[cfg(feature = "daemon")]
+    fn declaration_vouch(
+        &self,
+        args: &ExecuteRemedyPlanArgs,
+        call: Option<&str>,
+        expected: Option<&Actor>,
+    ) -> Result<Actor, RemedyRefusal> {
+        match (self.take_vouched(&declaration_key(args, call)), expected) {
+            (Ok((vouched, _)), Some(expected)) if vouched != *expected => Err(RemedyRefusal::ActorMismatch),
+            (Ok((vouched, _)), _) => Ok(vouched),
+            (Err(_), _) => Err(RemedyRefusal::UnvouchedDeclaration),
+        }
+    }
+
+    /// Without the daemon no control hook vouches: only an authenticated embedded actor declares.
+    #[cfg(not(feature = "daemon"))]
+    fn declaration_vouch(
+        &self,
+        _: &ExecuteRemedyPlanArgs,
+        _: Option<&str>,
+        _: Option<&Actor>,
+    ) -> Result<Actor, RemedyRefusal> {
+        Err(RemedyRefusal::UnvouchedDeclaration)
+    }
+
+    /// A return declaration ahead of the spawn: checked at the acting trajectory's label and
+    /// held for its next marked single spawn, which applies it through its block's own
+    /// declaration offer.
+    async fn declare_ahead(
+        &self,
+        acting: &Actor,
+        arguments: RemedyArguments,
+        presentation: EmbeddedPresentationOptions,
+    ) -> RemedyOutcome {
+        let trajectory = acting_trajectory(acting);
+        let declared = self
+            .session_with_presentation(&acting.root, trajectory, presentation)
+            .and_then(|session| session.declare_return_ahead(&arguments));
+        match declared {
+            Ok(label) => {
+                self.inner
+                    .hold_return(&acting.root, trajectory, HeldReturn { arguments, label });
+                RemedyOutcome::Returned {
+                    value: DECLARED_AHEAD.to_string(),
+                }
+            }
+            Err(error) => RemedyOutcome::Refused {
+                reason: RemedyRefusal::Runtime {
+                    detail: error.to_string(),
+                },
+            },
+        }
+    }
+
     /// The whole act: resolve the quoted id inside the acting trajectory's
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
-    pub(crate) async fn remedy(
+    async fn remedy(
         &self,
         acting: &Actor,
         quoted: OfferId,
         arguments: RemedyArguments,
         elicitation: Option<&Elicitation>,
-        ruling: Option<appa_runtime_api::Ruling>,
+        admission: Admission,
         presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
-        let unknown = || RemedyOutcome::Refused {
-            reason: RemedyRefusal::UnknownOffer,
-        };
+        let refused = |reason| RemedyOutcome::Refused { reason };
+        let unknown = || refused(RemedyRefusal::UnknownOffer);
         let root = acting.root.clone();
         let trajectory = acting_trajectory(acting).clone();
         let Some((offer, pursuer)) = self.resolve_in(&root, &quoted) else {
@@ -2679,39 +3354,72 @@ impl Runtime {
         // spends that standing, and every quote that resolves at all is this one spelling.
         let claimed = PermitKey::offer(&quoted);
         let actor = host_actor(acting);
-        let until = std::time::SystemTime::now() + self.execution_bound(elicitation.is_some());
+        let bound = self.execution_bound();
+        let until = std::time::SystemTime::now() + bound;
         // Two calls naming one offer must not both reach its authorities: a human review
         // holds its call open for minutes, and a second dialog for one decision is the
         // thing this refuses. The claim is derived at the position it is written at, so a
-        // writer that loses the compare-and-swap sees the winner's claim and refuses.
-        if let Err(refused) =
-            self.inner
-                .append_host_with::<RemedyOutcome, _>(&root, |log| match reduced(log).claimed(&claimed) {
-                    true => Err(RemedyOutcome::Refused {
-                        reason: RemedyRefusal::AlreadyExecuting,
-                    }),
-                    false => Ok((
-                        Some(HostObservation::Claimed {
-                            actor: actor.clone(),
-                            key: claimed.wire(),
-                            until,
-                        }),
-                        (),
-                    )),
-                })
-        {
-            return refused;
-        }
+        // writer that loses the compare-and-swap sees the winner's claim and refuses. The
+        // standing it spends and the offer it executes are read at that position too: an
+        // execution that ended the offer did so before releasing its claim.
+        let admitted = self.inner.append_host_with::<RemedyOutcome, _>(&root, |log| {
+            let host = reduced(log);
+            if host.claimed(&claimed).is_some() {
+                return Err(refused(RemedyRefusal::AlreadyExecuting));
+            }
+            let ruling = match admission {
+                Admission::Open => None,
+                Admission::Vouched { fresh } => {
+                    let ruling = match host.vouched(&claimed) {
+                        Ok((holder, ruling)) if holder == *acting => ruling,
+                        _ => return Err(refused(RemedyRefusal::Unvouched)),
+                    };
+                    if !matches!(self.live_holder(&claimed, Some(&root)), Ok(None)) {
+                        return Err(refused(RemedyRefusal::Unvouched));
+                    }
+                    if fresh && self.offer_kind_in(log, &quoted).is_none() {
+                        return Err(unknown());
+                    }
+                    ruling
+                }
+            };
+            Ok((
+                Some(HostObservation::Claimed {
+                    actor: actor.clone(),
+                    key: claimed.wire(),
+                    until,
+                }),
+                ruling,
+            ))
+        });
+        let ruling = match admitted {
+            Ok(ruling) => ruling,
+            Err(refusal) => return refusal,
+        };
         let mut claim = Claimed {
             inner: Arc::clone(&self.inner),
             root: root.clone(),
             actor,
-            key: claimed.wire(),
+            key: claimed,
+            until,
             released: false,
         };
-        let outcome = self
-            .run_remedy(acting, offer, arguments, elicitation, ruling, presentation)
-            .await;
+        // The execution renews its claim while it runs, so however many consults and
+        // reviews it waits on, only a hard crash leaves the claim to its bound. One that
+        // finds its claim gone stops: another attempt may be executing the offer now.
+        let execution = self.run_remedy(acting, offer, arguments, elicitation, ruling, presentation);
+        tokio::pin!(execution);
+        let mut renewal = tokio::time::interval_at(tokio::time::Instant::now() + bound / 2, bound / 2);
+        let outcome = loop {
+            tokio::select! {
+                outcome = &mut execution => break outcome,
+                _ = renewal.tick() => match claim.renew(bound) {
+                    Ok(Holding::Held) => {}
+                    Ok(Holding::Lost) => break refused(RemedyRefusal::AlreadyExecuting),
+                    Err(error) => break refused(RemedyRefusal::Runtime { detail: error.to_string() }),
+                },
+            }
+        };
         claim.release();
         outcome
     }
@@ -2751,19 +3459,21 @@ impl Runtime {
     }
 
     /// How long one execution's claim stands without word from the execution itself: the
-    /// person's budget where a review reaches one, and the machine-consult budget — every
-    /// resolution round of it — otherwise. Only a hard crash ever reaches the bound.
-    fn execution_bound(&self, reviewed: bool) -> std::time::Duration {
-        if reviewed {
-            return self.review_timeout();
-        }
-        self.inner.deployment().config.externals.longest_consult() * session::RESOLUTION_ROUNDS
+    /// machine-consult budget, every resolution round of it.
+    fn execution_bound(&self) -> std::time::Duration {
+        (self.inner.deployment().config.externals.longest_consult() * session::RESOLUTION_ROUNDS)
+            .max(std::time::Duration::from_secs(1))
     }
 
     /// What taking a quoted offer in this root's family would consult, or `None` for an
     /// offer that no longer stands.
+    #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
-        self.read_offer(root, quoted, |standing| {
+        self.offer_kind_in(&self.inner.log(root).ok()?, quoted)
+    }
+
+    fn offer_kind_in(&self, log: &Log, quoted: &OfferId) -> Option<OfferKind> {
+        self.read_offer_in(log, quoted, |standing| {
             standing
                 .engine
                 .offer_kind(standing.view, &standing.pursuer, &standing.offer)
@@ -2779,11 +3489,19 @@ impl Runtime {
         quoted: &OfferId,
         read: impl FnOnce(StandingOffer<'_>) -> Option<T>,
     ) -> Option<T> {
-        let log = self.inner.log(root).ok()?;
-        let offer = crate::engine::resolve_rendered(&log, quoted)?;
+        self.read_offer_in(&self.inner.log(root).ok()?, quoted, read)
+    }
+
+    fn read_offer_in<T>(
+        &self,
+        log: &Log,
+        quoted: &OfferId,
+        read: impl FnOnce(StandingOffer<'_>) -> Option<T>,
+    ) -> Option<T> {
+        let offer = crate::engine::resolve_rendered(log, quoted)?;
         let deployment = self.inner.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
-        let view = policy.engine().rebuild_view(&log).ok()?;
+        let policy = self.inner.resolve_policy(&deployment, log).ok()?;
+        let view = policy.rebuild_view(log).ok()?;
         let pursuer = policy.engine().offer_pursuer(&view, &offer)?;
         read(StandingOffer {
             engine: policy.engine(),
@@ -2889,6 +3607,7 @@ impl Runtime {
         reduced(&log).vouched(key)
     }
 
+    #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         // The spelling is read before the store is asked anything. An MCP request names the
         // key, so a caller over a non-loopback listener can ask about ids this runtime never
@@ -3021,12 +3740,14 @@ impl Runtime {
         )
     }
 
-    /// This actor's turn is over: its prompt mark and every vouch it still held end here.
+    /// This actor's turn is over: its prompt mark, every vouch it still held, and any return it
+    /// declared ahead end here.
     /// A vouch is recorded when the actor quotes an offer at the control tool's hook and
     /// taken when the tool itself runs, both inside one turn. One still standing at the
     /// turn's end was never spent — the harness declined the call, or the tool never ran —
     /// and nothing later can spend it.
     pub(crate) fn record_turn_end(&self, acting: &Actor) -> Result<(), EventError> {
+        self.inner.take_held_return(&acting.root, acting_trajectory(acting));
         self.inner.append_host(
             &acting.root,
             &HostObservation::TurnEnded {
@@ -3059,7 +3780,7 @@ impl Runtime {
             .inner
             .resolve_policy(deployment, &log)
             .expect("the opening policy resolves");
-        let view = policy.engine().rebuild_view(&log).expect("the log rebuilds");
+        let view = policy.rebuild_view(&log).expect("the log rebuilds");
         (policy, view)
     }
 
@@ -3163,6 +3884,7 @@ impl Runtime {
     /// it as no answer. Deliberately unrelated to
     /// `[externals] timeout_ms`, which bounds a machine consult: a
     /// person reads the arguments and thinks.
+    #[cfg(feature = "daemon")]
     pub(crate) fn review_timeout(&self) -> std::time::Duration {
         self.inner.deployment().config.externals.review_timeout
     }
@@ -3185,26 +3907,60 @@ impl Runtime {
 /// `Drop` is what the log allows — every store operation is synchronous and none awaits —
 /// and a release that cannot be written is logged and let go, because a destructor has
 /// nowhere to report it.
+///
+/// Renewal and release act only on the claim this execution wrote, which its `until` names:
+/// a claim that expired and was taken by another attempt is that attempt's.
 struct Claimed {
     inner: Arc<Inner>,
     root: TrajectoryId,
     actor: appa_eventlog::HostActor,
-    key: String,
+    key: PermitKey,
+    until: std::time::SystemTime,
     released: bool,
 }
 
+enum Holding {
+    Held,
+    Lost,
+}
+
 impl Claimed {
+    /// A renewal the store cannot confirm is no claim: the execution cannot know it still
+    /// holds the offer once its bound passes.
+    fn renew(&mut self, bound: std::time::Duration) -> Result<Holding, EventError> {
+        let until = std::time::SystemTime::now() + bound;
+        let renewed = self.inner.append_host_with::<EventError, _>(&self.root, |log| {
+            match reduced(log).claimed(&self.key) == Some(self.until) {
+                true => Ok((
+                    Some(HostObservation::Claimed {
+                        actor: self.actor.clone(),
+                        key: self.key.wire(),
+                        until,
+                    }),
+                    Holding::Held,
+                )),
+                false => Ok((None, Holding::Lost)),
+            }
+        });
+        if let Ok(Holding::Held) = renewed {
+            self.until = until;
+        }
+        renewed
+    }
+
     fn release(&mut self) {
         if std::mem::replace(&mut self.released, true) {
             return;
         }
-        if let Err(error) = self.inner.append_host(
-            &self.root,
-            &HostObservation::Released {
-                actor: self.actor.clone(),
-                key: self.key.clone(),
-            },
-        ) {
+        let released = self.inner.append_host_with::<EventError, _>(&self.root, |log| {
+            let observation =
+                (reduced(log).claimed(&self.key) == Some(self.until)).then(|| HostObservation::Released {
+                    actor: self.actor.clone(),
+                    key: self.key.wire(),
+                });
+            Ok((observation, ()))
+        });
+        if let Err(error) = released {
             tracing::warn!(root = %self.root.0, %error, "the executed offer's claim was not released; it stands until it expires");
         }
     }
@@ -3451,8 +4207,14 @@ fn bare_tool_name(authored: &str) -> &str {
 }
 
 fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Config, OpenError> {
-    let policy = resolve_served_policy(config.policy_file().value(), naming, &config.inventory, &config.aliases)
-        .map_err(OpenError::UnsupportedPolicy)?;
+    let policy = resolve_served_policy(
+        config.policy_file().value(),
+        naming,
+        &config.inventory,
+        &config.aliases,
+        Coverage::Required,
+    )
+    .map_err(OpenError::UnsupportedPolicy)?;
     let text = toml::to_string(&policy)
         .map_err(|error| OpenError::UnsupportedPolicy(format!("the policy table does not serialize: {error}")))?;
     appa_policy::Config::from_toml_str_routed(
@@ -3461,6 +4223,27 @@ fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Co
         config.externals.source_registrations(),
     )
     .map_err(|error| OpenError::Policy(Box::new(error)))
+}
+
+/// The inventory a stored composed policy file embeds as `[appa_inventory]`, or `None` for a file
+/// that embeds none: the family opened without an inventory and follows its deployment's files
+/// as published.
+fn stored_inventory(bytes: &[u8]) -> Result<Option<appa_runtime_api::inventory::ToolInventory>, EventError> {
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        appa_inventory: Option<appa_runtime_api::inventory::ToolInventory>,
+    }
+    let source = std::str::from_utf8(bytes)
+        .map_err(|_| EventError::PolicyUnavailable("the stored policy file is not UTF-8".into()))?;
+    let stored: Stored = toml::from_str(source)
+        .map_err(|error| EventError::PolicyUnavailable(format!("the stored policy file does not parse: {error}")))?;
+    Ok(stored.appa_inventory)
+}
+
+/// The content digest of one inventory, naming the engine compiled with it.
+fn inventory_digest(inventory: &appa_runtime_api::inventory::ToolInventory) -> String {
+    let bytes = serde_json::to_vec(inventory).expect("an inventory serializes: every field is a serde type");
+    crate::engine::policy_file_key(&bytes)
 }
 
 /// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
@@ -3482,22 +4265,37 @@ fn compile_stored_policy(bytes: &[u8]) -> Result<appa_policy::Config, String> {
     compile_stored_for_host(bytes, ToolNaming::AsAuthored)
 }
 
+/// Whether every tool a host observed must be covered by the policy being compiled.
+///
+/// A deployment requires it when it loads, so a host learns at once that it reports a tool its
+/// policy does not cover. A family compiling a revision with the inventory it opened with does
+/// not: a revision that stops covering an observed tool refuses that tool's calls when they
+/// are proposed, and the family keeps deciding everything else.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Coverage {
+    Required,
+    Followed,
+}
+
 fn resolve_served_policy(
     policy: &toml::Value,
     naming: ToolNaming,
     inventory: &appa_runtime_api::inventory::ToolInventory,
     aliases: &crate::config::Aliases,
+    coverage: Coverage,
 ) -> Result<toml::Value, String> {
     match naming {
         ToolNaming::AsAuthored => Ok(policy.clone()),
         ToolNaming::Canonical { adapter } => {
             let resolved = crate::tool_validation::resolve(policy, adapter, inventory, aliases);
-            if !resolved.report.is_valid() {
-                let mut errors = resolved.report.errors;
+            let mut errors = resolved.report.errors;
+            if coverage == Coverage::Required {
                 errors.extend(resolved.report.tools.into_iter().filter_map(|tool| match tool.status {
                     crate::tool_validation::ToolStatus::Invalid { reason } => Some(format!("{}: {reason}", tool.tool)),
                     _ => None,
                 }));
+            }
+            if !errors.is_empty() {
                 return Err(errors.join("; "));
             }
             Ok(resolved.policy)
@@ -3505,10 +4303,31 @@ fn resolve_served_policy(
     }
 }
 
+#[cfg(test)]
 fn compile_stored_for_host(bytes: &[u8], naming: ToolNaming) -> Result<appa_policy::Config, String> {
+    compile_stored_with_inventory(bytes, None, naming)
+}
+
+/// A stored policy file compiled for one family: with the inventory its opening recorded in
+/// place of any the file carries.
+fn compile_stored_with_inventory(
+    bytes: &[u8],
+    inventory: Option<&appa_runtime_api::inventory::ToolInventory>,
+    naming: ToolNaming,
+) -> Result<appa_policy::Config, String> {
     let text = std::str::from_utf8(bytes).map_err(|error| format!("the stored policy file is not UTF-8: {error}"))?;
-    let value: toml::Value =
+    let mut value: toml::Value =
         toml::from_str(text).map_err(|error| format!("the stored policy file does not parse: {error}"))?;
+    if let Some(inventory) = inventory {
+        value
+            .as_table_mut()
+            .ok_or("the stored policy file is not a table")?
+            .insert(
+                "appa_inventory".into(),
+                toml::Value::try_from(inventory)
+                    .map_err(|error| format!("the family's inventory does not encode: {error}"))?,
+            );
+    }
     let policy = value
         .get("policy")
         .ok_or("the stored policy file has no [policy] table")?;
@@ -3521,7 +4340,7 @@ fn compile_stored_for_host(bytes: &[u8], naming: ToolNaming) -> Result<appa_poli
         .unwrap_or_default();
     let aliases =
         crate::config::aliases::of_document(&value).map_err(|error| format!("invalid stored aliases: {error}"))?;
-    let policy = resolve_served_policy(policy, naming, &inventory, &aliases)?;
+    let policy = resolve_served_policy(policy, naming, &inventory, &aliases, Coverage::Followed)?;
     let text =
         toml::to_string(&policy).map_err(|error| format!("the stored policy table does not serialize: {error}"))?;
     let sources = crate::config::source_registrations_of(&value)
@@ -3566,6 +4385,63 @@ mod deployment_tests {
 
     use super::*;
     use crate::config::{Endpoint, HostDefaults, Transport};
+
+    #[cfg(feature = "daemon")]
+    #[test]
+    fn conditional_publication_records_only_new_revisions() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            "[policy]\nversion = 2\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n",
+        )
+        .expect("the policy writes");
+        let config = || Config::load(&path).expect("the policy loads");
+        let store = Arc::new(LogStore::open(appa_eventlog::Backend::Memory).expect("the store opens"));
+        let runtime = Runtime::open_with_store(config(), Arc::clone(&store), None).expect("the runtime opens");
+        let root = TrajectoryId("publication-diagnostic".into());
+        // A report includes deployment events after this family's first recorded hook.
+        runtime.record(
+            Some(&root),
+            crate::events::RuntimeEvent::Hook {
+                event: crate::events::HookKind::SessionStart,
+                tool: None,
+                dispatch: None,
+                outcome: crate::events::HookOutcome::Acked,
+                offers: Vec::new(),
+            },
+        );
+        let prepared = runtime.prepare_deployment(config()).expect("the policy prepares");
+        let line = DeploymentName::new("diagnostic");
+        runtime
+            .publish_if_head(&line, &prepared, None)
+            .expect("the first revision publishes");
+        let head = store.head(&line).expect("the head reads").expect("the line exists");
+        runtime
+            .publish_if_head(&line, &prepared, Some(head.revision))
+            .expect("the matching bytes reuse the head");
+        assert!(matches!(
+            runtime.publish_if_head(&line, &prepared, None),
+            Err(OpenError::PolicyHeadMoved { .. })
+        ));
+        let events = runtime.inner.events(&root);
+        let publications: Vec<_> = events
+            .deployment
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                crate::events::RuntimeEvent::PolicyPublished {
+                    deployment,
+                    revision,
+                    policy_key,
+                } => Some((deployment.as_str(), *revision, policy_key.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            publications,
+            vec![("diagnostic", head.revision.value(), head.key.as_str())]
+        );
+    }
 
     #[test]
     fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
@@ -4051,7 +4927,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             dir.path().join("appa.db"),
             None
         )));
-        assert!(refused(Runtime::open_in_memory(deferred(DOCUMENT), None)));
+        assert!(refused(Runtime::open_in_memory(
+            deferred(DOCUMENT),
+            None,
+            Remedies::StandIn
+        )));
         assert!(refused(Runtime::open_with_store(deferred(DOCUMENT), store(), None)));
         assert!(refused(Runtime::open_with_store_as(
             deferred(DOCUMENT),
@@ -4066,7 +4946,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             None,
             adapter
         )));
-        let runtime = Runtime::open_in_memory(claude_config(DOCUMENT), None).expect("the keyed document opens");
+        let runtime = Runtime::open_in_memory(claude_config(DOCUMENT), None, Remedies::StandIn)
+            .expect("the keyed document opens");
         assert!(refused(runtime.reload(deferred(DOCUMENT))));
         assert!(refused(runtime.prepare_deployment(deferred(DOCUMENT))));
         assert!(refused(load(deferred(DOCUMENT))));
@@ -4123,22 +5004,28 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 .model(builtin)
                 .try_acquire_many_owned(2)
                 .expect("the gate is free");
-            for deployment in [&*runtime.inner.deployment(), first.deployment(), second.deployment()] {
-                assert_eq!(permits(deployment), 0, "{builtin:?}");
+            for deployment in [runtime.inner.deployment(), first.deployment(), second.deployment()] {
+                assert_eq!(permits(&deployment), 0, "{builtin:?}");
             }
             drop(held);
 
-            let pinned = runtime.pinned(&runtime.prepare_deployment(with_pool(5)).expect("loads"));
+            let published = runtime
+                .publish(
+                    &DeploymentName::new("pinned"),
+                    &runtime.prepare_deployment(with_pool(5)).expect("loads"),
+                )
+                .expect("publishes");
+            let pinned = runtime.pinned(&published);
             assert!(runtime.reload(policy(7, REFUSED)).is_err(), "{builtin:?}");
             assert_eq!(permits(&pinned.inner.deployment()), 2, "{builtin:?}");
 
             runtime.reload(with_pool(3)).expect("reloads");
             for deployment in [
-                &*runtime.inner.deployment(),
+                runtime.inner.deployment(),
                 first.deployment(),
-                &*pinned.inner.deployment(),
+                pinned.inner.deployment(),
             ] {
-                assert_eq!(permits(deployment), 3, "{builtin:?}");
+                assert_eq!(permits(&deployment), 3, "{builtin:?}");
             }
         }
     }
@@ -4147,14 +5034,116 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         claude_config("[policy]\nversion = 2\n")
     }
 
+    /// A proposal of `tool` by `id`, numbered `n` so repeats are distinct calls, answered with its
+    /// result when released. Returns whether it was released.
+    async fn released_call(runtime: &Runtime, id: &TrajectoryId, tool: &str, n: u32) -> bool {
+        let call = ProposedCall {
+            tool: tool.into(),
+            arguments: session::raw(serde_json::json!({ "n": n })),
+            cwd: None,
+        };
+        let session = runtime.session(id, id).unwrap();
+        let decision = session.on_tool_call(call.clone(), false).await;
+        let released = matches!(decision, Ok(ToolCallDecision::Allow { .. }));
+        if released {
+            session
+                .on_tool_result(
+                    call,
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("done".into()),
+                    },
+                )
+                .await
+                .expect("the result is admitted");
+        }
+        released
+    }
+
+    fn notes_policy() -> Config {
+        claude_config("[policy]\nversion = 2\n[[policy.tool]]\nname = \"notes\"\ndelta = {}\n")
+    }
+
+    /// A family whose opening names no deployment was opened before live policy revisions: every
+    /// event on it is refused as such, operationally and under its own class, whatever its log
+    /// holds after the opening. A new family opens and decides.
+    #[tokio::test]
+    async fn a_family_opened_before_live_policy_revisions_is_refused() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let db = dir.path().join("appa.db");
+        let legacy = TrajectoryId("opened-before-live-revisions".into());
+        {
+            let runtime = Runtime::open(notes_policy(), db.clone(), None).expect("opens");
+            runtime.create_session(legacy.clone(), None).expect("the root opens");
+            assert!(released_call(&runtime, &legacy, "notes", 1).await);
+        }
+        {
+            let store = rusqlite::Connection::open(&db).expect("the database reopens");
+            let stored: Vec<u8> = store
+                .query_row(
+                    "SELECT facts FROM logs WHERE root = ?1 AND seq = 0",
+                    [legacy.0.as_str()],
+                    |row| row.get(0),
+                )
+                .expect("the opening reads");
+            let mut opening: serde_json::Value = serde_json::from_slice(&stored).expect("the opening is JSON");
+            let fields = opening[0]["TrajectoryOpened"]
+                .as_object_mut()
+                .expect("the opening record is an object");
+            fields.remove("deployment");
+            fields.remove("revision");
+            store
+                .execute(
+                    "UPDATE logs SET facts = ?2 WHERE root = ?1 AND seq = 0",
+                    rusqlite::params![legacy.0.as_str(), serde_json::to_vec(&opening).unwrap()],
+                )
+                .expect("the opening is rewritten as one that names no deployment");
+        }
+
+        let runtime = Runtime::open(notes_policy(), db, None).expect("reopens");
+        let session = runtime.session(&legacy, &legacy).expect("the root exists");
+        let call = ProposedCall {
+            tool: "notes".into(),
+            arguments: session::raw(serde_json::json!({ "n": 2 })),
+            cwd: None,
+        };
+        let error = session
+            .on_tool_call(call, false)
+            .await
+            .expect_err("the legacy family decides nothing");
+        assert!(matches!(error, EventError::LegacyFamily), "{error:?}");
+        assert!(error.is_operational());
+        assert_eq!(error.class(), appa_runtime_api::RefusalClass::LegacyFamily);
+        assert_eq!(
+            error.to_string(),
+            "this trajectory family was opened before live policy revisions; open a new one"
+        );
+
+        let fresh = TrajectoryId("opened-after".into());
+        runtime.create_session(fresh.clone(), None).expect("a new root opens");
+        assert!(released_call(&runtime, &fresh, "notes", 1).await);
+    }
+
     #[test]
-    #[should_panic(expected = "the deployment was prepared by another runtime")]
+    #[should_panic(expected = "the deployment was published by another runtime")]
     fn a_runtime_refuses_to_pin_another_runtimes_deployment() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let one = Runtime::open(minimal_policy(), dir.path().join("one.db"), None).expect("opens");
         let other = Runtime::open(minimal_policy(), dir.path().join("other.db"), None).expect("opens");
         let prepared = one.prepare_deployment(minimal_policy()).expect("loads");
-        let _ = other.pinned(&prepared);
+        let published = one
+            .publish(&DeploymentName::new("tenant"), &prepared)
+            .expect("publishes");
+        let _ = other.pinned(&published);
+    }
+
+    #[test]
+    #[should_panic(expected = "the deployment was prepared by another runtime")]
+    fn a_runtime_refuses_to_publish_another_runtimes_deployment() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let one = Runtime::open(minimal_policy(), dir.path().join("one.db"), None).expect("opens");
+        let other = Runtime::open(minimal_policy(), dir.path().join("other.db"), None).expect("opens");
+        let prepared = one.prepare_deployment(minimal_policy()).expect("loads");
+        let _ = other.publish(&DeploymentName::new("tenant"), &prepared);
     }
 
     #[test]
@@ -4164,11 +5153,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let one = Runtime::open(minimal_policy(), dir.path().join("one.db"), None).expect("opens");
         let other = Runtime::open(minimal_policy(), dir.path().join("other.db"), None).expect("opens");
         let prepared = one.prepare_deployment(minimal_policy()).expect("loads");
-        other.install(prepared);
+        let _ = other.install(prepared);
     }
 
-    /// Two policies that differ only in a tool's description, so a root opened
-    /// under one replays against the other through the retired branch.
+    /// Two policies that differ only in a tool's description, so publishing one after the
+    /// other moves the deployment to a new revision.
     fn versioned_policy(description: &str) -> Config {
         claude_config(&format!(
             r#"
@@ -4183,8 +5172,15 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
     #[tokio::test]
     async fn a_view_records_in_its_own_store_under_the_deployment_it_shares() {
-        let runtime = Runtime::open_in_memory(versioned_policy("first"), None).expect("the deployment opens");
+        let runtime =
+            Runtime::open_in_memory(versioned_policy("first"), None, Remedies::StandIn).expect("the deployment opens");
         let other = Arc::new(LogStore::open(appa_eventlog::Backend::Memory).expect("a second store opens"));
+        // A view's store follows the line the view serves: the host publishes to it as it
+        // publishes to the runtime's own.
+        let line = DeploymentName::new(SERVING_LINE);
+        other
+            .publish(&line, None, versioned_policy("first").policy_file().bytes())
+            .expect("the first revision publishes");
         let view = runtime.on(Arc::clone(&other));
         let root = TrajectoryId("viewed".to_string());
         assert_eq!(
@@ -4211,6 +5207,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let reloaded = runtime
             .reload(versioned_policy("second"))
             .expect("the second deployment loads");
+        other
+            .publish(
+                &line,
+                Some(appa_engine::profile::PolicyRevision::FIRST),
+                versioned_policy("second").policy_file().bytes(),
+            )
+            .expect("the second revision publishes");
         let later = TrajectoryId("viewed-after-reload".to_string());
         crate::hooks::handle(
             &view,
@@ -4226,8 +5229,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         .await;
         let opened_under = other.log(&later).expect("the later root reads");
         assert_eq!(
-            crate::engine::policy_file_key(opened_under.policy_file()),
-            reloaded.policy_key,
+            opened_under.stamp().map(|revision| revision.value()),
+            Some(reloaded.policy_revision),
             "a reload through the runtime serves the views made before it"
         );
     }
@@ -4245,10 +5248,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             })
             .expect("the PostgreSQL store opens"),
         );
-        let runtime =
-            Runtime::open_with_store(versioned_policy("leased"), Arc::clone(&store), None).expect("the runtime opens");
         let unique = tempfile::tempdir().expect("a unique root name exists");
         let root = TrajectoryId(format!("leased:{}", unique.path().display()));
+        let runtime = Runtime::open_with_store_on(
+            versioned_policy("leased"),
+            Arc::clone(&store),
+            DeploymentName::new(root.0.clone()),
+        )
+        .expect("the runtime opens");
         let lease = Arc::new(store.lease().expect("a connection leases"));
 
         assert_eq!(
@@ -4315,7 +5322,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     }
 
     #[tokio::test]
-    async fn a_reload_drops_the_retired_engines_compiled_before_it() {
+    async fn a_reload_drops_the_replay_engines_compiled_before_it() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = std::sync::Arc::new(
             Runtime::open(versioned_policy("first"), dir.path().join("appa.db"), None).expect("the deployment opens"),
@@ -4337,22 +5344,22 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookDecision::Ack
         );
 
-        // The root's policy is no longer the serving one, so reading it compiles the
-        // retired engine and caches it.
+        // The root's opening was decided at the revision before the head, so reading it
+        // compiles that revision's replay-only engine and caches it.
         runtime
             .reload(versioned_policy("second"))
             .expect("the second deployment loads");
         assert!(
             runtime.audit(&root).is_some(),
-            "the root still reads under its own policy"
+            "the root reads, each batch under the revision that decided it"
         );
-        assert_eq!(retired_len(&runtime), 1);
+        assert_eq!(revisions_len(&runtime), 1);
 
         runtime
             .reload(versioned_policy("third"))
             .expect("the third deployment loads");
         assert_eq!(
-            retired_len(&runtime),
+            revisions_len(&runtime),
             0,
             "the cache does not carry compiled engines across a reload"
         );
@@ -4384,7 +5391,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
     #[cfg(feature = "daemon")]
     /// The canonical policy the served deployment serves now: different bytes from either
-    /// stored one, so a trajectory recorded under those reopens through the retired branch.
+    /// stored one, so serving it publishes the deployment's next revision.
     fn served_policy() -> Config {
         claude_config(
             r#"
@@ -4401,13 +5408,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     }
 
     #[cfg(feature = "daemon")]
-    /// A trajectory recorded before the upgrade carries its own policy bytes, and reopening
-    /// it compiles them. A served deployment identifies every call's canonical identity, so
-    /// a stored policy naming a tool the host's raw way in a `[deployment]` field confines
-    /// nothing while its contract still permits the call: the served runtime refuses that
-    /// trajectory rather than deciding under it, and reopens a stored canonical policy.
+    /// A trajectory recorded before the upgrade was opened at a revision the served runtime
+    /// compiles to replay it, under the naming rule it serves. A served deployment identifies
+    /// every call's canonical identity, so a stored revision naming a tool the host's raw way
+    /// in a `[deployment]` field compiles to another policy than the one that opened the
+    /// family: the served runtime refuses that family rather than replay it under a rule it
+    /// rejects. A stored canonical revision replays, and the family decides at the served head.
     #[tokio::test]
-    async fn a_served_deployment_refuses_a_stored_policy_its_naming_rule_rejects() {
+    async fn a_served_deployment_decides_an_upgraded_family_at_its_head() {
         for (confined, refuses) in [("Bash", true), ("host/claude-code/Bash", false)] {
             let dir = tempfile::tempdir().expect("a temp dir is creatable");
             let db = dir.path().join("appa.db");
@@ -4454,10 +5462,29 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 },
             )
             .await;
+            if refuses {
+                assert!(
+                    matches!(decision, appa_runtime_api::HookDecision::Refuse { .. }),
+                    "the stored revision compiles to another policy under the served naming ({confined}): {decision:?}"
+                );
+                continue;
+            }
+            assert!(
+                matches!(decision, appa_runtime_api::HookDecision::AllowCall { .. }),
+                "the head declares the call ({confined}): {decision:?}"
+            );
+            let stamps: Vec<_> = served
+                .inner
+                .log(&root)
+                .expect("the log reads")
+                .stamped_batches()
+                .iter()
+                .map(|batch| batch.revision.map(|revision| revision.value()))
+                .collect();
             assert_eq!(
-                matches!(decision, appa_runtime_api::HookDecision::Refuse { .. }),
-                refuses,
-                "the stored policy confines {confined}: {decision:?}"
+                stamps,
+                [Some(1), Some(2)],
+                "the opening stays at its revision; the call is decided at the head"
             );
         }
     }
@@ -4508,11 +5535,15 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         candidate.inventory = ToolInventory {
             tools: vec![ObservedTool {
                 name: "Bash".into(),
-                tool: "builtin:Bash".into(),
+                tool: "Bash".into(),
             }],
             sources: vec![],
         };
-        assert!(runtime.reload(candidate).is_err());
+        let refused = runtime.reload(candidate).unwrap_err().to_string();
+        assert!(
+            refused.contains("host/claude-code/Bash is not covered by policy"),
+            "{refused}"
+        );
         let after = runtime
             .preflight_inventory(None, appa_adapter_claude_code::adapter(), &ToolInventory::default())
             .unwrap();
@@ -4537,7 +5568,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             ..ToolInventory::default()
         };
         runtime
-            .create_session_with_inventory(id.clone(), inventory, None)
+            .create_session_with_inventory(id.clone(), inventory.clone(), None)
             .unwrap();
         runtime
             .reload(claude_config(
@@ -4545,14 +5576,29 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             ))
             .unwrap();
         runtime.live(&id, &id).unwrap();
-        let log = runtime.inner.log(&id).unwrap();
-        let compiled = compile_stored_for_host(log.policy_file(), ToolNaming::Canonical { adapter }).unwrap();
-        let engine = RuntimeEngine::from_policy(&compiled, ToolNaming::Canonical { adapter });
-        assert!(engine.names_tool("mcp/demo/read_secret"));
-        assert!(!engine.names_tool("read_secret"));
+        let names = |runtime: &Runtime, tool: &str| {
+            let log = runtime.inner.log(&id).unwrap();
+            let deployment = runtime.inner.deployment();
+            let policy = runtime.inner.resolve_policy(&deployment, &log).unwrap();
+            policy.engine().names_tool(tool)
+        };
+        assert_eq!(
+            stored_inventory(runtime.inner.log(&id).unwrap().policy_file()).unwrap(),
+            Some(inventory.clone()),
+            "the family keeps the inventory it opened with"
+        );
+        assert!(
+            !names(&runtime, "mcp/demo/read_secret"),
+            "the family follows the head, which no longer names the tool"
+        );
         drop(runtime);
         let reopened = Runtime::open_served(config(), db, None, adapter).unwrap();
         reopened.live(&id, &id).unwrap();
+        assert!(
+            names(&reopened, "mcp/demo/read_secret"),
+            "a head naming the tool again binds it through the family's opening inventory"
+        );
+        assert!(!names(&reopened, "read_secret"));
     }
 
     #[cfg(feature = "daemon")]
@@ -4667,7 +5713,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
 
     #[cfg(feature = "daemon")]
     #[test]
-    fn remote_preflight_is_read_only_and_uses_the_requested_policy() {
+    fn remote_preflight_is_read_only_and_uses_the_head_policy() {
         use crate::tool_validation::{ToolStatus, ValidationReport};
         let dir = tempfile::tempdir().unwrap();
         let adapter = appa_adapter_kagent::adapter();
@@ -4707,11 +5753,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .unwrap();
         assert!(report(None, "write").is_valid());
         assert!(!report(None, "read").is_valid());
-        assert!(report(Some("preflight"), "read").is_valid());
-        assert!(!report(Some("preflight"), "write").is_valid());
+        assert!(
+            report(Some("preflight"), "write").is_valid(),
+            "an open family follows the head"
+        );
+        assert!(!report(Some("preflight"), "read").is_valid());
         let after = runtime.inner.log(&root).unwrap();
         assert_eq!(before.basis(), after.basis());
-        assert_eq!(before.policy_file(), after.policy_file());
         assert!(inventories(&after).is_empty());
         let unknown = crate::tool_validation::answer(
             &runtime,
@@ -4957,6 +6005,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         .await;
         assert_eq!(passed["decision"], "pass_control");
         let (offer, args) = parse_control_arguments(&args.to_string()).unwrap();
+        let offer = offer.expect("the control call quotes an offer");
         let actor = Actor {
             root: root.clone(),
             child: None,
@@ -5034,13 +6083,13 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .collect()
     }
 
-    fn retired_len(runtime: &Runtime) -> usize {
+    fn revisions_len(runtime: &Runtime) -> usize {
         runtime
             .inner
             .shared
-            .retired
+            .revisions
             .lock()
-            .expect("the retired-engine mutex is never poisoned")
+            .expect("the revision-engine mutex is never poisoned")
             .len()
     }
 
@@ -5719,109 +6768,93 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
         assert!(runtime.live(&root, &root).is_ok());
 
+        // The root opened at the first revision; the reload publishes the second, which serves
+        // from memory. Replaying the root's opening needs the first revision's stored file.
+        runtime.reload(versioned_policy("second")).expect("the edit publishes");
         runtime.inner.store.forget_policy_files();
         assert!(
             matches!(runtime.live(&root, &root), Err(EventError::PolicyUnavailable(_))),
-            "the root's policy file is gone, which is not a storage failure"
+            "the file of the revision that opened the root is gone, which is not a storage failure"
         );
     }
 
-    /// A root an earlier engine opened records the identity that engine's algorithm gave its
-    /// policy. It reopens under the same policy file, and it pins the same policy as a root this
-    /// engine opens. A digest no algorithm gives the policy still refuses.
+    /// A family follows its deployment's head across a restart under an edited policy: its
+    /// earlier batches replay under the revision that decided them, with no externals; its next
+    /// decision is stamped with the revision the restart published; and two families of one
+    /// line act alike, whichever revision opened them.
     #[tokio::test]
-    async fn a_root_an_earlier_identity_algorithm_opened_reopens() {
+    async fn a_family_follows_the_head_its_deployment_published_after_it_opened() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let db = dir.path().join("appa.db");
-        let earlier = TrajectoryId("opened-under-v1".to_string());
-        let current = TrajectoryId("opened-under-v2".to_string());
-        let runtime = std::sync::Arc::new(
-            Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens"),
-        );
-        for root in [&earlier, &current] {
-            assert_eq!(
-                crate::hooks::handle(
-                    &runtime,
-                    appa_runtime_api::HookEvent::SessionStart {
-                        root: root.clone(),
-                        principal: None,
-                        address: None,
-                        title: None,
-                        launch: None,
-                        start: None,
-                    }
-                )
-                .await,
-                appa_runtime_api::HookDecision::Ack
-            );
-        }
-        let stored = runtime
-            .inner
-            .store
-            .log(&earlier)
-            .expect("the root reads")
-            .policy_file()
-            .to_vec();
-        let compiled = compile_stored_policy(&stored).expect("the stored policy compiles");
-        let hex = |identity: &appa_engine::profile::PolicyIdentity| crate::engine::hex(identity.bytes());
-        let v2 = hex(&compiled.engine().identity());
-        let v1 = hex(compiled
-            .engine()
-            .earlier_identities()
-            .first()
-            .expect("the policy has a v1 identity"));
-
-        // Rewrite the opening's digest as the v1 engine recorded it.
-        let rewrite = |digest: &str| {
-            let connection = rusqlite::Connection::open(&db).expect("the database opens");
-            let (seq, facts): (i64, Vec<u8>) = connection
-                .query_row(
-                    "SELECT seq, facts FROM logs WHERE root = ?1 ORDER BY seq LIMIT 1",
-                    [earlier.as_str()],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .expect("the opening batch reads");
-            let text = String::from_utf8(facts).expect("the batch is JSON");
-            let current_digest = [v1.as_str(), v2.as_str()]
-                .into_iter()
-                .find(|candidate| text.contains(candidate))
-                .expect("the opening records a digest of this policy");
-            runtime
-                .inner
-                .store
-                .corrupt_batch(&earlier, seq as u64, text.replace(current_digest, digest).as_bytes());
+        let earlier = TrajectoryId("opened-at-first".to_string());
+        let later = TrajectoryId("opened-at-second".to_string());
+        let start = |root: &TrajectoryId| appa_runtime_api::HookEvent::SessionStart {
+            root: root.clone(),
+            principal: None,
+            address: None,
+            title: None,
+            launch: None,
+            start: None,
         };
-        let reopened = || Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment reopens");
-
-        rewrite(&v1);
-        let fresh = reopened();
-        assert!(fresh.live(&earlier, &earlier).is_ok(), "the v1 opening reopens");
-        assert!(fresh.live(&current, &current).is_ok());
-        let pinned = |runtime: &Runtime| {
-            let current_log = runtime.inner.log(&current).expect("the root reads");
-            let deployment = runtime.inner.deployment();
-            let policy = runtime
-                .inner
-                .resolve_policy(&deployment, &current_log)
-                .expect("the current root resolves");
-            peer::pinned_alike(
-                &policy,
-                &current_log,
-                &runtime.inner.log(&earlier).expect("the root reads"),
-            )
-        };
-        assert!(pinned(&fresh), "both openings name one policy");
-        drop(fresh);
-
-        rewrite(&"07".repeat(32));
-        let fresh = reopened();
-        assert!(
-            matches!(fresh.live(&earlier, &earlier), Err(EventError::PolicyUnavailable(_))),
-            "a digest no algorithm gives this policy refuses"
+        let runtime = Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens");
+        assert_eq!(
+            crate::hooks::handle(&runtime, start(&earlier)).await,
+            appa_runtime_api::HookDecision::Ack
         );
+        drop(runtime);
+
+        let reopened =
+            Runtime::open(versioned_policy("second"), db, None).expect("the edited deployment publishes and opens");
+        assert_eq!(
+            crate::hooks::handle(&reopened, start(&later)).await,
+            appa_runtime_api::HookDecision::Ack
+        );
+        assert!(reopened.live(&earlier, &earlier).is_ok(), "the earlier family replays");
+        assert!(reopened.audit(&earlier).is_some());
+        let decision = crate::hooks::handle(
+            &reopened,
+            appa_runtime_api::HookEvent::ToolCall {
+                actor: Actor {
+                    root: earlier.clone(),
+                    child: None,
+                },
+                call: ProposedCall {
+                    tool: "fetch".to_string(),
+                    arguments: raw(serde_json::json!({})),
+                    cwd: None,
+                },
+                call_id: Some("call-1".to_string()),
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+        .await;
         assert!(
-            !pinned(&fresh),
-            "an opening whose digest names no identity of the policy is not pinned alike, though it shares the file"
+            !matches!(decision, appa_runtime_api::HookDecision::Refuse { .. }),
+            "the earlier family decides at the head: {decision:?}"
+        );
+        let earlier_log = reopened.inner.log(&earlier).expect("the root reads");
+        let stamps: Vec<Option<u64>> = earlier_log
+            .stamped_batches()
+            .iter()
+            .map(|batch| batch.revision.map(|revision| revision.value()))
+            .collect();
+        assert_eq!(
+            stamps.first(),
+            Some(&Some(1)),
+            "the opening keeps the revision that decided it"
+        );
+        assert_eq!(
+            earlier_log.stamp().map(|revision| revision.value()),
+            Some(2),
+            "the next decision is stamped with the head"
+        );
+        let later_log = reopened.inner.log(&later).expect("the root reads");
+        assert_eq!(later_log.stamp().map(|revision| revision.value()), Some(2));
+        assert!(
+            peer::decide_alike(&earlier_log, &later_log),
+            "two families of one line act alike"
         );
     }
 }

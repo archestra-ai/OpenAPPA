@@ -5,7 +5,7 @@ use appa_engine::contract::ToolDeclaration;
 use appa_engine::engine::Engine;
 use appa_engine::label::Label;
 use appa_engine::names::AnnotatorName;
-use appa_engine::profile::{DeploymentPolicy, PolicyDialectVersion, ProfileDeclaration};
+use appa_engine::profile::{DeploymentPolicy, ProfileDeclaration};
 use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
 
 use crate::annotator::{AnnotatorBinding, compile_annotators, validate_annotator_inputs};
@@ -124,7 +124,6 @@ impl Config {
         let policy = DeploymentPolicy {
             registry: registry_config,
             planner_cap,
-            dialect: PolicyDialectVersion::new(SUPPORTED_VERSION),
             profile,
         };
         let engine = Engine::open(policy.clone())?;

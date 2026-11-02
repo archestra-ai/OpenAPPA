@@ -41,7 +41,7 @@ const TERMS = {
 
   /* Tool identity */
   "canonical tool id":
-    "The identity APPA records for a tool: <family>/<namespace>/<tool>, with families mcp, host, and agent. Policies accept canonical or host-native names. An unqualified kagent rule can span MCP servers; server restricts it to one connection. Discovery supplies evidence, not permission. A trajectory retains its opening policy and accepted tool identities.",
+    "The identity APPA records for a tool: <family>/<namespace>/<tool>, with families mcp, host, and agent. Policies accept canonical or host-native names. An unqualified kagent rule can span MCP servers; server restricts it to one connection. Discovery supplies evidence, not permission. A trajectory keeps the tool identities it accepted.",
   "<family>/<namespace>/<tool>":
     "The shape of a canonical tool id. The family is mcp, host, or agent; each segment matches [A-Za-z0-9_.-]+; a namespace never contains __. The one id outside these families is appa/execute_remedy_plan.",
   "appa/execute_remedy_plan":
@@ -186,7 +186,7 @@ const TERMS = {
   trajectory:
     "One agent's work and security state. A root and its spawned subagents are separate trajectories recorded in one family log.",
   "trajectory family":
-    "One root and its spawned subagent trajectories, recorded in the same event log under the family's opening policy. Their effect history is family-wide.",
+    "One root and its spawned subagent trajectories, recorded in the same event log. The family belongs to one deployment and decides under its current policy revision. Their effect history is family-wide.",
   "subagent fork":
     "A child trajectory bound to an approved spawn in the parent's family. Its content snapshot refers to values in that family log, and its answer crosses a checked return path.",
   "fan-out spawn":
@@ -194,7 +194,11 @@ const TERMS = {
   "void return":
     "A return declaration that takes no answer from a subagent. Nothing the child says crosses, so the child cannot change the parent's label, and no limit restricts what the child may read or accept. The child ends with an empty final message.",
   "root fork":
-    "An independent family opened from an identified source trajectory. It freezes the source label and denials, family effects and unsettled reservations, and opening policy. Later activity stays separate; there is no spawn dispatch or child-return contract.",
+    "An independent family opened from an identified source trajectory, in the source family's deployment. It freezes the source label and denials, family effects and unsettled reservations. Later activity stays separate; there is no spawn dispatch or child-return contract.",
+  deployment:
+    "A line of policies that advances through policy revisions. Every trajectory family belongs to one deployment and decides under its current revision, the head. A standalone runtime serves one deployment.",
+  "policy revision":
+    "One published policy of a deployment, numbered in publish order. Each batch of a family log records the revision that decided it, and replay judges the batch under that revision. A decision commits only while its revision is the head.",
 } as const satisfies Record<string, string>;
 
 /** Every chip with a definition, in declaration order. */

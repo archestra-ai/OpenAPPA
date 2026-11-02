@@ -217,8 +217,7 @@ def test_logical_dispatch_and_hidden_retry_are_correlated_in_the_audit(monkeypat
     FakeSession.decisions = iter(
         [
             Blocked(
-                "OpenAPPA blocked this tool call: [appa] Blocked: write_record cannot run yet.\n\n"
-                "Continue:\n  - Run log_verification first; it clears: requires a prior identity.verified effect.",
+                "OpenAPPA blocked this tool call: [appa] Blocked.\n\nContinue:\n  - …",
                 recoverable=True,
             ),
             Allowed("log_verification", {"user_id": "u1"}),

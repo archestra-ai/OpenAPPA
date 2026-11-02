@@ -140,3 +140,28 @@ test('source setup respects the OpenCode global directory override and refuses t
   expect(JSON.parse(await readFile(join(global, 'opencode.json'), 'utf8')).plugins).toHaveLength(1)
   expect(await Bun.file(join(directory, 'custom-xdg/opencode/opencode.json')).exists()).toBe(false)
 })
+
+test('a battery that does not list the deployment target is not in the catalog', async () => {
+  const catalog = join(directory, 'target-catalog')
+  const config = join(directory, 'target-catalog.toml')
+  await writeFile(config, '[policy]\nversion = 2\n')
+  await mkdir(join(catalog, 'personal'), { recursive: true })
+  await writeFile(join(catalog, 'personal', 'appa-package.toml'),
+    'description = "Personal"\n[battery]\npolicy = "appa.toml"\nhosts = ["opencode"]\n[battery.targets.single-user]\npolicy = "appa.toml"\n')
+  await writeFile(join(catalog, 'personal', 'appa.toml'), '# Catalog policy\n')
+  await writeFile(join(catalog, 'personal', 'README.md'), 'Personal documentation')
+  const previous = { store: process.env.APPA_OPENCODE_BATTERIES, target: process.env.APPA_BATTERY_TARGET }
+  process.env.APPA_OPENCODE_BATTERIES = catalog
+  try {
+    process.env.APPA_BATTERY_TARGET = 'single-user'
+    const single = JSON.parse((await (await configuration(config, '/unused/appa'))({ operation: 'battery', battery: 'personal' }, []))!)
+    expect(single.target_policy).toBeUndefined()
+    process.env.APPA_BATTERY_TARGET = 'multi-user'
+    await expect((await configuration(config, '/unused/appa'))({ operation: 'battery', battery: 'personal' }, [])).rejects.toThrow('catalog')
+  } finally {
+    if (previous.store === undefined) delete process.env.APPA_OPENCODE_BATTERIES
+    else process.env.APPA_OPENCODE_BATTERIES = previous.store
+    if (previous.target === undefined) delete process.env.APPA_BATTERY_TARGET
+    else process.env.APPA_BATTERY_TARGET = previous.target
+  }
+})

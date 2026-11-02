@@ -155,13 +155,47 @@ impl TargetPolicies {
     }
 }
 
-/// A battery: a base policy file with a policy for every target or none, the hosts
-/// it is written for, the namespaces its contracts may name, and the helper
-/// programs its externals may run.
+/// The deployment targets a battery supports, and what a deployment of each
+/// composes. A target the battery does not list is one it does not support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant, reason = "one per battery, never on a hot path")]
+pub enum Targets {
+    /// Each listed target uses the base policy alone.
+    Base(Vec<BatteryTarget>),
+    /// Each target has its own policy file, loaded before the base.
+    Split(TargetPolicies),
+}
+
+impl Targets {
+    pub fn supports(&self, target: BatteryTarget) -> bool {
+        match self {
+            Self::Base(targets) => targets.contains(&target),
+            Self::Split(_) => true,
+        }
+    }
+
+    pub fn policies(&self) -> Option<&TargetPolicies> {
+        match self {
+            Self::Base(_) => None,
+            Self::Split(policies) => Some(policies),
+        }
+    }
+
+    pub fn policies_mut(&mut self) -> Option<&mut TargetPolicies> {
+        match self {
+            Self::Base(_) => None,
+            Self::Split(policies) => Some(policies),
+        }
+    }
+}
+
+/// A battery: a base policy file, the targets it supports, the hosts it is
+/// written for, the namespaces its contracts may name, and the helper programs
+/// its externals may run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Battery {
     pub base: RelativePath,
-    pub targets: Option<TargetPolicies>,
+    pub targets: Targets,
     pub hosts: Vec<Host>,
     /// The tool namespaces this battery covers. A battery usually covers the
     /// one namespace its own name spells, which is why the field defaults to
@@ -196,9 +230,10 @@ pub struct Battery {
 
 impl Battery {
     /// The policies a deployment of `target` includes, target policy first. A battery
-    /// without targets includes the base alone.
+    /// whose targets name the base includes the base alone. The caller has
+    /// checked that the battery supports `target`.
     pub fn compose_order(&self, target: BatteryTarget) -> Vec<&RelativePath> {
-        match &self.targets {
+        match self.targets.policies() {
             Some(targets) => vec![&targets.get(target).policy, &self.base],
             None => vec![&self.base],
         }
@@ -207,7 +242,7 @@ impl Battery {
     /// The variables a deployment of `target` reads: its target policy's, then the
     /// base's, each once.
     pub fn credentials_for(&self, target: BatteryTarget) -> Vec<&str> {
-        let target_credentials = match &self.targets {
+        let target_credentials = match self.targets.policies() {
             Some(targets) => &targets.get(target).credentials[..],
             None => &[][..],
         };
@@ -227,7 +262,7 @@ impl Battery {
             .readiness
             .as_ref()
             .map_or(&[][..], |readiness| &readiness.command[..]);
-        match &self.targets {
+        match self.targets.policies() {
             Some(targets) => targets.get(target).readiness.as_deref().unwrap_or(base),
             None => base,
         }
@@ -235,7 +270,7 @@ impl Battery {
 
     /// The setup steps a deployment of `target` follows: its target policy's, else the base's.
     pub fn setup_steps(&self, target: BatteryTarget) -> &[String] {
-        match &self.targets {
+        match self.targets.policies() {
             Some(targets) => targets.get(target).setup.as_deref().unwrap_or(&self.setup),
             None => &self.setup,
         }
@@ -452,21 +487,38 @@ impl RawBattery {
             };
             declared.insert(parsed, target_policy);
         }
-        let partial = |missing| ManifestError::PartialTargets {
-            path: path.to_path_buf(),
-            missing,
-        };
-        let targets = match (
-            declared.remove(&BatteryTarget::SingleUser),
-            declared.remove(&BatteryTarget::MultiUser),
-        ) {
-            (Some(single_user), Some(multi_user)) => Some(TargetPolicies {
-                single_user,
-                multi_user,
-            }),
-            (None, None) => None,
-            (None, Some(_)) => return Err(partial(BatteryTarget::SingleUser)),
-            (Some(_), None) => return Err(partial(BatteryTarget::MultiUser)),
+        // No targets listed: both targets use the base. A target whose policy
+        // is the base uses the base; a target left out is not supported. If
+        // one target has its own policy file, the other needs one too.
+        let targets = if declared.is_empty() {
+            Targets::Base(BatteryTarget::ALL.to_vec())
+        } else if declared.values().all(|target_policy| target_policy.policy == base) {
+            if let Some((target, _)) = declared
+                .iter()
+                .find(|(_, target_policy)| target_policy.readiness.is_some() || target_policy.setup.is_some())
+            {
+                return Err(ManifestError::BaseTargetSettings {
+                    path: path.to_path_buf(),
+                    target: *target,
+                });
+            }
+            Targets::Base(declared.into_keys().collect())
+        } else {
+            let partial = |missing| ManifestError::PartialTargets {
+                path: path.to_path_buf(),
+                missing,
+            };
+            match (
+                declared.remove(&BatteryTarget::SingleUser),
+                declared.remove(&BatteryTarget::MultiUser),
+            ) {
+                (Some(single_user), Some(multi_user)) => Targets::Split(TargetPolicies {
+                    single_user,
+                    multi_user,
+                }),
+                (None, _) => return Err(partial(BatteryTarget::SingleUser)),
+                (_, None) => return Err(partial(BatteryTarget::MultiUser)),
+            }
         };
         let mut hosts = Vec::new();
         for host in self.hosts {
@@ -678,7 +730,9 @@ mod tests {
     use super::*;
 
     const BATTERY: &str = "schema = 1\nname = \"github\"\ndescription = \"GitHub MCP server\"\n\n\
-         [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n";
+         [battery]\npolicy = \"appa.toml\"\nhosts = [\"claude-code\"]\nhelpers = [\"audience-source.py\"]\n\n\
+         [battery.targets.single-user]\npolicy = \"appa.toml\"\n\n\
+         [battery.targets.multi-user]\npolicy = \"appa.toml\"\n";
 
     const CLAUDE_CODE: &str = "schema = 1\nname = \"claude-code\"\ndescription = \"Claude Code plugin\"\n\n\
          [plugin]\nhost = \"claude-code\"\nprotocol = 1\ndefault_policy = \"default.appa.toml\"\n";
@@ -700,7 +754,7 @@ mod tests {
             package.battery().unwrap(),
             &Battery {
                 base: RelativePath::parse("appa.toml").unwrap(),
-                targets: None,
+                targets: Targets::Base(vec![BatteryTarget::SingleUser, BatteryTarget::MultiUser]),
                 hosts: vec![Host::ClaudeCode],
                 namespaces: vec![Namespace::parse("github").unwrap()],
                 audiences: vec![],
@@ -725,7 +779,7 @@ mod tests {
         let battery = package.battery().unwrap();
 
         assert_eq!(battery.base.as_str(), "appa.toml");
-        let targets = battery.targets.as_ref().unwrap();
+        let targets = battery.targets.policies().unwrap();
         assert_eq!(
             targets.get(BatteryTarget::SingleUser).policy.as_str(),
             "single-user.toml"
@@ -781,10 +835,9 @@ mod tests {
         ));
     }
 
-    /// A battery that declares targets declares every one of them; a battery
-    /// that declares none is the base alone.
+    /// If one target has its own policy file, the other needs one too.
     #[test]
-    fn a_battery_declares_every_target_or_none() {
+    fn a_split_battery_declares_every_target() {
         let without =
             |target: &str| TARGETED.replace(&format!("[battery.targets.{target}]\npolicy = \"{target}.toml\"\n"), "");
         assert!(matches!(
@@ -801,7 +854,31 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(manifest(BATTERY).unwrap().battery().unwrap().targets, None);
+    }
+
+    /// A target that names the base is supported with the base alone, and a
+    /// target left out is not supported. A battery that lists none supports both.
+    #[test]
+    fn a_battery_lists_the_targets_it_supports() {
+        let single_user_only = BATTERY.replace("[battery.targets.multi-user]\npolicy = \"appa.toml\"\n", "");
+        let package = manifest(&single_user_only).unwrap();
+        let battery = package.battery().unwrap();
+        assert_eq!(battery.targets, Targets::Base(vec![BatteryTarget::SingleUser]));
+        assert!(battery.targets.supports(BatteryTarget::SingleUser));
+        assert!(!battery.targets.supports(BatteryTarget::MultiUser));
+
+        let untargeted = single_user_only.replace("[battery.targets.single-user]\npolicy = \"appa.toml\"\n", "");
+        assert_eq!(
+            manifest(&untargeted).unwrap().battery().unwrap().targets,
+            Targets::Base(BatteryTarget::ALL.to_vec())
+        );
+        assert!(matches!(
+            manifest(&format!("{BATTERY}setup = [\"Install the App.\"]\n")),
+            Err(ManifestError::BaseTargetSettings {
+                target: BatteryTarget::MultiUser,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -846,7 +923,7 @@ mod tests {
         targeted.credentials = vec!["APPA_PROVIDER_A".into(), "APPA_PROVIDER_B".into()];
         targeted
             .targets
-            .as_mut()
+            .policies_mut()
             .unwrap()
             .get_mut(BatteryTarget::MultiUser)
             .credentials = vec!["APPA_PROVIDER_C".into(), "APPA_PROVIDER_A".into()];

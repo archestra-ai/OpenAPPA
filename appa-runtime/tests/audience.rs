@@ -3,7 +3,7 @@ use common::{actor, audit_len, last_offer, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
 
-use appa_runtime::api::{ProbeError, RemedyOutcome, Runtime};
+use appa_runtime::api::{ProbeError, Remedies, RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::Router;
@@ -182,6 +182,8 @@ async fn narrowed_under(dir: &tempfile::TempDir, policy: &str, audience_url: &st
     let HookDecision::DenyCall { feedback, .. } = blocked else {
         panic!("the narrowing read is offered for acceptance, got {blocked:?}");
     };
+    assert!(feedback.contains("Continue:"), "{feedback}");
+    assert!(!feedback.contains("No remedy is offered"), "{feedback}");
     assert!(matches!(
         runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
         RemedyOutcome::Authorized { .. }
@@ -384,6 +386,50 @@ async fn public_and_literal_arguments_never_consult_the_source() {
     assert!(source.requests().is_empty(), "no spelling here names a group");
 }
 
+#[tokio::test]
+async fn a_refusal_without_a_continuation_explains_how_to_finish() {
+    let (url, _) = serve_source().await;
+    // A requirement gap alone, and the same gap with a narrowing. Neither can be
+    // cleared by delegating to a child that inherits this session's label.
+    for delta in ["{}", "{ trust = \"suspicious\", audience = [\"self\"] }"] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let policy = POLICY.replace(
+            "effects = [\"egress\"]\ndelta = {}",
+            &format!("effects = [\"egress\"]\ndelta = {delta}"),
+        );
+        let policy = format!(
+            "{policy}\n[[policy.tool]]\nname = \"trusted_work\"\nrequires = {{ trust = \"trusted\" }}\ndelta = {{}}\n"
+        );
+        let runtime = narrowed_under(&dir, &policy, &url).await;
+        let HookDecision::DenyCall { feedback, offers, .. } = propose(&runtime, send("public")).await else {
+            panic!("public is outside the private read's audience");
+        };
+        assert!(offers.is_empty());
+        assert!(feedback.starts_with("[appa] Blocked: send cannot run."), "{feedback}");
+        for guidance in [
+            "No remedy is offered for this call in the current state.",
+            "Do not retry this flow or reuse an earlier offer for it.",
+            "Tell the user that the policy refused this part of the task, and finish any permitted work.",
+        ] {
+            assert!(feedback.contains(guidance), "{feedback}");
+        }
+        for misleading in [
+            "cannot run yet",
+            "Accepting the narrowing",
+            "After accepting",
+            "Continue:",
+            "delegate",
+        ] {
+            assert!(!feedback.contains(misleading), "{feedback}");
+        }
+        // The refusal does not stop permitted work in the same trajectory.
+        assert_eq!(
+            propose(&runtime, read_hr()).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+    }
+}
+
 /// The probe reads every selector the policy references, once each, and refuses the first
 /// source that fails or reports a reader outside the shape rule — naming the provider and
 /// the selector.
@@ -505,18 +551,18 @@ async fn a_refused_reload_probe_leaves_the_previous_deployment_serving() {
     source.members(Some(vec!["bob@corp.example"]));
     let prepared = runtime.prepare_deployment(revised()).expect("the revision loads again");
     prepared.probe_sources().await.expect("the source recovered");
-    let reloaded = runtime.install(prepared);
+    let reloaded = runtime.install(prepared).expect("the revision publishes");
     assert!(
         reloaded.changed,
         "the refused probe installed nothing, so this reload is the change"
     );
 }
 
-/// A trajectory opened under one routing keeps it after a reload retargets the provider:
-/// its lookups still reach the entry its stored policy file names, while a trajectory opened
-/// under the reloaded deployment reaches the new one.
+/// A trajectory opened under one routing follows its deployment when a reload retargets the
+/// provider: the revision that decides its next call is the one whose externals answer it, so
+/// its lookups reach the entry the reloaded policy names.
 #[tokio::test]
-async fn a_retired_trajectory_keeps_the_lookup_routing_it_opened_under() {
+async fn a_trajectory_takes_the_lookup_routing_its_deployment_now_serves() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, source) = serve_source().await;
     let policy = POLICY.replace(SLACK_BINDING, LOOKUP_URL_BINDINGS);
@@ -552,8 +598,8 @@ async fn a_retired_trajectory_keeps_the_lookup_routing_it_opened_under() {
         .collect();
     assert_eq!(lookups.len(), 1);
     assert_eq!(
-        lookups[0]["name"], "people",
-        "the retired trajectory's lookup goes where its own policy file sends it"
+        lookups[0]["name"], "directory",
+        "the trajectory's lookup goes where the head's policy sends it"
     );
 }
 
@@ -600,7 +646,8 @@ fn an_audience_source_declared_by_an_absent_include_is_undeclared() {
 
     for batteries in [vec![], vec![battery("[policy]\nversion = 2\n")]] {
         let config = compose(ROOT, &batteries).expect("the document composes");
-        let Err(appa_runtime::api::OpenError::Policy(error)) = Runtime::open_in_memory(config, None) else {
+        let Err(appa_runtime::api::OpenError::Policy(error)) = Runtime::open_in_memory(config, None, Remedies::StandIn)
+        else {
             panic!("an undeclared audience source must not open");
         };
         let appa_policy::ConfigError::UndeclaredProvider { context, provider } = *error else {
@@ -610,7 +657,7 @@ fn an_audience_source_declared_by_an_absent_include_is_undeclared() {
     }
 
     let restored = compose(ROOT, &[battery(&declaring)]).expect("the restored include composes");
-    Runtime::open_in_memory(restored, None).expect("the restored include declares the source");
+    Runtime::open_in_memory(restored, None, Remedies::StandIn).expect("the restored include declares the source");
 
     let doubled = format!("{ROOT}{ROOT_BINDING}");
     assert!(matches!(
@@ -766,6 +813,7 @@ async fn a_redirected_providers_lookups_go_to_the_named_entry() {
     ));
     assert_eq!(audit_len(&runtime), decided);
     assert!(decided > before);
+    let asked = source.requests().len();
     drop(runtime);
 
     // The reopened deployment replays the pinned lookups without consulting anyone; only
@@ -777,7 +825,11 @@ async fn a_redirected_providers_lookups_go_to_the_named_entry() {
         propose(&reopened, send("@team")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(source.requests().len(), 8);
+    assert_eq!(
+        source.requests().len(),
+        asked + 2,
+        "the fresh act reads the selector and the lookup entry once each"
+    );
 }
 
 #[tokio::test]
@@ -836,6 +888,7 @@ async fn a_group_recipient_is_read_per_act_and_replayed_from_the_pin() {
 
     let audit = serde_json::to_string(&runtime.audit(&root()).expect("the audit reads")).expect("the audit serializes");
     assert!(!audit.contains("carol"), "the audit leaks a directory member: {audit}");
+    let asked = source.requests().len();
     drop(runtime);
 
     // The reopened deployment replays the log — its pinned answers included — without
@@ -847,7 +900,11 @@ async fn a_group_recipient_is_read_per_act_and_replayed_from_the_pin() {
         propose(&reopened, send("@team")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(source.requests().len(), 4);
+    assert_eq!(
+        source.requests().len(),
+        asked + 1,
+        "the fresh act reads the selector once"
+    );
 }
 
 /// `POLICY` with a channel-keyed sink: posting to a channel requires that channel's members

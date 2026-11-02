@@ -43,7 +43,7 @@ jobs:
 
       - name: Check new Cargo dependency release ages
         if: github.event_name == 'pull_request' || github.event_name == 'push'
-        uses: archestra-ai/.github/actions/cargo-release-age@f9b82a1ae0c8d73088513454aa46cf5a4021df82
+        uses: archestra-ai/.github/actions/cargo-release-age@f9b82a1ae0c8d73088513454aa46cf5a4021df82 # v1.0.0
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
           lockfiles: |
@@ -96,6 +96,7 @@ jobs:
               - 'integrations/kagent/appa-kagent-adk/**'
               - 'integrations/kagent/tests/**'
               - 'marketplace/plugins/kagent/fixtures/**'
+              - 'appa-runtime-api/refusal-classes.txt'
               - '.github/workflows/ci.yml'
             receiver:
               - 'receiver/**'
@@ -108,6 +109,7 @@ jobs:
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'
               - 'marketplace/plugins/kagent/fixtures/**'
+              - 'appa-runtime-api/refusal-classes.txt'
               - '.github/workflows/ci.yml'
             chart:
               - 'integrations/kagent/demo/chart/**'
@@ -133,6 +135,8 @@ jobs:
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
               - 'website-chat-playground/**'
+              # Generated from the service's `WireEvent`; its test fails on drift.
+              - 'website/components/playground/wire-events.ts'
               - 'bench/corp-agent/**'
               - 'bench/corp-systems/**'
               - 'bench/corp/policies/**'
@@ -145,6 +149,7 @@ jobs:
             plugin:
               - 'integrations/amp/**'
               - 'integrations/opencode/**'
+              - 'appa-runtime-api/refusal-classes.txt'
               - 'marketplace/plugins/opencode/**'
               - 'integrations/appa-guide/**'
               - 'website/content/docs/contracts.md'
@@ -293,7 +298,7 @@ jobs:
           python3 -m unittest discover -s marketplace/plugins/claude-code -p 'test_*.py'
 
       - name: Check release versions
-        uses: ./.github/actions/check-release-versions
+        uses: $/.github/actions/check-release-versions
 
   # One debug build of the runtime binary serves both checks that drive it
   # as a black box: the shipped examples and the real Claude Code harness.
@@ -316,10 +321,10 @@ jobs:
         run: rustup show
 
       - name: Cache the Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: runtime-binary
-          env-vars: CARGO_PROFILE_DEV_DEBUG
+          env-vars: CARGO_PROFILE_DEV_DEBUG ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
@@ -370,7 +375,7 @@ jobs:
           retention-days: 7
 
       - name: Setup uv for OTLP verification
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Verify value-safe OTLP export with a real runtime
         run: uv run scripts/verify-runtime-telemetry.py target/debug/appa
@@ -385,8 +390,11 @@ jobs:
             ./target/debug/appa replay --config "${dir}appa.toml" "$dir"
           done
 
+      # The version and its hashes are locked in .github/tools/claude-code.
       - name: Install Claude Code harness
-        run: npm install --global @anthropic-ai/claude-code@2.1.266
+        run: |
+          npm ci --prefix .github/tools/claude-code --no-audit --no-fund
+          echo "$PWD/.github/tools/claude-code/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Exercise the real harness with deterministic inference
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
@@ -430,9 +438,10 @@ jobs:
         run: rustup show
 
       - name: Cache marketplace builds
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: marketplace
+          env-vars: ImageOS
 
       - name: Manifest tests
         run: cargo test -p appa-package --all-targets --locked
@@ -489,7 +498,10 @@ jobs:
   # is omitted: clippy --all-targets is a superset. Each rust-cache key is
   # per job: clippy and test write different target/ trees, so they must
   # not share one entry. A job that runs on main seeds the key later PRs
-  # restore.
+  # restore. Every rust-cache key on a floating runner label also hashes
+  # `ImageOS`: build scripts record what they found on the image (pyo3 links
+  # the image's libpython3.x) and cargo does not rerun them when the image
+  # changes, so an entry built on one image must not restore on another.
   rust-lint:
     name: Rust Lint
     needs: [changes, cargo-release-age]
@@ -507,9 +519,10 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: rust-lint
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust formatting
@@ -557,10 +570,10 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: rust-tests
-          env-vars: CARGO_PROFILE_TEST_DEBUG
+          env-vars: CARGO_PROFILE_TEST_DEBUG ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust tests
@@ -581,6 +594,13 @@ jobs:
           cargo test -p appa-eventlog -p appa --lib
           --features appa-eventlog/postgres,appa-eventlog/fault-injection,appa/postgres --locked
           -- --ignored postgres_ a_view_on_a_lease
+
+      # The previous release and this checkout share one store, as old and new pods do during
+      # a rolling release and after a rollback. This checkout must read and continue what the
+      # previous release wrote; the previous release must refuse what this checkout wrote. The
+      # run exits non-zero on the first case that does not hold.
+      - name: Mixed-version proof (PostgreSQL)
+        run: cargo run --locked --manifest-path scripts/mixed-version/Cargo.toml
 
   # Stable-named gate so a required check named "Rust Checks" still
   # covers the split jobs. Both jobs skipped is success: their paths
@@ -642,7 +662,7 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           env-vars: CARGO_PROFILE_TEST_DEBUG
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -664,6 +684,10 @@ jobs:
     if: needs.changes.outputs.rust == 'true'
     runs-on: windows-latest
     timeout-minutes: 20
+    # The build and the tests below share one dependency tree only while the dev and
+    # test profiles agree; the workspace manifest gives tests line tables only.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -675,8 +699,9 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build runtime
@@ -714,12 +739,13 @@ jobs:
         run: rustup show
 
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -762,7 +788,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -783,7 +809,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -809,7 +835,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -835,7 +861,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -944,15 +970,16 @@ jobs:
       # runtime binary checks and the Python bindings each have their own
       # rust-cache entry.
       - name: Cache the Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
         run: cargo build --package appa --locked
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -1122,7 +1149,7 @@ jobs:
         run: bash integrations/kagent/e2e/ci/install.sh
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: true
 
@@ -1191,7 +1218,7 @@ jobs:
           helm version
           kubectl version --client
       - name: Setup fixture test environment
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false
       - name: Check fixture and evidence contracts

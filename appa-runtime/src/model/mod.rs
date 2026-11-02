@@ -1,5 +1,8 @@
-//! The model builtins: `claude-code`, `llm` and, with the `archestra` feature, `archestra`,
-//! which answer a rendered [`ModelPrompt`], and `jev`, TypeSafe's classifier, which asks its own questions about the call.
+//! The model builtins.
+//!
+//! - `claude-code`, `llm` and, with the `archestra` feature, `archestra` answer a rendered
+//!   [`ModelPrompt`].
+//! - `jev`, TypeSafe's classifier, asks its own questions about the call.
 //!
 //! [`ModelPrompt`]: crate::consult::ModelPrompt
 
@@ -33,12 +36,23 @@ pub(crate) enum PromptModel {
     Archestra(archestra::ArchestraBackend),
 }
 
-/// One consult of an API model transport: `send` makes one request and returns the model's
-/// answer text. The deadline covers every permit wait and every attempt: queueing behind
-/// `builtin`'s gate spends the same budget the consult itself would. A transport failure, a
-/// 429 or a 5xx is retried after [`RETRY_BACKOFF`] while the budget leaves room for another
-/// attempt; each attempt holds a permit, the backoff none. `seen` keeps the last attempt's
-/// answer text, capped, or its non-success status.
+/// Consults an API model, retries transient failures, and parses the answer as JSON.
+///
+/// Each call of `send` makes one request and returns the model's answer text.
+///
+/// - **Budget.** One deadline, `budget` from now, covers the whole consult: waits for a
+///   permit of `builtin`'s gate, every attempt, and every backoff.
+/// - **Concurrency.** Each attempt holds one gate permit. The permit is released before the
+///   backoff and acquired again for the next attempt.
+/// - **Retries.** A transport failure, a 429 or a 5xx is retried after [`RETRY_BACKOFF`].
+///   Any other failure is returned at once. No retry starts after [`MAX_ATTEMPTS`]
+///   attempts, or when less than [`RETRY_BACKOFF`] plus [`MIN_ATTEMPT`] of the budget remains.
+/// - **Answer.** An answer longer than `max_body_bytes` is [`NoAnswerReason::Oversized`]; an
+///   answer that is not JSON is [`NoAnswerReason::Malformed`].
+/// - **Record.** If `seen` is given, it records the last attempt: the answer text (cut to
+///   `max_body_bytes`), or the status and detail of a non-success response.
+///
+/// `name` identifies the Annotator in log messages.
 pub(crate) async fn consult_with_retries<S, Fut>(
     gates: &ConsultGates,
     builtin: AnnotatorBuiltin,
@@ -78,6 +92,7 @@ where
     }
 }
 
+/// Runs one request until `deadline`, parses its answer, and writes the outcome to `seen`.
 async fn attempt(
     sent: impl Future<Output = Result<String, NoAnswerReason>>,
     deadline: tokio::time::Instant,
@@ -104,7 +119,8 @@ async fn attempt(
             Err(NoAnswerReason::NonSuccess { status, .. }) => Some(status),
             _ => None,
         };
-        // What the transport said about its refusal is the consult's diagnostics.
+        // A non-success response's detail, such as the provider's error message, becomes
+        // the consult's diagnostics.
         seen.diagnostics = match &answered {
             Err(NoAnswerReason::NonSuccess {
                 detail: Some(detail), ..

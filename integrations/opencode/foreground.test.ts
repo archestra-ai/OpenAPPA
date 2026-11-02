@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { OpenCode } from '@opencode/client'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { configuration, install } from './setup'
+import { configuration, guide, install } from './setup'
 
 // Only inference is scripted. The published CLI, plugin, native tools, APPA
 // daemon, policy store and MCP remedy execution are real.
@@ -23,6 +23,8 @@ const slow = new Map<string, { promise: Promise<void>; resolve: () => void }>()
 let corruptDecision: string | undefined
 let setupInspection: any
 let setupPolicy: string
+let setupDirectory: string
+let setupGuide: string
 let appaCatalogGate: Promise<void> | undefined
 let appaCatalogSeen = false
 let projectMcp: ReturnType<typeof Bun.serve> | undefined
@@ -56,6 +58,7 @@ async function startServer(setupConfig?: string) {
     XDG_DATA_HOME: `${directory}/data`, XDG_CACHE_HOME: `${directory}/cache`, XDG_STATE_HOME: `${directory}/state`,
     APPA_OPENCODE_RUNTIME_URL: proxy.url.toString(),
     APPA_OPENCODE_SETUP_CONFIG: setupConfig,
+    APPA_OPENCODE_SETUP_GUIDE: setupConfig ? setupGuide : undefined,
     APPA_OPENCODE_SETUP_BINARY: setupConfig ? resolve(process.env.APPA_TEST_BINARY || '../../target/debug/appa') : undefined,
     OPENCODE_PASSWORD: password, OPENCODE_DISABLE_MODELS_FETCH: '1' },
   stdout: Bun.file(`${directory}/opencode.log`), stderr: Bun.file(`${directory}/opencode-error.log`) })
@@ -144,6 +147,11 @@ builtin = "redact-email"
       return completion(null, [{ name: call.name, input: call.input }])
     }
     if (user.startsWith('setup:')) {
+      if (user === 'setup:guide' || user === 'setup:battery') {
+        return last?.role === 'tool' ? completion(`Setup result: ${output}`)
+          : completion(null, [user === 'setup:guide' ? { name: 'read', input: { path: setupGuide } }
+            : { name: 'appa_setup', input: { operation: 'battery', battery: 'opencode' } }])
+      }
       if (last?.role === 'tool') {
         if (user === 'setup:init') {
           const decoded = JSON.parse(output)
@@ -241,6 +249,7 @@ afterAll(async () => {
   if (runtime) await runtime.exited
   provider?.stop(true); proxy?.stop(true); projectMcp?.stop(true)
   if (directory) await rm(directory, { recursive: true, force: true })
+  if (setupDirectory) await rm(setupDirectory, { recursive: true, force: true })
 })
 
 async function begin(task: string) {
@@ -499,7 +508,12 @@ test('operator setup proposes without writing, rejects invalid and stale policie
     .replace('[policy]\nversion = 2', '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/shell(command:printf setup-proof)"\nrequires = { trust = "trusted", audience = { contains = ["public"] } }')
   server.kill(); await server.exited
   runtime.kill(); await runtime.exited
-  await writeFile(`${directory}/appa.toml`, '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/appa_setup"\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n')
+  setupDirectory = await mkdtemp(`${tmpdir()}/appa-operator-`)
+  setupGuide = `${setupDirectory}/guide*),[?].md`
+  await writeFile(setupGuide, await guide(), { mode: 0o444 })
+  await writeFile(`${setupDirectory}/AGENTS.md`, 'UNCHECKED-SETUP-INSTRUCTION-CANARY')
+  const selector = JSON.stringify(`host/opencode/read(path:${setupGuide.replace(/[\\*),]/g, '\\$&')})`)
+  await writeFile(`${directory}/appa.toml`, `[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/appa_setup"\n[[policy.tool]]\nname = ${selector}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 1048576\n`)
   await startRuntime()
   await startServer(target)
   const session = await client.session.create({ location: { directory } })
@@ -539,7 +553,35 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   expect(setupInspection.tools.some((tool: any) => tool.canonical === 'host/opencode/shell')).toBe(true)
   expect(setupInspection.batteries.some((battery: any) => battery.name === 'microsoft-learn' && battery.hosts.includes('opencode'))).toBe(true)
   const setupRequest = [...requests].reverse().find(request => request.messages.some((message: any) => message.content === 'setup:init'))
-  expect(setupRequest.tools.map((tool: any) => tool.function.name)).toEqual(['appa_setup'])
+  expect(setupRequest.tools.map((tool: any) => tool.function.name).sort()).toEqual(['appa_setup', 'read'])
+  await client.session.prompt({ sessionID: session.id, text: 'setup:guide' })
+  await client.session.wait({ sessionID: session.id })
+  expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Publish and finish')
+  expect(hooks.some(hook => hook.event.root_id === session.id && hook.event.tool === 'read' && hook.reply.decision === 'allow_call')).toBe(true)
+  expect(JSON.stringify(requests)).not.toContain('UNCHECKED-SETUP-INSTRUCTION-CANARY')
+  // A real battery exceeds both the old 64 KiB runtime envelope and the host's
+  // 50 KiB truncation threshold. Verify the complete JSON at the next inference.
+  await client.session.prompt({ sessionID: session.id, text: 'setup:battery' })
+  await client.session.wait({ sessionID: session.id })
+  const batteryRequest = requests.at(-1)
+  const batteryMessage = [...batteryRequest.messages].reverse().find((message: any) => message.role === 'tool')
+  const battery = JSON.parse(batteryMessage.content)
+  expect(battery.contracts).toBe(await readFile(`${payload}/contracts.md`, 'utf8'))
+  expect(battery.files['appa.toml']).toBe(await readFile(resolve(import.meta.dir, '../../marketplace/batteries/opencode/appa.toml'), 'utf8'))
+  expect(Buffer.byteLength(batteryMessage.content)).toBeGreaterThan(50 * 1024)
+  expect(batteryMessage.content).not.toContain('Full output saved')
+  for (const path of [target, setupDirectory, `${setupDirectory}/../${setupDirectory.split('/').at(-1)}/${setupGuide.split('/').at(-1)}`, `${setupDirectory}/missing.md`]) {
+    await client.session.prompt({ sessionID: session.id, text: `battery:${JSON.stringify({ name: 'read', input: { path }, remedy: false })}` })
+    await client.session.wait({ sessionID: session.id })
+    const result = [...requests.at(-1).messages].reverse().find((message: any) => message.role === 'tool')
+    expect(result.content).toContain('Setup read is restricted to the fixed guide file')
+  }
+  const alias = `${setupDirectory}/alias.md`
+  await symlink(setupGuide, alias)
+  await client.session.prompt({ sessionID: session.id, text: `battery:${JSON.stringify({ name: 'read', input: { path: alias }, remedy: false })}` })
+  await client.session.wait({ sessionID: session.id })
+  const aliasResult = [...requests.at(-1).messages].reverse().find((message: any) => message.role === 'tool')
+  expect(aliasResult.content).toContain('Setup read is restricted to the fixed guide file')
   for (const text of ['setup:invalid', 'setup:approve']) {
     if (text === 'setup:approve') await writeFile(target, `${original}\n# Concurrent operator change\n`)
     await client.session.prompt({ sessionID: session.id, text })
@@ -557,8 +599,33 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('saved')
   expect(hooks.some(hook => hook.event.root_id === session.id && hook.event.tool === 'appa_setup' && hook.reply.decision === 'allow_call')).toBe(true)
 
-  // Close operator mode, serve the saved policy, and open an ordinary root.
+  await rm(setupGuide)
+  await symlink(target, setupGuide)
+  await client.session.prompt({ sessionID: session.id, text: 'setup:guide' })
+  await client.session.wait({ sessionID: session.id })
+  expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Setup guide was replaced')
+
+  // A guide outside the Location but inside its Git worktree would still load
+  // nearby instructions. Refuse the prompt, not plugin loading (which the host
+  // can skip), and prove no inference starts with unprotected native tools.
   server.kill(); await server.exited
+  const git = Bun.spawn(['git', 'init', directory], { stdout: 'ignore', stderr: 'ignore' })
+  expect(await git.exited).toBe(0)
+  const nested = `${directory}/nested`
+  await mkdir(nested)
+  setupGuide = `${directory}/internal-guide.md`
+  await writeFile(setupGuide, await guide())
+  await startServer(target)
+  const internal = await client.session.create({ location: { directory: nested } })
+  const priorRequests = requests.length
+  await expect(client.session.prompt({ sessionID: internal.id, text: 'setup:guide' })).rejects.toThrow()
+  expect(requests.length).toBe(priorRequests)
+  server.kill(); await server.exited
+  const log = await readFile(`${directory}/data/opencode/log/opencode.log`, 'utf8')
+  expect(log).toContain('Setup guide must be outside the OpenCode project and Location')
+  await rm(`${directory}/.git`, { recursive: true, force: true })
+
+  // Close operator mode, serve the saved policy, and open an ordinary root.
   runtime.kill(); await runtime.exited
   await startRuntime(target)
   await startServer()

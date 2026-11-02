@@ -4,9 +4,8 @@
 
 use appa_engine::contract::{Delta, DeltaAudience, SelectorPlaceholder, ToolAnnotation};
 use appa_engine::label::{Audience, DeclaredAudience, ReaderId, Trust};
-use appa_engine::names::SurfaceName;
 use appa_engine::params::ParamsError;
-use appa_engine::profile::{BindingMode, OpenVector, SurfaceMode};
+use appa_engine::profile::{BindingMode, SurfaceMode};
 use appa_engine::registry::{LoadError, MAX_HINT_CHARS, TrustChain};
 use appa_policy::{Config, ConfigError, ToolCallSource, parse_delta};
 
@@ -274,13 +273,6 @@ fn the_deployment_table_accepts_every_surface_mode_binding_and_context_control()
             ("code_execution", SurfaceMode::Open),
             ("web_search", SurfaceMode::Mediated)
         ]
-    );
-    assert_eq!(
-        config.engine().open_vectors(),
-        [OpenVector::OpenProviderSurface {
-            surface: SurfaceName::new("code_execution")
-        }],
-        "an open surface is an open vector; a mediated one is not"
     );
 
     let explicit = Config::from_toml_str("version = 2\n[deployment]\ncontext_control = false\nbinding = \"harness\"\n")

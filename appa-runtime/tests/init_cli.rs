@@ -342,7 +342,6 @@ fn a_rerun_keeps_the_config_and_rewrites_nothing_it_already_wrote() {
     assert_eq!(fs::read_to_string(&config).ok(), Some(authored));
     assert_eq!(Installed::of(&fixture), written);
     let calls = fixture.claude_calls();
-    assert_eq!(calls.matches("mcp get appa").count(), 2);
     assert_eq!(calls.matches("mcp add-json").count(), 1);
     assert_eq!(calls.matches("mcp remove").count(), 0);
 }

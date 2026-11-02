@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 PROTOCOL = 1
@@ -197,6 +198,35 @@ class WireError(Exception):
     """The runtime's answer left the decision contract. Fail closed."""
 
 
+class RefusalClass(str, Enum):
+    """Which operational fault a ``refuse`` names, as the runtime spells it
+    (``RefusalClass`` in ``appa-runtime-api``). A refuse with any other
+    class is outside the wire."""
+
+    STORAGE = "storage"
+    UNTRUSTED_LOG = "untrusted_log"
+    POLICY_UNAVAILABLE = "policy_unavailable"
+    POLICY_MOVED = "policy_moved"
+    LEGACY_FAMILY = "legacy_family"
+    INVENTORY_REFUSED = "inventory_refused"
+    ENGINE_INVARIANT = "engine_invariant"
+    CONTENDED = "contended"
+    RESOLUTION_DIVERGED = "resolution_diverged"
+    ANNOTATION_REFUSED = "annotation_refused"
+    UNDECLARED_TOOL = "undeclared_tool"
+    UNDECLARED_SPAWN = "undeclared_spawn"
+    PEER_MESSAGE = "peer_message"
+    PRINCIPAL = "principal"
+    OUTSTANDING_CALL = "outstanding_call"
+    CALL_ID_REUSED = "call_id_reused"
+    TRAJECTORY_ENDED = "trajectory_ended"
+    TRAJECTORY = "trajectory"
+    DISPATCH = "dispatch"
+    REMEDY = "remedy"
+    SPAWN_NOT_TAKEN = "spawn_not_taken"
+    SPAWN = "spawn"
+
+
 RETURN_AS_SPOKEN = "as_spoken"
 """The route of a return that crosses as the child spoke it."""
 
@@ -256,6 +286,8 @@ class Decision:
     """On a ``context``: what the harness hands the actor the event
     names — at a child's start, the return contract it works under."""
     detail: str | None = None
+    refusal_class: RefusalClass | None = None
+    """On a ``refuse``: the class of the fault ``detail`` names."""
     spawn_binding: str | None = None
     review: tuple[tuple[str, str], ...] = ()
     """On a ``deny_call``: the offers whose plans consult a human
@@ -315,10 +347,36 @@ def parse_decision(body: bytes | str) -> Decision:
             fields["spawn_binding"] = binding
     review: tuple[tuple[str, str], ...] = ()
     offers: tuple[Offer, ...] = ()
+    refusal_class: RefusalClass | None = None
     if kind == "deny_call":
         review = _parse_review(parsed.get("review"))
         offers = _parse_offers(parsed.get("offers"))
-    return Decision(kind=kind, review=review, offers=offers, **fields)
+    if kind == "refuse":
+        refusal_class = _parse_refusal_class(parsed.get("class"))
+    return Decision(kind=kind, review=review, offers=offers, refusal_class=refusal_class, **fields)
+
+
+def parse_answer(status: int, body: bytes) -> Decision:
+    """Parse the runtime's answer to a gated event; anything else is a
+    `WireError`. A 409 carries a ``refuse``, a 200 any other decision,
+    and every other status fails closed."""
+    match status:
+        case 200 | 409:
+            decision = parse_decision(body)
+        case _:
+            raise WireError(f"appa answered {status}: {body.decode(errors='replace')[:500]}")
+    if (decision.kind == "refuse") != (status == 409):
+        raise WireError(f"a {status} answer carrying a {decision.kind} decision")
+    return decision
+
+
+def _parse_refusal_class(raw: Any) -> RefusalClass:
+    if not isinstance(raw, str):
+        raise WireError("a refuse decision without its class")
+    try:
+        return RefusalClass(raw)
+    except ValueError:
+        raise WireError(f"a refuse decision with a class outside the wire: {raw!r}") from None
 
 
 def _parse_review(raw: Any) -> tuple[tuple[str, str], ...]:

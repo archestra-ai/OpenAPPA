@@ -1,0 +1,11 @@
+{
+  "name": "openappa-ci-claude-code",
+  "private": true,
+  "description": "The Claude Code CLI that CI's live harness check runs, locked so npm ci installs it.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.266"
+  },
+  "allowScripts": {
+    "@anthropic-ai/claude-code@2.1.266": true
+  }
+}

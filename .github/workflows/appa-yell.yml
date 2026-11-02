@@ -58,13 +58,11 @@ jobs:
           fetch-depth: 1
 
       - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
         with:
           service_account: ${{ secrets.APPA_YELL_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_YELL_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-
-      - name: Set up Google Cloud
-        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+          setup_gcloud: "true"
 
       - name: Deploy the function source
         env:

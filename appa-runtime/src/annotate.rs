@@ -102,7 +102,7 @@ pub(crate) async fn run(
     repeat: u32,
     concurrency: std::num::NonZeroUsize,
 ) -> ExitCode {
-    let runtime = match Runtime::open_in_memory(config, modules) {
+    let runtime = match Runtime::open_in_memory(config, modules, crate::api::Remedies::StandIn) {
         Ok(runtime) => runtime,
         Err(error) => {
             eprintln!("appa runtime annotate: {error}");

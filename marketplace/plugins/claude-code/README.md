@@ -180,10 +180,10 @@ complete example.
 - It must name all six file tools (`mcp/appa/appa_read_file`, `appa_write_file`,
   `appa_edit_file`, `appa_copy_file`, `appa_move_file`, `appa_process_files`); a tool
   the policy does not name is refused, not annotated.
-- It must not use sanitizers or rewrite routes. File tracking refuses to start when the
-  registry holds any, because a rewritten call would render arguments the ledger never
-  pinned. The starting policy declares the Claude fallback annotator's sanitizers, so
-  enabling file tracking against it stops at startup with that reason.
+- It must not use tool-input sanitizers or rewrite routes. File tracking refuses to start
+  when the registry holds any, because a rewritten call would render arguments the ledger
+  never pinned. The starting policy declares the `redact-for-public` tool-input sanitizer,
+  so enabling file tracking against it stops at startup with that reason.
 
 In file mode, APPA admits declared subagent spawns so children can use the root
 session's ledger. Every other call that reaches APPA and is not one of the six file
@@ -238,12 +238,13 @@ explicit about the checked boundary and its unobserved inputs.
 ## What is here
 
 - `appa-package.toml` — the package manifest: the starting policy and the
-  `claude-code` battery a first install includes with it.
+  `coding` and `claude-code` batteries a first install includes with it.
 - `default.appa.toml` — a complete starting policy: the `hitl` authority,
-  subagents run as children of the session, sends to protected peers'
-  addresses, the runtime's own tools, and a bounded per-call fallback for
-  every tool the policy does not name. The other rules for the harness's
-  built-in tools are left to the battery, whose argument selectors a bare
+  the `redact-for-public` model sanitizer for public sinks, subagents run
+  as children of the session, sends to protected peers' addresses, the
+  runtime's own tools, and a bounded per-call fallback for every tool the
+  policy does not name. The other rules for the harness's
+  built-in tools are left to the batteries, whose argument selectors a bare
   rule here would shadow.
 - `live-gate-check.py` — the harness conformance check described below.
 
@@ -265,10 +266,13 @@ Claude Code
 support with that version's own binary. What it installs does not depend on
 the working directory.
 
-A first install includes the `claude-code` battery, the one the plugin
-requires, as one line of the config's include list
-(`batteries/claude-code/appa.toml`). A later install leaves the include list
-alone and warns when that battery is not among it. Every install then reads
+A first install includes the `coding` and `claude-code` batteries, the ones
+the plugin requires, as lines of the config's include list
+(`batteries/coding/appa.toml`, `batteries/claude-code/appa.toml`). The
+`claude-code` battery binds the `coding` battery's canonical tools to Claude
+Code's own, and a config that includes it without `coding` fails to load. A
+later install leaves the include list alone and warns when one of those
+batteries is not among it. Every install then reads
 the MCP servers Claude Code has configured, in its user scope and in the
 current project's local and project scopes, and prints the batteries that
 cover them as the commands that include them:
@@ -557,8 +561,9 @@ blocked action.
 - **An edited policy installs without a restart.** `curl -X POST
   http://127.0.0.1:8787/reload` re-reads the `--config` file. The
   runtime validates before it installs, so a bad file answers 422 and
-  changes nothing. Sessions started after the reload bind the new
-  policy; sessions already running keep the file they opened with.
+  changes nothing. Every protected session, running or new, decides its
+  next tool call under the reloaded policy; an offer the previous policy
+  made no longer stands, and the agent re-proposes the call.
 - **Stopping the process blocks protected sessions.** That is the
   design, not a fault. Start a plain `claude` if you want an
   unprotected session.

@@ -182,7 +182,9 @@ def child_return_shape(response: object) -> str:
     ``{"appa": "withheld"}``, and the withheld text under ``result``
     carries any reason but ``SPAWN_NOT_TAKEN``: the message the parent
     delivered is not the one the child returned, so nothing crossed
-    into the parent. ``spawn-not-taken``: ``{"appa": "withheld"}``, and
+    into the parent. A spawn that failed before its child returned is
+    withheld too, with the reason that the subagent stopped.
+    ``spawn-not-taken``: ``{"appa": "withheld"}``, and
     the withheld text carries ``SPAWN_NOT_TAKEN``. The runtime never
     tied the child to this parent's prepared fork. ``denied``:
     ``{"appa": "denied"}``. The runtime denied the spawn, and no child

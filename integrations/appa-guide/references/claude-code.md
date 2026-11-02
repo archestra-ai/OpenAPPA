@@ -389,5 +389,5 @@ user's choice: do not call the setup unfinished.
 
 After a successful reload, add:
 
-> Start a new `clappa` session to use the updated policy; this session keeps
-> the policy it started with.
+> The updated policy is in effect: this session and every other protected
+> session decide their next tool call under it.

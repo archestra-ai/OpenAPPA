@@ -1684,6 +1684,94 @@ samp {
   color: var(--accent-hover);
 }
 
+/* Home-page animation (BenchmarkHighlightAnimated): the ceiling the subject
+   bar breaks through, the scene headline, and the replay control. */
+.bench-track-wrap {
+  position: relative;
+}
+
+.bench-track-wrap .bench-track {
+  display: block;
+}
+
+.bench-wall {
+  position: absolute;
+  top: -5px;
+  bottom: -5px;
+  width: 3px;
+  margin-left: -1.5px;
+  display: flex;
+  flex-direction: column;
+}
+
+.bench-wall i {
+  flex: 1;
+  background: color-mix(in srgb, var(--danger) var(--strain), var(--text-weak));
+}
+
+.bench-wall i:first-child {
+  transform: translate(calc(var(--split) * 4px), calc(var(--split) * -10px)) rotate(calc(var(--split) * 35deg));
+}
+
+.bench-wall i:last-child {
+  transform: translate(calc(var(--split) * 4px), calc(var(--split) * 10px)) rotate(calc(var(--split) * -35deg));
+}
+
+.bench-panel-animated {
+  margin-top: 1rem;
+}
+
+.bench-panel-animated .bench-charts {
+  margin-top: 0;
+}
+
+.bench-panel-animated .bench-row.subject::before {
+  content: none;
+}
+
+.bench-stage {
+  position: relative;
+  container-type: inline-size;
+}
+
+.bench-headline {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0 8px;
+  text-align: center;
+  text-wrap: balance;
+  font-size: clamp(18px, 4cqi, 26px);
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-strong);
+  pointer-events: none;
+}
+
+.bench-panel-footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.bench-panel-footer .bench-panel-link {
+  width: auto;
+}
+
+.bench-replay {
+  font-size: 12px;
+  color: var(--text-weak);
+  cursor: pointer;
+}
+
+.bench-replay:hover {
+  color: var(--text-strong);
+}
+
 /* ————————————————————————————————————————————————
    Advisory Board signup
    ———————————————————————————————————————————————— */

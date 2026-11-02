@@ -7,7 +7,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use appa_engine::label::Label;
+use crate::StoredLabel;
 use appa_runtime_api::PeerDigest;
 
 /// The store's identity for one held message: a UUID v4 in its hyphenated lowercase form.
@@ -56,7 +56,7 @@ impl From<HeldPeerId> for String {
 pub struct HeldNotice {
     pub id: HeldPeerId,
     pub digest: PeerDigest,
-    pub label: Label,
+    pub label: StoredLabel,
     pub expires: SystemTime,
 }
 
@@ -107,7 +107,7 @@ pub(crate) struct NewHeld {
 }
 
 impl NewHeld {
-    pub(crate) fn new(label: &Label, now: SystemTime, ttl: Duration) -> Result<Self, HeldError> {
+    pub(crate) fn new(label: &StoredLabel, now: SystemTime, ttl: Duration) -> Result<Self, HeldError> {
         Ok(Self {
             id: HeldPeerId::fresh(),
             label: serde_json::to_value(label).map_err(|error| HeldError::Storage(error.to_string()))?,
@@ -115,7 +115,7 @@ impl NewHeld {
         })
     }
 
-    pub(crate) fn notice(self, digest: PeerDigest, label: &Label) -> HeldNotice {
+    pub(crate) fn notice(self, digest: PeerDigest, label: &StoredLabel) -> HeldNotice {
         HeldNotice {
             id: self.id,
             digest,
@@ -140,7 +140,8 @@ pub(crate) fn quota_limit(quota: usize) -> i64 {
 pub(crate) mod tests {
     use super::*;
     use crate::{Backend, LogStore, TrajectoryId};
-    use appa_engine::label::{Audience, Trust};
+    use appa_engine::label::{Audience, Label, Trust};
+    use appa_engine::registry::TrustChain;
 
     const TTL: Duration = Duration::from_secs(60);
     const QUOTA: usize = 8;
@@ -159,8 +160,11 @@ pub(crate) mod tests {
         UNIX_EPOCH + Duration::from_secs(1_700_000_000 + seconds)
     }
 
-    fn label(rank: u8) -> Label {
-        Label::new(Trust::new(rank), Audience::public())
+    fn label(rank: u8) -> StoredLabel {
+        StoredLabel::named(
+            &Label::new(Trust::new(rank), Audience::public()),
+            &TrustChain::new(vec!["low".into(), "mid".into(), "high".into()]),
+        )
     }
 
     fn hold(store: &LogStore, receiver: &TrajectoryId, body: &str, now: SystemTime) -> HeldNotice {

@@ -117,7 +117,7 @@ impl StorageCipher {
     }
 
     pub fn seal_json(&self, context: &str, value: &Value) -> Result<Value, StorageEncryptionError> {
-        if !self.is_encrypted() && !json_envelope(value) {
+        if !self.is_encrypted() && !json_envelope(value) && !json_contains_nul(value) {
             return Ok(value.clone());
         }
         let raw = serde_json::to_vec(value).map_err(|_| StorageEncryptionError("storage JSON encoding failed"))?;
@@ -148,7 +148,7 @@ impl StorageCipher {
     }
 
     pub fn seal_text(&self, context: &str, text: &str) -> Result<String, StorageEncryptionError> {
-        if !self.is_encrypted() && !text.starts_with(TEXT) {
+        if !self.is_encrypted() && !text.starts_with(TEXT) && !text.contains('\0') {
             return Ok(text.to_owned());
         }
         let bytes = if self.is_encrypted() {
@@ -194,6 +194,19 @@ fn json_envelope(value: &Value) -> bool {
         .is_some_and(|object| object.len() == 1 && object.contains_key(JSON_KEY))
 }
 
+/// PostgreSQL `text` and `jsonb` refuse U+0000, which binary tool output can
+/// carry, so plaintext that holds it is stored under the plaintext escape.
+fn json_contains_nul(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains('\0'),
+        Value::Array(items) => items.iter().any(json_contains_nul),
+        Value::Object(object) => object
+            .iter()
+            .any(|(key, item)| key.contains('\0') || json_contains_nul(item)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,12 +247,13 @@ mod tests {
             for value in [
                 json!({"argument":"private"}),
                 json!({JSON_KEY:"user content"}),
+                json!({"output":["binary\0output"], "key\0":1}),
                 Value::Null,
             ] {
                 let stored = cipher.seal_json("operation", &value).unwrap();
                 assert_eq!(cipher.open_json("operation", stored).unwrap(), value);
             }
-            for text in ["result", "appa-storage-v1:user content"] {
+            for text in ["result", "appa-storage-v1:user content", "binary\0output"] {
                 assert_eq!(
                     cipher
                         .open_text("result", cipher.seal_text("result", text).unwrap())
@@ -248,5 +262,27 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn plaintext_with_nul_is_escaped_and_other_plaintext_stays_verbatim() {
+        let plain = StorageCipher::Plain;
+        for value in [
+            json!("binary\0output"),
+            json!({"arguments":{"content":"a\0b"}}),
+            json!([{"type":"text","text":"\0"}]),
+            json!({"key\0":true}),
+        ] {
+            let stored = plain.seal_json("operation", &value).unwrap();
+            assert!(json_envelope(&stored), "{value} is escaped");
+            assert!(!serde_json::to_string(&stored).unwrap().contains("\\u0000"));
+            assert_eq!(plain.open_json("operation", stored).unwrap(), value);
+        }
+        let ordinary = json!({"output":"text with \\u0000 spelled out", "n":1});
+        assert_eq!(plain.seal_json("operation", &ordinary).unwrap(), ordinary);
+
+        let stored = plain.seal_text("result", "binary\0output").unwrap();
+        assert!(stored.starts_with(TEXT) && !stored.contains('\0'));
+        assert_eq!(plain.open_text("result", stored).unwrap(), "binary\0output");
+        assert_eq!(plain.seal_text("result", "ordinary").unwrap(), "ordinary");
     }
 }

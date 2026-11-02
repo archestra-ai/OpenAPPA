@@ -396,13 +396,15 @@ pub enum ToolOutcome {
     Indeterminate,
 }
 
-/// The tool output body, where available. `Unavailable` records a
-/// success whose body the runtime refused to carry (for example, over
-/// the byte cap — the cap is the runtime's to apply, so the adapter
-/// carries the body it saw).
+/// The tool output body, where available. `TooLarge` records a success
+/// whose body was over a byte cap, with the cap when the side that applied
+/// it knows it (the cap is the runtime's to apply, so an adapter carries the
+/// body it saw). `Unavailable` records a success the harness reported
+/// without a body.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OutcomeBody {
     Available(String),
+    TooLarge { limit_bytes: Option<usize> },
     Unavailable,
 }
 
@@ -496,8 +498,9 @@ pub enum HookEvent {
         /// The title the host shows for this session.
         title: Option<SessionTitle>,
     },
-    /// The actor finished a turn. Nothing it released is still running,
-    /// so a dispatch still open names a call the harness never ran.
+    /// The actor finished a turn. A dispatch still open names a call the
+    /// harness never ran, except an identified spawn whose subagent is still
+    /// running: a background subagent works past its parent's turn.
     TurnEnd { actor: Actor },
     ToolCall {
         actor: Actor,
@@ -553,6 +556,41 @@ pub enum HookEvent {
         child: Option<TrajectoryId>,
         value: Option<String>,
     },
+}
+
+/// Which operational fault a [`HookDecision::Refuse`] names: a closed
+/// class a host can route on without reading `detail`. The serde name is
+/// its one spelling, on the wire and in telemetry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalClass {
+    Storage,
+    UntrustedLog,
+    PolicyUnavailable,
+    /// The deployment published a later revision while this event was being decided.
+    /// Nothing was committed; the same event decides at the head when the host retries it.
+    PolicyMoved,
+    /// The trajectory family was opened before live policy revisions, and no policy of this
+    /// runtime decides it. A retry is refused again: the host opens a new family.
+    LegacyFamily,
+    InventoryRefused,
+    EngineInvariant,
+    Contended,
+    ResolutionDiverged,
+    AnnotationRefused,
+    UndeclaredTool,
+    UndeclaredSpawn,
+    PeerMessage,
+    Principal,
+    OutstandingCall,
+    CallIdReused,
+    TrajectoryEnded,
+    Trajectory,
+    Dispatch,
+    Remedy,
+    /// No prepared fork opens this child: the spawn never took.
+    SpawnNotTaken,
+    Spawn,
 }
 
 /// The runtime's answer to one hook event. The adapter renders each
@@ -615,14 +653,16 @@ pub enum HookDecision {
         text: String,
     },
     /// The runtime judged nothing for this event because of an
-    /// operational fault it names in `detail`: an annotator or store
-    /// that did not answer, a policy that would not load. Fail the one
+    /// operational fault it classes in `class` and names in `detail`: an
+    /// annotator or store that did not answer, a policy that would not
+    /// load. A host routes on `class`, never on `detail`. Fail the one
     /// event closed — the call does not run, the result is not admitted
     /// — and hand the model `detail` as the runtime's words, never as
     /// policy feedback: nothing was decided and no remedy is offered.
     /// The trajectory stays open; a harness ends it only when a
     /// lifecycle event is refused.
     Refuse {
+        class: RefusalClass,
         detail: String,
     },
 }

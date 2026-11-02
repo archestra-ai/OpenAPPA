@@ -18,7 +18,7 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::events::{AuditReader, WireEvent, record_event};
+use crate::events::{Reader, WireEvent};
 use crate::lint::check_policy;
 use crate::session::{CreateError, DemoSession, Sessions};
 use crate::systems::System;
@@ -340,7 +340,7 @@ async fn session_message(
             tx: &tx,
             records,
             audit_seen: 0,
-            audit: AuditReader::default(),
+            reader: Reader::default(),
             last_label: None,
         };
         let mut ticker = tokio::time::interval(PUMP_INTERVAL);
@@ -394,7 +394,7 @@ struct Pump<'a> {
     tx: &'a tokio::sync::mpsc::Sender<WireEvent>,
     records: tokio::sync::mpsc::Receiver<Recorded>,
     audit_seen: usize,
-    audit: AuditReader,
+    reader: Reader,
     last_label: Option<(String, String)>,
 }
 
@@ -413,11 +413,11 @@ impl Pump<'_> {
         }
         let mut events = self.session.approvals.drain_events();
         while let Ok(recorded) = self.records.try_recv() {
-            events.extend(record_event(&recorded));
+            events.extend(self.reader.record(&recorded));
         }
         if let Some(entries) = self.session.runtime.audit(&self.session.trajectory) {
             for entry in entries.iter().skip(self.audit_seen) {
-                events.extend(self.audit.event(entry));
+                events.extend(self.reader.audit(entry));
             }
             self.audit_seen = entries.len();
         }

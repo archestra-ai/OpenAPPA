@@ -92,6 +92,10 @@ mod process;
 
 pub(super) struct FileTracking {
     pub(super) initial: appa_engine::label::Label,
+    /// The deployment whose following families share the tracked workspaces.
+    pub deployment: String,
+    /// The key of the policy file the runtime opened with. A new workspace stream opens under
+    /// it.
     pub policy_key: String,
     pub protected_paths: Vec<PathBuf>,
     pub process_backend: Option<PathBuf>,
@@ -136,7 +140,6 @@ impl FileTracking {
         Ok(std::sync::Arc::new(FileStore::for_root(
             std::sync::Arc::clone(authority),
             root,
-            &self.policy_key,
             &self.initial,
         )?))
     }
@@ -615,23 +618,25 @@ max_body_bytes = 65536
     }
 
     #[test]
-    fn initialized_default_and_claude_code_battery_start_with_file_tracking() {
+    fn initialized_default_and_claude_code_battery_refuse_file_tracking() {
         let dir = tempfile::tempdir().unwrap();
-        let battery = dir.path().join("batteries/claude-code");
-        std::fs::create_dir_all(&battery).unwrap();
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let default =
             std::fs::read_to_string(repository.join("marketplace/plugins/claude-code/default.appa.toml")).unwrap();
-        std::fs::copy(
-            repository.join("marketplace/batteries/claude-code/appa.toml"),
-            battery.join("appa.toml"),
-        )
-        .unwrap();
+        for name in ["coding", "claude-code"] {
+            let battery = dir.path().join("batteries").join(name);
+            std::fs::create_dir_all(&battery).unwrap();
+            std::fs::copy(
+                repository.join("marketplace/batteries").join(name).join("appa.toml"),
+                battery.join("appa.toml"),
+            )
+            .unwrap();
+        }
         let config = dir.path().join("appa.toml");
         std::fs::write(
             &config,
             format!(
-                "include = [\"batteries/claude-code/appa.toml\"]\n\n{default}\n[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"\n"
+                "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n{default}\n[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"\n"
             ),
         )
         .unwrap();
@@ -643,9 +648,10 @@ max_body_bytes = 65536
         )
         .unwrap();
 
-        runtime
-            .with_file_tracking(Label::new(Trust::new(0), Audience::public()), config)
-            .expect("the shipped output-only sanitizer remains available with file tracking");
+        let Err(error) = runtime.with_file_tracking(Label::new(Trust::new(0), Audience::public()), config) else {
+            panic!("the shipped tool-input sanitizer `redact-for-public` must stop file tracking at startup");
+        };
+        assert!(error.to_string().contains("tool-input sanitizer"), "{error}");
     }
 
     #[test]
@@ -1223,6 +1229,129 @@ else:
         );
     }
 
+    /// A spawn whose child runs on past the parent's turn stays open, and the file tools
+    /// work beside it: neither the hook-checked call nor the bound one is taken for the
+    /// spawn, whose result comes under its own call id.
+    #[tokio::test]
+    async fn file_calls_run_beside_a_subagent_that_outlives_the_turn() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let id = TrajectoryId("cc:beside-subagent".into());
+        bind(&runtime, &id, dir.path());
+        let session = runtime.create_session(id.clone(), None).unwrap();
+        let spawn = || {
+            session.on_tool_call_identified(
+                ProposedCall {
+                    tool: "host/claude-code/Agent".to_string(),
+                    arguments: super::super::session::raw(serde_json::json!({"prompt": "Work on."})),
+                    cwd: None,
+                },
+                Some("toolu-spawn".into()),
+                Some(appa_runtime_api::SpawnKind::Single),
+                None,
+            )
+        };
+        let ToolCallDecision::Deny { offers, .. } = spawn().await.unwrap() else {
+            panic!("the spawn blocks until its return is declared");
+        };
+        let quoted = offers
+            .iter()
+            .find(|offer| offer.returns == Some(appa_runtime_api::OfferedReturn::AsSpoken))
+            .map(|offer| crate::api::OfferId(offer.id.clone()))
+            .expect("the block offers the return as spoken");
+        let offer = runtime.resolve_in(&id, &quoted).unwrap().0;
+        let declared = RemedyArguments {
+            label: Some(crate::engine::LabelSpelling::default()),
+            return_schema: None,
+        };
+        let RemedyDecision::Authorized { call: released } =
+            session.on_remedy(offer, declared, None, None).await.unwrap()
+        else {
+            panic!("the declaration approves the spawn");
+        };
+        let ToolCallDecision::Allow {
+            spawn: Some(binding), ..
+        } = session
+            .on_tool_call_identified(
+                released.clone().proposed(),
+                Some("toolu-spawn".into()),
+                Some(appa_runtime_api::SpawnKind::Single),
+                None,
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("the approved spawn releases its fork");
+        };
+        let child_id = TrajectoryId("cc:beside-subagent:child".into());
+        let subagent = session
+            .on_child_start(child_id.clone(), crate::api::SpawnRef::Binding(binding))
+            .unwrap();
+        session.on_turn_end().await.unwrap();
+        assert_eq!(
+            runtime.open_dispatches(&id, &id).len(),
+            1,
+            "the running subagent's spawn stays open"
+        );
+
+        // The hook checks the call under the host's id, and the MCP call runs it.
+        let write = call("Write", "beside-hook.txt");
+        assert!(matches!(
+            session
+                .on_tool_call_identified(write.clone(), Some("toolu-write".into()), None, None)
+                .await
+                .unwrap(),
+            ToolCallDecision::Allow { .. }
+        ));
+        assert_eq!(
+            execute(&runtime, &id, write).await,
+            FileReply::Value("file written".into())
+        );
+        // A bound connection proposes and runs its call itself, with no host id.
+        let actor = appa_runtime_api::Actor {
+            root: id.clone(),
+            child: None,
+        };
+        assert_eq!(
+            runtime
+                .execute_bound_file(
+                    &actor,
+                    FileTool::Write,
+                    serde_json::json!({"file_path": "beside-bound.txt", "content": "bound"}),
+                )
+                .await
+                .unwrap(),
+            FileReply::Value("file written".into())
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("work/beside-bound.txt")).unwrap(),
+            "bound"
+        );
+        assert_eq!(
+            runtime.open_dispatches(&id, &id).len(),
+            1,
+            "only the spawn is still open"
+        );
+
+        subagent.on_child_end(Some("done".into())).await.unwrap();
+        assert!(matches!(
+            session
+                .on_spawn_result_identified(
+                    released.proposed(),
+                    Some("toolu-spawn".into()),
+                    ToolOutcome::Success {
+                        body: OutcomeBody::Available("done".into()),
+                    },
+                    Some(child_id),
+                    Some("done".into()),
+                )
+                .await
+                .unwrap(),
+            crate::api::SpawnResultDecision::Return(crate::api::ChildReturnDecision::Returned { .. })
+        ));
+        assert!(runtime.open_dispatches(&id, &id).is_empty());
+    }
+
     async fn allow(runtime: &Runtime, id: &TrajectoryId, call: ProposedCall) {
         let session = runtime.session(id, id).unwrap();
         let decision = session.on_tool_call(call.clone(), false).await.unwrap();
@@ -1427,6 +1556,75 @@ else:
             version.content_dependencies
         );
         assert!(!version.content_dependencies.is_empty());
+    }
+
+    /// Publish an edit of the fixture policy: `from` replaced by `to`.
+    fn publish_an_edit(runtime: &Runtime, dir: &Path, from: &str, to: &str) {
+        let config = dir.join("policy.toml");
+        let edited = std::fs::read_to_string(&config).unwrap().replacen(from, to, 1);
+        std::fs::write(&config, edited).unwrap();
+        assert!(runtime.reload(Config::load(&config).unwrap()).unwrap().changed);
+    }
+
+    /// Publish an edit of the fixture policy that adds one unrelated tool.
+    fn publish_a_tool(runtime: &Runtime, dir: &Path) {
+        publish_an_edit(
+            runtime,
+            dir,
+            "[policy.deployment]",
+            "[[policy.tool]]\nname = \"mcp/github/list_issues\"\ndelta = {}\n[policy.deployment]",
+        );
+    }
+
+    fn refused_ledger(refused: &Result<ToolCallDecision, crate::api::EventError>) -> bool {
+        matches!(refused, Err(crate::api::EventError::RemedyArguments { detail }) if detail.contains("workspace ledger"))
+    }
+
+    #[tokio::test]
+    async fn a_workspace_ledger_serves_every_family_of_its_deployment_across_a_publish() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let before = TrajectoryId("opened-before-the-publish".into());
+        bind(&runtime, &before, dir.path());
+        runtime.create_session(before.clone(), None).unwrap();
+        allow(&runtime, &before, call("Read", "source.txt")).await;
+        success(&runtime, &before, call("Read", "source.txt")).await;
+
+        publish_a_tool(&runtime, dir.path());
+        let after = TrajectoryId("opened-after-the-publish".into());
+        bind(&runtime, &after, dir.path());
+        runtime.create_session(after.clone(), None).unwrap();
+        for id in [&before, &after] {
+            allow(&runtime, id, call("Read", "source.txt")).await;
+            success(&runtime, id, call("Read", "source.txt")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_workspace_ledger_refuses_a_family_judged_under_another_trust_chain() {
+        let dir = fixture();
+        let runtime = open(dir.path());
+        let id = TrajectoryId("following".into());
+        bind(&runtime, &id, dir.path());
+        runtime.create_session(id.clone(), None).unwrap();
+        allow(&runtime, &id, call("Read", "source.txt")).await;
+        success(&runtime, &id, call("Read", "source.txt")).await;
+
+        publish_an_edit(
+            &runtime,
+            dir.path(),
+            "version = 2",
+            "version = 2\ntrust_chain = [\"suspicious\", \"vendor\", \"trusted\"]",
+        );
+        let refused = runtime
+            .session(&id, &id)
+            .unwrap()
+            .on_tool_call(call("Read", "source.txt"), false)
+            .await;
+        assert!(
+            refused_ledger(&refused),
+            "the ledger's labels rank against the chain it opened under: {refused:?}"
+        );
     }
 
     #[tokio::test]
@@ -1759,8 +1957,18 @@ else:
         let id = TrajectoryId("host-owned-session".into());
         bind(&runtime, &id, dir.path());
         let session = runtime.create_session(id.clone(), None).unwrap();
+        let shell = ProposedCall {
+            tool: "host/claude-code/Bash".into(),
+            arguments: super::super::session::raw(serde_json::json!({"command": "cat source.txt"})),
+            cwd: None,
+        };
+        let refused = session.on_tool_call(shell, false).await;
+        assert!(
+            matches!(&refused, Err(EventError::RemedyArguments { detail })
+                if detail.contains("native filesystem and shell tools")),
+            "{refused:?}"
+        );
         for proposal in [
-            call("Bash", "source.txt"),
             call("Read", "../policy.toml"),
             call("Write", ".claude/settings.json"),
             call("Write", "CLAUDE.md"),

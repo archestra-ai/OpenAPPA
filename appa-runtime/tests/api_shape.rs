@@ -179,7 +179,7 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::ChildReturn { value } => {
             let _: String = value;
         }
-        HookDecision::Refuse { detail } => {
+        HookDecision::Refuse { detail, .. } => {
             let _: String = detail;
         }
     }
@@ -193,6 +193,11 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             body: OutcomeBody::Available(body),
         } => {
             let _: String = body;
+        }
+        ToolOutcome::Success {
+            body: OutcomeBody::TooLarge { limit_bytes },
+        } => {
+            let _: Option<usize> = limit_bytes;
         }
         ToolOutcome::Success {
             body: OutcomeBody::Unavailable,

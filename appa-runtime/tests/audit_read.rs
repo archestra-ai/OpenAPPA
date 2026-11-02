@@ -267,6 +267,67 @@ async fn a_released_call_records_its_label_its_effects_and_what_it_admitted() {
 }
 
 #[tokio::test]
+async fn each_entry_names_the_host_call_its_dispatch_ran_for() {
+    // Two calls to one tool are open at once and report out of order: only the
+    // host's call id tells their entries apart.
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = deployment(&dir).await;
+    for id in ["call-a", "call-b"] {
+        let decision = hooks::handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: actor(None),
+                call: call("publish"),
+                call_id: Some(id.to_string()),
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+        .await;
+        assert_eq!(decision, HookDecision::AllowCall { spawn: None }, "{id} is released");
+    }
+    for id in ["call-b", "call-a"] {
+        hooks::handle(
+            &runtime,
+            HookEvent::ToolResult {
+                actor: actor(None),
+                call: call("publish"),
+                call_id: Some(id.to_string()),
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available(format!("posted by {id}")),
+                },
+            },
+        )
+        .await;
+    }
+
+    let entries = runtime.audit(&root()).expect("the audit reads");
+    let named = |kind: fn(&AuditEvent) -> bool| -> Vec<Option<&str>> {
+        entries
+            .iter()
+            .filter(|entry| kind(&entry.event))
+            .map(|entry| entry.call_id.as_deref())
+            .collect()
+    };
+    assert_eq!(
+        named(|event| matches!(event, AuditEvent::Released { .. })),
+        [Some("call-a"), Some("call-b")],
+        "{entries:?}",
+    );
+    assert_eq!(
+        named(|event| matches!(event, AuditEvent::Closed { .. })),
+        [Some("call-b"), Some("call-a")],
+        "each close names the call that reported, not the oldest open one: {entries:?}",
+    );
+    assert_eq!(
+        named(|event| matches!(event, AuditEvent::Admitted { .. })),
+        [Some("call-b"), Some("call-a")],
+        "{entries:?}",
+    );
+}
+
+#[tokio::test]
 async fn a_blocked_call_leaves_no_entry() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let runtime = deployment(&dir).await;
@@ -368,6 +429,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
             .find(|entry| matches!(entry.event, AuditEvent::Forked { .. })),
         Some(&AuditEntry {
             trajectory: "audit-test:c1".to_string(),
+            call_id: None,
             event: AuditEvent::Forked {
                 parent: "audit-test".to_string(),
                 seed: label("internal", "public"),
