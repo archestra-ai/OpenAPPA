@@ -13,7 +13,8 @@ A multi-user deployment runs `context-multi-user.py` under a GitHub App
 installation token, which has no viewer: its answer has no `viewer` and
 no `viewer_permission`, names every person `"person": "github:<id>"`
 where this one names its `"login"`, and reads the token from
-APPA_PROVIDER_GITHUB_TOKEN alone.
+APPA_PROVIDER_GITHUB_TOKEN alone. Its answer depends on no one's login, so
+a call that sets its own GH_TOKEN or GITHUB_TOKEN is followed there.
 
 Two kinds of call are recognized. A `Bash` call is split into its simple
 commands; each `gh` call and `git push` names its repository by
@@ -81,6 +82,21 @@ PUSH_OPTIONS_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "-
 HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"}
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
 HARMLESS_VARIABLES = {"GH_REPO", "GH_PROMPT_DISABLED", "GH_PAGER", "GIT_PAGER", "PAGER", "GIT_TERMINAL_PROMPT", "NO_COLOR", "CI"}
+TOKEN_VARIABLES = {"GH_TOKEN", "GITHUB_TOKEN"}
+# Shell variables that git, gh, or the shell itself read, as they are or once exported.
+READ_PREFIXES = ("GIT_", "GH_", "GITHUB_", "XDG_", "LD_", "DYLD_")
+READ_VARIABLES = {"HOME", "PATH", "CDPATH"}
+# git config sections and variables that change which repository a push or the checkout's
+# remotes name (git-config(1), git-push(1)), or run commands in a push's place.
+MOVING_SECTIONS = {"remote", "url", "push", "branch", "include", "includeif"}
+MOVING_VARIABLES = {("core", "sshcommand"), ("core", "gitproxy"), ("core", "hookspath"), ("credential", "url")}
+CONFIG_READS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "-l", "--list", "--get-color", "--get-colorbool"}
+CONFIG_WRITES = {"--add", "--replace-all", "--unset", "--unset-all", "--rename-section", "--remove-section"}
+CONFIG_SWITCHES = {
+    "--global", "--system", "--local", "--worktree", "--includes", "--no-includes", "--show-origin", "--show-scope",
+    "--name-only", "-z", "--null", "--bool", "--int", "--bool-or-int", "--path", "--expiry-date", "--fixed-value", "--all",
+}
+CONFIG_OPTIONS_WITH_VALUE = {"-f", "--file", "--blob", "--type", "--default", "--comment", "--value", "--url"}
 
 GITHUB_URL = re.compile(r"^(?:https?://|git@|ssh://git@)github\.com[/:]([\w.-]+)/([\w.-]+?)(?:\.git)?(?:/(?:pull|issues)/(\d+))?(?:[/#?]|$)")
 API_PATH = re.compile(r"^(?:https://api\.github\.com)?/?repos/([\w.-]+)/([\w.-]+)(?:/(?:issues|pulls)/(\d+))?")
@@ -91,6 +107,8 @@ NUMBER = re.compile(r"^#?(\d+)$")
 BACKTICKS = re.compile(r"`([^`]*)")
 INVOCATION = re.compile(r"\b(git|gh)\s")
 MENTIONS_GIT = re.compile(r"\b(git|gh)\b")
+REFERENCE = re.compile(r"\$\{?[#!]?([A-Za-z_]\w*)")
+HEREDOC = re.compile(r"<<(-?)[ \t]*([^\s;&|<>()]+)")
 
 # gh commands that act on one repository: `--repo`/`-R`, `GH_REPO`, or the checkout.
 CHECKOUT_COMMANDS = {"api", "browse", "cache", "issue", "label", "pr", "release", "repo", "ruleset", "run", "secret", "variable", "workflow"}
@@ -133,6 +151,71 @@ NUMBER_ARGUMENTS = ("pullNumber", "pull_number", "issue_number", "issueNumber")
 
 class Unfollowable(Exception):
     """The command reaches GitHub in a way this provider cannot establish."""
+
+
+def login_of(account):
+    return account.get("login")
+
+
+def github_id_of(account):
+    """`github:<databaseId>` for a user or a bot; `None` for a deleted
+    account, a mannequin, or any other actor the query reads no id for."""
+    match account.get("databaseId"):
+        case int() as number if not isinstance(number, bool) and number > 0:
+            return f"github:{number}"
+        case _:
+            return None
+
+
+class Deployment(Enum):
+    """Whose token the provider holds, which decides how the answer names a
+    person and where the token comes from.
+
+    A single-user deployment's token is a person's: the answer names the
+    viewer, the viewer's permission, and every person by `login`. A
+    multi-user deployment's token is a GitHub App installation's, which
+    has no viewer: every person is `person`, `github:<id>`, and the token
+    comes from the deployment alone."""
+
+    SINGLE_USER = "single-user"
+    MULTI_USER = "multi-user"
+
+    @property
+    def has_viewer(self):
+        return self is Deployment.SINGLE_USER
+
+    @property
+    def key(self):
+        match self:
+            case Deployment.SINGLE_USER:
+                return "login"
+            case Deployment.MULTI_USER:
+                return "person"
+
+    def person(self, account):
+        match self:
+            case Deployment.SINGLE_USER:
+                return login_of(account)
+            case Deployment.MULTI_USER:
+                return github_id_of(account)
+
+    def token(self):
+        match self:
+            case Deployment.SINGLE_USER:
+                return resolve_token(timeout=within_budget(GH_TIMEOUT_SECONDS))
+            case Deployment.MULTI_USER:
+                return env_token()
+
+    @property
+    def harmless_variables(self):
+        """Variables a git or gh call may carry without changing a fact the answer reports.
+        The repository comes from the command or the checkout, never from the token, so the
+        call's own token matters only to an answer that names the viewer."""
+        match self:
+            case Deployment.SINGLE_USER:
+                return HARMLESS_VARIABLES
+            case Deployment.MULTI_USER:
+                return HARMLESS_VARIABLES | TOKEN_VARIABLES
 
 
 # How faithfully a listing's query repeats the call:
@@ -261,9 +344,60 @@ def url_target(word, directory):
     return Target("slug", f"{match.group(1)}/{match.group(2)}", directory, number)
 
 
+@dataclass(frozen=True)
+class Moves:
+    """A `git config` or `git remote` call that changes where a push, or the
+    checkout's own repository, goes."""
+
+    change: str
+
+
+def moving(name):
+    """Whether a git config key or section changes where a push or the checkout's remotes go."""
+    section, _, rest = name.partition(".")
+    section, variable = section.lower(), rest.rpartition(".")[2].lower()
+    if not rest:
+        return section in MOVING_SECTIONS | {moved for moved, _ in MOVING_VARIABLES}
+    return section in MOVING_SECTIONS or (section, variable) in MOVING_VARIABLES
+
+
+def config_change(arguments):
+    """What one `git config` call changes: `None` for a read or for settings that move
+    no push, such as a credential helper or `user.*`."""
+    names, mode, words = [], None, iter(arguments)
+    for word in words:
+        match word:
+            case _ if "$" in word or "`" in word:
+                raise Unfollowable(f"git config {word} is computed when the command runs")
+            case "-e" | "--edit" | "edit" if not names:
+                raise Unfollowable("git config --edit changes settings this provider cannot read")
+            case "get" | "list" if not names and mode is None:
+                mode = "read"
+            case "set" | "unset" | "rename-section" | "remove-section" if not names and mode is None:
+                mode = "write"
+            case _ if word in CONFIG_READS:
+                mode = mode or "read"
+            case _ if word in CONFIG_WRITES:
+                mode = "write"
+            case _ if word in CONFIG_SWITCHES or word.partition("=")[0] in CONFIG_OPTIONS_WITH_VALUE and "=" in word:
+                pass
+            case _ if word in CONFIG_OPTIONS_WITH_VALUE:
+                next(words, None)
+            case _ if word.startswith("-"):
+                raise Unfollowable(f"git config {word} is an option this provider cannot read")
+            case _:
+                names.append(word)
+    if mode == "read" or mode is None and len(names) < 2:
+        return None
+    if any(name.partition(".")[0].lower() == "alias" for name in names):
+        raise Unfollowable("git config alias.* defines a git command this provider cannot follow")
+    moved = next((name for name in names if moving(name)), None)
+    return Moves(f"git config {moved}") if moved else None
+
+
 def git_target(words, directory):
-    """Where one `git` call pushes, or `None` for a call that pushes
-    nothing on GitHub."""
+    """Where one `git` call pushes, a `Moves` for a call that changes where
+    a push goes, or `None` for a call that pushes nothing on GitHub."""
     index, unfollowable = 0, None
     while index < len(words) and words[index].startswith("-"):
         option = words[index]
@@ -275,11 +409,13 @@ def git_target(words, directory):
             unfollowable = option
             index += option in GIT_OPTIONS_WITH_VALUE
         index += 1
+    if index < len(words):
+        computed(words[index])
     match words[index : index + 2]:
         case ["config", *_]:
-            raise Unfollowable("git config changes where a later push goes")
+            return config_change(words[index + 1 :])
         case ["remote", change] if change in REMOTE_CHANGES:
-            raise Unfollowable(f"git remote {change} changes where a later push goes")
+            return Moves(f"git remote {change}")
         case ["push", *_]:
             pass
         case _:
@@ -435,12 +571,85 @@ def gh_targets(words, environment, directory):
     return [Target("slug" if slug else "checkout", slug, directory, number, listed)]
 
 
-def bash_targets(command, cwd):
+def body_of(command, index, delimiter, tabs):
+    """A here-document's body from `index`, and where its delimiter line ends; an
+    unterminated body runs to the end, as in bash."""
+    lines = []
+    while index < len(command):
+        end = command.find("\n", index)
+        end = len(command) if end < 0 else end
+        line, index = command[index:end], end + 1
+        if (line.lstrip("\t") if tabs else line) == delimiter:
+            break
+        lines.append(line)
+    return "\n".join(lines), index
+
+
+def without_heredocs(command):
+    """The command with each here-document's body left out: it is text a command reads,
+    not shell. A body naming git or gh is refused, as the command reading it may run it."""
+    kept, pending, quote, arithmetic, index = [], [], None, 0, 0
+    while index < len(command):
+        character = command[index]
+        match character:
+            case "\\" if quote != "'":
+                kept.append(command[index : index + 2])
+                index += 2
+                continue
+            case "'" | '"' if quote in (None, character):
+                quote = None if quote else character
+            case _ if quote:
+                pass
+            case "#" if not kept or kept[-1][-1] in " \t\n;&|()":
+                end = command.find("\n", index)
+                index = len(command) if end < 0 else end
+                continue
+            case "(" | ")" if command.startswith(character * 2, index) and (character == "(" or arithmetic):
+                arithmetic += 1 if character == "(" else -1
+                kept.append(character * 2)
+                index += 2
+                continue
+            case "<" if not arithmetic and not command.startswith("<<<", index) and (heredoc := HEREDOC.match(command, index)):
+                pending.append((re.sub(r"[\"'\\]", "", heredoc.group(2)), bool(heredoc.group(1))))
+                kept.append(heredoc.group(0))
+                index = heredoc.end()
+                continue
+            case "\n" if pending:
+                kept.append(character)
+                index += 1
+                for delimiter, tabs in pending:
+                    body, index = body_of(command, index, delimiter, tabs)
+                    if MENTIONS_GIT.search(body):
+                        raise Unfollowable("a here-document hands a command text naming git or gh, which it may run")
+                pending = []
+                continue
+        kept.append(character)
+        index += 1
+    return "".join(kept)
+
+
+def unsafe_settings(words, environment, assigned, deployment):
+    """Refuses a git or gh call whose environment, or a shell variable the command set,
+    may change what the answer reports. A variable git and gh do not read matters only
+    where the call expands it, which this provider does not do."""
+    harmless = deployment.harmless_variables
+    read = {
+        name
+        for name in assigned - (harmless - {"GH_REPO"})
+        if not name.isidentifier() or name.startswith(READ_PREFIXES) or name in READ_VARIABLES
+    }
+    expanded = {name for word in words for name in REFERENCE.findall(word)} & assigned
+    if settings := read | expanded | (environment.keys() - harmless):
+        raise Unfollowable(f"{', '.join(sorted(settings))} may change which repository or login a call uses")
+
+
+def bash_targets(command, cwd, deployment=Deployment.SINGLE_USER):
     """Every place on GitHub the command reaches. A subshell or an unquoted command
     substitution is followed inside; its directory and settings end where it closes."""
+    command = without_heredocs(command)
     if any(MENTIONS_GIT.search(inner) for inner in BACKTICKS.findall(command)):
         raise Unfollowable("a command substitution runs a git or gh call this provider cannot follow")
-    targets, exported, assigned, directory, scopes = [], {}, set(), cwd, []
+    targets, moves, pushed, exported, assigned, directory, scopes = [], [], False, {}, set(), cwd, []
     for words in segments_of(command):
         match words:
             case "(":
@@ -483,12 +692,16 @@ def bash_targets(command, cwd):
             continue
         if program in ("git", "gh") and program != words[0]:
             raise Unfollowable(f"{words[0]} may not be the {program} this provider follows")
-        if program in ("git", "gh") and (settings := assigned | environment.keys() - HARMLESS_VARIABLES):
-            raise Unfollowable(f"{', '.join(sorted(settings))} may change which repository or login a call uses")
+        if program in ("git", "gh"):
+            unsafe_settings(words, environment, assigned, deployment)
         match program:
             case "git":
-                target = git_target(words[1:], directory)
-                targets += [target] if target else []
+                match git_target(words[1:], directory):
+                    case Moves() as moved:
+                        moves.append(moved)
+                    case Target() as target:
+                        targets.append(target)
+                        pushed = True
             case "gh":
                 targets += gh_targets(words[1:], environment, directory)
             case "cd" | "pushd" if len(words) == 2:
@@ -508,6 +721,9 @@ def bash_targets(command, cwd):
                 or any(os.path.basename(word) in ("git", "gh") or INVOCATION.search(word) for word in words)
             ):
                 raise Unfollowable(f"{program} runs a git or gh call this provider cannot follow")
+    # A loop can run a change after the push it precedes, so order does not matter.
+    if moves and (pushed or any(target.kind != "slug" for target in targets)):
+        raise Unfollowable(f"{moves[0].change} changes where a push or the checkout's repository goes")
     return list(dict.fromkeys(targets))
 
 
@@ -592,7 +808,7 @@ def mcp_target(tool, arguments):
     return Target("slug", f"{owner}/{repo}", None, number, listed(arguments) if listed else None)
 
 
-def call_targets(artifact):
+def call_targets(artifact, deployment=Deployment.SINGLE_USER):
     """What the proposed call reaches, `[]` for a call that reaches nothing
     on GitHub."""
     tool = artifact.get("tool")
@@ -608,7 +824,7 @@ def call_targets(artifact):
     if not isinstance(command, str) or not MENTIONS_GIT.search(command):
         return []
     cwd = artifact.get("cwd")
-    return bash_targets(command, cwd if isinstance(cwd, str) else None)
+    return bash_targets(command, cwd if isinstance(cwd, str) else None, deployment)
 
 
 # ---------------------------------------------------------------- checkouts
@@ -749,60 +965,6 @@ def reached(targets):
 
 
 # ---------------------------------------------------------------- GitHub
-
-def login_of(account):
-    return account.get("login")
-
-
-def github_id_of(account):
-    """`github:<databaseId>` for a user or a bot; `None` for a deleted
-    account, a mannequin, or any other actor the query reads no id for."""
-    match account.get("databaseId"):
-        case int() as number if not isinstance(number, bool) and number > 0:
-            return f"github:{number}"
-        case _:
-            return None
-
-
-class Deployment(Enum):
-    """Whose token the provider holds, which decides how the answer names a
-    person and where the token comes from.
-
-    A single-user deployment's token is a person's: the answer names the
-    viewer, the viewer's permission, and every person by `login`. A
-    multi-user deployment's token is a GitHub App installation's, which
-    has no viewer: every person is `person`, `github:<id>`, and the token
-    comes from the deployment alone."""
-
-    SINGLE_USER = "single-user"
-    MULTI_USER = "multi-user"
-
-    @property
-    def has_viewer(self):
-        return self is Deployment.SINGLE_USER
-
-    @property
-    def key(self):
-        match self:
-            case Deployment.SINGLE_USER:
-                return "login"
-            case Deployment.MULTI_USER:
-                return "person"
-
-    def person(self, account):
-        match self:
-            case Deployment.SINGLE_USER:
-                return login_of(account)
-            case Deployment.MULTI_USER:
-                return github_id_of(account)
-
-    def token(self):
-        match self:
-            case Deployment.SINGLE_USER:
-                return resolve_token(timeout=within_budget(GH_TIMEOUT_SECONDS))
-            case Deployment.MULTI_USER:
-                return env_token()
-
 
 ACCOUNT = "__typename ... on User { databaseId } ... on Bot { databaseId }"
 
@@ -1042,7 +1204,7 @@ def context_of(consult, deployment=Deployment.SINGLE_USER):
     artifact = consult.get("artifact")
     if not isinstance(artifact, dict):
         raise ValueError("the consult carries no artifact")
-    place = reached(call_targets(artifact))
+    place = reached(call_targets(artifact, deployment))
     if place is None:
         return None
     payload = graphql(deployment.token(), query_of(deployment), variables_of(*place))
