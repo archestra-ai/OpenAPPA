@@ -736,15 +736,18 @@ impl ExternalServices {
         if !status.is_success() {
             // Whatever the body holds, the outcome is the status; the body only says why.
             let settled = std::time::Instant::now();
-            let said = diagnostics.as_ref().and_then(Diagnostics::error_line);
             let mut body = Vec::new();
-            let mut whole = false;
-            if said.is_none() || seen.is_some() {
-                let read = tokio::time::timeout(RECORD_READ_GRACE, read_body(&mut response, cap, &mut body)).await;
-                whole = matches!(read, Ok(Ok(())));
-            }
-            // A body cut short is kept for the record only, as is a truncated header.
-            let detail = said.or_else(|| whole.then(|| refusal_detail(&body)).flatten());
+            let read = tokio::time::timeout(RECORD_READ_GRACE, read_body(&mut response, cap, &mut body)).await;
+            // A body cut short is kept for the record only, as is a truncated header. The
+            // header may describe the external rather than the refusal, so the body leads.
+            let said = [
+                matches!(read, Ok(Ok(()))).then(|| refusal_detail(&body)).flatten(),
+                diagnostics.as_ref().and_then(Diagnostics::error_line),
+            ];
+            let detail = match said {
+                [Some(body), Some(header)] if body != header => Some(format!("{body}; {header}")),
+                [body, header] => body.or(header),
+            };
             if let Some(seen) = seen {
                 seen.settled = Some(settled);
                 seen.raw_response = Some(body);
@@ -1988,12 +1991,12 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     /// A refusal carries what the external said about it, redacted: a `url` external's
-    /// diagnostics header over its body, the body's error envelope without one, and the
-    /// last line a command wrote to stderr.
+    /// body's error envelope followed by its diagnostics header, and the last line a
+    /// command wrote to stderr.
     #[tokio::test]
     async fn a_refusal_carries_the_externals_redacted_reason() {
         let said = "github context: GH_TOKEN=ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8 may change the login";
-        let redacted = Some("github context: GH_TOKEN=[redacted-secret] may change the login".to_string());
+        let redacted = "github context: GH_TOKEN=[redacted-secret] may change the login";
         let url = stub(Router::new().route(
             "/",
             post(move || async move {
@@ -2009,7 +2012,9 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             resolve(&services(Some(url), 2000, 65536)).await,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                 status: 502,
-                detail: redacted.clone()
+                detail: Some(format!(
+                    "Battery helper failed: the helper exited with status 1; {redacted}"
+                ))
             }),
         );
 
@@ -2039,7 +2044,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 resolve_command(&command_services(dir.path(), &script, budget_ms(), 1024)).await,
                 ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                     status: 1,
-                    detail: redacted
+                    detail: Some(redacted.to_string())
                 }),
             );
         }
@@ -2496,7 +2501,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             transcribed,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                 status: 503,
-                detail: Some("trace=7f3a".to_string())
+                detail: Some("upstream overloaded; trace=7f3a".to_string())
             })
         );
         assert_eq!(transcribed, plain, "transcribing changes no outcome");
@@ -2685,9 +2690,9 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     /// A failed `url` consult whose body stalls part-way: the record keeps the part read, and
-    /// the consult waits out only the grace, not the client's timeout.
+    /// the consult, recorded or not, waits out only the grace, not the client's timeout.
     #[tokio::test]
-    async fn a_stalled_non_success_body_costs_a_recorded_consult_only_the_grace() {
+    async fn a_stalled_non_success_body_costs_a_consult_only_the_grace() {
         const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
         let consult = authority_consult("security", serde_json::json!({}));
         let services_at = |url: String| {
@@ -2701,9 +2706,11 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             .consult_transcribed(&consult, None, None)
             .await;
         let elapsed = started.elapsed();
+        let started = std::time::Instant::now();
         let plain = services_at(raw_stub(STALLED, true).await)
             .consult(&consult, None, None)
             .await;
+        let plain_elapsed = started.elapsed();
 
         assert_eq!(
             recorded,
@@ -2717,6 +2724,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         assert!(
             elapsed < RECORD_READ_GRACE + Duration::from_millis(900),
             "the stalled body stretched the consult to {elapsed:?}"
+        );
+        assert!(
+            plain_elapsed < RECORD_READ_GRACE + Duration::from_millis(900),
+            "the stalled body stretched the plain consult to {plain_elapsed:?}"
         );
         let transcript = transcript.expect("a url consult is transcribed");
         assert_eq!(transcript.raw_response.as_deref(), Some(&b"partial"[..]));

@@ -346,7 +346,8 @@ async fn run_command_process(
     match status.code().and_then(|code| u16::try_from(code).ok()) {
         Some(status) => Err(NoAnswerReason::NonSuccess { status, detail }),
         // A signal or another platform-specific status establishes no useful failure
-        // classification. The stderr tail remains confined to logs and the recorder.
+        // classification, so unlike an exit code's, its stderr line stays in logs and the
+        // recorder.
         None => Err(NoAnswerReason::Transport),
     }
 }
