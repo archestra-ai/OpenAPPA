@@ -81,13 +81,17 @@ REMOTE_CHANGES = {"add", "set-url", "rename", "remove", "rm", "set-head"}
 PUSH_OPTIONS_WITH_VALUE = {"-o", "--push-option", "--receive-pack", "--exec", "--repo"}
 HARMLESS_GIT_OPTIONS = {"--no-pager", "--paginate", "-P", "--no-replace-objects"}
 GIT_OPTIONS_WITH_VALUE = {"-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--exec-path"}
-HARMLESS_VARIABLES = {"GH_REPO", "GH_PROMPT_DISABLED", "GH_PAGER", "GIT_PAGER", "PAGER", "GIT_TERMINAL_PROMPT", "NO_COLOR", "CI"}
+HARMLESS_VARIABLES = {"GH_REPO", "GH_PROMPT_DISABLED", "GIT_TERMINAL_PROMPT", "NO_COLOR", "CI"}
+# A pager runs its value as a command; only these values run nothing but a pager.
+PAGER_VARIABLES = {"GH_PAGER", "GIT_PAGER", "PAGER"}
+INERT_PAGERS = {"", "cat", "less", "more"}
 TOKEN_VARIABLES = {"GH_TOKEN", "GITHUB_TOKEN"}
 # Shell variables that git, gh, or the shell itself read, as they are or once exported.
 READ_PREFIXES = ("GIT_", "GH_", "GITHUB_", "XDG_", "LD_", "DYLD_")
 READ_VARIABLES = {
     "HOME", "PATH", "CDPATH", "PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV", "http_proxy", "https_proxy", "all_proxy",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "CURL_CA_BUNDLE",
+    "PAGER", "EDITOR", "VISUAL", "BROWSER", "SSH_ASKPASS", "LESSOPEN", "LESSCLOSE",
 }
 # git config sections and variables that change which repository or host a push or the
 # checkout's remotes reach (git-config(1), git-push(1)), or run commands in a push's place.
@@ -118,6 +122,10 @@ RUNS_GIT = re.compile(r"(?<![\w.-])(git|gh)(?![\w@.:/-])")
 GIT_FILE = re.compile(r"(?<![\w-])\.git(?![\w-])|\.gitconfig\b|\bgit/config\b")
 REFERENCE = re.compile(r"\$\{?[#!]?([A-Za-z_]\w*)")
 HEREDOC = re.compile(r"<<(-?)[ \t]*")
+# A redirection operator as the lexer splits it (`>`, `>>`, `>&`, `&>`, `<<`, `>|`) and a
+# file descriptor number written against one (`2>`, `1>&2`, `<&3`).
+REDIRECTION = re.compile(r"[<>&]*[<>][<>&]*\|?")
+DESCRIPTOR = re.compile(r"\d+(?=[<>])")
 
 # gh commands that act on one repository: `--repo`/`-R`, `GH_REPO`, or the checkout.
 CHECKOUT_COMMANDS = {"api", "browse", "cache", "issue", "label", "pr", "release", "repo", "ruleset", "run", "secret", "variable", "workflow"}
@@ -304,7 +312,7 @@ def segments_of(command):
                     segment.append(token)
                 previous, redirected = token, False
                 continue
-            if not array and set(token) <= set("<>&") and set(token) & set("<>"):
+            if not array and REDIRECTION.fullmatch(token):
                 redirected = True
                 continue
             redirected = False
@@ -439,9 +447,16 @@ def git_target(words, directory):
         elif option not in HARMLESS_GIT_OPTIONS:
             unfollowable = option
             index += option in GIT_OPTIONS_WITH_VALUE
+            # The value, given apart (`-c k=v`) or attached (`-ck=v`, `--git-dir=d`).
+            match option:
+                case _ if option in GIT_OPTIONS_WITH_VALUE:
+                    value = words[index] if index < len(words) else ""
+                case _ if option.startswith("-c") and not option.startswith("--"):
+                    value = option.removeprefix("-c")
+                case _:
+                    value = option.partition("=")[2]
             # A setting such as core.pager runs its value in the call it applies to.
-            value = words[index] if index < len(words) else option
-            if option.startswith("--config-env") or value.lower().startswith("alias.") or runs_git(value) or "$" in value or "`" in value:
+            if option.startswith("--config") or value.lower().startswith("alias.") or runs_git(value) or "$" in value or "`" in value:
                 raise Unfollowable(f"git {option} {value} sets what the call runs, which this provider cannot follow")
         index += 1
     if index < len(words):
@@ -679,6 +694,15 @@ def without_heredocs(command):
                 end = command.find("\n", index)
                 index = len(command) if end < 0 else end
                 continue
+            # A descriptor number belongs to its redirection, not to the command's words.
+            case _ if (
+                character.isdigit()
+                and not arithmetic
+                and (not kept or kept[-1][-1] in " \t\n;&|()")
+                and (descriptor := DESCRIPTOR.match(command, index))
+            ):
+                index = descriptor.end()
+                continue
             case "(" | ")" if command.startswith(character * 2, index) and (character == "(" or arithmetic):
                 arithmetic += 1 if character == "(" else -1
                 kept.append(character * 2)
@@ -731,7 +755,10 @@ def unsafe_settings(words, environment, assigned, deployment):
         if not name.isidentifier() or name.startswith(READ_PREFIXES) or name in READ_VARIABLES
     }
     expanded = {name for word in words for name in REFERENCE.findall(word)} & assigned
-    if settings := read | expanded | (environment.keys() - harmless):
+    carried = {
+        name for name, value in environment.items() if name not in harmless and not (name in PAGER_VARIABLES and value in INERT_PAGERS)
+    }
+    if settings := read | expanded | carried:
         raise Unfollowable(f"{', '.join(sorted(settings))} may change which repository or login a call uses")
 
 

