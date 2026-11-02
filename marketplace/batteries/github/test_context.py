@@ -398,6 +398,9 @@ class Unfollowable(unittest.TestCase):
             "echo \"$('gh' pr view 12 --repo acme/private)\"",
             "(cd /private; case x in x) git push origin;; esac)",
             "f() { cd /other; }; gh pr view 12",
+            "f ( ) { cd /other; }; git push origin",
+            "f () { cd /other; }; git push origin",
+            "(time -p case x in x) cd /other;; esac); git push origin",
             "function f { cd /other; }; gh pr view 12",
             'if [ -n "$CODE_REVIEW_GITHUB_TOKEN" ]; then export GH_TOKEN="$CODE_REVIEW_GITHUB_TOKEN"; fi\n'
             "gh api repos/archestra-ai/archestra/commits/cd4138ba/check-runs",

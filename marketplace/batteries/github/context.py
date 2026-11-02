@@ -181,7 +181,7 @@ def segments_of(command):
     lexer = shlex.shlex(command, posix=True, punctuation_chars=OPERATORS)
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    segment, array = [], False
+    segment, array, previous = [], False, ""
     try:
         for token in lexer:
             if not set(token) <= set(OPERATORS):
@@ -189,6 +189,7 @@ def segments_of(command):
                     raise Unfollowable("a quoted command substitution runs a git or gh call this provider cannot follow")
                 if not array:
                     segment.append(token)
+                previous = token
                 continue
             if "()" in token and segment and not array and not segment[-1].endswith("="):
                 raise Unfollowable(f"{segment[-1]}() defines a function whose calls this provider cannot follow")
@@ -200,12 +201,16 @@ def segments_of(command):
                         raise Unfollowable("an array's values run commands this provider cannot follow")
                     case "(" if segment and segment[-1].endswith("="):
                         array = True
+                    # Bash has no empty subshell: `( )` can only define a function.
+                    case ")" if previous == "(":
+                        raise Unfollowable("( ) defines a function whose calls this provider cannot follow")
                     case _:
                         if segment:
                             yield segment
                         segment = []
                         if character in "()":
                             yield character
+                previous = character
     except ValueError as error:
         raise Unfollowable(f"the command does not parse: {error}") from None
     if array:
@@ -440,11 +445,10 @@ def bash_targets(command, cwd):
         environment = dict(exported)
         while words and words[0] in PREFIXES:
             words = words[1:]
-        match words[:1]:
-            case ["case"] if scopes:
-                raise Unfollowable("a case inside a subshell closes patterns this provider cannot tell from the subshell")
-            case ["function"]:
-                raise Unfollowable("function defines a function whose calls this provider cannot follow")
+        if scopes and "case" in words:
+            raise Unfollowable("a case inside a subshell closes patterns this provider cannot tell from the subshell")
+        if words[:1] == ["function"]:
+            raise Unfollowable("function defines a function whose calls this provider cannot follow")
         exporting = words[:1] == ["export"]
         if exporting:
             words = words[1:]
