@@ -51,6 +51,7 @@ import re
 import shlex
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -829,16 +830,30 @@ def graphql(token, query, variables):
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=within_budget(TIMEOUT_SECONDS)) as response:
-            # The socket timeout bounds each read; the budget bounds them all.
-            body = bytearray()
-            while chunk := response.read1(64 * 1024):
-                body += chunk
-                within_budget(TIMEOUT_SECONDS)
+    limit = within_budget(TIMEOUT_SECONDS)
+    outcome = {}
+
+    def exchange():
+        try:
+            with urllib.request.urlopen(request, timeout=limit) as response:
+                outcome["body"] = response.read()
+        except Exception as error:  # noqa: BLE001 - re-raised by the caller
+            outcome["error"] = error
+
+    # A socket timeout bounds each read only; the join bounds the whole exchange, and a
+    # daemon thread still blocked in it ends with the helper.
+    worker = threading.Thread(target=exchange, daemon=True)
+    worker.start()
+    worker.join(limit)
+    match outcome:
+        case {"body": body}:
             return json.loads(body)
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"GitHub GraphQL failed: {error.code}") from error
+        case {"error": urllib.error.HTTPError() as error}:
+            raise RuntimeError(f"GitHub GraphQL failed: {error.code}") from error
+        case {"error": error}:
+            raise error
+        case _:
+            raise RuntimeError(f"GitHub GraphQL did not answer within {limit:.1f} s")
 
 
 def connection(node, name):

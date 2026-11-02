@@ -259,12 +259,12 @@ pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
     tail.within(Duration::from_secs(1)).await
 }
 
-/// `parent` without the runtime's own namespace. A consult child starts from exactly this,
-/// its environment cleared first: filtering one read of the environment, rather than
-/// removing names from the live one, leaves no gap for a variable set in between.
 /// The variable a command reads the milliseconds it has to answer from.
 pub(crate) const CONSULT_TIMEOUT_VARIABLE: &str = "APPA_CONSULT_TIMEOUT_MS";
 
+/// `parent` without the runtime's own namespace. A consult child starts from exactly this,
+/// its environment cleared first: filtering one read of the environment, rather than
+/// removing names from the live one, leaves no gap for a variable set in between.
 pub(crate) fn without_runtime_variables(
     parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {
