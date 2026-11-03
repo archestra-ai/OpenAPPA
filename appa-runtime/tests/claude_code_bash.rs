@@ -184,6 +184,8 @@ async fn a_command_naming_a_dotenv_file_narrows_and_one_merely_containing_env_do
         "cat .env.local",
         "cat apps/web/.env.production",
         r#"cat ".env""#,
+        r#"cat ".env.local""#,
+        r#"docker compose --env-file=".env.production" up"#,
         r#"source "$ROOT/.env""#,
         "set -a; source .env; set +a",
     ] {
@@ -214,6 +216,7 @@ async fn a_command_naming_a_dotenv_file_narrows_and_one_merely_containing_env_do
         r"Get-Content .\.env",
         r"Get-Content platform\.env.local",
         r#"Get-Content ".\.env""#,
+        r#"Get-Content ".env.production""#,
     ] {
         let decision = propose(&runtime, powershell(command)).await;
         assert!(

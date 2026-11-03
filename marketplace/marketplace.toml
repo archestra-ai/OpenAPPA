@@ -16,7 +16,7 @@ digest = "sha256:df31d0373f8bd220e5dcb2581904a63fc323cf3db261f4d34088b707950e63c
 
 [packages.battery.coding]
 path = "batteries/coding"
-digest = "sha256:3712abc468ed725873c08699f8ed4eb501ac24a49c54d0955dd960751c302cdd"
+digest = "sha256:6822d5f77b3e7eb6ad8214168a65751df75f8261d0b9ce55d30ee730e5730a7b"
 
 [packages.battery.databricks]
 path = "batteries/databricks"

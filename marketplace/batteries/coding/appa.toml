@@ -22,7 +22,7 @@ version = 2
 # A dotenv file is matched as a path, not a substring: `.env` after a space,
 # `/` or `=`, and at the end of the command, before a space, or before
 # `.<suffix>` (`.env.local`, also `.env.example`); also a double-quoted
-# `".env"` or `"$DIR/.env"`, and `source .env;`. `os.environ`,
+# `".env"`, `".env.local"` or `"$DIR/.env"`, and `source .env;`. `os.environ`,
 # `process.env.X` and `.envrc` reach the Annotator below.
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env)"
@@ -71,6 +71,11 @@ tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env.*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -346,6 +351,11 @@ tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env.*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
