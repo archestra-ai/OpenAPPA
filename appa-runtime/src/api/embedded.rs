@@ -537,13 +537,13 @@ impl Runtime {
         }) {
             return Err(refused("a peer read tool must declare an empty delta"));
         }
-        if registry.sanitizers().any(|sanitizer| {
-            sanitizer.on.output
-                && variants
-                    .iter()
-                    .any(|declaration| sanitizer.scope.covers(declaration.tags()))
-        }) {
-            return Err(refused("a peer read tool must not be in an output sanitizer's scope"));
+        // The engine offers an output sanitizer only on a confined result, so an unconfined
+        // read delivers the stored body under its source label whatever sanitizers are scoped.
+        if variants
+            .iter()
+            .any(|declaration| registry.profile().confines_result(declaration.name()))
+        {
+            return Err(refused("a peer read tool's result must not be confined"));
         }
         Ok(())
     }
