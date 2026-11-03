@@ -387,4 +387,47 @@ if [ "$verbose" = true ]; then printf '[{"type":"system"},%s]' "$envelope"; else
         assert_eq!(answer, Ok(serde_json::json!({"ruling": "approve", "reason": "ok"})));
         assert_process_gone(recorded_pid(&pid_file).await).await;
     }
+
+    /// The mandate admits `suspicious` and `trusted`; the out-of-mandate answer is complete
+    /// and well formed, and differs only in a trust rank the declaration does not list.
+    #[tokio::test]
+    async fn only_an_answer_inside_the_mandate_is_stored() {
+        let declaration = AnnotationDeclaration {
+            hint: None,
+            deployment_hint: None,
+            context_hints: Default::default(),
+            inputs: vec![],
+            trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
+            audiences: appa_engine::registry::AudienceVocabulary::parse_entries(&["internal".to_string()])
+                .expect("a fixture vocabulary parses"),
+            attention_marks: vec![],
+            effects: vec![],
+        };
+        let prompt = ModelPrompt {
+            system: "rule".to_string(),
+            input: "{}".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+        let stored = async |trust: &str| {
+            let answer = serde_json::json!({
+                "delta": {"trust": trust},
+                "forwards": {},
+                "requires": {"history": [], "attention": []},
+                "emits": [],
+            });
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let envelope = serde_json::json!({"type": "result", "structured_output": answer});
+            let command =
+                crate::test_support::fake_claude(dir.path(), &format!("cat > /dev/null\nprintf '%s' '{envelope}'"));
+            let config = ClaudeCode {
+                command,
+                ..ClaudeCode::default()
+            };
+            let backend = ClaudeCodeBackend::new(&config, 65_536, &crate::external::ConsultGates::per_runtime());
+            assert_eq!(backend.annotate(&prompt, &declaration, "judge", None).await, Ok(answer));
+            backend.verdicts().answers.len()
+        };
+        assert_eq!(stored("suspicious").await, 1, "an admitted answer is stored");
+        assert_eq!(stored("root").await, 0, "an answer outside the mandate is not stored");
+    }
 }

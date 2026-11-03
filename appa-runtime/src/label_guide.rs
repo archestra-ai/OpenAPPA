@@ -642,7 +642,7 @@ pub(crate) const EXAMPLES: [Example; 35] = [
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "npm pkg set 'dependencies.left-pad=^1.3.0'", "description": "Add the dependency to the manifest"}}"#,
-        delta_audience: ResultAudience::Internal,
+        delta_audience: ResultAudience::Public,
         delta_trust: ResultTrust::Trusted,
         requires_audience: RequiredAudience::None,
         requires_trusted: true,
@@ -650,7 +650,7 @@ pub(crate) const EXAMPLES: [Example; 35] = [
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "npm pkg set description='Retry with backoff'", "description": "Fix the package description"}}"#,
-        delta_audience: ResultAudience::Internal,
+        delta_audience: ResultAudience::Public,
         delta_trust: ResultTrust::Trusted,
         requires_audience: RequiredAudience::None,
         requires_trusted: false,
@@ -658,7 +658,7 @@ pub(crate) const EXAMPLES: [Example; 35] = [
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "sed -i 's|^FROM .*|FROM ghcr.io/acme/base@sha256:4f1c|' Dockerfile", "description": "Switch the base image"}}"#,
-        delta_audience: ResultAudience::Internal,
+        delta_audience: ResultAudience::Public,
         delta_trust: ResultTrust::Trusted,
         requires_audience: RequiredAudience::None,
         requires_trusted: true,
@@ -1045,6 +1045,9 @@ mod tests {
         for chosen_code in [install, manifest_write, image_reference, selected_image, build_arg] {
             assert_eq!(chosen_code.requires_audience, RequiredAudience::None);
             assert!(chosen_code.requires_trusted);
+        }
+        for silent_edit in [manifest_write, metadata_write, image_reference] {
+            assert_eq!(silent_edit.delta_audience, ResultAudience::Public);
         }
         for no_chosen_code in [locked_install, metadata_write, pull, project_image] {
             assert_eq!(no_chosen_code.requires_audience, RequiredAudience::None);
