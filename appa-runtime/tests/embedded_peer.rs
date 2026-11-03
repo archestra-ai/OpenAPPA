@@ -761,6 +761,34 @@ async fn a_peer_read_refuses_a_non_top_delta_and_a_confined_result() {
         matches!(refused, Err(EmbeddedPeerError::Refused(_))),
         "a confined read could be sanitized in place of the captured label, got {refused:?}"
     );
+
+    let (_dir, selected) = scrubbed_runtime(
+        r#"confined_results = ["mcp/demo/read"]
+
+[[policy.tool]]
+name = "mcp/*/read"
+delta = {}"#,
+    );
+    start(&selected).await;
+    assert!(matches!(
+        release(&selected, None, "send", "send-1").await,
+        HookDecision::AllowCall { .. }
+    ));
+    let notice = selected
+        .send_embedded_peer(&family(), &family(), &family(), None, "send-1", "secret")
+        .expect("the send records");
+    let refused = selected
+        .read_embedded_peer(
+            &actor(None),
+            "read-1",
+            &notice.id,
+            call("mcp/demo/read", json!({"message_id": notice.id.as_str()})),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(EmbeddedPeerError::Refused(_))),
+        "a read confined by its concrete name under a selector rule is refused, got {refused:?}"
+    );
 }
 
 #[tokio::test]
