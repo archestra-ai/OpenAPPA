@@ -2225,7 +2225,7 @@ impl Runtime {
                 artifact: crate::consult::AnnotationArtifact { args, context },
             },
         };
-        let outcome = deployment.externals.consult(&consult, None, None).await;
+        let outcome = deployment.externals.consult_afresh(&consult).await;
         let admitted = matches!(
             &outcome,
             crate::external::ConsultOutcome::Answer(answer)
