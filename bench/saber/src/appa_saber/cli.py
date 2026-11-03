@@ -5,7 +5,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from appa_saber.dataset import DEFAULT_CHECKOUT, PILOT, REPOSITORY, REVISION, ROOT, SEQUENCING, tasks
+from appa_saber.dataset import DEFAULT_CHECKOUT, DIAGNOSTIC_PILOT, PILOT, REPOSITORY, REVISION, ROOT, SEQUENCING, tasks
 
 
 def main() -> None:
@@ -13,7 +13,7 @@ def main() -> None:
     parser.add_argument("command", choices=["setup", "list", "plan", "preflight", "run"])
     parser.add_argument("--checkout", type=Path, default=DEFAULT_CHECKOUT)
     parser.add_argument("--package-mirrors", choices=["upstream", "standard"], default="upstream")
-    parser.add_argument("--scope", choices=["full", "sequencing", "pilot"], default="pilot")
+    parser.add_argument("--scope", choices=["full", "sequencing", "pilot", "diagnostic-pilot"], default="pilot")
     parser.add_argument("--method", choices=["standard", "chaos-monkey"], default="standard")
     parser.add_argument("--arms", nargs="+", choices=["appa", "auto"], default=["appa", "auto"])
     parser.add_argument("--model", default="claude-sonnet-5")
@@ -75,7 +75,15 @@ def main() -> None:
     if args.command == "list":
         print(
             json.dumps(
-                [{"id": t["id"], "pilot": t["id"] in PILOT, "rationale": SEQUENCING.get(t["id"])} for t in selected],
+                [
+                    {
+                        "id": t["id"],
+                        "pilot": t["id"] in PILOT,
+                        "diagnostic_pilot": t["id"] in DIAGNOSTIC_PILOT,
+                        "rationale": SEQUENCING.get(t["id"]),
+                    }
+                    for t in selected
+                ],
                 indent=2,
             )
         )
