@@ -4610,6 +4610,13 @@ fn block_feedback(
                  outside this session's readers fails that check unless a remedy covers it."
             ));
         }
+        if !impact.per_call.is_empty() {
+            reasons.push(
+                "Tools labeled per call, such as shell commands, are not judged here: after accepting, their calls \
+                 may also need an authority's sign-off."
+                    .to_string(),
+            );
+        }
     }
     if planned.plans.iter().any(|plan| match plan {
         RemedyPlan::Executable(plan) => plan.return_step().is_some(),
@@ -5814,18 +5821,24 @@ mod tests {
                 .map(|tool| appa_engine::value::ToolName::new(*tool))
                 .collect()
         };
-        let impact = |sign_off: &[&str], blocked: &[&str], recipient_checked: &[&str]| {
+        let impact_with = |sign_off: &[&str], blocked: &[&str], recipient_checked: &[&str], per_call: &[&str]| {
             Some(NarrowingImpact {
                 sign_off: names(sign_off),
                 blocked: names(blocked),
                 recipient_checked: names(recipient_checked),
+                per_call: names(per_call),
             })
+        };
+        let impact = |sign_off: &[&str], blocked: &[&str], recipient_checked: &[&str]| {
+            impact_with(sign_off, blocked, recipient_checked, &[])
         };
         for (impact, added) in [
             (impact(&["post"], &[], &[]), 1),
             (impact(&[], &["send_mail"], &[]), 1),
             (impact(&[], &[], &["send_mail", "reply"]), 1),
             (impact(&["post"], &["drain"], &["send_mail"]), 3),
+            (impact_with(&[], &[], &[], &["Bash"]), 1),
+            (impact_with(&["post"], &[], &[], &["Bash", "*"]), 2),
         ] {
             let with = reasons(impact.clone());
             assert_eq!(with.len(), without.len() + added, "{impact:?}");

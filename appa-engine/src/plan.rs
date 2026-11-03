@@ -267,7 +267,7 @@ pub struct PlannedBlock {
     /// Kept out of `plans` so the emptiness assertion stays about remedies.
     pub fork_advice: Option<ForkAdvice>,
     /// Advice, never a remedy: what accepting the block's narrowing does to the rest of the
-    /// policy's argument-free tools. `None` when nothing narrows or nothing gets worse.
+    /// policy's argument-free tools. `None` when nothing narrows, or nothing gets worse and no tool is labeled per call.
     pub narrowing_impact: Option<NarrowingImpact>,
 }
 
@@ -276,11 +276,14 @@ pub struct PlannedBlock {
 /// lose every authority and input sanitizer that could clear them. `recipient_checked` names the tools
 /// with a declared variant that checks recipients from its arguments against an audience this
 /// narrowing reduces; they are not judged, since the verdict depends on the recipients.
+/// `per_call` names each contract an Annotator labels per call, the wildcard `*` among them, once
+/// each; they are not judged either, since their labels exist only per call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarrowingImpact {
     pub sign_off: Vec<ToolName>,
     pub blocked: Vec<ToolName>,
     pub recipient_checked: Vec<ToolName>,
+    pub per_call: Vec<ToolName>,
 }
 
 /// Advice, never a remedy, on delegating a blocked call to a child. The planner decides which
@@ -506,6 +509,7 @@ fn narrowing_impact(
         sign_off: Vec::new(),
         blocked: Vec::new(),
         recipient_checked: Vec::new(),
+        per_call: Vec::new(),
     };
     let audience_narrows = narrowing.to.audience != narrowing.from.audience;
     for name in registry.tool_names() {
@@ -538,8 +542,18 @@ fn narrowing_impact(
             Standing::Clear => {}
         }
     }
-    (!impact.sign_off.is_empty() || !impact.blocked.is_empty() || !impact.recipient_checked.is_empty())
-        .then_some(impact)
+    for tool in registry.semantic_tools().map(|(_, tool)| tool) {
+        if let ToolDeclaration::Annotated { name, .. } = tool
+            && !impact.per_call.contains(name)
+        {
+            impact.per_call.push(name.clone());
+        }
+    }
+    (!impact.sign_off.is_empty()
+        || !impact.blocked.is_empty()
+        || !impact.recipient_checked.is_empty()
+        || !impact.per_call.is_empty())
+    .then_some(impact)
 }
 
 /// How a call's return declaration enters its plans.
@@ -3230,6 +3244,66 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowing_marks_the_tools_an_annotator_labels_per_call() {
+        let fetch = ToolAnnotation {
+            delta: Delta {
+                trust: None,
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "insider",
+                )]))),
+            },
+            ..plain_tool("fetch")
+        };
+        let annotated = |name: &str| ToolDeclaration::Annotated {
+            name: ToolName::new(name),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: crate::names::AnnotatorName::new("classifier"),
+        };
+        let with = |others: Vec<ToolDeclaration>| {
+            build(RegistryConfig {
+                tools: std::iter::once(ToolDeclaration::Declared(fetch.clone()))
+                    .chain(others)
+                    .collect(),
+                annotators: vec![crate::registry::AnnotatorDeclaration {
+                    name: crate::names::AnnotatorName::new("classifier"),
+                    trust: None,
+                    audiences: None,
+                    marks: None,
+                    effects: None,
+                }],
+                ..config(vec![])
+            })
+        };
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        assert_eq!(
+            plan_of(&with(vec![]), &log, &call("fetch", json!({}))).narrowing_impact,
+            None,
+            "a policy of fixed labels only has nothing the narrowing leaves unjudged"
+        );
+        assert_eq!(
+            plan_of(
+                &with(vec![annotated("shell"), annotated("mcp/*/search"), annotated("*")]),
+                &log,
+                &call("fetch", json!({}))
+            )
+            .narrowing_impact,
+            Some(NarrowingImpact {
+                sign_off: vec![],
+                blocked: vec![],
+                recipient_checked: vec![],
+                per_call: vec![
+                    ToolName::new("shell"),
+                    ToolName::new("mcp/*/search"),
+                    ToolName::new("*")
+                ],
+            }),
+            "the annotated tool, the annotated name selector and the wildcard are labeled per call, so the impact marks them unjudged"
+        );
+    }
+
+    #[test]
     fn a_narrowing_names_the_tools_it_moves_to_sign_off_or_blocked() {
         let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
         let insider = || DeclaredAudience::restricted([ReaderId::new("insider")]);
@@ -3313,6 +3387,7 @@ mod tests {
                 sign_off: vec![ToolName::new("post")],
                 blocked: vec![ToolName::new("drain"), ToolName::new("read")],
                 recipient_checked: vec![ToolName::new("post"), ToolName::new("reply")],
+                per_call: vec![],
             }),
             "post needs desk; read's org variant has no remedy, and drain's consumed is committed by accepting \
              fetch; share and notify (an input hop through scrub), gated (a call to approve) and reply (its arguments) are \
@@ -3409,6 +3484,7 @@ mod tests {
                 sign_off: vec![ToolName::new("lookup"), ToolName::new("post")],
                 blocked: vec![],
                 recipient_checked: vec![],
+                per_call: vec![],
             }),
             "audit's org variant is blocked before and after, so its other variant's move is no news"
         );
@@ -3418,6 +3494,7 @@ mod tests {
                 sign_off: vec![ToolName::new("post")],
                 blocked: vec![],
                 recipient_checked: vec![],
+                per_call: vec![],
             }),
             "under a trusted floor lookup's drop to suspicious never settles, before or after"
         );

@@ -68,11 +68,16 @@ claude-code` includes both. A rule no map binds is inactive.
   (`.claude/settings*`) and hooks (`.claude/hooks/`), its MCP server list
   (`.mcp.json`), and the deployment's policy (`appa/appa.toml`,
   `appa/batteries/`). Every other path takes the session's label as it is.
-- **fetch_url, web_search** — A page or search result is a `suspicious`
-  source. A fetch URL is a `public` sink, except that a fetch from a listed
-  documentation host keeps the session's label. A search, through
-  `web_search` or a Google search URL, requires no audience: the query goes
-  only to the search provider.
+- **fetch_url, web_search** — A fetch from a listed documentation host keeps
+  the session's label. Any other fetch goes to the
+  `claude-code.fetch-requirements` Annotator: a page that one accountable
+  publisher controls, such as vendor docs or a release index, is `trusted`;
+  a page anyone can write to, such as a forum answer or a package README, is
+  `suspicious`; and data the URL or body carries requires the readers it
+  reaches. The root's `[policy.deployment] hint` can mark a source trusted
+  or suspicious either way. A search result is a `suspicious` source. A
+  search, through `web_search` or a Google search URL, requires no audience:
+  the query goes only to the search provider.
 
 The Annotators run the local `claude` command (`builtin = "claude-code"`); on
 Windows it must resolve to `claude.exe`. An Annotator reads the client's call
