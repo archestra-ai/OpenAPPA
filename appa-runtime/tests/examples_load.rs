@@ -101,6 +101,32 @@ fn with_the_coding_battery(dir: &Path) {
 /// them: the default's rules run before the battery's.
 #[cfg(unix)]
 fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
+    composed_with_the_battery_and(dir, "")
+}
+
+/// The composed deployment with the fetch Annotator replaced by a script that labels every
+/// fetch as a public sink returning `suspicious` data.
+#[cfg(unix)]
+fn composed_with_a_suspicious_fetch(dir: &tempfile::TempDir) -> Config {
+    std::fs::write(
+        dir.path().join("fetch-annotator.sh"),
+        "cat > /dev/null\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"trust\":\"suspicious\"},\"requires\":{\"audience\":{\"contains\":\"public\"},\"history\":[],\"attention\":[]},\"emits\":[]}}'",
+    )
+    .expect("the annotator script writes");
+    composed_with_the_battery_and(
+        dir,
+        r#"
+[[policy.annotator]]
+name = "claude-code.fetch-requirements"
+
+[externals.annotators."claude-code.fetch-requirements"]
+command = ["/bin/sh", "fetch-annotator.sh"]
+"#,
+    )
+}
+
+#[cfg(unix)]
+fn composed_with_the_battery_and(dir: &tempfile::TempDir, root_tail: &str) -> Config {
     with_the_coding_battery(dir.path());
     let battery_dir = dir.path().join("batteries/claude-code");
     std::fs::create_dir_all(&battery_dir).expect("the battery directory is created");
@@ -117,7 +143,9 @@ fn composed_with_the_battery(dir: &tempfile::TempDir) -> Config {
     let root = dir.path().join("appa.toml");
     std::fs::write(
         &root,
-        format!("include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n{default}"),
+        format!(
+            "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n\n{default}{root_tail}"
+        ),
     )
     .expect("the initialized config includes the battery");
 
@@ -142,6 +170,7 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         .expect("the composed tools are an array");
     for (name, annotator) in [
         ("host/claude-code/Bash", "claude-code.bash-requirements"),
+        ("host/claude-code/WebFetch", "claude-code.fetch-requirements"),
         (
             "host/claude-code/Bash(command:*git push*)",
             "claude-code.bash-repository-requirements",
@@ -332,7 +361,7 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 #[tokio::test]
 async fn the_battery_judges_relative_credentials_and_offers_review_for_public_release() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let config = composed_with_the_battery(&dir);
+    let config = composed_with_a_suspicious_fetch(&dir);
     let runtime =
         Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"));
     assert_eq!(
@@ -635,7 +664,7 @@ command = ["/bin/sh", "annotator.sh"]
 #[tokio::test]
 async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let config = composed_with_the_battery(&dir);
+    let config = composed_with_a_suspicious_fetch(&dir);
     let runtime =
         Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"));
     assert_eq!(

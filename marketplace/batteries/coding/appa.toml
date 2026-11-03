@@ -1746,12 +1746,17 @@ delta = { trust = "suspicious" }
 name = "tool/coding/fetch_url(url:https://google.com/search?*)"
 delta = { trust = "suspicious" }
 
-# Web pages are authored outside the session, and the URL leaves it for any
-# host: a public sink and an untrusted source at once.
+# Any other URL is labeled per call: whether anyone can write the page decides
+# its trust, and what the URL or body carries decides who it reaches. The
+# deployment hint can mark a source trusted or suspicious either way.
+[[policy.annotator]]
+name = "claude-code.fetch-requirements"
+builtin = "claude-code"
+
 [[policy.tool]]
 name = "tool/coding/fetch_url"
-requires = { audience = { contains = ["public"] } }
-delta = { trust = "suspicious" }
+description = "Fetches one URL and returns its content."
+annotator = "claude-code.fetch-requirements"
 
 # The search provider sees the query, as Google does above; strangers write
 # the results.
