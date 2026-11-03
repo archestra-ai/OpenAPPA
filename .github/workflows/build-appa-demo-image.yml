@@ -53,7 +53,7 @@ jobs:
 
       - name: Authenticate to Artifact Registry
         if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
+        uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
           service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
