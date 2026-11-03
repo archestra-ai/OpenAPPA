@@ -421,18 +421,25 @@ pub(crate) const REQUIRES_TRUST_CRITERIA: RequiresTrustCriteria = RequiresTrustC
         "The call acts outside the operator's machine or runs code fetched from outside it: ",
         "it sends data to a person, even a colleague, writes it where people can ",
         "read it, even an internal repository, ticket or channel, publishes it to a service ",
-        "outside the operator's organization, or installs or runs a package or script that the ",
-        "call names for download. Pushing commits, filing a report, installing a named package ",
-        "and running a downloaded script all count. An injected instruction that fires this ",
-        "call moves data or code outward, or chooses the code that runs."
+        "outside the operator's organization, installs or runs a package, script or container ",
+        "image that the call selects, or writes a dependency manifest, lockfile or ",
+        "package-manager config, which decides the code the next install fetches and runs: ",
+        "a redirect into one, `sed -i` on one, `npm pkg set`, or `uv add`, `cargo add` or ",
+        "`npm install <name>` updating one. Pushing commits, filing a report, installing a named ",
+        "package, running a registry image, cached or not, and running a downloaded script all ",
+        "count. An injected instruction that fires this call moves data or code outward, or ",
+        "chooses the code that runs."
     ),
     false_: concat!(
         "The call only reads, searches or fetches, whatever its query or URL carries: what it ",
-        "discloses is bounded by `requires.audience`. Or its effect stays on the operator's ",
-        "machine, even if it overwrites or deletes local files. Code the call does not fetch ",
-        "stays on this machine: the project's own tools, tests and scripts, a program the agent ",
-        "wrote, or an install the project's lockfile fixes. Re-running it after an injection ",
-        "changes nothing outside this machine."
+        "discloses is bounded by `requires.audience`; pulling an image runs none of its code. ",
+        "Or its effect stays on the operator's machine, even if it overwrites or deletes local ",
+        "files other than a dependency manifest, lockfile or package-manager config. Code the ",
+        "call does not select stays on this machine: the project's own tools, tests and scripts, ",
+        "a program the agent wrote, an install the project's lockfile fixes and that leaves the ",
+        "manifest as it is, or an image built from the project's own Dockerfile or pinned in ",
+        "project files the call does not change. Re-running it after an injection changes ",
+        "nothing outside this machine."
     ),
 };
 
@@ -459,7 +466,7 @@ impl Example {
 
 /// Written from the contract examples in the docs, not from observed calls. Each `call` is
 /// the example's `{"tool", "arguments"}` object, with the `context` it came with, if any.
-pub(crate) const EXAMPLES: [Example; 28] = [
+pub(crate) const EXAMPLES: [Example; 32] = [
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "grep -rn 'fn resolve' src/ | head -20", "description": "Find the resolver"}}"#,
         delta_audience: ResultAudience::Internal,
@@ -627,6 +634,38 @@ pub(crate) const EXAMPLES: [Example; 28] = [
         requires_audience: RequiredAudience::None,
         requires_trusted: false,
         why: "the lockfile names what to download and nothing of the trajectory's is sent; an injection cannot choose the code, and the workspace's own install scripts run over the local checkout",
+    },
+    Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "npm pkg set 'dependencies.left-pad=^1.3.0'", "description": "Add the dependency to the manifest"}}"#,
+        delta_audience: ResultAudience::Internal,
+        delta_trust: ResultTrust::Trusted,
+        requires_audience: RequiredAudience::None,
+        requires_trusted: true,
+        why: "nothing leaves the machine, but the manifest decides what the next install fetches and runs, so writing it chooses that code",
+    },
+    Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "docker pull python:3.12-slim", "description": "Fetch the base image"}}"#,
+        delta_audience: ResultAudience::Public,
+        delta_trust: ResultTrust::Trusted,
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "the image name only names what to retrieve; pulling runs none of the image's code, and docker's own progress comes back",
+    },
+    Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "docker run --rm -v \"$PWD\":/src -w /src python:3.12-slim python -m pytest -q", "description": "Run the suite in a container"}}"#,
+        delta_audience: ResultAudience::Internal,
+        delta_trust: ResultTrust::Trusted,
+        requires_audience: RequiredAudience::None,
+        requires_trusted: true,
+        why: "the call selects the registry image whose code runs, as a named package install does, whether or not it is cached; the tests are the project's own and report like any build",
+    },
+    Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "docker build -t widget-test . && docker run --rm widget-test", "description": "Build and run the project's test image"}}"#,
+        delta_audience: ResultAudience::Internal,
+        delta_trust: ResultTrust::Trusted,
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "the image is built from the project's own Dockerfile, which the call does not change, so the project fixes the code that runs",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "npm publish --access public", "description": "Release the package"}}"#,
@@ -967,9 +1006,18 @@ mod tests {
             assert_eq!(disclosing_read.requires_audience, RequiredAudience::Public);
             assert!(!disclosing_read.requires_trusted);
         }
-        assert_eq!(install.requires_audience, RequiredAudience::None);
-        assert!(install.requires_trusted);
-        assert!(!locked_install.requires_trusted);
+        let manifest_write = example("npm pkg set").expect("the manifest-write example");
+        let pull = example("docker pull").expect("the image-pull example");
+        let selected_image = example("docker run --rm -v").expect("the registry-image example");
+        let project_image = example("docker build").expect("the project-image example");
+        for chosen_code in [install, manifest_write, selected_image] {
+            assert_eq!(chosen_code.requires_audience, RequiredAudience::None);
+            assert!(chosen_code.requires_trusted);
+        }
+        for no_chosen_code in [locked_install, pull, project_image] {
+            assert_eq!(no_chosen_code.requires_audience, RequiredAudience::None);
+            assert!(!no_chosen_code.requires_trusted);
+        }
         let send_by_url = example("sendMessage").expect("the send-by-URL example");
         for outward in [push, publish, send_by_url] {
             assert_eq!(outward.requires_audience, RequiredAudience::Public);
