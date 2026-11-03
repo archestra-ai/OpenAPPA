@@ -18,8 +18,69 @@ version = 2
 
 # A command naming a credential path narrows the session to `self`, the
 # requester. The `credentials` tag records why a rule is here.
+#
+# A dotenv file is matched as a path, not a substring: `.env` after a space,
+# `/` or `=`, and at the end of the command, before a space, or before
+# `.<suffix>` (`.env.local`, also `.env.example`); also a double-quoted
+# `".env"` or `"$DIR/.env"`, and `source .env;`. `os.environ`,
+# `process.env.X` and `.envrc` reach the Annotator below.
 [[policy.tool]]
-name = "tool/coding/shell(command:*.env*)"
+name = "tool/coding/shell(command:* .env)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .env *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .env.*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env.*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env.*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:* .env;*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -224,7 +285,82 @@ annotator = "claude-code.bash-requirements"
 # `Get-Secret` are named here too, and `/proc/*/environ` for a WSL command. A
 # selector matches case-sensitively, so another spelling reaches the Annotator.
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.env*)'
+name = 'tool/coding/powershell(command:* .env)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env"*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 

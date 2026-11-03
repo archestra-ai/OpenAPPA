@@ -164,6 +164,73 @@ async fn a_powershell_command_naming_a_credential_narrows_with_either_path_separ
     }
 }
 
+/// A dotenv file is matched where the command names it as a path; an identifier or a
+/// file name that only contains `.env` is the Annotator's.
+#[tokio::test]
+async fn a_command_naming_a_dotenv_file_narrows_and_one_merely_containing_env_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir).await;
+
+    for command in [
+        "cat .env",
+        "cat ./.env",
+        "cat platform/.env",
+        "source .env",
+        ". .env",
+        "wc -l < .env",
+        "cat .env | grep KEY",
+        "docker run --env-file .env alpine",
+        "docker compose --env-file=.env up",
+        "cat .env.local",
+        "cat apps/web/.env.production",
+        r#"cat ".env""#,
+        r#"source "$ROOT/.env""#,
+        "set -a; source .env; set +a",
+    ] {
+        let decision = propose(&runtime, bash(command)).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
+        );
+    }
+
+    for command in [
+        "grep -n os.environ Tiltfile",
+        "grep process.env install.mjs",
+        "rg -n process.env.API_URL src",
+        "grep -rn import.meta.env web/src",
+        "cat .envrc",
+        r#"rg -n "process.env" src"#,
+        "docker run --env-file prod.vars alpine",
+    ] {
+        let decision = propose(&runtime, bash(command)).await;
+        assert!(
+            matches!(decision, HookDecision::Refuse { .. }),
+            "{command} is the Annotator's: {decision:?}"
+        );
+    }
+
+    for command in [
+        r"Get-Content .\.env",
+        r"Get-Content platform\.env.local",
+        r#"Get-Content ".\.env""#,
+    ] {
+        let decision = propose(&runtime, powershell(command)).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
+        );
+    }
+
+    for command in ["Select-String process.env install.mjs", "Get-Content .envrc"] {
+        let decision = propose(&runtime, powershell(command)).await;
+        assert!(
+            matches!(decision, HookDecision::Refuse { .. }),
+            "{command} is the Annotator's: {decision:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_monitor_call_is_the_annotators_whether_it_runs_a_command_or_opens_a_socket() {
     let dir = tempfile::tempdir().unwrap();
