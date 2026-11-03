@@ -46,6 +46,8 @@ pub(crate) struct ClaudeCodeBackend {
 
 /// The most annotation answers one backend keeps; the oldest is dropped first.
 const VERDICT_CACHE_ENTRIES: usize = 512;
+/// The longest answer it keeps, serialized; an ordinary annotation is well under 1 KiB.
+const VERDICT_CACHE_ANSWER_BYTES: usize = 16 * 1024;
 
 /// Annotation answers this backend already gave, keyed by [`ClaudeCodeBackend::verdict_key`].
 #[derive(Default)]
@@ -117,7 +119,7 @@ impl ClaudeCodeBackend {
             return Ok(answer);
         }
         let answer = self.consult(prompt, name, seen).await?;
-        if admitted(&answer) {
+        if admitted(&answer) && answer.to_string().len() <= VERDICT_CACHE_ANSWER_BYTES {
             self.verdicts().insert(key, answer.clone());
         }
         Ok(answer)
