@@ -1,7 +1,10 @@
 //! The `claude-code` builtin: one isolated, tool-less `claude` process per consult.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+
 use crate::config::ClaudeCode;
-use crate::consult::ModelPrompt;
+use crate::consult::{AnnotationAnswer, AnnotationDeclaration, ModelPrompt};
 use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
 use appa_policy::AnnotatorBuiltin;
 
@@ -38,6 +41,31 @@ pub(crate) struct ClaudeCodeBackend {
     config: ClaudeCode,
     max_body_bytes: usize,
     gates: ConsultGates,
+    verdicts: Arc<Mutex<VerdictCache>>,
+}
+
+/// The most annotation answers one backend keeps; the oldest is dropped first.
+const VERDICT_CACHE_ENTRIES: usize = 512;
+
+/// Annotation answers this backend already gave, keyed by [`ClaudeCodeBackend::verdict_key`].
+#[derive(Default)]
+struct VerdictCache {
+    answers: HashMap<[u8; 32], serde_json::Value>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl VerdictCache {
+    fn insert(&mut self, key: [u8; 32], answer: serde_json::Value) {
+        if self.answers.insert(key, answer).is_some() {
+            return;
+        }
+        self.order.push_back(key);
+        if self.order.len() > VERDICT_CACHE_ENTRIES
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.answers.remove(&oldest);
+        }
+    }
 }
 
 impl ClaudeCodeBackend {
@@ -46,7 +74,53 @@ impl ClaudeCodeBackend {
             config: config.clone(),
             max_body_bytes,
             gates: gates.clone(),
+            verdicts: Arc::default(),
         }
+    }
+
+    /// Everything that reaches the model: the executable, the model, and the rendered prompt.
+    fn verdict_key(&self, prompt: &ModelPrompt) -> [u8; 32] {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        let schema = prompt.schema.to_string();
+        for part in [
+            self.config.command.as_os_str().as_encoded_bytes(),
+            self.config.model.as_bytes(),
+            prompt.system.as_bytes(),
+            prompt.input.as_bytes(),
+            schema.as_bytes(),
+        ] {
+            hasher.update((part.len() as u64).to_le_bytes());
+            hasher.update(part);
+        }
+        hasher.finalize().into()
+    }
+
+    fn verdicts(&self) -> std::sync::MutexGuard<'_, VerdictCache> {
+        self.verdicts.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// An annotation consult answered from an identical earlier prompt where one gave an answer
+    /// inside `declaration`'s mandate, and otherwise asked, keeping only such an answer.
+    pub(crate) async fn annotate(
+        &self,
+        prompt: &ModelPrompt,
+        declaration: &AnnotationDeclaration,
+        name: &str,
+        seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
+        let admitted = |answer: &serde_json::Value| AnnotationAnswer::from_wire(answer, declaration).is_ok();
+        let key = self.verdict_key(prompt);
+        let recalled = self.verdicts().answers.get(&key).cloned();
+        if let Some(answer) = recalled.filter(admitted) {
+            tracing::debug!(name, "claude consult answered from an identical earlier prompt");
+            return Ok(answer);
+        }
+        let answer = self.consult(prompt, name, seen).await?;
+        if admitted(&answer) {
+            self.verdicts().insert(key, answer.clone());
+        }
+        Ok(answer)
     }
 
     /// One consult. The deadline covers the permit wait and the subprocess: queueing behind

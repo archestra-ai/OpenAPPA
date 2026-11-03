@@ -128,6 +128,14 @@ impl Diagnostics {
     }
 }
 
+/// Whether a `claude-code` annotation consult may be answered from an identical earlier prompt.
+#[derive(Debug, Clone, Copy)]
+enum Recall {
+    Recalled,
+    #[cfg(any(test, feature = "daemon"))]
+    Afresh,
+}
+
 /// What a recorded transport saw of one consult beside its outcome.
 #[derive(Debug)]
 pub(crate) struct Transcript {
@@ -498,7 +506,15 @@ impl ExternalServices {
         elicitation: Option<&Elicitation>,
         ruling: Option<Ruling>,
     ) -> ConsultOutcome {
-        self.dispatch(consult, elicitation, ruling, None).await
+        self.dispatch(consult, elicitation, ruling, None, Recall::Recalled)
+            .await
+    }
+
+    /// [`ExternalServices::consult`] that never answers from an identical earlier prompt, so
+    /// `appa runtime annotate --repeat` measures the model rather than the cache.
+    #[cfg(any(test, feature = "daemon"))]
+    pub(crate) async fn consult_afresh(&self, consult: &Consult) -> ConsultOutcome {
+        self.dispatch(consult, None, None, None, Recall::Afresh).await
     }
 
     /// [`ExternalServices::consult`] for a consult recorder: the outcome, and what the
@@ -511,7 +527,9 @@ impl ExternalServices {
         ruling: Option<Ruling>,
     ) -> (ConsultOutcome, Option<Transcript>) {
         let mut transcript = self.backend(consult).and_then(Backend::recorded).map(Transcript::of);
-        let outcome = self.dispatch(consult, elicitation, ruling, transcript.as_mut()).await;
+        let outcome = self
+            .dispatch(consult, elicitation, ruling, transcript.as_mut(), Recall::Recalled)
+            .await;
         (outcome, transcript)
     }
 
@@ -527,6 +545,7 @@ impl ExternalServices {
         elicitation: Option<&Elicitation>,
         ruling: Option<Ruling>,
         seen: Option<&mut Transcript>,
+        recall: Recall,
     ) -> ConsultOutcome {
         let kind = consult.kind();
         let name = consult.name.as_str();
@@ -564,7 +583,7 @@ impl ExternalServices {
                     Err(NoAnswerReason::Unreachable)
                 }
             },
-            Backend::Model(model) => self.consult_model(model, consult, seen).await,
+            Backend::Model(model) => self.consult_model(model, consult, seen, recall).await,
             Backend::Jev(jev) => {
                 let (answered, record) = Box::pin(jev.consult(consult)).await;
                 if let Some(seen) = seen {
@@ -650,13 +669,17 @@ impl ExternalServices {
         model: &PromptModel,
         consult: &Consult,
         seen: Option<&mut Transcript>,
+        recall: Recall,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let prompt = ModelPrompt::new(consult).ok_or(NoAnswerReason::Unregistered)?;
-        match model {
-            PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name, seen).await,
-            PromptModel::ClaudeCode(claude) => claude.consult(&prompt, &consult.name, seen).await,
+        match (model, recall, &consult.body) {
+            (PromptModel::ClaudeCode(claude), Recall::Recalled, ConsultBody::Annotation { declaration, .. }) => {
+                claude.annotate(&prompt, declaration, &consult.name, seen).await
+            }
+            (PromptModel::ClaudeCode(claude), ..) => claude.consult(&prompt, &consult.name, seen).await,
+            (PromptModel::Llm(llm), ..) => llm.consult(&prompt, &consult.name, seen).await,
             #[cfg(feature = "archestra")]
-            PromptModel::Archestra(archestra) => archestra.consult(&prompt, &consult.name, seen).await,
+            (PromptModel::Archestra(archestra), ..) => archestra.consult(&prompt, &consult.name, seen).await,
         }
     }
 
@@ -1821,6 +1844,49 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .await,
             ConsultOutcome::Answer(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_identical_claude_annotation_is_answered_once_and_only_an_admitted_answer_is_kept() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let spawns = |answer: &str| {
+            let fixture = tempfile::tempdir_in(dir.path()).expect("a fixture directory is created");
+            let counter = fixture.path().join("spawns");
+            let script = format!(
+                "printf x >> {counter}\nprintf '%s' '{{\"type\":\"result\",\"structured_output\":{answer}}}'",
+                counter = counter.display()
+            );
+            let mut config = externals(None, 5000, 65_536);
+            config.claude_code.command = fake_claude(fixture.path(), &script);
+            let services = services_declaring(config, declared("judge", AnnotatorBuiltin::ClaudeCode));
+            let count = move || std::fs::read(&counter).map_or(0, |bytes| bytes.len());
+            (services, count, fixture)
+        };
+        let consult = annotation_consult("judge", serde_json::json!({"id": 7}));
+
+        let admitted =
+            r#"{"delta":{"trust":"suspicious"},"forwards":{},"requires":{"history":[],"attention":[]},"emits":[]}"#;
+        let (services, count, _fixture) = spawns(admitted);
+        let first = services.consult(&consult, None, None).await;
+        assert!(matches!(first, ConsultOutcome::Answer(_)), "{first:?}");
+        assert_eq!(services.consult(&consult, None, None).await, first);
+        assert_eq!(count(), 1, "the identical consult does not start the model again");
+        assert_eq!(services.consult_afresh(&consult).await, first);
+        assert_eq!(count(), 2, "an afresh consult always starts the model");
+        services
+            .consult(&annotation_consult("judge", serde_json::json!({"id": 8})), None, None)
+            .await;
+        assert_eq!(count(), 3, "other arguments are another prompt");
+
+        let (services, count, _fixture) = spawns(r#"{"ruling":"approve"}"#);
+        for _ in 0..2 {
+            assert!(matches!(
+                services.consult(&consult, None, None).await,
+                ConsultOutcome::Answer(_)
+            ));
+        }
+        assert_eq!(count(), 2, "an answer outside the mandate is never kept");
     }
 
     #[tokio::test]
