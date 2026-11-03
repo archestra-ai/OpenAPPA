@@ -422,23 +422,26 @@ pub(crate) const REQUIRES_TRUST_CRITERIA: RequiresTrustCriteria = RequiresTrustC
         "it sends data to a person, even a colleague, writes it where people can ",
         "read it, even an internal repository, ticket or channel, publishes it to a service ",
         "outside the operator's organization, installs or runs a package, script or container ",
-        "image that the call selects, or writes a dependency manifest, lockfile or ",
-        "package-manager config, which decides the code the next install fetches and runs: ",
-        "a redirect into one, `sed -i` on one, `npm pkg set`, or `uv add`, `cargo add` or ",
-        "`npm install <name>` updating one. Pushing commits, filing a report, installing a named ",
-        "package, running a registry image, cached or not, and running a downloaded script all ",
-        "count. An injected instruction that fires this call moves data or code outward, or ",
-        "chooses the code that runs."
+        "image that the call selects, or changes what a later install or run selects: the ",
+        "dependencies, scripts or lifecycle hooks, registries, indexes or install sources in a ",
+        "dependency manifest, lockfile or package-manager config, or a container image reference ",
+        "such as a Dockerfile `FROM`, a Compose or Kubernetes `image:` or a devcontainer ",
+        "`image`. A redirect, `sed -i`, `npm pkg set`, or `uv add`, `cargo add` or ",
+        "`npm install <name>` can make that change. Pushing commits, filing a report, installing ",
+        "a named package, running a registry image, cached or not, and running a downloaded ",
+        "script all count. An injected instruction that fires this call moves data or code ",
+        "outward, or chooses the code that runs."
     ),
     false_: concat!(
         "The call only reads, searches or fetches, whatever its query or URL carries: what it ",
         "discloses is bounded by `requires.audience`; pulling an image runs none of its code. ",
         "Or its effect stays on the operator's machine, even if it overwrites or deletes local ",
-        "files other than a dependency manifest, lockfile or package-manager config. Code the ",
-        "call does not select stays on this machine: the project's own tools, tests and scripts, ",
-        "a program the agent wrote, an install the project's lockfile fixes and that leaves the ",
-        "manifest as it is, or an image built from the project's own Dockerfile or pinned in ",
-        "project files the call does not change. Re-running it after an injection changes ",
+        "files, unless it changes what a later install or run selects; a manifest's metadata, ",
+        "such as its description or version, selects nothing. Code the call does not select ",
+        "stays on this machine: the project's own tools, tests and scripts, a program the agent ",
+        "wrote, an install the project's lockfile fixes and that leaves the manifest as it is, ",
+        "or an image the project's own files name, built from its Dockerfile or pinned in its ",
+        "Compose file, which the call does not change. Re-running it after an injection changes ",
         "nothing outside this machine."
     ),
 };
@@ -466,7 +469,7 @@ impl Example {
 
 /// Written from the contract examples in the docs, not from observed calls. Each `call` is
 /// the example's `{"tool", "arguments"}` object, with the `context` it came with, if any.
-pub(crate) const EXAMPLES: [Example; 32] = [
+pub(crate) const EXAMPLES: [Example; 34] = [
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "grep -rn 'fn resolve' src/ | head -20", "description": "Find the resolver"}}"#,
         delta_audience: ResultAudience::Internal,
@@ -642,6 +645,22 @@ pub(crate) const EXAMPLES: [Example; 32] = [
         requires_audience: RequiredAudience::None,
         requires_trusted: true,
         why: "nothing leaves the machine, but the manifest decides what the next install fetches and runs, so writing it chooses that code",
+    },
+    Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "npm pkg set description='Retry with backoff'", "description": "Fix the package description"}}"#,
+        delta_audience: ResultAudience::Internal,
+        delta_trust: ResultTrust::Trusted,
+        requires_audience: RequiredAudience::None,
+        requires_trusted: false,
+        why: "the description is metadata that no install or run selects code by; the edit stays on this machine",
+    },
+    Example {
+        call: r#"{"tool": "Bash", "arguments": {"command": "sed -i 's|^FROM .*|FROM ghcr.io/acme/base@sha256:4f1c|' Dockerfile", "description": "Switch the base image"}}"#,
+        delta_audience: ResultAudience::Internal,
+        delta_trust: ResultTrust::Trusted,
+        requires_audience: RequiredAudience::None,
+        requires_trusted: true,
+        why: "the `FROM` line selects the image the next build and run execute, so changing it chooses that code, as a manifest write does",
     },
     Example {
         call: r#"{"tool": "Bash", "arguments": {"command": "docker pull python:3.12-slim", "description": "Fetch the base image"}}"#,
@@ -1006,15 +1025,17 @@ mod tests {
             assert_eq!(disclosing_read.requires_audience, RequiredAudience::Public);
             assert!(!disclosing_read.requires_trusted);
         }
-        let manifest_write = example("npm pkg set").expect("the manifest-write example");
+        let manifest_write = example("npm pkg set 'dependencies").expect("the dependency-write example");
+        let metadata_write = example("npm pkg set description").expect("the metadata-write example");
+        let image_reference = example("FROM ghcr.io").expect("the image-reference example");
         let pull = example("docker pull").expect("the image-pull example");
         let selected_image = example("docker run --rm -v").expect("the registry-image example");
         let project_image = example("docker build").expect("the project-image example");
-        for chosen_code in [install, manifest_write, selected_image] {
+        for chosen_code in [install, manifest_write, image_reference, selected_image] {
             assert_eq!(chosen_code.requires_audience, RequiredAudience::None);
             assert!(chosen_code.requires_trusted);
         }
-        for no_chosen_code in [locked_install, pull, project_image] {
+        for no_chosen_code in [locked_install, metadata_write, pull, project_image] {
             assert_eq!(no_chosen_code.requires_audience, RequiredAudience::None);
             assert!(!no_chosen_code.requires_trusted);
         }
