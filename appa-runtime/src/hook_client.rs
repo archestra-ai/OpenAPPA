@@ -287,19 +287,19 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
     // out of the model's attention instead of staying in front of it.
     let body = match wire_body(&event) {
         Ok(body) => body,
-        Err(failure) => return unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
+        Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
     };
     let answered =
         Endpoint::parse(&target.url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
     let answer = match answered {
         Ok(answer) => answer,
-        Err(failure) => return unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
+        Err(failure) => return unanswered(&codec, Unanswered::Event(&event), &failure, decides),
     };
     if decides == Decides::Nothing {
         return ExitCode::SUCCESS;
     }
     match (decision_of(&answer.body), answer.is_success()) {
-        (Ok(decision), true) => deliver(&(codec.render)(&host_event, &event, &decision)),
+        (Ok(decision), true) => deliver(&(codec.render)(&event, &decision)),
         // A refusal is rendered too, and for a result that already ran the rendering
         // is the whole answer: the harness reads it only from a hook that exits zero,
         // so a replacement carried out on a blocking exit would be discarded and the
@@ -318,15 +318,9 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
         }
         (answered, false) => {
             let failure = refusal(&answer);
-            carry_out(
-                &codec,
-                &host_event,
-                &event,
-                refused(&event, answered.ok(), &failure),
-                &failure,
-            )
+            carry_out(&codec, &event, refused(&event, answered.ok(), &failure), &failure)
         }
-        (Err(failure), true) => unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
+        (Err(failure), true) => unanswered(&codec, Unanswered::Event(&event), &failure, decides),
     }
 }
 
@@ -359,13 +353,13 @@ fn refused(event: &HookEvent, answered: Option<HookDecision>, failure: &str) -> 
     }
 }
 
-fn carry_out(codec: &Codec, host: &[u8], event: &HookEvent, refused: Refused, failure: &str) -> ExitCode {
+fn carry_out(codec: &Codec, event: &HookEvent, refused: Refused, failure: &str) -> ExitCode {
     match refused {
-        Refused::Withheld(withholding) => withhold(&(codec.render)(host, event, &withholding), failure),
+        Refused::Withheld(withholding) => withhold(&(codec.render)(event, &withholding), failure),
         // The exit code stops the call either way; where the answer's own rendering could
         // not be delivered, the failure to write it is surfaced beside the refusal rather
         // than swallowed.
-        Refused::Stopped(answered) => match answered.map(|decision| print(&(codec.render)(host, event, &decision))) {
+        Refused::Stopped(answered) => match answered.map(|decision| print(&(codec.render)(event, &decision))) {
             Some(Err(error)) => block(&format!("{failure}; the answer could not be written: {error}")),
             _ => block(failure),
         },
@@ -393,7 +387,7 @@ fn withhold(withholding: &serde_json::Value, failure: &str) -> ExitCode {
 /// codec can tell what a host's own bytes report, so the unread ones are handed back to it
 /// rather than sniffed here.
 enum Unanswered<'a> {
-    Event(&'a [u8], &'a HookEvent),
+    Event(&'a HookEvent),
     Unparsed(&'a [u8]),
 }
 
@@ -408,7 +402,7 @@ fn unanswered(codec: &Codec, hook: Unanswered<'_>, failure: &str, decides: Decid
         eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
         return ExitCode::SUCCESS;
     }
-    if let Unanswered::Event(_, event) = hook
+    if let Unanswered::Event(event) = hook
         && ends_unchecked(event)
     {
         eprintln!("OpenAPPA hook let the withheld return end the subagent: {failure}");
@@ -425,9 +419,8 @@ fn unanswered(codec: &Codec, hook: Unanswered<'_>, failure: &str, decides: Decid
 /// — by the codec, which reads the host's own shape for a result the harness has produced.
 fn withholding(codec: &Codec, hook: Unanswered<'_>, failure: &str) -> Option<serde_json::Value> {
     match hook {
-        Unanswered::Event(host, event) => reports_a_result(event).then(|| {
+        Unanswered::Event(event) => reports_a_result(event).then(|| {
             (codec.render)(
-                host,
                 event,
                 &HookDecision::Block {
                     reason: unchecked_reason(event, &format!("the runtime did not answer this hook: {failure}")),
@@ -643,7 +636,7 @@ mod tests {
                 matches!(withholding, HookDecision::Block { .. }),
                 "a refusal carrying no replacement synthesizes one: {withholding:?}"
             );
-            let rendered = (codec.render)(host, &event, &withholding).to_string();
+            let rendered = (codec.render)(&event, &withholding).to_string();
             assert!(
                 !rendered.contains("root:x:0:0"),
                 "the withheld output does not reach the model: {rendered}"

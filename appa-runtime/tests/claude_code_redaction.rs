@@ -62,7 +62,7 @@ fn hook(name: &str, fields: serde_json::Value) -> serde_json::Value {
         "session_id": SESSION,
         "transcript_path": "/recorded/session.jsonl",
         "cwd": "/recorded/work",
-        "permission_mode": "auto",
+        "permission_mode": "default",
         "hook_event_name": name,
     });
     let object = event.as_object_mut().expect("a hook event is an object");
@@ -112,9 +112,8 @@ async fn through_the_masker(runtime: &Runtime, proposal: &serde_json::Value) -> 
     let (status, allowed) = claude_hook(runtime, proposal).await;
     assert_eq!(status, 200, "the re-proposed call is answered: {allowed}");
     assert_eq!(
-        allowed,
-        serde_json::json!({}),
-        "the authorized plan releases the call to auto mode's classifier: {allowed}"
+        allowed["hookSpecificOutput"]["permissionDecision"], "allow",
+        "the authorized plan releases the call: {allowed}"
     );
     allowed
 }
