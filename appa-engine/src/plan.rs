@@ -267,7 +267,7 @@ pub struct PlannedBlock {
     /// Kept out of `plans` so the emptiness assertion stays about remedies.
     pub fork_advice: Option<ForkAdvice>,
     /// Advice, never a remedy: what accepting the block's narrowing does to the rest of the
-    /// policy's argument-free tools. `None` when nothing narrows or nothing gets worse.
+    /// policy's argument-free tools. `None` when nothing narrows, or nothing gets worse and no tool is labeled per call.
     pub narrowing_impact: Option<NarrowingImpact>,
 }
 
@@ -276,8 +276,8 @@ pub struct PlannedBlock {
 /// lose every authority and input sanitizer that could clear them. `recipient_checked` names the tools
 /// with a declared variant that checks recipients from its arguments against an audience this
 /// narrowing reduces; they are not judged, since the verdict depends on the recipients.
-/// `per_call` names each contract an Annotator labels per call, the wildcard `*` among them, in
-/// declaration order; they are not judged either, since their labels exist only per call.
+/// `per_call` names each contract an Annotator labels per call, the wildcard `*` among them, once
+/// each; they are not judged either, since their labels exist only per call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarrowingImpact {
     pub sign_off: Vec<ToolName>,
