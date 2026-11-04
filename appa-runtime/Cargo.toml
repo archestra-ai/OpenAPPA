@@ -57,6 +57,7 @@ appa-adapter-amp = { path = "../appa-adapter-amp" }
 appa-adapter-opencode = { path = "../appa-adapter-opencode" }
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
 appa-adapter-kagent = { path = "../appa-adapter-kagent" }
+appa-file-tracker = { path = "../appa-file-tracker" }
 # The builtin-module ABI: one source of truth for the descriptor,
 # statuses, and version shared with deployer modules.
 appa-builtin = { path = "../appa-builtin" }

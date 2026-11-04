@@ -887,10 +887,10 @@ annotator = "file-tracker"
 recorder = "file-tracker"
 
 [externals.annotators.file-tracker]
-command = ["appa-file-tracker", "annotate"]
+command = ["appa", "file-tracker", "annotate"]
 
 [externals.recorders.file-tracker]
-command = ["appa-file-tracker", "record"]
+command = ["appa", "file-tracker", "record"]
 ```
 
 A recorder is not consulted. It cannot deny, delay, or approve a call, and OpenAPPA does not wait for it. A recorder needs the same trust as an annotator: a recorder that stores a wrong label makes a later annotation wrong.
@@ -1423,7 +1423,7 @@ If the service requires authentication, set `token_env` to an environment variab
 
 ### Local programs
 
-Set `command` to a list containing the executable and its arguments, such as `command = ["python3", "./sanitize.py"]`. OpenAPPA runs the program on the same machine, without a shell, and ends every process it started when the request completes. The shipped batteries run `python3`, which Windows does not always provide. It starts the program in the directory containing the configuration file.
+Set `command` to a list containing the executable and its arguments, such as `command = ["python3", "./sanitize.py"]`. OpenAPPA runs the program on the same machine, without a shell, and ends every process it started when the request completes. An executable named `appa` is the runtime's own executable, which serves the plugins OpenAPPA ships, such as `appa file-tracker`. The shipped batteries run `python3`, which Windows does not always provide. It starts the program in the directory containing the configuration file.
 
 The program reads one JSON consult request from standard input and writes one JSON response to standard output. It must respond within `timeout_ms`, and its response must fit within `max_body_bytes`. `APPA_CONSULT_TIMEOUT_MS` gives the program the milliseconds it has left: `timeout_ms` less the wait for a free slot. Each OpenAPPA instance runs at most eight such programs at once.
 

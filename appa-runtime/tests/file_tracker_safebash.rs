@@ -6,8 +6,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 fn safebash(config: &std::path::Path, arguments: serde_json::Value) -> (String, bool) {
-    let mut server = Command::new(env!("CARGO_BIN_EXE_appa-file-tracker"))
-        .args(["mcp", "--config"])
+    let mut server = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["file-tracker", "mcp", "--config"])
         .arg(config)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

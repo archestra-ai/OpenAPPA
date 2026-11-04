@@ -199,13 +199,13 @@ would not refuse. Unity Catalog enforces the caller's own permissions on
 every statement either way.
 
 Databricks' own agent skills route data work through the Databricks CLI
-in Bash rather than the managed servers. That path is `host/claude-code/Bash`,
-which the `claude-code` battery owns, and this battery's rules do not
-reach it. The `claude-code` battery narrows the CLI's credential commands
-(`auth token`, `auth env`, `secrets get-secret`, `configure`) and its
-profile file to `self`; every other `databricks` command, the SQL of
-`databricks experimental aitools tools query` included, is classified by
-the generic Bash annotator under the root's hint. A Bash selector is a
+in a shell rather than the managed servers, and this battery's rules do not
+reach a shell. Under the `claude-code` battery a shell command runs only as
+SafeBash, which must declare the hosts it reaches, so a CLI call that
+reaches the workspace requires `public` and takes the lowest trust. The
+`coding` battery narrows the CLI's credential commands (`auth token`,
+`auth env`, `secrets get-secret`, `configure`) and its profile file to
+`self` for a client whose map binds its shell tool. A shell selector is a
 substring of a free-text command line, so no rule set can promise full
 recall over it; the statement classification above lives on the managed
 servers, where the tool and its `query` argument are exact.

@@ -115,12 +115,14 @@ fn file_tracking(config: &Path) -> Vec<String> {
                 .and_then(|recorders| recorders.get("file-tracker"))
                 .is_some()
         });
+    // This launcher is the `appa` executable, which serves SafeBash too.
+    let executable = std::env::current_exe().map_or_else(|_| "appa".into(), |path| path.display().to_string());
     match bound {
         true => vec![
             format!("--disallowedTools={UNMEDIATED_TOOLS}"),
             format!(
                 "--mcp-config={}",
-                serde_json::json!({ "mcpServers": { "file-tracker": { "command": "appa-file-tracker", "args": ["mcp"] } } })
+                serde_json::json!({ "mcpServers": { "file-tracker": { "command": executable, "args": ["file-tracker", "mcp"] } } })
             ),
         ],
         false => Vec::new(),
@@ -413,12 +415,12 @@ impl Drop for Signals {
 mod tests {
     use super::*;
 
-    /// The shipped file-tracking policy launches Claude Code without its unmediated tools and
-    /// with SafeBash; the default policy launches it unchanged.
+    /// The shipped Claude Code policy launches Claude Code without its unmediated tools and
+    /// with SafeBash; a policy that binds no file-tracker launches it unchanged.
     #[test]
     fn only_a_policy_binding_the_file_tracker_disables_the_unmediated_tools() {
         let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/claude-code");
-        let tracking = file_tracking(&plugin.join("file-tracker.appa.toml"));
+        let tracking = file_tracking(&plugin.join("default.appa.toml"));
         assert_eq!(
             tracking[0],
             "--disallowedTools=Bash,PowerShell,Monitor,Grep,NotebookEdit"
@@ -426,9 +428,11 @@ mod tests {
         let servers: Value = serde_json::from_str(tracking[1].strip_prefix("--mcp-config=").unwrap()).unwrap();
         assert_eq!(
             servers["mcpServers"]["file-tracker"]["args"],
-            serde_json::json!(["mcp"])
+            serde_json::json!(["file-tracker", "mcp"])
         );
-        assert!(file_tracking(&plugin.join("default.appa.toml")).is_empty());
+        let untracked = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(untracked.path(), "[policy]\nversion = 2\n").unwrap();
+        assert!(file_tracking(untracked.path()).is_empty());
     }
 
     /// A signal that lands between spawning Claude Code and storing its pid reaches it once the

@@ -3,9 +3,10 @@
 This battery gives a coding agent policy-aware shell commands and `self`
 labels on the requester's own secrets. It writes its rules once, for
 canonical tools under `tool/coding/`. A client battery binds each canonical
-tool to the client's own tool with an `[aliases.tool.coding]` map; the
-`claude-code` battery is that map for Claude Code, and `appa plugin install
-claude-code` includes both. A rule no map binds is inactive.
+tool to the client's own tool with an `[aliases.tool.coding]` map. A rule
+no map binds is inactive. The `claude-code` battery binds only `fetch_url`
+and `web_search`: Claude Code's file tools go through the file-tracker
+instead, and its native shell is blocked.
 
 | Canonical tool | What it is | Argument the rules read |
 | --- | --- | --- |
@@ -93,6 +94,5 @@ version = 2
 ```
 
 The `coding` battery alone declares no client tool. Root rules take
-precedence over both batteries, and a root rule names the client's tool
-(`host/claude-code/Bash(command:kubectl *)`); the `claude-code` battery's
-README shows overrides and Annotator hints.
+precedence over both batteries, and a root rule names the client's tool,
+such as `host/claude-code/WebFetch(url:https://wiki.example/*)`.

@@ -23,12 +23,14 @@ This lets a subagent read a private ticket or credential-adjacent log and return
 
 ## Shell and native file tools
 
-Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code), which gives native tools these contracts:
+Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code). It routes `Read`, `Write`, and `Edit` through the [file-tracker](#files-that-keep-their-labels), runs shell commands only as [SafeBash](#safebash), and blocks `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`.
 
-- **Reading credentials narrows the trajectory.** Read, Grep, Bash, or PowerShell calls that contain configured credential-path spellings narrow the audience to `self`.
+The `coding` battery gives the canonical shell and file tools of other harnesses these contracts:
+
+- **Reading credentials narrows the trajectory.** Read, search, or shell calls that contain configured credential-path spellings narrow the audience to `self`.
 - **Writing where another process looks requires trust.** Writes to credential and control paths require a `trusted` trajectory. After suspicious input, the exact call requires human review.
-- **Changing the controls requires review.** Writes to Claude Code settings or OpenAPPA policy always ask the person running the session.
-- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for Bash, PowerShell, and Monitor calls. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
+- **Changing the controls requires review.** Writes to harness settings or OpenAPPA policy always ask the person running the session.
+- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for each shell command. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
 
 These contracts label what a command reads or returns; they do not sandbox the command. For confinement, see [SafeBash](#safebash).
 
@@ -41,7 +43,7 @@ The plugin is a [recorder](/contracts#recorders) and an [annotator](/contracts#a
 - As a recorder, it receives the label each released call published: the trajectory's label at release, combined with the call's `forwards` and `delta`. It stores that label on each file the call wrote.
 - As an annotator, it answers a `Read` with the stored label as `delta`. An `Edit` forwards the file's existing label, so the edited file keeps it. A `Write` replaces the file, so the new label replaces the old one.
 
-The plugin's own `file-tracker.toml` gives credential paths such as `.env*` and `~/.ssh/*` the audience `self` before any call touches them. It also sets the trust a write to a control file such as `CLAUDE.md` requires. The plugin never denies a call: the engine checks the annotation's `requires`.
+The plugin's built-in path rules give credential paths such as `.env*` and `~/.ssh/*` the audience `self` before any call touches them. They also set the trust a write to a control file such as `CLAUDE.md` requires. A deployment adds rules in `~/.config/appa/file-tracker.toml`. The plugin never denies a call: the engine checks the annotation's `requires`.
 
 ### SafeBash
 
@@ -55,11 +57,11 @@ The two-step leak is then refused before it runs. If the agent reads `.env` and 
 
 | Harness | File tools | Shell |
 |---|---|---|
-| Claude Code | `Read`, `Write`, `Edit`, and `mcp/file-tracker/SafeBash` use the file-tracker annotator and recorder. | `clappa` starts Claude Code without `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`, and the policy blocks them. |
+| Claude Code | `Read`, `Write`, `Edit`, and `mcp/file-tracker/SafeBash` use the file-tracker annotator and recorder. | `clappa` starts Claude Code without `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`, and the battery blocks them. |
 | OpenCode | `read`, `write`, `edit`, and `appa_safebash` use the file-tracker annotator and recorder. | AppenCode removes native `shell` and `patch`. `appa_safebash` runs in a sandbox extension with a proxy. |
 | Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. No file-tracker runs. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
 
-For Claude Code, use `marketplace/plugins/claude-code/file-tracker.appa.toml` as the root policy, and put `appa-file-tracker` and `srt` on `PATH`.
+The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. SafeBash needs `srt` on `PATH`.
 
 ### Limits
 

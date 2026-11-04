@@ -129,6 +129,66 @@ audience = ["self"]
 write_trust = "trusted"
 
 [[path]]
+pattern = "*.jks"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.keystore"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*auth.json"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*credentials*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*secrets*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*service*account*.json"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*token"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*token.json"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/Library/Keychains/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "/etc/ssh/*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "/etc/*shadow*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
+pattern = "/etc/sudoers*"
+audience = ["self"]
+write_trust = "trusted"
+
+[[path]]
 pattern = "/proc/*/environ"
 audience = ["self"]
 
@@ -167,6 +227,22 @@ write_trust = "trusted"
 
 [[path]]
 pattern = "*/.profile"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*CLAUDE.local.md"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.bash_profile"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.zprofile"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/Library/LaunchAgents/*"
 write_trust = "trusted"
 
 # --- the files that can turn the protection off ask the person running the session ---

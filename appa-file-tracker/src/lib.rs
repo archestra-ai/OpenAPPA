@@ -1,4 +1,5 @@
-//! `appa-file-tracker`: the file-tracker plugin's three entry points.
+//! `appa file-tracker`: the file-tracker plugin's three entry points, served by the `appa`
+//! executable so the plugin ships with every runtime.
 //!
 //! - `annotate` reads one annotation consult on stdin and writes its answer.
 //! - `record` reads one recorder delivery on stdin and writes its acknowledgement.
@@ -18,10 +19,11 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
-    let mut arguments = std::env::args().skip(1);
+/// Run one entry point: `arguments` are what follows `appa file-tracker`.
+pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
+    let mut arguments = arguments.into_iter();
     let Some(command) = arguments.next() else {
-        eprintln!("usage: appa-file-tracker annotate|record|mcp [--config <file-tracker.toml>]");
+        eprintln!("usage: appa file-tracker annotate|record|mcp [--config <file-tracker.toml>]");
         return ExitCode::from(2);
     };
     let mut explicit: Option<PathBuf> = None;
@@ -29,7 +31,7 @@ fn main() -> ExitCode {
         match (argument.as_str(), arguments.next()) {
             ("--config", Some(path)) => explicit = Some(PathBuf::from(path)),
             _ => {
-                eprintln!("appa-file-tracker: unknown argument {argument:?}");
+                eprintln!("appa file-tracker: unknown argument {argument:?}");
                 return ExitCode::from(2);
             }
         }
@@ -37,7 +39,7 @@ fn main() -> ExitCode {
     let config = match config::Config::load(explicit.as_deref()) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("appa-file-tracker: {error}");
+            eprintln!("appa file-tracker: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -50,7 +52,7 @@ fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("appa-file-tracker: {error}");
+            eprintln!("appa file-tracker: {error}");
             ExitCode::FAILURE
         }
     }

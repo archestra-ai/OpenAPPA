@@ -184,6 +184,13 @@ enum Command {
         event: appa_runtime::protected_launch::Event,
     },
 
+    /// The file-tracker plugin: `annotate` and `record` answer the runtime, `mcp` serves SafeBash.
+    #[command(hide = true, disable_help_flag = true)]
+    FileTracker {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
+
     /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
     Hook {
@@ -324,6 +331,7 @@ fn main() -> ExitCode {
             };
             appa_runtime::hook_client::run(&target.resolve(), turn_end, deployment.as_ref())
         }
+        Command::FileTracker { arguments } => appa_file_tracker::run(arguments),
         Command::Statusline { target } => appa_runtime::statusline::run(&target.resolve()),
         Command::SessionContext { subagent } => appa_runtime::session_context::run(if subagent {
             appa_runtime::session_context::Delivery::SubagentContext

@@ -2,12 +2,12 @@
 title: Claude Code tools battery
 category: Batteries
 order: 6.62
-description: Rules and annotators for Claude Code's Read, Grep, Write, Edit and Bash tools, from the coding battery's canonical tools.
+description: File labels for Claude Code's Read, Write and Edit, shell commands confined by SafeBash, and rules for the tools only Claude Code offers.
 sidebar: false
 breadcrumb: Claude Code tools
 ---
 
-Two batteries cover Claude Code's built-in `Read`, `Grep`, `Write`, `Edit` and `Bash` tools, which the policy names `host/claude-code/Read`, `host/claude-code/Grep`, `host/claude-code/Write`, `host/claude-code/Edit` and `host/claude-code/Bash`. The `coding` battery writes the rules once for [canonical tools](/contracts#canonical-tools) such as `tool/coding/shell` and `tool/coding/read_file`. The `claude-code` battery maps each canonical tool to the Claude Code tool that serves it, and covers the tools only Claude Code offers. A config includes both; the `claude-code` battery fails to load without `coding`. Batteries can also cover tools that do not come from an MCP server.
+The `claude-code` battery covers Claude Code's built-in tools. It routes `Read`, `Write`, and `Edit` through the [file-tracker](/coding-agents#files-that-keep-their-labels), runs every shell command as [SafeBash](/coding-agents#safebash), and gives the tools only Claude Code offers static rules. It maps the `coding` battery's canonical `fetch_url` and `web_search` tools to `WebFetch` and `WebSearch`, so a config includes both batteries; the `claude-code` battery fails to load without `coding`.
 
 [View the coding battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/coding) and [the claude-code battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/claude-code).
 
@@ -15,12 +15,13 @@ Two batteries cover Claude Code's built-in `Read`, `Grep`, `Write`, `Edit` and `
 
 | Tool | Contract |
 |---|---|
-| `host/claude-code/Read` | Static rules narrow the session to `self`, the requester, when a hidden path, a credential file, a private key, or a system secret location is read. |
-| `host/claude-code/Grep` | A search inside one of the same paths is a read of it and narrows the session to `self`. A search over a directory that holds such a file is not matched; only the path as written is. |
-| `host/claude-code/Write`, `host/claude-code/Edit` | Writing into one of the same paths requires a `trusted` session: content that arrived at `suspicious` reaches a file the next process trusts only when the person running the session approves the exact call. Writing the harness's own settings (`.claude/settings*`) or the deployment's policy (`appa/appa.toml`, `appa/batteries/`) asks that person every time. Every other path takes the session's label as it is. |
-| `host/claude-code/Bash` | A command naming a credential path narrows the session to `self`. Before every other command runs, the Claude Code model decides the trust and fresh attention it requires and labels its output for trust and audience. A command that prints or writes a credential counts as a credential path: the Databricks CLI's `auth token`, `auth env`, `secrets get-secret`, and `configure`, and its profile file `.databrickscfg`. A selector is a substring of the command line and promises no full recall; a spelling it misses is classified like any other command. |
+| `host/claude-code/Read` | The file-tracker returns the file's label. A file that a mediated call wrote carries the label that call published, in this session or another. A credential path such as `.env*`, `~/.ssh/*`, or a private key carries the audience `self` before any call writes it. |
+| `host/claude-code/Write`, `host/claude-code/Edit` | The file-tracker records the label the call published on the file. Writing a credential path, an instruction file such as `CLAUDE.md`, a hook, or a shell profile requires a `trusted` session. Writing Claude Code settings, `.mcp.json`, or the deployment's policy asks the person running the session. |
+| `mcp/file-tracker/SafeBash` | The command declares its `input_files`, `output_files`, and `network_hosts`, and the sandbox runtime `srt` confines it to exactly those. The call forwards its input files' label. A call that reaches the network lowers trust to the lowest rank and requires `public`. Its output files take the label the call published. |
+| `host/claude-code/Bash`, `PowerShell`, `Monitor`, `Grep`, `NotebookEdit` | Blocked. They read or write file content out of the file-tracker's sight. `clappa` starts Claude Code with them disabled. |
+| `host/claude-code/WebFetch`, `host/claude-code/WebSearch` | The `coding` battery's web rules. Listed documentation sites keep the session's label, a search returns `suspicious` content, and an Annotator labels a fetch of any other URL per call. |
 
-The default config `appa plugin install claude-code` writes handles tools that the batteries do not name.
+The default config `appa plugin install claude-code` writes binds the file-tracker to `appa file-tracker`, which the runtime executable serves. It also handles tools that the batteries do not name. SafeBash needs `srt` on `PATH`.
 
 ## Files
 
@@ -35,10 +36,4 @@ claude-code/
 `-- appa.toml
 ```
 
-The `host/claude-code/Read` rules match a path as written, absolute or relative, so a hidden name and its relative spelling are both covered.
-
-The Bash annotator describes the data a command needs and returns. Neither tool isolates a command from your computer.
-
-The Bash Annotator's `hint` is its policy-specific prompt. A root `[[policy.annotator]]` declaration with the same name replaces the battery default. This lets the deployment define how to classify its shell commands without editing the battery. Facts about the whole deployment, such as which hosts are the organization's own, belong in the root's `[policy.deployment] hint`, which every annotator reads.
-
-Use a sandbox to protect credentials and network access.
+The file-tracker's path rules are built into `appa`. Add rules for your own paths in `~/.config/appa/file-tracker.toml`; they combine with the built-in rules.

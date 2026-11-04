@@ -209,7 +209,7 @@ annotator = "file-tracker"
 recorder = "file-tracker"
 
 [externals.recorders.file-tracker]
-command = ["appa-file-tracker", "record"]
+command = ["appa", "file-tracker", "record"]
 ```
 
 A recorder is a `command` or a `url`, with the same `token_env` credentials as an

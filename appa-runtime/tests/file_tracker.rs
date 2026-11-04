@@ -2,6 +2,8 @@
 //! a label written into a file in one session reaches a read of that file in another, and an
 //! upload of it is refused before it runs.
 
+mod common;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,12 +13,12 @@ use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
 
-const TRACKER: &str = env!("CARGO_BIN_EXE_appa-file-tracker");
+const APPA: &str = env!("CARGO_BIN_EXE_appa");
 
 fn policy(tracker_config: &Path) -> String {
     let command = |verb: &str| {
         format!(
-            "[{TRACKER:?}, {verb:?}, \"--config\", {:?}]",
+            "[{APPA:?}, \"file-tracker\", {verb:?}, \"--config\", {:?}]",
             tracker_config.display().to_string()
         )
     };
@@ -249,11 +251,11 @@ async fn a_secret_copied_into_a_scratch_file_cannot_leave_from_a_later_session()
     ));
 }
 
-/// The Claude Code file-tracking policy, installed as `appa plugin install claude-code` lays a
-/// deployment out: its rules precede the batteries', so Read reaches the file-tracker and Bash
-/// is refused with no remedy.
+/// The shipped Claude Code deployment, laid out as `appa plugin install claude-code` lays it
+/// out: the Claude Code battery routes Read and Write to the file-tracker the root policy
+/// binds, and refuses Bash and the other unmediated tools with no remedy.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_claude_code_policy_routes_file_tools_to_the_tracker_and_blocks_bash() {
+async fn the_claude_code_battery_routes_file_tools_to_the_tracker_and_blocks_unmediated_tools() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -269,20 +271,10 @@ async fn the_claude_code_policy_routes_file_tools_to_the_tracker_and_blocks_bash
         }
     }
     let store = root.join("file-tracker.json");
-    let tracker_config = root.join("file-tracker.toml");
-    std::fs::write(&tracker_config, format!("store = {:?}\n", store.display().to_string())).unwrap();
-    let shipped = std::fs::read_to_string(repo.join("marketplace/plugins/claude-code/file-tracker.appa.toml")).unwrap();
-    let local = |verb: &str| {
-        format!(
-            "[{TRACKER:?}, {verb:?}, \"--config\", {:?}]",
-            tracker_config.display().to_string()
-        )
-    };
+    let shipped = std::fs::read_to_string(repo.join("marketplace/plugins/claude-code/default.appa.toml")).unwrap();
     let policy = format!(
         "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{}",
-        shipped
-            .replace("[\"appa-file-tracker\", \"annotate\"]", &local("annotate"))
-            .replace("[\"appa-file-tracker\", \"record\"]", &local("record"))
+        common::with_a_local_file_tracker(&root, &shipped)
     );
     let config_path = root.join("appa.toml");
     std::fs::write(&config_path, policy).unwrap();
@@ -298,16 +290,24 @@ async fn the_claude_code_policy_routes_file_tools_to_the_tracker_and_blocks_bash
         "TOKEN=1",
     )
     .await;
-    let HookDecision::DenyCall { feedback, .. } = propose(
-        &runtime,
-        "s",
-        call("host/claude-code/Bash", serde_json::json!({ "command": "ls" })),
-    )
-    .await
-    else {
-        panic!("Bash is refused")
-    };
-    assert!(!feedback.contains("execute_remedy_plan"), "{feedback}");
+    for tool in ["Bash", "PowerShell", "Monitor", "Grep", "NotebookEdit"] {
+        let HookDecision::DenyCall { feedback, .. } = propose(
+            &runtime,
+            "s",
+            call(
+                &format!("host/claude-code/{tool}"),
+                serde_json::json!({ "command": "ls" }),
+            ),
+        )
+        .await
+        else {
+            panic!("{tool} is refused")
+        };
+        assert!(
+            feedback.contains("requires attention: blocked") && !feedback.contains("execute_remedy_plan"),
+            "{tool}: {feedback}"
+        );
+    }
     let notes = root.join("notes.txt");
     std::fs::write(&notes, "TOKEN=1\n").unwrap();
     run(

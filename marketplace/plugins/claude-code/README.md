@@ -44,13 +44,14 @@ The plugin cannot prevent that observation by denying the later hook.
 
 ### File labels and SafeBash
 
-`file-tracker.appa.toml` is the default policy with Claude Code's `Read`, `Write` and
-`Edit` routed through the `appa-file-tracker` plugin, as both Annotator and recorder,
-and shell commands confined to `mcp/file-tracker/SafeBash`. Copy it over the root
-`appa.toml`, and put `appa-file-tracker` and Anthropic's sandbox runtime `srt` on
-`PATH`. While the policy binds the `file-tracker` recorder, `clappa` starts Claude
-Code with `Bash`, `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` disabled and the
-file-tracker's MCP server registered; the policy also blocks those tools at the hook.
+The Claude Code battery routes `Read`, `Write` and `Edit` through the
+file-tracker, as both Annotator and recorder, and confines shell commands to
+`mcp/file-tracker/SafeBash`. The default policy binds the file-tracker to
+`appa file-tracker`, which the runtime executable serves. SafeBash needs
+Anthropic's sandbox runtime `srt` on `PATH`. While the policy binds the
+`file-tracker` recorder, `clappa` starts Claude Code with `Bash`, `PowerShell`,
+`Monitor`, `Grep` and `NotebookEdit` disabled and the file-tracker's MCP server
+registered; the battery also blocks those tools at the hook.
 The [coding-agents guide](../../../website/content/docs/coding-agents.md#files-that-keep-their-labels)
 describes the labels and the sandbox.
 
