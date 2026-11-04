@@ -8,12 +8,12 @@
 #
 # Archestra's configuration, rosters, runs and files are the organization's,
 # so a read of them adds `internal`. A read that returns text strangers can
-# write, such as synced mail and tickets, a server's logs or a run's tool
-# results, also adds `suspicious`. A write that changes what other people's
-# agents run or read, or that removes or controls a shared resource,
-# requires `trusted` data, so an injected instruction cannot choose it. A
-# write that other members read also needs data the organization may read:
-# `internal`.
+# write, such as synced mail and tickets, a server's logs, the tool
+# descriptions an upstream server wrote or a run's tool results, also adds
+# `suspicious`. A write that changes what other people's agents run or
+# read, or that removes or controls a shared resource, requires `trusted`
+# data, so an injected instruction cannot choose it. A write that other
+# members read also needs data the organization may read: `internal`.
 #
 # A share names who may read: the organization is `internal`, a team is
 # `@archestra:team/<team>`, a member is `@archestra:user/<user>`. A tool
@@ -22,9 +22,14 @@
 # replaces who the resource is shared with, so `(team_ids:*)` checks a sent
 # list even without a visibility. Every rule of such a tool declares its
 # lists as arrays of strings, so a malformed list is refused rather than
-# read as no list. `initialGrants` lists principal objects no selector can
-# read, so a tool that takes it requires `internal`, which holds every
-# principal a grant can name, whether or not the call sends grants.
+# read as no list.
+#
+# The Archestra proxy adds two string-array arguments before evaluation,
+# since no selector reads an array of objects: `initialGrantPrincipals`
+# names each principal of a sent `initialGrants` as `<type>:<id>`, and
+# `transferModes` names each transferred credential `value` or `link`. A
+# create that sends grants requires `internal`, which holds every principal
+# a grant can name.
 #
 # The root config maps `internal` onto the `archestra` audience source,
 # which resolves each collection through Archestra's own API. The README
@@ -77,9 +82,10 @@ description = "Runs one shell command in the conversation's sandbox and returns 
 annotator = "archestra.run-command"
 
 # --- guardrails: the policy, its validations, yells and helper consults are
-# the organization's. A preview or a validation saves nothing and sends
-# nothing. A publish, a repository connection, a sync or a credential
-# binding changes the guardrails of every session ---
+# the organization's; a server inspection quotes the tool descriptions and
+# schemas its upstream server wrote. A preview or a validation saves nothing
+# and sends nothing. A publish, a repository connection, a sync or a
+# credential binding changes the guardrails of every session ---
 
 [[policy.tool]]
 name = "mcp/archestra/get_guardrails_policy"
@@ -87,7 +93,7 @@ delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/inspect_guardrails_server"
-delta = { audience = ["internal"] }
+delta = { audience = ["internal"], trust = "suspicious" }
 
 [[policy.tool]]
 name = "mcp/archestra/list_guardrails_battery_fits"
@@ -198,7 +204,13 @@ delta = {}
 requires = { trust = "trusted" }
 
 [[policy.tool]]
+name = "mcp/archestra/transfer_credential(transferModes:link)"
+parameters = { type = "object", properties = { transferModes = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+
+[[policy.tool]]
 name = "mcp/archestra/transfer_credential"
+parameters = { type = "object", properties = { transferModes = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
@@ -255,6 +267,40 @@ delta = {}
 [[policy.tool]]
 name = "mcp/archestra/list_agent_runs"
 delta = { audience = ["internal"] }
+
+# --- the same run tools under the names Archestra 1.4 lists them by ---
+
+[[policy.tool]]
+name = "mcp/archestra/start_run"
+delta = {}
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/steer_run"
+delta = {}
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/get_run"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_runs"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/cancel_run"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/post_run_message"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/post_run_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 # --- run posts and workspaces: a post reaches a messaging thread, and a
 # workspace delete discards a run's files ---
@@ -355,9 +401,15 @@ name = "mcp/archestra/list_hooks"
 delta = { audience = ["internal"] }
 
 [[policy.tool]]
-name = "mcp/archestra/create_agent"
+name = "mcp/archestra/create_agent(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_agent"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
 
 [[policy.tool]]
 name = "mcp/archestra/edit_agent"
@@ -365,9 +417,15 @@ delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/create_mcp_gateway"
+name = "mcp/archestra/create_mcp_gateway(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_mcp_gateway"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
 
 [[policy.tool]]
 name = "mcp/archestra/edit_mcp_gateway"
@@ -411,7 +469,8 @@ requires = { trust = "trusted" }
 
 # --- MCP servers: a configuration selects the image, command or URL that
 # runs and where its credentials go. A server's logs record what its users
-# sent ---
+# sent, and its tool list quotes the descriptions and schemas the upstream
+# server wrote ---
 
 [[policy.tool]]
 name = "mcp/archestra/search_private_mcp_registry"
@@ -423,7 +482,7 @@ delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/get_mcp_server_tools"
-delta = { audience = ["internal"] }
+delta = { audience = ["internal"], trust = "suspicious" }
 
 [[policy.tool]]
 name = "mcp/archestra/list_mcp_server_deployments"
@@ -434,9 +493,16 @@ name = "mcp/archestra/get_mcp_server_logs"
 delta = { audience = ["internal"], trust = "suspicious" }
 
 [[policy.tool]]
-name = "mcp/archestra/create_mcp_server"
+name = "mcp/archestra/create_mcp_server(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_mcp_server"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/edit_mcp_config"
@@ -572,9 +638,15 @@ name = "mcp/archestra/get_knowledge_connector"
 delta = { audience = ["internal"] }
 
 [[policy.tool]]
-name = "mcp/archestra/create_knowledge_base"
+name = "mcp/archestra/create_knowledge_base(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_knowledge_base"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
 
 [[policy.tool]]
 name = "mcp/archestra/update_knowledge_base"
@@ -685,9 +757,15 @@ delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/create_plugin"
+name = "mcp/archestra/create_plugin(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_plugin"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
 
 [[policy.tool]]
 name = "mcp/archestra/update_plugin"
@@ -800,9 +878,15 @@ name = "mcp/archestra/validate_app"
 delta = {}
 
 [[policy.tool]]
-name = "mcp/archestra/scaffold_app"
+name = "mcp/archestra/scaffold_app(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/scaffold_app"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
 
 [[policy.tool]]
 name = "mcp/archestra/edit_app"

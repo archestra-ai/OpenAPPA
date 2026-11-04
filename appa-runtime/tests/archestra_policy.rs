@@ -189,9 +189,9 @@ async fn contract(call: &ProposedCall) -> (Adds, Needs) {
 
 const RUN: &str = "00000000-0000-4000-8000-000000000001";
 
-/// Representative calls of each class, with the arguments they send. `initialGrants` holds
-/// principal objects no selector reads, so whether a create sends grants does not change
-/// what it requires.
+/// Representative calls of each class, with the arguments they send. `initialGrantPrincipals`
+/// and `transferModes` are the string arrays the Archestra proxy derives from `initialGrants`
+/// and `environment`.
 struct Class {
     adds: Adds,
     needs: Needs,
@@ -211,6 +211,12 @@ const TABLE: &[Class] = &[
             ("reload_mcp_server_tools", r#"{"id": "s"}"#),
             ("update_knowledge_base", r#"{"id": "k", "name": "n"}"#),
             ("cancel_agent_run", r#"{"run_id": "r"}"#),
+            ("cancel_run", r#"{"run_id": "r"}"#),
+            ("create_agent", r#"{"name": "a"}"#),
+            ("create_agent", r#"{"name": "a", "initialGrantPrincipals": []}"#),
+            ("create_plugin", r#"{"name": "a"}"#),
+            ("scaffold_app", r#"{"name": "a", "initialGrantPrincipals": []}"#),
+            ("transfer_credential", r#"{"agent_id": "a", "transferModes": ["link"]}"#),
         ],
     },
     // The organization's records, written by its own members and agents.
@@ -224,6 +230,8 @@ const TABLE: &[Class] = &[
             ("read_file", r#"{"id": "f"}"#),
             ("get_agent", r#"{"id": "a"}"#),
             ("get_agent_run", r#"{"run_id": "r"}"#),
+            ("get_run", r#"{"run_id": "r"}"#),
+            ("get_mcp_servers", "{}"),
         ],
     },
     // Text strangers can write.
@@ -234,6 +242,8 @@ const TABLE: &[Class] = &[
             ("get_schedule_trigger_run_transcript", r#"{"run_id": "r"}"#),
             ("query_knowledge_sources", r#"{"query": "invoices"}"#),
             ("get_mcp_server_logs", r#"{"id": "s"}"#),
+            ("get_mcp_server_tools", r#"{"mcpServerId": "s"}"#),
+            ("inspect_guardrails_server", r#"{"id": "s"}"#),
         ],
     },
     // Guardrails, destructive and control-plane writes.
@@ -252,10 +262,11 @@ const TABLE: &[Class] = &[
             ("delete_runtime_credential", r#"{"id": "c"}"#),
             ("delete_plugin", r#"{"id": "p"}"#),
             ("unassign_knowledge_base_from_agent", r#"{"agent_id": "a"}"#),
+            ("create_mcp_server", r#"{"name": "s"}"#),
         ],
     },
-    // Writes other members read or run, and creates that take `initialGrants`: omitted,
-    // empty, and sent.
+    // Writes other members read or run, creates that share with someone, and credential
+    // transfers that carry a value or send no modes.
     Class {
         adds: Adds::Nothing,
         needs: Needs::TrustedInternal,
@@ -264,14 +275,23 @@ const TABLE: &[Class] = &[
             ("edit_agent", r#"{"id": "a", "systemPrompt": "p"}"#),
             ("create_schedule_trigger", r#"{"message_template": "m"}"#),
             ("publish_app", r#"{"appId": "a", "scope": "org"}"#),
-            ("create_agent", r#"{"name": "a"}"#),
-            ("create_agent", r#"{"name": "a", "initialGrants": []}"#),
-            ("create_agent", GRANTED),
-            ("create_plugin", r#"{"name": "a"}"#),
-            ("create_plugin", r#"{"name": "a", "initialGrants": []}"#),
-            ("create_plugin", GRANTED),
-            ("create_knowledge_base", GRANTED),
-            ("scaffold_app", GRANTED),
+            ("post_run_message", r#"{"run_id": "r", "text": "done"}"#),
+            ("create_agent", ORGANIZATION),
+            (
+                "create_plugin",
+                r#"{"name": "a", "initialGrantPrincipals": ["team:t1"]}"#,
+            ),
+            ("create_knowledge_base", ORGANIZATION),
+            ("create_mcp_gateway", ORGANIZATION),
+            ("create_mcp_server", ORGANIZATION),
+            ("scaffold_app", ORGANIZATION),
+            ("create_knowledge_connector", r#"{"name": "c"}"#),
+            (
+                "transfer_credential",
+                r#"{"agent_id": "a", "transferModes": ["value"]}"#,
+            ),
+            ("transfer_credential", r#"{"agent_id": "a", "transferModes": []}"#),
+            ("transfer_credential", r#"{"agent_id": "a"}"#),
         ],
     },
     // Writes into a run or to files a project or app can share.
@@ -280,14 +300,14 @@ const TABLE: &[Class] = &[
         needs: Needs::Internal,
         calls: &[
             ("start_agent_run", r#"{"agent_id": "a", "message": "m"}"#),
+            ("start_run", r#"{"agent_id": "a", "message": "m"}"#),
             ("save_file", r#"{"filename": "n.md", "content": "n"}"#),
         ],
     },
 ];
 
 /// A create that shares its resource with the whole organization.
-const GRANTED: &str =
-    r#"{"name": "a", "initialGrants": [{"principal": {"type": "organization", "id": "*"}, "actions": ["read"]}]}"#;
+const ORGANIZATION: &str = r#"{"name": "a", "initialGrantPrincipals": ["organization"]}"#;
 
 #[tokio::test]
 async fn each_tool_adds_and_requires_what_its_class_declares() {
@@ -511,4 +531,25 @@ async fn a_transfer_direction_selects_its_rule() {
         propose(&fresh, transfer("upload")).await,
         HookDecision::AllowCall { spawn: None }
     );
+}
+
+/// A tool list quotes what its upstream server wrote, so after reading one the session can
+/// no longer choose a guardrails edit or a delete.
+#[tokio::test]
+async fn an_upstream_tool_list_leaves_the_session_unable_to_choose_trusted_writes() {
+    for write in [
+        archestra("update_guardrails_policy", serde_json::json!({ "edits": [] })),
+        archestra("delete_plugin", serde_json::json!({ "id": "p" })),
+    ] {
+        let tool = write.tool.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(&dir).await;
+        assert!(runs_after_remedies(&runtime, write.clone()).await, "{tool}");
+        narrowed_by(
+            &runtime,
+            archestra("get_mcp_server_tools", serde_json::json!({ "mcpServerId": "s" })),
+        )
+        .await;
+        assert!(!runs_after_remedies(&runtime, write).await, "{tool}");
+    }
 }

@@ -12,10 +12,10 @@ sharing tool, first match wins:
 | --- | --- | --- | --- |
 | Own surfaces | `search_tools`, `search_files`, `load_skill`, `ask_user`, `todo_write`, `whoami`, `validate_guardrails_policy`, `resolve_openappa_yell`, credential setup cards, `cancel_agent_run` and other writes that carry no session data | nothing | nothing |
 | Organization records | configuration, rosters, the guardrails policy and its previews, yells, consults, files, apps, run state | `internal` | nothing |
-| Text strangers write | `query_knowledge_sources`, `get_mcp_server_logs`, `get_schedule_trigger_run_transcript` | `internal`, `suspicious` | nothing |
+| Text strangers write | `query_knowledge_sources`, `get_mcp_server_logs`, `get_schedule_trigger_run_transcript`, upstream tool lists (`get_mcp_server_tools`, `inspect_guardrails_server`) | `internal`, `suspicious` | nothing |
 | Control plane | deletes and unassigns, guardrails publishes, repository connection and sync, credential bindings, schedule controls, team changes, limits, tool assignments | nothing | `trusted` |
 | Read or run by others | agents, gateways, MCP servers, hooks, skills, plugins, apps, scheduled tasks, run posts, credential transfers | nothing | `trusted`, `internal` |
-| Shared files and runs | persistent file writes, `start_agent_run`, `steer_agent_run`, workspace writes and uploads | nothing | `internal` |
+| Shared files and runs | persistent file writes, `start_agent_run`, `steer_agent_run` (and their Archestra 1.4 names), workspace writes and uploads | nothing | `internal` |
 | Shares | `publish_app` by `scope`, `update_knowledge_connector` by `visibility` or a sent `team_ids`, `add_team_member` | nothing | `trusted` and `internal` / `@archestra:team/<team>` / `@archestra:user/$user` |
 | Sandbox | `run_command` | the `archestra.run-command` Annotator | |
 
@@ -24,10 +24,15 @@ The battery declares no rule for `yell` (ruled as `mcp/appa/yell`),
 `execute_remedy_plan`, `get_remedy_plans`, `list_peer_messages`,
 `read_peer_message`, and the app-runtime tools no agent lists.
 
-A create that takes `initialGrants` requires `trusted` data sharable
-with `internal` whether or not it sends grants: a grant names principal
-objects that no argument selector reads, and every principal it can name
-is in the organization. An update that sends `team_ids` replaces who the
+The Archestra proxy adds string arrays no selector could read from the
+original objects: `initialGrantPrincipals` (`<type>:<id>`, the
+organization as `organization`, sent only with a non-empty
+`initialGrants`) and `transferModes` (`value` or `link` per credential).
+A create that sends grants requires `trusted` data sharable with
+`internal`, which holds every principal a grant can name; without grants
+it requires what the create alone needs. A credential transfer that only
+returns links requires nothing; any other transfer requires `trusted` and
+`internal`. An update that sends `team_ids` replaces who the
 connector is shared with whatever visibility it already has, so the list
 is checked on its own. Auto-synced connector permissions mirror the
 connected system's own ACLs, which this source cannot read, so such a
