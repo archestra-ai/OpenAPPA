@@ -1,6 +1,6 @@
 //! Peer messages between protected Claude Code sessions in one runtime. A send to a socket
-//! address reaches only another protected session's registered address; a send by name is a
-//! public sink. A delivered message enters directly when the label its senders stood behind
+//! address reaches only another protected session's registered address; a send by name is an
+//! internal sink. A delivered message enters directly when the label its senders stood behind
 //! does not narrow the receiver, and is held otherwise, to be read with `read_peer_message`.
 
 mod common;
