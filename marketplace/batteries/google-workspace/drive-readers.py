@@ -1,13 +1,13 @@
 """The google-workspace.drive-readers annotator: one consult in, one answer out.
 
-Drive gives a file the sharing of its folder, so a write reaches whoever
-reads the file or folder it lands in. Before `create_file`, `copy_file`,
-or `update_file` runs, this script asks the Drive API who reads that
-target and answers what the write requires: trusted data that those
-readers may see.
+Drive gives a file the sharing of its folder, so a write reaches
+everyone who can read the file or folder it lands in. Before
+`create_file`, `copy_file`, or `update_file` runs, this script asks the
+Drive API who can read that target and answers what the write
+requires: trusted data that those readers may see.
 
-  self       only the viewer reads the target, as in the viewer's own
-             My Drive root, which cannot be shared
+  self       only the viewer can read the target, as in the viewer's
+             own My Drive root, which cannot be shared
   internal   every reader is an active Workspace user, the Workspace's
              own domain, or a group whose members all are
   public     anything else: anyone with the link, a published file,
