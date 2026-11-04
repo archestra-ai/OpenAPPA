@@ -25,6 +25,19 @@ Your root config needs no Authority for it: every tool on these servers reads, s
 - `workers_list`, `workers_get_worker`, and `workers_get_worker_code` read the account's own Workers. The code download is the deployed bundle, which carries third-party dependencies the policy cannot vouch for, so it is untrusted too.
 - `search_cloudflare_documentation` and `migrate_pages_to_workers_guide` return public pages of developers.cloudflare.com and leave the audience alone, on either server. The search sends the agent's `query` to Cloudflare's public documentation index, so that query must be sharable with `public`. An agent that has read internal data cannot search the documentation until that data is released.
 
+## Sanitizers
+
+The battery confines the results of its eight Workers Observability and documentation tools. A read that narrows the session then offers each sanitizer below beside the plain narrowing, and the agent chooses. A chosen sanitizer runs the Claude Code model (`builtin = "claude-code"`) on the confined result with the battery's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+
+| Sanitizer | `permits` | Effect |
+|---|---|---|
+| `cloudflare.strip-instructions` | `trust`: `suspicious` → `trusted` | Removes every instruction from the result and keeps the data. The read does not lower the session's trust, so it adds no trust gap to a later call that requires `trusted` data. |
+| `cloudflare.redact-for-public` | `audience`: `internal` → `public` | Removes account, zone and Worker identifiers, hostnames, request paths, IP addresses, headers, bodies, user identifiers, credentials and code from Workers logs and telemetry, and keeps errors, status codes and timings. The read does not narrow the session's audience, so it adds no audience gap to a later call bound for `public` readers. |
+
+A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts or settles with the other sanitizer. A sanitizer never clears a requirement, such as a review mark.
+
+APPA does not verify what the model removed: including the battery registers these sanitizers as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tag offers no sanitizer. The model runs through `[externals.claude_code]`, so the host that runs OpenAPPA needs the `claude` command. Without it, a chosen sanitizer gets no answer and the result stays withheld.
+
 ## Limits
 
 Cloudflare API tokens grant account-wide log access without exposing per-Worker reader boundaries. All reads default to `internal`. To restrict an agent to specific Workers, scope them in your root `appa.toml` using argument selectors.

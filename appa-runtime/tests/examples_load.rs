@@ -1,7 +1,7 @@
 mod common;
 use common::repo_root;
 #[cfg(unix)]
-use common::{actor, last_offer, offer_of, propose, ran, raw, root};
+use common::{actor, last_offer, propose, ran, raw, root};
 
 use std::path::Path;
 
@@ -12,13 +12,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(unix)]
-use appa_runtime::api::{RemedyOutcome, Runtime};
+use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
 #[cfg(unix)]
 use appa_runtime::config::Config;
 #[cfg(unix)]
 use appa_runtime::hooks;
 #[cfg(unix)]
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime_api::{HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome};
 
 /// The policies a package directory ships, by the suffix every one of them
 /// carries. The package's own `appa-package.toml` manifest is not a policy.
@@ -324,15 +324,53 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     }
 }
 
+/// The coding battery's `coding.strip-secrets` rebound from the Claude Code model to a
+/// stand-in that masks every value after `=`, so the masked delivery runs without the
+/// `claude` CLI. The deployment is loaded again over the rebound battery.
+#[cfg(unix)]
+fn with_a_stand_in_masker(dir: &Path) -> Config {
+    const MASK: &str = "import json, re, sys\n\
+                        body = json.load(sys.stdin)['artifact']['body']\n\
+                        print(json.dumps({'version': 1, 'answer': {'body': re.sub(r'=.*', '=[redacted-secret]', body)}}))\n";
+    let battery = dir.join("batteries/coding");
+    std::fs::write(battery.join("mask.py"), MASK).expect("the stand-in is writable");
+    let policy = battery.join("appa.toml");
+    let shipped = std::fs::read_to_string(&policy).expect("the battery is readable");
+    let rebound = shipped.replace(
+        "[externals.sanitizers.\"coding.strip-secrets\"]\nbuiltin = \"claude-code\"",
+        "[externals.sanitizers.\"coding.strip-secrets\"]\ncommand = [\"python3\", \"mask.py\"]",
+    );
+    assert_ne!(
+        rebound, shipped,
+        "the battery binds coding.strip-secrets to the Claude Code model"
+    );
+    std::fs::write(&policy, rebound).expect("the battery is writable");
+    Config::load(&dir.join("appa.toml")).expect("the rebound deployment composes")
+}
+
+/// The offer the feedback attributes to `sanitizer`. An offer's `returns` describes a
+/// child's return only, so the feedback is where an output sanitizer's offer is named.
+#[cfg(unix)]
+fn sanitizer_offer(feedback: &str, sanitizer: &str) -> OfferId {
+    let line = feedback
+        .lines()
+        .skip_while(|line| !line.contains(&format!("sanitizer {sanitizer}")))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no {sanitizer} offer in feedback: {feedback}"));
+    last_offer(line)
+}
+
 /// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
-/// spelling. A Bash call naming one is blocked with only the narrowing to `self` offered:
-/// the battery declares no sanitizer. A Read narrows the trajectory to `self`, after which
-/// a public sink requires an exact-call human review.
+/// spelling. A Bash call naming one narrows the trajectory to `self` and offers the
+/// battery's `coding.strip-secrets`, which returns the command's masked output at
+/// `internal`. A Read narrows the trajectory to `self`, after which a public sink requires
+/// an exact-call human review.
 #[cfg(unix)]
 #[tokio::test]
 async fn the_battery_judges_relative_credentials_and_offers_review_for_public_release() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let config = composed_with_the_battery(&dir);
+    composed_with_the_battery(&dir);
+    let config = with_a_stand_in_masker(dir.path());
     let runtime =
         Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"));
     assert_eq!(
@@ -351,29 +389,70 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         HookDecision::Ack
     );
 
-    // A credential read is `self` data: the block offers only the narrowing to `self`
-    // and consults no person.
+    // A credential read is `self` data: the block offers the masker beside the plain
+    // narrowing and consults no person; the masked output is what reaches the model.
     for command in [
         "cat .env",
         "cat .netrc",
         "cat ~/.ssh/id_ed25519",
         "cat /home/me/.aws/credentials",
     ] {
-        let blocked = propose(&runtime, call("host/claude-code/Bash", "command", command)).await;
+        let read = call("host/claude-code/Bash", "command", command);
+        let blocked = propose(&runtime, read.clone()).await;
         let HookDecision::DenyCall {
             feedback,
             offers,
             review,
         } = blocked
         else {
-            panic!("`{command}` is blocked with the narrowing offered, got {blocked:?}");
+            panic!("`{command}` is blocked with the masker offered, got {blocked:?}");
         };
-        assert_eq!(offers.len(), 1, "`{command}` offers only the narrowing: {feedback}");
-        assert!(review.is_empty(), "`{command}` consults no person");
-        assert!(
-            !feedback.contains("redact-secrets"),
-            "`{command}` offers no masker: {feedback}"
+        assert_eq!(
+            offers.len(),
+            2,
+            "`{command}` offers the narrowing and the masker: {feedback}"
         );
+        assert!(review.is_empty(), "`{command}` consults no person");
+        assert!(matches!(
+            runtime
+                .execute_remedy(&actor(), sanitizer_offer(&feedback, "coding.strip-secrets"))
+                .await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        assert_eq!(
+            propose(&runtime, read.clone()).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+        let delivered = hooks::handle(
+            &runtime,
+            HookEvent::ToolResult {
+                actor: actor(),
+                call: read,
+                call_id: None,
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available("GITHUB_TOKEN=ghp_live\nREGION=eu-west-1\n".to_string()),
+                },
+            },
+        )
+        .await;
+        // The masked output carries `internal`: on a public session the model accepts that
+        // residual before it reads the output, and on an `internal` one it arrives as is.
+        let value = match delivered {
+            HookDecision::ReplaceOutput { output } => {
+                assert!(
+                    output.contains("public -> internal"),
+                    "`{command}`: the residual is the narrowing to `internal`, never `self`: {output}"
+                );
+                let RemedyOutcome::Returned { value } = runtime.execute_remedy(&actor(), last_offer(&output)).await
+                else {
+                    panic!("`{command}`: accepting the residual returns the masked output");
+                };
+                value
+            }
+            HookDecision::DeliverValue { value } => value,
+            other => panic!("`{command}`'s output crosses through the masker, got {other:?}"),
+        };
+        assert_eq!(value, "GITHUB_TOKEN=[redacted-secret]\nREGION=[redacted-secret]\n");
     }
 
     for path in ["./README.md", "../src/main.rs", "src/.gitignore/../main.rs"] {
@@ -432,7 +511,12 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         call("host/claude-code/WebFetch", "url", "https://example.net/page.html"),
     )
     .await;
-    let HookDecision::DenyCall { offers, review, .. } = publication else {
+    let HookDecision::DenyCall {
+        feedback,
+        offers,
+        review,
+    } = publication
+    else {
         panic!("a trajectory narrowed to `self` requires a remedy before publishing: {publication:?}");
     };
     let rewrites: Vec<_> = offers
@@ -441,10 +525,12 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         .collect();
     assert_eq!(
         (offers.len(), rewrites),
-        (2, vec!["redact-for-public"]),
-        "the default authority can review the audience expansion, or the model sanitizer can rewrite the call for `public`"
+        (3, vec!["redact-for-public"]),
+        "the default authority can review the audience expansion, beside accepting the page's trust or \
+         stripping its instructions, or the model sanitizer can rewrite the call for `public`: {feedback}"
     );
-    assert_eq!(review.len(), 1, "one offer is backed by the default human authority");
+    sanitizer_offer(&feedback, "coding.strip-instructions");
+    assert_eq!(review.len(), 2, "two offers are backed by the default human authority");
     assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
         review[0].text.contains("public"),
@@ -702,11 +788,20 @@ async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
     );
     ran(&runtime, instructions).await;
 
-    // Reading a web page is offered as the drop to `suspicious`; the session accepts it.
+    // Reading a web page is offered as the drop to `suspicious`, or as the battery's
+    // instruction-stripping sanitizer over the confined page; the session accepts the drop.
     let page = call("host/claude-code/WebFetch", "url", "https://docs.example/page");
     let drop = propose(&runtime, page.clone()).await;
+    let HookDecision::DenyCall { feedback, .. } = &drop else {
+        panic!("a web page is offered as a narrowing, got {drop:?}");
+    };
+    sanitizer_offer(feedback, "coding.strip-instructions");
+    let accept = common::offers(feedback)
+        .first()
+        .cloned()
+        .expect("the narrowing is offered first");
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&drop)).await,
+        runtime.execute_remedy(&actor(), accept).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(

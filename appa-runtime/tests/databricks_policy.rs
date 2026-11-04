@@ -9,7 +9,8 @@ use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use common::{
-    Classifier, actor, members_source, offer_of, propose, ran, raw, repo_root, root, serve_runtime, session_runtime,
+    Classifier, actor, members_source, propose, ran, raw, repo_root, root, serve_runtime, session_runtime,
+    unsanitized_offer_of,
 };
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -153,7 +154,7 @@ async fn genie_reads_narrow_once_and_a_read_only_statement_follows() {
     let (runtime, classifier) = runtime(&dir).await;
 
     let ask = call("genie_ask", serde_json::json!({ "question": "revenue by region" }));
-    let offer = offer_of(&propose(&runtime, ask.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, ask.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }
@@ -226,7 +227,7 @@ async fn a_write_records_its_effect_and_a_reviewed_statement_needs_the_reviewer(
     let decision = propose(&runtime, grant.clone()).await;
     assert!(matches!(decision, HookDecision::DenyCall { .. }), "{decision:?}");
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(
@@ -392,7 +393,7 @@ async fn the_base_alone_keeps_every_rule_without_the_audience_source() {
         HookDecision::Ack
     );
     let ask = call("genie_ask", serde_json::json!({ "question": "revenue by region" }));
-    let offer = offer_of(&propose(&runtime, ask.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, ask.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }

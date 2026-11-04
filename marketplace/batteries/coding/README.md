@@ -20,7 +20,13 @@ claude-code` includes both. A rule no map binds is inactive.
 
 - **shell** — A command that names a credential path (`.env`, `.ssh/`,
   `.netrc`, `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows
-  the session to `self`, the requester. Before any other command runs, the
+  the session to `self`, the requester. A client whose map entry sets
+  `confined = true` withholds the command's result, and the battery offers
+  `coding.strip-secrets` beside the narrowing: the Claude Code model replaces
+  every secret value in the output with `[redacted-secret]`, and the masked
+  output returns at `internal`, not `self`. It never reaches `public` without
+  another remedy. The sanitizer is tagged `credentials`, so it applies only to
+  the credential rules, not to a command the Annotator narrowed. Before any other command runs, the
   `claude-code.bash-requirements` Annotator decides what trust and fresh
   attention it requires and labels its output for trust and audience, inside
   the vocabulary static rules write: a command that visibly reads the
@@ -72,7 +78,17 @@ claude-code` includes both. A rule no map binds is inactive.
   source. A fetch URL is a `public` sink, except that a fetch from a listed
   documentation host keeps the session's label. A search, through
   `web_search` or a Google search URL, requires no audience: the query goes
-  only to the search provider.
+  only to the search provider. Where a client's map confines the result
+  (Claude Code confines WebFetch), the battery offers `coding.strip-instructions`
+  beside the trust narrowing: the Claude Code model removes every instruction
+  from the page and keeps its facts, code and links, and the result returns
+  at the session's own trust. The sanitizer is tagged `web` and applies only
+  to the `suspicious` fetch and search rules.
+
+Both sanitizers run the Claude Code model with the battery's `hint`. APPA
+does not verify what the model removed: including the battery registers them
+as trusted. A root rule for a tool precedes the battery's, and a root rule
+without the battery's tag offers no sanitizer.
 
 The Annotators run the local `claude` command (`builtin = "claude-code"`); on
 Windows it must resolve to `claude.exe`. An Annotator reads the client's call

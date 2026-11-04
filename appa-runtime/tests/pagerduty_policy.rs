@@ -3,7 +3,7 @@ mod common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw, root};
+use common::{actor, battery_runtime, members_source, propose, ran, raw, root, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, request: serde_json::Value) -> ProposedCall {
@@ -47,8 +47,9 @@ selectors = [{{ template = "members", feeds = "internal" }}]
     .await
 }
 
-/// An incident read narrows the trajectory to internal; once it has, further reads run
-/// outright and what was read cannot be written back as trusted.
+/// An incident read narrows the trajectory to internal unless one of the battery's
+/// sanitizers settles it; once it has narrowed, further reads run outright and what was
+/// read cannot be written back as trusted.
 #[tokio::test]
 async fn a_read_is_internal_and_suspicious() {
     let dir = tempfile::tempdir().unwrap();
@@ -58,9 +59,21 @@ async fn a_read_is_internal_and_suspicious() {
         "browse_incidents",
         serde_json::json!({ "action": "list", "statuses": ["triggered"] }),
     );
-    let offer = offer_of(&propose(&runtime, read.clone()).await);
+    let blocked = propose(&runtime, read.clone()).await;
+    // The read is confined, so the battery's sanitizers stand beside the plain narrowing:
+    // one keeps the session's trust, the other its `public` audience.
+    let HookDecision::DenyCall { feedback, offers, .. } = &blocked else {
+        panic!("an incident read narrows the trajectory, got {blocked:?}");
+    };
+    assert_eq!(offers.len(), 3, "the narrowing and two sanitizers: {feedback}");
+    for sanitizer in ["pagerduty.strip-instructions", "pagerduty.redact-for-public"] {
+        assert!(
+            feedback.contains(&format!("Use sanitizer {sanitizer}'s result")),
+            "{sanitizer} is offered: {feedback}"
+        );
+    }
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&blocked)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(
@@ -135,7 +148,7 @@ async fn a_write_needs_review_and_records_its_effect() {
         let decision = propose(&runtime, write.clone()).await;
         assert!(!matches!(decision, HookDecision::AllowCall { .. }), "{}", write.tool);
         assert!(matches!(
-            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }
         ));
         assert_eq!(

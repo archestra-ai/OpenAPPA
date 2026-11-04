@@ -447,6 +447,15 @@ fn a_battery_that_validates_loads() {
                 "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n",
             ),
         ),
+        (
+            "a model sanitizer bound by name",
+            yes,
+            yes,
+            body(
+                &format!("{tool}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n"),
+                "[externals.sanitizers.mask]\nbuiltin = \"claude-code\"\n",
+            ),
+        ),
         // Stricter than the loader again: the loader lets an operator's own
         // file bind the stock approving authority; a battery may not.
         (
@@ -874,14 +883,14 @@ fn every_field_and_binding_a_package_may_carry_loads() {
         );
     }
 
-    for stock in appa_package::BINDABLE_STOCK_SANITIZERS {
+    for stock in appa_package::BINDABLE_SANITIZER_BUILTINS {
         let fragment = format!(
             "[policy]\nversion = 2\n\n[[policy.sanitizer]]\nname = \"probe\"\non = [\"tool_output\"]\n\n\
              [externals.sanitizers.probe]\nbuiltin = \"{stock}\"\n"
         );
         assert!(
             probe_loads(&fragment, false),
-            "a package may bind the stock sanitizer {stock} and a deployment will not load it"
+            "a package may bind the sanitizer builtin {stock} and a deployment will not load it"
         );
     }
 }

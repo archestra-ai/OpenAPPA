@@ -23,6 +23,18 @@ Your root config must define an Authority permitting `huggingface-review` for Jo
 
 Tools a Space adds to the server (`gr<N>_*`) are named after each account's own Space list, so the battery cannot name them; add a root rule with the exact name for each one you enable.
 
+## Sanitizers
+
+The battery confines the results of every tool that returns Hub content or the output of code run on the Hub; the target policies tag the same reads. A read that narrows the session then offers each sanitizer below beside the plain narrowing, and the agent chooses. A chosen sanitizer runs the Claude Code model (`builtin = "claude-code"`) on the confined result with the battery's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+
+| Sanitizer | `permits` | Effect |
+|---|---|---|
+| `huggingface.strip-instructions` | `trust`: `suspicious` → `trusted` | Removes every instruction from the result and keeps the data. The read does not lower the session's trust, so it adds no trust gap to a later call that requires `trusted` data. The audience does not change. |
+
+A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts. A sanitizer never clears a requirement, such as a review mark.
+
+APPA does not verify what the model removed: including the battery registers these sanitizers as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tag offers no sanitizer. The model runs through `[externals.claude_code]`, so the host that runs OpenAPPA needs the `claude` command. Without it, a chosen sanitizer gets no answer and the result stays withheld.
+
 ## Audience source
 
 The audience source builds `self` from the token's account and resolves one resource group's members. The battery binds it and its two annotators; map `self` onto `huggingface:viewer` in the root config, and redeclare the annotators there to admit a resource group's collection. The scripts read their token from `APPA_PROVIDER_HUGGINGFACE_TOKEN`, or from your Hugging Face CLI login (`hf auth login`) when the variable is unset. `appa battery install huggingface` names the variable and the fallback after it includes the battery. The scripts call `https://huggingface.co`; set `HF_ENDPOINT` to another Hub instead.

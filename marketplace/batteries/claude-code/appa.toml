@@ -3,9 +3,10 @@
 # built-in tool set varies by Claude Code version; regenerate the list from a
 # live session when it drifts. Include the `coding` battery beside this one.
 
-# Claude Code spells each argument as the canonical tools do. Bash and
-# PowerShell results stay confined so a sanitizer the root declares can run
-# on them.
+# Claude Code spells each argument as the canonical tools do. Bash,
+# PowerShell and WebFetch results stay confined so the `coding` battery's
+# sanitizers, and any the root declares, can run on them. WebSearch stays
+# unconfined: Claude Code's replacement of its result is not verified live.
 [aliases.tool.coding]
 shell = [{ name = "host/claude-code/Bash", args = { command = "command" }, confined = true }]
 powershell = [{ name = "host/claude-code/PowerShell", args = { command = "command" }, confined = true }]
@@ -13,7 +14,7 @@ read_file = [{ name = "host/claude-code/Read", args = { file_path = "file_path" 
 search_files = [{ name = "host/claude-code/Grep", args = { path = "path" } }]
 write_file = [{ name = "host/claude-code/Write", args = { file_path = "file_path" } }]
 edit_file = [{ name = "host/claude-code/Edit", args = { file_path = "file_path" } }]
-fetch_url = [{ name = "host/claude-code/WebFetch", args = { url = "url" } }]
+fetch_url = [{ name = "host/claude-code/WebFetch", args = { url = "url" }, confined = true }]
 web_search = [{ name = "host/claude-code/WebSearch" }]
 
 

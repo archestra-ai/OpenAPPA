@@ -53,62 +53,77 @@ selectors = [
 [[policy.tool]]
 name = "mcp/github/get_file_contents"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_branches"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_commits"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_commit"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_tags"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_tag"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_releases"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_latest_release"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_release_by_tag"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_repository_collaborators"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_issues"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/issue_read"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_label"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_pull_requests"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/pull_request_read"
 annotator = "github.repository-visibility"
+tags = ["github"]
 
 # --- writes into one repository: its visibility decides who must be allowed to see the data ---
 
@@ -139,6 +154,7 @@ annotator = "github.repository-readers"
 [[policy.tool]]
 name = "mcp/github/sub_issue_write"
 annotator = "github.repository-readers"
+tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/add_issue_comment"

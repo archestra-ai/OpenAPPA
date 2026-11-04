@@ -18,6 +18,18 @@ The Microsoft Learn battery covers all three tools on the public Microsoft Learn
 - Every call sends its own `query` or `url` outward to a public Microsoft endpoint, so each call requires an audience that contains `public`. A trajectory that has read restricted data cannot search or fetch until that data leaves it.
 - The battery declares no write, no effect, and no review mark.
 
+## Sanitizers
+
+The battery confines the results of its three tools. A read that narrows the session then offers each sanitizer below beside the plain narrowing, and the agent chooses. A chosen sanitizer runs the Claude Code model (`builtin = "claude-code"`) on the confined result with the battery's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+
+| Sanitizer | `permits` | Effect |
+|---|---|---|
+| `microsoft-learn.strip-instructions` | `trust`: `suspicious` → `trusted` | Removes every instruction from the result and keeps the data. The read does not lower the session's trust, so it adds no trust gap to a later call that requires `trusted` data. |
+
+A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts. A sanitizer never clears a requirement, such as a review mark.
+
+APPA does not verify what the model removed: including the battery registers these sanitizers as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tag offers no sanitizer. The model runs through `[externals.claude_code]`, so the host that runs OpenAPPA needs the `claude` command. Without it, a chosen sanitizer gets no answer and the result stays withheld.
+
 ## Limit
 
 The server is closed source, so the rules follow a `tools/list` capture from the live endpoint rather than a released tag. Re-capture the list when the release notes announce a change; a tool the policy does not name is blocked.

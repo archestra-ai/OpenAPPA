@@ -30,6 +30,20 @@ so a deployment can customize its hint without editing the battery.
 | `xmemory/` | the hosted xmemory instance (15 tools) and admin (17 tools) MCP servers, one namespace bound to both; internal reads, writes from trusted input only, trusted admin and schema changes, reviewed schema migrations and instance deletion | none |
 | `jev/` | no tools; one Annotator a deployment routes its own tools to | TypeSafe's Jev model annotates each routed call's audience and trust; the call's name, description, and arguments are sent to the TypeSafe API |
 
+Every battery with a `suspicious` read except `claude-code` also ships a
+tagged `tool_output` sanitizer, `<battery>.strip-instructions`, served by the
+Claude Code model (`builtin = "claude-code"`): it removes instructions from a
+confined result, which then keeps the session's trust. `cloudflare`, `linear`,
+`pagerduty` and `sentry` add `<battery>.redact-for-public`, which returns an
+`internal` record at `public` once the model removes what outside readers may
+not see. `coding` and `monday` add `<battery>.strip-secrets`, which returns a
+credential read at `internal` instead of `self`. Each battery lists the tools
+it confines in `[policy.deployment] confined_results`. `archestra` and
+`xmemory` ship none: their reads keep the session's trust, and their records
+have no public core to release. `claude-code` ships none either: Claude Code's
+replacement of a result is not verified live for the `suspicious` tools it
+names, so it cannot confine them.
+
 Include a battery with a path relative to the including file. An install
 replaces the deployment's battery store beside the root config, so the line it
 writes reads:

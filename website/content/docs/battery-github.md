@@ -21,6 +21,18 @@ The GitHub battery covers the MCP server's default profile, repository, issue, p
 
 The battery does not include optional GitHub tools. Add rules to the root config before enabling Actions, Discussions, Gists, Projects, or security alerts.
 
+## Sanitizers
+
+The battery confines the results of the 27 reads that return text other people wrote; the target policies tag the same reads. A read that narrows the session then offers each sanitizer below beside the plain narrowing, and the agent chooses. A chosen sanitizer runs the Claude Code model (`builtin = "claude-code"`) on the confined result with the battery's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+
+| Sanitizer | `permits` | Effect |
+|---|---|---|
+| `github.strip-instructions` | `trust`: `suspicious` → `trusted` | Removes every instruction from the result and keeps the data. The read does not lower the session's trust, so it adds no trust gap to a later call that requires `trusted` data. The audience does not change. |
+
+A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts. A sanitizer never clears a requirement, such as a review mark.
+
+APPA does not verify what the model removed: including the battery registers these sanitizers as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tag offers no sanitizer. The model runs through `[externals.claude_code]`, so the host that runs OpenAPPA needs the `claude` command. Without it, a chosen sanitizer gets no answer and the result stays withheld.
+
 ## Audience source
 
 The audience source can build `self`, organization member, organization team, and repository collaborator audiences. The battery binds it, its two annotators, and its context provider; map `self` and `internal` onto it in the root config. The scripts read their token from `APPA_PROVIDER_GITHUB_TOKEN`, or from your GitHub CLI login (`gh auth login`) when the variable is unset; a token needs the `repo` and `read:org` scopes. `appa battery install github` names the variable and the fallback after it includes the battery. The scripts call `https://api.github.com`; set `GITHUB_API_URL` to a GitHub Enterprise Server's `/api/v3` root instead.

@@ -3,7 +3,7 @@ mod common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw, root};
+use common::{actor, battery_runtime, members_source, propose, ran, raw, root, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -63,7 +63,7 @@ async fn the_proxy_is_read_by_its_inner_tool_name() {
     let runtime = runtime(&dir).await;
 
     let read = execute("get_issue_details");
-    let offer = offer_of(&propose(&runtime, read.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, read.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }
@@ -125,7 +125,7 @@ async fn a_write_needs_review_and_records_its_effect() {
         let decision = propose(&runtime, write.clone()).await;
         assert!(!matches!(decision, HookDecision::AllowCall { .. }));
         assert!(matches!(
-            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }
         ));
         assert_eq!(
