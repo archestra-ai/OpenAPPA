@@ -132,7 +132,7 @@ Protected sessions can coordinate with `SendMessage`. A peer message carries the
 | --- | --- |
 | The address of exactly one other live protected session under the same policy and principal | Allowed at any label |
 | Any other socket address | Denied |
-| A session name | Requires audience `public`: a name can belong to any session, including an unprotected one |
+| A session name | Requires audience `internal`: a name belongs to a session of the same organization or user, which may be unprotected |
 
 When a send by name is denied and one protected peer has that name, the denial gives the peer's address. The model can then send again to that address. `recipient`, when set, MUST equal `to`.
 

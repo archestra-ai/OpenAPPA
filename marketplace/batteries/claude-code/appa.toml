@@ -220,13 +220,13 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/RemoteTrigger"
-requires = { audience = { contains = ["public"] } }
+requires = { audience = { contains = ["internal"] } }
 delta = {}
 
-# A name may belong to any session, including one APPA does not protect, so a
-# send is a public sink. A root whose runtime verifies protected peers precedes
-# this rule with its exceptions for their addresses.
+# A name belongs to a session of the same organization or user, so a send is an
+# internal sink. A root whose runtime verifies protected peers precedes this
+# rule with its exceptions for their addresses.
 [[policy.tool]]
 name = "host/claude-code/SendMessage"
-requires = { audience = { contains = ["public"] } }
+requires = { audience = { contains = ["internal"] } }
 delta = {}

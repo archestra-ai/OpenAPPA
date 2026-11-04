@@ -8,7 +8,7 @@ digest = "sha256:ae883e165b3c8b2a92c0efed17258b993badc1066d52fda57e76c5801ad6092
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
-digest = "sha256:5e74f59de479501c85ca7c023bdc7ce2cbd3f489f8bc92136be3d8f5026d6a76"
+digest = "sha256:be3e54fe1bc99d98693e80c16aeb4e9467c988f6d4bf953e39fa29bcf6590bb1"
 
 [packages.battery.cloudflare]
 path = "batteries/cloudflare"
@@ -88,7 +88,7 @@ digest = "sha256:276b44dd41b0a94b6c8aac3a7407ed81689ee0f03c02676308d87db5eba4f99
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"
-digest = "sha256:a8bbb52ac8e367f7e8308fe154fd4b76eb1d74df1781f6410c51ee9ba635fb20"
+digest = "sha256:4c038a6abef5ef1485d43c6cb0bdfb092a36ce05018d35a457873a50d2f0e590"
 
 [packages.plugin.kagent]
 path = "plugins/kagent"
