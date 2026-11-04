@@ -9,7 +9,7 @@ use std::time::Duration;
 use super::consult_with_retries;
 use crate::config::{Endpoint, EndpointHost, EndpointToken, ModelLimits};
 use crate::consult::ModelPrompt;
-use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, Transcript, error_line, read_body};
+use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, Transcript, read_body, refusal_detail};
 use appa_engine::value::TrajectoryId;
 use appa_policy::AnnotatorBuiltin;
 
@@ -135,7 +135,7 @@ impl ArchestraBackend {
             .await;
             return Err(NoAnswerReason::NonSuccess {
                 status: status.as_u16(),
-                detail: host_message(&body),
+                detail: refusal_detail(&body),
             });
         }
         let mut text = Vec::new();
@@ -151,17 +151,6 @@ impl ArchestraBackend {
         }
         String::from_utf8(text).map_err(|_| NoAnswerReason::Malformed)
     }
-}
-
-/// What the host said about a consult it refused: the `message` of its error envelope
-/// (`{"error":{"message":…}}`), else the last line of whatever it wrote; none when it
-/// wrote nothing.
-fn host_message(body: &[u8]) -> Option<String> {
-    let envelope: Option<String> = serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("error")?.get("message")?.as_str().map(str::to_string));
-    let line = error_line(envelope.as_deref().unwrap_or(&String::from_utf8_lossy(body)));
-    (!line.is_empty()).then_some(line)
 }
 
 #[cfg(test)]

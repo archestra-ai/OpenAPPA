@@ -498,8 +498,9 @@ pub enum HookEvent {
         /// The title the host shows for this session.
         title: Option<SessionTitle>,
     },
-    /// The actor finished a turn. Nothing it released is still running,
-    /// so a dispatch still open names a call the harness never ran.
+    /// The actor finished a turn. A dispatch still open names a call the
+    /// harness never ran, except an identified spawn whose subagent is still
+    /// running: a background subagent works past its parent's turn.
     TurnEnd { actor: Actor },
     ToolCall {
         actor: Actor,

@@ -75,6 +75,14 @@ impl CallRole {
             Some(_) | None => CallRole::Ordinary,
         }
     }
+
+    /// The kind of spawn a marked spawn starts, or `None` for an ordinary call.
+    pub(crate) fn spawn(self) -> Option<crate::transition::SpawnKind> {
+        match self {
+            CallRole::MarkedSpawn(kind) => Some(kind),
+            CallRole::Ordinary => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

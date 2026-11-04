@@ -11,8 +11,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use appa_engine::audience::{DeclaredTemplate, SelectorTemplate, SourceRegistration, well_formed_reader};
+use appa_engine::authority::{ContextHint, HintTooLong};
 use appa_engine::label::{ChainAudience, ReaderId};
-use appa_engine::names::ProviderName;
+use appa_engine::names::{ContextProviderName, ProviderName};
 use appa_package::BatteryTarget;
 use appa_policy::AnnotatorBuiltin;
 use appa_runtime_api::PrincipalSource;
@@ -304,6 +305,9 @@ pub struct Externals {
     /// One context provider per `[externals.context.<name>]`, under its name: asked about
     /// every call an Annotator judges, before the Annotator.
     pub context: BTreeMap<String, Transport>,
+    /// The deployer's instruction on reading each context provider's facts, for every provider
+    /// in `context` that declares a `hint`.
+    pub context_hints: BTreeMap<ContextProviderName, ContextHint>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -904,6 +908,8 @@ pub enum ConfigError {
     },
     #[error("the {section} entry {name:?} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
     LlmNotConfigured { section: &'static str, name: String },
+    #[error("the context entry {name:?} hint is {len} characters, over the maximum {max}")]
+    ContextHintTooLong { name: String, len: usize, max: usize },
     #[error("the {section} entry {name:?} command must contain at least one non-empty argument")]
     InvalidCommand { section: &'static str, name: String },
     #[error("a hosted document declares {key:?}, which is the host's to declare, not the policy's")]
@@ -1084,7 +1090,7 @@ struct RawExternals {
     #[serde(default)]
     audience: BTreeMap<String, RawAudienceBinding>,
     #[serde(default)]
-    context: BTreeMap<String, RawBinding>,
+    context: BTreeMap<String, RawContextBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
     jev: Option<RawJev>,
@@ -1097,7 +1103,6 @@ impl RawExternals {
             (Section::Authorities, &self.authorities),
             (Section::Sanitizers, &self.sanitizers),
             (Section::Annotators, &self.annotators),
-            (Section::Context, &self.context),
         ];
         bindings
             .into_iter()
@@ -1107,6 +1112,12 @@ impl RawExternals {
                     .filter(|(_, binding)| binding.command.is_some())
                     .map(move |(name, _)| (section, name.as_str()))
             })
+            .chain(
+                self.context
+                    .iter()
+                    .filter(|(_, provider)| provider.command.is_some())
+                    .map(|(name, _)| (Section::Context, name.as_str())),
+            )
             .chain(
                 self.audience
                     .iter()
@@ -1166,6 +1177,37 @@ struct RawBinding {
     token_env: Option<RawTokenEnv>,
     builtin: Option<String>,
     command: Option<Vec<String>>,
+}
+
+/// A context provider's binding and the deployer's `hint` on reading its answers. Only this
+/// section takes a `hint`: every other binding stays a bare [`RawBinding`].
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawContextBinding {
+    url: Option<String>,
+    token_env: Option<RawTokenEnv>,
+    builtin: Option<String>,
+    command: Option<Vec<String>>,
+    hint: Option<String>,
+}
+
+impl RawContextBinding {
+    fn split(self) -> (RawBinding, Option<String>) {
+        let RawContextBinding {
+            url,
+            token_env,
+            builtin,
+            command,
+            hint,
+        } = self;
+        let binding = RawBinding {
+            url,
+            token_env,
+            builtin,
+            command,
+        };
+        (binding, hint)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1610,6 +1652,7 @@ impl Config {
         let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {
             resolve_bindings(section, entries, &origins, keys, llm.is_some())
         };
+        let (context, context_hints) = split_context(context)?;
         Ok(Config {
             credential_store: None,
             keys: keys.keys(),
@@ -1636,6 +1679,7 @@ impl Config {
                     .into_iter()
                     .map(|(name, implementation)| (name, transport_only(implementation)))
                     .collect(),
+                context_hints,
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
                 jev,
@@ -2216,6 +2260,27 @@ fn compose_included_confinement(
     }
     Ok(())
 }
+
+/// The context section's bindings, and the hint of every provider that declares one.
+fn split_context(raw: BTreeMap<String, RawContextBinding>) -> Result<SplitContext, ConfigError> {
+    let mut bindings = BTreeMap::new();
+    let mut hints = BTreeMap::new();
+    for (name, entry) in raw {
+        let (binding, hint) = entry.split();
+        if let Some(hint) = hint.filter(|hint| !hint.trim().is_empty()) {
+            let hint = ContextHint::new(hint).map_err(|HintTooLong { len, max }| ConfigError::ContextHintTooLong {
+                name: name.clone(),
+                len,
+                max,
+            })?;
+            hints.insert(ContextProviderName::new(name.clone()), hint);
+        }
+        bindings.insert(name, binding);
+    }
+    Ok((bindings, hints))
+}
+
+type SplitContext = (BTreeMap<String, RawBinding>, BTreeMap<ContextProviderName, ContextHint>);
 
 /// An annotator or context-provider binding after its section refused every `builtin` at parse.
 fn transport_only(implementation: Implementation) -> Transport {
@@ -3064,8 +3129,20 @@ mod tests {
                 Some(Bound::Builtin(name)) if name == builtin
             ));
         };
-        for section in [Section::Authorities, Section::Sanitizers] {
-            for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
+        // Each section takes the builtins it owns (`external::builtin_backend`: `hitl` and
+        // the stock `approve` for authorities, the stock redactors for sanitizers, the model
+        // transports for both) and any module name, resolved once modules load.
+        for (section, owned) in [
+            (
+                Section::Authorities,
+                ["hitl", "approve", "claude-code", "llm", "some-module"],
+            ),
+            (
+                Section::Sanitizers,
+                ["redact-email", "redact-secrets", "claude-code", "llm", "some-module"],
+            ),
+        ] {
+            for builtin in owned {
                 accepts(section, builtin);
             }
         }
@@ -4363,27 +4440,22 @@ mod tests {
     #[test]
     fn a_malformed_selector_declaration_is_refused_at_load_naming_the_source_and_template() {
         for (selectors, expected) in [
-            (
-                "[{ template = \"channel//x\" }]",
-                "[externals.audience] bad selector declaration for audience source \"slack\": \"channel//x\" has an empty segment",
-            ),
-            (
-                "[{ template = \"viewer\", feeds = \"public\" }]",
-                "[externals.audience] bad selector declaration for audience source \"slack\": \"viewer\" `feeds` names a built-in audience: `self` or `internal`",
-            ),
-            (
-                "[]",
-                "[externals.audience] bad selector declaration for audience source \"slack\": \"\" `selectors` declares no template",
-            ),
+            ("[{ template = \"channel//x\" }]", "channel//x"),
+            ("[{ template = \"viewer\", feeds = \"public\" }]", "viewer"),
+            ("[]", ""),
         ] {
             let document = format!(
                 "{MINIMAL}\n[externals.audience.slack]\nurl = \"https://slack.internal\"\nselectors = {selectors}\n"
             );
             let refused = parse(&document).expect_err("a malformed selector declaration refuses the load");
-            assert_eq!(refused.to_string(), expected);
+            assert!(
+                matches!(&refused, ConfigError::SelectorDeclaration { provider, template, .. }
+                    if provider == "slack" && template == expected),
+                "{refused}"
+            );
             let value: toml::Value = toml::from_str(&document).expect("the document is TOML");
             let described = source_registrations_of(&value).expect_err("the document's sources are refused");
-            assert_eq!(described.to_string(), expected);
+            assert_eq!(described.to_string(), refused.to_string());
         }
     }
 
@@ -4810,6 +4882,8 @@ mod tests {
         for deployment in [
             "[policy.deployment]\ncontext_control = true\n",
             "[policy.deployment]\nconfined_results = \"fetch\"\n",
+            "[policy.deployment]\nhint = \"The battery's own hosts.\"\n",
+            "[policy.deployment]\nconfined_results = [\"fetch\"]\nhint = \"The battery's own hosts.\"\n",
         ] {
             std::fs::write(
                 &battery,
@@ -4821,6 +4895,96 @@ mod tests {
                 "{deployment} is root-only"
             );
         }
+    }
+
+    /// A context provider's `hint` is that section's alone, bounded in characters, and a
+    /// fragment's provider carries its hint into the composed deployment.
+    #[test]
+    fn a_context_provider_hint_loads_bounded_and_composes_from_a_fragment() {
+        let provider = |hint: &str| {
+            format!(
+                "{MINIMAL}\n[externals.context.github]\ncommand = [\"python3\", \"context.py\"]\nhint = \"{hint}\"\n"
+            )
+        };
+        let config = parse(&provider("Private repositories of acme are internal.")).expect("a hinted provider loads");
+        assert_eq!(
+            config
+                .externals
+                .context_hints
+                .get(&ContextProviderName::new("github"))
+                .map(ContextHint::as_str),
+            Some("Private repositories of acme are internal.")
+        );
+        assert!(config.externals.context.contains_key("github"));
+        let unhinted = MINIMAL.to_string() + "\n[externals.context.github]\ncommand = [\"python3\", \"context.py\"]\n";
+        assert!(parse(&unhinted).expect("loads").externals.context_hints.is_empty());
+        assert!(
+            parse(&provider("  "))
+                .expect("loads")
+                .externals
+                .context_hints
+                .is_empty()
+        );
+
+        let max = appa_engine::registry::MAX_CONTEXT_HINT_CHARS;
+        assert!(parse(&provider(&"é".repeat(max))).is_ok());
+        assert!(matches!(
+            parse(&provider(&"é".repeat(max + 1))),
+            Err(ConfigError::ContextHintTooLong { name, len, .. }) if name == "github" && len == max + 1
+        ));
+
+        for section in ["authorities", "sanitizers", "annotators", "audience"] {
+            let text = format!("{MINIMAL}\n[externals.{section}.x]\ncommand = [\"python3\", \"x.py\"]\nhint = \"h\"\n");
+            assert!(toml::from_str::<RawConfig>(&text).is_err(), "{section} refuses a hint");
+        }
+
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        std::fs::write(
+            &root,
+            "include = [\"battery.toml\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write root config");
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            "[policy]\nversion = 2\n[externals.context.github]\ncommand = [\"python3\", \"context.py\"]\n\
+             hint = \"The battery's reading.\"\n",
+        )
+        .expect("write battery");
+        let composed = Config::load(&root).expect("the fragment composes");
+        assert_eq!(
+            composed
+                .externals
+                .context_hints
+                .get(&ContextProviderName::new("github"))
+                .map(ContextHint::as_str),
+            Some("The battery's reading.")
+        );
+    }
+
+    /// The deployment hint is the root's: a hosted battery's base or target that declares it
+    /// is refused like any other deployment key but `confined_results`.
+    #[test]
+    fn a_hosted_battery_cannot_declare_the_deployment_hint() {
+        let hinted = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"fetch\"\ndelta = {}\n[policy.deployment]\n\
+                      confined_results = [\"fetch\"]\nhint = \"The battery's own hosts.\"\n";
+        let plain = "[policy]\nversion = 2\n";
+        for (base, target) in [(hinted, None), (plain, Some(hinted))] {
+            assert!(matches!(
+                hosted_composed(
+                    HOSTED_ROOT,
+                    &[HostedBattery {
+                        name: "fetcher",
+                        base,
+                        target,
+                        token_env: &[],
+                    }],
+                ),
+                Err(ConfigError::IncludedPolicyField { field, .. }) if field == "deployment.hint"
+            ));
+        }
+        let root = format!("{HOSTED_ROOT}[policy.deployment]\nhint = \"The root's own hosts.\"\n");
+        assert!(hosted_composed(&root, &[]).is_ok(), "the root declares it");
     }
 
     #[test]

@@ -750,7 +750,21 @@ impl Run<'_> {
             }
         };
         let acting = self.actor(frame);
-        let (record, reply) = match self.agent.runtime.execute_remedy_with(&acting, offer, arguments).await {
+        // A call that quotes no offer declares the next subagent call's return.
+        let declares = offer.is_none();
+        let outcome = match offer {
+            Some(offer) => self.agent.runtime.execute_remedy_with(&acting, offer, arguments).await,
+            None => self.agent.runtime.declare_return_ahead(&acting, arguments).await,
+        };
+        let (record, reply) = match outcome {
+            RemedyOutcome::Returned { value } if declares => (
+                Record::OfferTaken {
+                    call: id,
+                    detail: "the next subagent call's return is declared".to_string(),
+                    value: None,
+                },
+                value,
+            ),
             RemedyOutcome::Authorized { call } => (
                 Record::OfferTaken {
                     call: id,

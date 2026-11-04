@@ -4,7 +4,7 @@ name = "appa"
 
 [packages.battery.archestra]
 path = "batteries/archestra"
-digest = "sha256:f59ea96070e56d2755fe8b8aba95df2d72c5b410431fd5a97df61b4dc7d18072"
+digest = "sha256:ae883e165b3c8b2a92c0efed17258b993badc1066d52fda57e76c5801ad60929"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
@@ -16,7 +16,7 @@ digest = "sha256:c3efc3ab1f450b16533138991b6a338944af29735bfc2c210f540a521164461
 
 [packages.battery.coding]
 path = "batteries/coding"
-digest = "sha256:b50e514b36358afd613148a05241790ee8ed03e9e193882f568c7fdcc41ffd91"
+digest = "sha256:3032945866fd438f85e8fc9a25bb271181b53dc18d4e251072b173cde8a61a0c"
 
 [packages.battery.databricks]
 path = "batteries/databricks"
@@ -24,11 +24,11 @@ digest = "sha256:ba9d4fcdf34c66e40e69f985a69d6691b3ba2c8ac90f4349036c9cdc53e4f41
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:bb52d165990af2a06519b04c259be63dadb9b84f50614669ffc094a9e3df6350"
+digest = "sha256:f73635bfb891e007dddb8ef052282d37bfe2a55820d8702d0efb945a413b6c47"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
-digest = "sha256:a776f20ee5fe67c0c2fa871ac1552b597fd189b1c25be951f1faa33bd41d70db"
+digest = "sha256:cc76a62b25883585e58331085cca32d0e343331e6780898944e3bb64ced3a4b8"
 
 [packages.battery.grain]
 path = "batteries/grain"
@@ -92,8 +92,8 @@ digest = "sha256:a8bbb52ac8e367f7e8308fe154fd4b76eb1d74df1781f6410c51ee9ba635fb2
 
 [packages.plugin.kagent]
 path = "plugins/kagent"
-digest = "sha256:9fde3eb55c0eb2743026b0deb738ee3f275377014a7f4ef21b2dbf7e8eef32ab"
+digest = "sha256:fbc405f90aea47fa66e30b01569e46a75b86c4caaed05baf1add478db722bb1d"
 
 [packages.plugin.opencode]
 path = "plugins/opencode"
-digest = "sha256:48b2f1e1fc06b315633a5dc3fe2f4f9ee0dffde0d8c9c62249ffd305b4e5a0f4"
+digest = "sha256:17ae881fc5b002b549fe720fe54a0f18912b5c1bed1252fe23a9e3039ee5452c"

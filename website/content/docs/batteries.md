@@ -47,7 +47,8 @@ OpenAPPA combines these files into one config.
 | Annotators | Each annotator name must be unique. |
 | Script path | A script path is relative to the config file that names it. |
 | Audience sources | A battery binds the membership service it ships and declares its selector templates. A root entry for the same provider is a duplicate. |
-| Confined results | A battery can list its own tools in `confined_results`, so an output sanitizer it ships has a result to run on. The names join the root's list. Other `[policy.deployment]` settings stay in the root. |
+| Context providers | A battery binds the context helper it ships, with an optional `hint` on reading its answers. The hint reaches every annotation the provider contributes to, not only the battery's own tools. A root entry for the same provider is a duplicate, so the root cannot replace the battery's hint. |
+| Confined results | A battery can list its own tools in `confined_results`, so an output sanitizer it ships has a result to run on. The names join the root's list. Other `[policy.deployment]` settings, `hint` included, stay in the root. |
 | Bindings | A battery binds the helper scripts it ships, and a sanitizer to a stock `builtin` such as `redact-secrets`. A `url`, a model, or a stock authority is the root's to bind. |
 | Model components | An annotator or a sanitizer can name a model on its declaration with `builtin = "claude-code"` or `builtin = "llm"`. A root declaration with the same name replaces the battery's, so the root can change its model or hint. |
 

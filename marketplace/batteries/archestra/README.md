@@ -1,44 +1,44 @@
 # Archestra battery
 
-Rules for the sharing, discovery, reporting, and agent run tools of
-Archestra's built-in MCP server, plus the `archestra` audience source.
+Rules for every tool of Archestra's built-in MCP server, plus the
+`archestra` audience source.
 
 ## Files
 
-**`appa.toml`** — one rule per sharing value of each tool, first match
-wins:
+**`appa.toml`** — one rule per tool, and one per sharing value of a
+sharing tool, first match wins:
 
-| Tool | Widens to | Requires |
-| --- | --- | --- |
-| `set_project_share` | `visibility: organization` / `team` or a sent `team_ids` | `internal` / `@archestra:team/$team_ids` |
-| `publish_app` | `scope: org` / `team` | `internal` / `@archestra:team/$teams` |
-| `create_knowledge_base` | default `org-wide` / `team-scoped`, or `private` with a sent `teamIds` | `internal` / `@archestra:team/$teamIds` |
-| `update_knowledge_base` | `org-wide` / `team-scoped` or a sent `teamIds` | `internal` / `@archestra:team/$teamIds` |
-| `create_knowledge_connector` | default `org-wide` / `team-scoped` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `internal` |
-| `update_knowledge_connector` | `org-wide` / `team-scoped` or a sent `team_ids` / `auto-sync-permissions` | `internal` / `@archestra:team/$team_ids` / `internal` |
-| `create_plugin`, `update_plugin` | `scope: org` / `team` or a sent `teamIds` / a sent `userIds` / both lists | `internal` / `@archestra:team/$teamIds` / `@archestra:user/$userIds` / `internal` |
-| `edit_agent`, `edit_mcp_gateway` | `scope: org` / `team` or a sent `teams` | `internal` / `@archestra:team/$teams` |
-| `add_team_member` | the added member | `@archestra:user/$user` |
-| `search_tools`, `search_files`, `load_skill` | nothing: they list tools and files, and load a skill | nothing |
-| `yell` | nothing: it files a guardrails report, the way out of a block | nothing |
-| `start_agent_run`, `steer_agent_run`, `write_workspace_file`, `transfer_workspace_file` upload | the run and its workspace | `internal` |
-| `get_agent_run`, `read_workspace_file`, `transfer_workspace_file` download | nothing: adds `internal` to the session | nothing |
-| `transfer_workspace_file` without a `direction` | both: adds `internal` | `internal` |
-| `cancel_agent_run` | nothing: it returns only the run's state | nothing |
-| `list_agent_runs` | nothing: adds `internal`, since it names the organization's agents, requesters, and channels | nothing |
+| Class | Tools | Adds | Requires |
+| --- | --- | --- | --- |
+| Own surfaces | `search_tools`, `search_files`, `load_skill`, `ask_user`, `todo_write`, `whoami`, `validate_guardrails_policy`, `resolve_openappa_yell`, credential setup cards, `cancel_agent_run` and other writes that carry no session data | nothing | nothing |
+| Organization records | configuration, rosters, the guardrails policy and its previews, yells, consults, files, apps, run state | `internal` | nothing |
+| Text strangers write | `query_knowledge_sources`, `get_schedule_trigger_run_transcript` | `internal`, `suspicious` | nothing |
+| Control plane | deletes and unassigns, guardrails publishes, repository connection and sync, credential bindings, schedule controls, team changes, limits, tool assignments | nothing | `trusted` |
+| Read or run by others, or read back as trusted | agents, gateways, MCP servers, hooks, skills, plugins, apps and app specs, knowledge base updates, scheduled tasks, run posts, credential transfers, persistent file writes | nothing | `trusted`, `internal` |
+| Runs | `start_agent_run`, `steer_agent_run` (and their Archestra 1.4 names), workspace writes and uploads | nothing | `internal` |
+| Shares | `publish_app` by `scope`, `update_knowledge_connector` by `visibility` or a sent `team_ids`, `add_team_member` | nothing | `trusted` and `internal` / `@archestra:team/<team>` / `@archestra:user/$user` |
+| Sandbox | `run_command` | the `archestra.run-command` Annotator | |
 
-Every widening share also requires `trusted` data. Values that keep a
-resource personal or private, and updates that send no scope and no
-list, require nothing. An update that sends a team or member list
-replaces who the resource is shared with whatever scope it already has,
-so the list is checked on its own: an argument selector such as
-`(teams:*)` matches a call that sent a non-empty list. A call that sends
-both a team and a member list requires `internal`, which holds every
-team and member. Auto-synced connector permissions mirror the connected
-system's own ACLs, which this source cannot read, so such a connector
-must be sharable with anyone. Every rule of a tool declares its lists as
-arrays of strings, so a malformed list is refused rather than read as no
-list.
+The battery declares no rule for `yell` (ruled as `mcp/appa/yell`),
+`run_tool` and `preview_app_tool` (ruled as the tool they run),
+`execute_remedy_plan`, `get_remedy_plans`, `list_peer_messages`,
+`read_peer_message`, and the app-runtime tools no agent lists.
+
+The Archestra proxy adds string arrays no selector could read from the
+original objects: `initialGrantPrincipals` (`<type>:<id>`, the
+organization as `organization`, sent only with a non-empty
+`initialGrants`) and `transferModes` (`value` or `link` per credential).
+A create that sends grants requires `trusted` data sharable with
+`internal`, which holds every principal a grant can name; without grants
+it requires what the create alone needs. A credential transfer that only
+returns links requires nothing; any other transfer requires `trusted` and
+`internal`. An update that sends `team_ids` replaces who the
+connector is shared with whatever visibility it already has, so the list
+is checked on its own. Auto-synced connector permissions mirror the
+connected system's own ACLs, which this source cannot read, so such a
+connector requires `internal`. Every rule of a sharing tool declares its
+lists as arrays of strings, so a malformed list is refused rather than
+read as no list.
 
 A run and its workspace are one container the organization may read,
 since admins can open any run. What enters it must be sharable with
@@ -47,10 +47,11 @@ holds on every host, including one whose calls carry no LLM Proxy proof
 and so cross no label of their own. On such a host, data written into a run
 is read back with the run's trust, so suspicious data steered into an
 unbound run can return trusted; through the LLM Proxy, the run's return
-crossing labels it. The run's posts
-(`post_agent_run_message`, `post_agent_run_file`) have no rule here and
-fall to the deployment's annotator: a post reaches a messaging thread
-whose readers this source cannot list.
+crossing labels it.
+
+`run_command` routes to the `archestra.run-command` Annotator, declared
+here with `builtin = "claude-code"`. An Archestra root redeclares it with
+`builtin = "archestra"`, so the annotator model answers it.
 
 A team list names one collection per team, and OpenAPPA reads at most 100
 of them per call.
@@ -86,8 +87,8 @@ an Archestra API key allowed to read the organization's membership. It
 sends the key as `Authorization: Bearer <key>`. An API error or a
 malformed answer exits nonzero, which the runtime treats as no answer.
 
-`appa-runtime/tests/archestra_policy.rs` pins which rule each representative
-share selects and what it requires.
+`appa-runtime/tests/archestra_policy.rs` pins what a representative call
+of each class adds and requires, and which rule each share selects.
 
 **`test_audience_source.py`** — runs the script against a local HTTP
 server that answers from recorded payloads:

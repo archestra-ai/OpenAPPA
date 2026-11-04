@@ -42,6 +42,6 @@ The `host/claude-code/Read` rules match a path as written, absolute or relative,
 
 The Bash annotator describes the data a command needs and returns. Neither tool isolates a command from your computer.
 
-The Bash Annotator's `hint` is its policy-specific prompt. A root `[[policy.annotator]]` declaration with the same name replaces the battery default. This lets the deployment define how to classify its shell commands without editing the battery.
+The Bash Annotator's `hint` is its policy-specific prompt. A root `[[policy.annotator]]` declaration with the same name replaces the battery default. This lets the deployment define how to classify its shell commands without editing the battery. Facts about the whole deployment, such as which hosts are the organization's own, belong in the root's `[policy.deployment] hint`, which every annotator reads.
 
 Use a sandbox to protect credentials and network access.

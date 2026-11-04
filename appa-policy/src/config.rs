@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use appa_engine::audience::SourceRegistration;
+use appa_engine::authority::ContextHint;
 use appa_engine::contract::ToolDeclaration;
 use appa_engine::engine::Engine;
 use appa_engine::label::Label;
@@ -10,7 +11,7 @@ use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap
 
 use crate::annotator::{AnnotatorBinding, AnnotatorBuiltin, compile_annotators, validate_annotator_inputs};
 use crate::audience::convert_audience;
-use crate::convert::{default_boundary_label, split_selector};
+use crate::convert::{default_boundary_label, parse_context_hint, split_selector};
 use crate::error::ConfigError;
 use crate::raw::{RawConfig, RawDeployment, RawTool};
 
@@ -32,6 +33,8 @@ pub struct Config {
     sanitizer_builtins: BTreeMap<SanitizerName, AnnotatorBuiltin>,
     /// Every tool a `[deployment]` field names, as authored, with the field it was named in.
     deployment_tools: Vec<(&'static str, String)>,
+    /// The deployer's `[deployment] hint`, runtime-owned like an Annotator hint.
+    deployment_hint: Option<ContextHint>,
 }
 
 impl Config {
@@ -111,13 +114,14 @@ impl Config {
             Some(cap) => PlannerCap::new(cap).ok_or(ConfigError::ZeroPlannerCap)?,
         };
 
-        let (profile, deployment_tools) = match raw.deployment {
+        let (profile, deployment_tools, deployment_hint) = match raw.deployment {
             Some(mut deployment) => {
                 qualify_deployment_names(&mut deployment, &qualified);
                 let named = deployment.tool_names();
-                (deployment.convert(&trust_chain)?, named)
+                let hint = parse_context_hint(deployment.hint.take(), "deployment")?;
+                (deployment.convert(&trust_chain)?, named, hint)
             }
-            None => (ProfileDeclaration::no_coverage(&trust_chain), Vec::new()),
+            None => (ProfileDeclaration::no_coverage(&trust_chain), Vec::new(), None),
         };
 
         let registry_config = RegistryConfig {
@@ -152,6 +156,7 @@ impl Config {
             annotators,
             sanitizer_builtins,
             deployment_tools,
+            deployment_hint,
         })
     }
 
@@ -210,6 +215,12 @@ impl Config {
     /// other Sanitizer is bound by name under `[externals.sanitizers]`.
     pub fn sanitizer_builtins(&self) -> impl Iterator<Item = (&SanitizerName, AnnotatorBuiltin)> {
         self.sanitizer_builtins.iter().map(|(name, builtin)| (name, *builtin))
+    }
+
+    /// The deployer's statement about this deployment's environment and trust boundaries, which
+    /// every Annotator reads. Advisory: it stays out of the engine and the policy identity.
+    pub fn deployment_hint(&self) -> Option<&ContextHint> {
+        self.deployment_hint.as_ref()
     }
 }
 

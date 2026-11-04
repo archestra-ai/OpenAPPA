@@ -818,6 +818,10 @@ impl Default for PlannerCap {
 /// intended shape.
 pub const MAX_HINT_CHARS: usize = 512;
 
+/// The longest [`ContextHint`](crate::authority::ContextHint): a context provider's hint or the
+/// deployment's. It describes an environment rather than one component, so it may run longer.
+pub const MAX_CONTEXT_HINT_CHARS: usize = 2048;
+
 /// The remedy components the planner-cap lint counts against: every registered authority and
 /// sanitizer, and the policy's whole mark vocabulary, which is what a catch-all authority attends.
 struct Remedies<'a> {

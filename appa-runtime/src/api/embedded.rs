@@ -537,13 +537,16 @@ impl Runtime {
         }) {
             return Err(refused("a peer read tool must declare an empty delta"));
         }
-        if registry.sanitizers().any(|sanitizer| {
-            sanitizer.on.output
-                && variants
-                    .iter()
-                    .any(|declaration| sanitizer.scope.covers(declaration.tags()))
-        }) {
-            return Err(refused("a peer read tool must not be in an output sanitizer's scope"));
+        // The engine offers an output sanitizer only on a confined result, judged on the
+        // concrete call name, so an unconfined read delivers the stored body under its source
+        // label whatever sanitizers are scoped.
+        let profile = registry.profile();
+        if profile.confines_result(&name)
+            || variants
+                .iter()
+                .any(|declaration| profile.confines_result(declaration.name()))
+        {
+            return Err(refused("a peer read tool's result must not be confined"));
         }
         Ok(())
     }
@@ -1036,7 +1039,10 @@ max_body_bytes = 65536
                 },
             )
             .await;
-        assert!(forged.is_err(), "a forged result is not admitted, got {forged:?}");
+        assert!(
+            matches!(forged, Err(EventError::OutcomeMismatch)),
+            "a forged result is not admitted, got {forged:?}"
+        );
         let read = runtime
             .read_embedded_peer(&actor, "read-1", &notice.id, call(arguments))
             .await
@@ -1047,11 +1053,16 @@ max_body_bytes = 65536
                 value: "plain".to_string()
             }
         );
-        let audit = runtime.audit(&family()).expect("the family audits");
-        assert!(
-            !format!("{audit:?}").contains("forged"),
-            "the forged bytes never enter the log, audit={audit:?}"
-        );
+        let log = runtime.inner.log(&family()).expect("the family log");
+        let admitted: Vec<&str> = log
+            .facts()
+            .iter()
+            .filter_map(|fact| match fact {
+                Fact::ValueAdmitted { value, .. } => Some(value.body.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(admitted, ["plain"], "the stored body is the only admitted value");
     }
 
     #[tokio::test]

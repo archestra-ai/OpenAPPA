@@ -48,7 +48,7 @@ jobs:
         run: rustup show
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -74,7 +74,7 @@ jobs:
 
       - name: Authenticate to Google Cloud
         if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}
-        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
+        uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
           service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
           workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}

@@ -4,6 +4,7 @@
 
 use serde::Serialize;
 
+use crate::consult::AnnotationDeclaration;
 use crate::label_guide::{
     CALL_RULES, DELTA_AUDIENCE_CRITERIA, DELTA_AUDIENCE_RULE, DELTA_TRUST_CRITERIA, DELTA_TRUST_RULE,
     DeltaAudienceCriteria, DeltaTrustCriteria, EXAMPLES, FRAMING, Leaf, REQUIRES_AUDIENCE_CRITERIA,
@@ -27,14 +28,34 @@ fn instructions(leaf: Leaf) -> [&'static str; 2] {
     }
 }
 
-/// The framing, the call rules and the question, the deployer's hint when the policy
-/// declares one, then the worked examples for this question.
-fn rendered(leaf: Leaf, hint: Option<&str>) -> String {
+/// The deployer's text the declaration carries, one paragraph each: the tool hint, the
+/// deployment hint, then each context provider's hint.
+fn deployer_paragraphs(declaration: &AnnotationDeclaration) -> Vec<String> {
+    let tool = declaration
+        .hint
+        .as_deref()
+        .filter(|hint| !hint.is_empty())
+        .map(|hint| format!("The deployer's instruction for this tool: {hint}"));
+    let deployment = declaration
+        .deployment_hint
+        .as_ref()
+        .map(|hint| format!("The deployer's statement about this deployment: {}", hint.as_str()));
+    let providers = declaration.context_hints.iter().map(|(provider, hint)| {
+        format!(
+            "The deployer's instruction on reading the `{}` entry in `context`: {}",
+            provider.as_str(),
+            hint.as_str()
+        )
+    });
+    tool.into_iter().chain(deployment).chain(providers).collect()
+}
+
+/// The framing, the call rules and the question, the deployer's text the declaration
+/// carries, then the worked examples for this question.
+fn rendered(leaf: Leaf, deployer: &[String]) -> String {
     let [question, rule] = instructions(leaf);
     let mut parts = [FRAMING, CALL_RULES, question, rule].map(str::to_string).to_vec();
-    if let Some(hint) = hint.filter(|hint| !hint.is_empty()) {
-        parts.push(format!("The deployer's instruction for this tool: {hint}"));
-    }
+    parts.extend_from_slice(deployer);
     let examples = EXAMPLES.iter().map(|example| {
         let answer = leaf.name(&example.labels());
         format!("- {}\n  -> {answer}  ({})", example.call, example.why)
@@ -64,10 +85,10 @@ struct Asked<C: 'static> {
 }
 
 impl<C> Asked<C> {
-    fn of(leaf: Leaf, kind: QuestionType, criteria: &'static C, hint: Option<&str>) -> Asked<C> {
+    fn of(leaf: Leaf, kind: QuestionType, criteria: &'static C, deployer: &[String]) -> Asked<C> {
         Asked {
             kind,
-            instructions: rendered(leaf, hint),
+            instructions: rendered(leaf, deployer),
             criteria,
         }
     }
@@ -83,23 +104,49 @@ pub(crate) struct Questions {
 }
 
 impl Questions {
-    pub(crate) fn new(hint: Option<&str>) -> Questions {
+    pub(crate) fn new(declaration: &AnnotationDeclaration) -> Questions {
         use QuestionType::{Choice, Noul};
+        let deployer = deployer_paragraphs(declaration);
         Questions {
-            delta_audience: Asked::of(Leaf::DeltaAudience, Choice, &DELTA_AUDIENCE_CRITERIA, hint),
-            delta_trust: Asked::of(Leaf::DeltaTrust, Choice, &DELTA_TRUST_CRITERIA, hint),
-            requires_audience: Asked::of(Leaf::RequiresAudience, Choice, &REQUIRES_AUDIENCE_CRITERIA, hint),
-            requires_trusted: Asked::of(Leaf::RequiresTrust, Noul, &REQUIRES_TRUST_CRITERIA, hint),
+            delta_audience: Asked::of(Leaf::DeltaAudience, Choice, &DELTA_AUDIENCE_CRITERIA, &deployer),
+            delta_trust: Asked::of(Leaf::DeltaTrust, Choice, &DELTA_TRUST_CRITERIA, &deployer),
+            requires_audience: Asked::of(Leaf::RequiresAudience, Choice, &REQUIRES_AUDIENCE_CRITERIA, &deployer),
+            requires_trusted: Asked::of(Leaf::RequiresTrust, Noul, &REQUIRES_TRUST_CRITERIA, &deployer),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use appa_engine::authority::ContextHint;
+    use appa_engine::names::ContextProviderName;
     use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
     use serde_json::value::RawValue;
 
     use super::Questions;
+    use crate::consult::AnnotationDeclaration;
+
+    fn declaration(hint: Option<&str>) -> AnnotationDeclaration {
+        AnnotationDeclaration {
+            hint: hint.map(str::to_string),
+            deployment_hint: None,
+            context_hints: BTreeMap::new(),
+            inputs: vec![],
+            trust_ranks: vec![],
+            audiences: Default::default(),
+            attention_marks: vec![],
+            effects: vec![],
+        }
+    }
+
+    fn instructions(declaration: &AnnotationDeclaration) -> Vec<String> {
+        entries(&serde_json::to_string(&Questions::new(declaration)).expect("serializes"))
+            .iter()
+            .map(|(_, question)| string(&entries(question.get())[1].1))
+            .collect()
+    }
 
     /// A JSON object's entries in the order the serializer wrote them.
     struct Entries(Vec<(String, Box<RawValue>)>);
@@ -145,7 +192,7 @@ mod tests {
             ("requires_trusted", "noul", &["true", "false"]),
         ];
         for hint in [None, Some("the deployment's own host is build.corp")] {
-            let questions = entries(&serde_json::to_string(&Questions::new(hint)).expect("serializes"));
+            let questions = entries(&serde_json::to_string(&Questions::new(&declaration(hint))).expect("serializes"));
             assert_eq!(keys(&questions), expected.map(|(key, _, _)| key));
             for ((_, question), (key, kind, criteria)) in questions.iter().zip(expected) {
                 let fields = entries(question.get());
@@ -159,6 +206,34 @@ mod tests {
                     "{key}"
                 );
             }
+        }
+    }
+
+    /// Every question carries each deployer hint the declaration holds, in a paragraph of its
+    /// own; a declaration without the two layers asks exactly what it asked before them.
+    #[test]
+    fn every_question_carries_the_deployment_and_provider_hints() {
+        let deployment = "Hosts under corp.example are the organization's own.";
+        let github = "A private repository of the acme org is internal.";
+        let hinted = AnnotationDeclaration {
+            deployment_hint: Some(ContextHint::new(deployment).expect("a short hint")),
+            context_hints: BTreeMap::from([(
+                ContextProviderName::new("github"),
+                ContextHint::new(github).expect("a short hint"),
+            )]),
+            ..declaration(Some("the tool hint"))
+        };
+        let plain = declaration(Some("the tool hint"));
+        for (with, without) in instructions(&hinted).iter().zip(instructions(&plain)) {
+            let paragraphs: Vec<&str> = with.split("\n\n").collect();
+            assert!(paragraphs.iter().any(|paragraph| paragraph.ends_with(deployment)));
+            assert!(paragraphs.iter().any(|paragraph| paragraph.ends_with(github)));
+            assert!(!without.contains(deployment) && !without.contains(github));
+            let stripped: Vec<&str> = paragraphs
+                .into_iter()
+                .filter(|paragraph| !paragraph.ends_with(deployment) && !paragraph.ends_with(github))
+                .collect();
+            assert_eq!(stripped.join("\n\n"), without);
         }
     }
 }

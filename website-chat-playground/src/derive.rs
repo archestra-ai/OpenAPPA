@@ -82,25 +82,59 @@ impl Derivations {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
-    fn desk() -> Derivations {
-        Derivations::new(
-            Endpoint::new("http://127.0.0.1:1/v1"),
-            "openai/gpt-4o".to_string(),
-            BTreeMap::from([("digest".to_string(), "drop names".to_string())]),
-        )
+    /// A loopback provider that answers every completion with `derived` and counts the
+    /// requests it saw, so a fail-closed derivation is shown to fail before the spend.
+    pub(crate) async fn counting_provider() -> (Endpoint, Arc<AtomicUsize>) {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post({
+                let seen = Arc::clone(&seen);
+                move || {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                    async {
+                        axum::Json(serde_json::json!({
+                            "choices": [{ "message": { "role": "assistant", "content": "derived" } }]
+                        }))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback port");
+        let address = listener.local_addr().expect("the listener has an address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (Endpoint::new(format!("http://{address}")), seen)
     }
 
     #[tokio::test]
     async fn a_derivation_without_an_armed_key_fails_closed() {
-        let desk = desk();
+        let (inference, seen) = counting_provider().await;
+        let desk = Derivations::new(
+            inference,
+            "openai/gpt-4o".to_string(),
+            BTreeMap::from([("digest".to_string(), "drop names".to_string())]),
+        );
+        let spent = || seen.load(Ordering::SeqCst);
+
         assert!(desk.derive("digest", "body").await.is_none());
         desk.arm("k".to_string());
         assert!(desk.derive("unregistered", "body").await.is_none());
         assert!(desk.derive("digest", &"x".repeat(MAX_BODY_BYTES + 1)).await.is_none());
+        assert_eq!(spent(), 0, "no refused derivation reaches the provider");
+        assert_eq!(desk.derive("digest", "body").await.as_deref(), Some("derived"));
+        assert_eq!(spent(), 1, "an armed, registered derivation reaches the provider");
         desk.disarm();
         assert!(desk.derive("digest", "body").await.is_none());
+        assert_eq!(spent(), 1, "a disarmed derivation does not reach the provider");
     }
 }

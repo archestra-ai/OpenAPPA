@@ -136,6 +136,11 @@ pub struct ExecutableRemedyPlan {
 }
 
 impl ExecutableRemedyPlan {
+    /// Does this plan only declare a marked spawn's return? Such a plan asks no authority.
+    pub fn declares_only(&self) -> bool {
+        matches!(self.steps.as_slice(), [RemedyStep::Return(_)])
+    }
+
     /// The narrowing this plan asks the agent to accept, where its route carries one.
     /// A raw release path orders that acceptance before its rulings; an output-sanitizer path
     /// accepts no residual up front and has none here.
@@ -262,7 +267,7 @@ pub struct PlannedBlock {
     /// Kept out of `plans` so the emptiness assertion stays about remedies.
     pub fork_advice: Option<ForkAdvice>,
     /// Advice, never a remedy: what accepting the block's narrowing does to the rest of the
-    /// policy's argument-free tools. `None` when nothing narrows or nothing gets worse.
+    /// policy's argument-free tools. `None` when nothing narrows, or nothing gets worse and no tool is labeled per call.
     pub narrowing_impact: Option<NarrowingImpact>,
 }
 
@@ -271,11 +276,14 @@ pub struct PlannedBlock {
 /// lose every authority and input sanitizer that could clear them. `recipient_checked` names the tools
 /// with a declared variant that checks recipients from its arguments against an audience this
 /// narrowing reduces; they are not judged, since the verdict depends on the recipients.
+/// `per_call` names each contract an Annotator labels per call, the wildcard `*` among them, once
+/// each; they are not judged either, since their labels exist only per call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarrowingImpact {
     pub sign_off: Vec<ToolName>,
     pub blocked: Vec<ToolName>,
     pub recipient_checked: Vec<ToolName>,
+    pub per_call: Vec<ToolName>,
 }
 
 /// Advice, never a remedy, on delegating a blocked call to a child. The planner decides which
@@ -364,6 +372,8 @@ pub(crate) fn plan(
         call,
         stage,
         role,
+        Declaring::of(role, views, call),
+        denied,
         floor.as_ref(),
         context,
     )?
@@ -499,6 +509,7 @@ fn narrowing_impact(
         sign_off: Vec::new(),
         blocked: Vec::new(),
         recipient_checked: Vec::new(),
+        per_call: Vec::new(),
     };
     let audience_narrows = narrowing.to.audience != narrowing.from.audience;
     for name in registry.tool_names() {
@@ -531,14 +542,83 @@ fn narrowing_impact(
             Standing::Clear => {}
         }
     }
-    (!impact.sign_off.is_empty() || !impact.blocked.is_empty() || !impact.recipient_checked.is_empty())
-        .then_some(impact)
+    for tool in registry.semantic_tools().map(|(_, tool)| tool) {
+        if let ToolDeclaration::Annotated { name, .. } = tool
+            && !impact.per_call.contains(name)
+        {
+            impact.per_call.push(name.clone());
+        }
+    }
+    (!impact.sign_off.is_empty()
+        || !impact.blocked.is_empty()
+        || !impact.recipient_checked.is_empty()
+        || !impact.per_call.is_empty())
+    .then_some(impact)
+}
+
+/// How a call's return declaration enters its plans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Declaring {
+    /// An ordinary call, or a marked spawn whose declaration stands: no plan declares.
+    No,
+    /// A marked spawn with no declaration: each plan is one return route, with no authority
+    /// and no settlement. The retry is planned on whatever else blocks it.
+    Separately(crate::transition::SpawnKind),
+    /// Every gap plan with every return route: the menu an earlier planner recorded for a
+    /// marked spawn. Read only to replay those offers.
+    Bundled(crate::transition::SpawnKind),
+}
+
+impl Declaring {
+    pub(crate) fn of(role: CallRole, views: &Views, call: &ResolvedCall) -> Declaring {
+        match role {
+            CallRole::MarkedSpawn(kind) if views.declaration(call).is_none() => Declaring::Separately(kind),
+            CallRole::MarkedSpawn(_) | CallRole::Ordinary => Declaring::No,
+        }
+    }
+}
+
+/// The menu an earlier planner recorded for a marked spawn with no declaration: each gap plan
+/// bundled with each return route. Replay reads it for offers recorded under that planner; no
+/// block offers it.
+pub(crate) fn bundled_spawn_menu(
+    registry: &Registry,
+    views: &Views,
+    blocked: BlockedCall<'_>,
+    context: &MembershipContext<'_>,
+) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
+    let CallRole::MarkedSpawn(kind) = blocked.role else {
+        return Ok(Vec::new());
+    };
+    let no_denials = BTreeSet::new();
+    let denied = views.denied_authorities(&blocked.call.digest()).unwrap_or(&no_denials);
+    Ok(enumerate_plans(
+        registry,
+        blocked.contract,
+        &views.current_label(),
+        &|kind| views.has_effect(kind),
+        &|kind| views.has_reservation(kind),
+        blocked.call,
+        blocked.stage,
+        blocked.role,
+        Declaring::Bundled(kind),
+        denied,
+        floor_of(registry, views).as_ref(),
+        context,
+    )?
+    .into_iter()
+    .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
+    .collect())
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
 /// history predicates. The log supplies them for a live block; a recovery route supplies the
 /// state it has reached (RMD-20). A membership read no pinned answer decides refuses the
 /// whole enumeration with the union of every undecided atom, never a smaller menu.
+///
+/// A marked spawn's return declaration is never bundled with a gap's authority: an undeclared
+/// spawn is offered the declarations alone, and once one stands its retry is planned on its
+/// remaining gaps (see [`Declaring`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enumerate_plans(
     registry: &Registry,
@@ -549,6 +629,8 @@ pub(crate) fn enumerate_plans(
     call: &ResolvedCall,
     stage: &CallStage,
     role: CallRole,
+    declaring: Declaring,
+    denied: &BTreeSet<AuthorityName>,
     floor: Option<&Floor>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
@@ -561,7 +643,7 @@ pub(crate) fn enumerate_plans(
         stage,
         context,
     )?;
-    if role == CallRole::Ordinary && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
+    if declaring == Declaring::No && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
         return Ok(Vec::new());
     }
 
@@ -596,10 +678,10 @@ pub(crate) fn enumerate_plans(
             context,
             &mut needs,
         );
-        // An ordinary call declares no return policy; a marked spawn declares exactly one.
-        let returns: Vec<Option<ReturnRoute>> = match role {
-            CallRole::Ordinary => vec![None],
-            CallRole::MarkedSpawn(kind) => return_options(registry, current, floor, kind)
+        // Only the bundled menu declares beside a gap plan.
+        let returns: Vec<Option<ReturnRoute>> = match declaring {
+            Declaring::No | Declaring::Separately(_) => vec![None],
+            Declaring::Bundled(kind) => return_options(registry, current, floor, kind)
                 .into_iter()
                 .map(Some)
                 .collect(),
@@ -628,6 +710,27 @@ pub(crate) fn enumerate_plans(
         }
     }
     needs.refuse_if_any()?;
+    // An undeclared spawn is offered its declarations alone, where its other gaps have a plan.
+    // A plan naming an authority that denied this call does not count: the caller drops it.
+    if let Declaring::Separately(kind) = declaring {
+        let unblocked = block.requirement_gaps.is_empty() && block.narrowing.is_none();
+        let planned = candidates.iter().any(|candidate| {
+            !candidate
+                .required
+                .iter()
+                .any(|ruling| denied.contains(&ruling.authority))
+        });
+        if !unblocked && !planned {
+            return Ok(Vec::new());
+        }
+        candidates = return_options(registry, current, floor, kind)
+            .into_iter()
+            .map(|route| PlanCandidate {
+                steps: vec![RemedyStep::Return(route)],
+                required: Vec::new(),
+            })
+            .collect();
+    }
     Ok(least_mandate_first(
         registry,
         &block.requirement_gaps,
@@ -2079,22 +2182,30 @@ mod tests {
                 "the sanitizer covers no gap: the ruling is still required"
             );
         }
+        let accept = executables
+            .iter()
+            .find(|plan| plan.narrowing().is_some())
+            .expect("an accept plan is offered");
+        let sanitize = executables
+            .iter()
+            .find(|plan| plan.sanitizer().is_some())
+            .expect("a sanitize plan is offered");
         assert!(
-            executables[1]
+            sanitize
                 .steps
                 .contains(&RemedyStep::Authorize(AuthorityName::new("steward")))
         );
         assert_eq!(executables[0].id, PlanId::new(0));
         assert_eq!(executables[1].id, PlanId::new(1));
         assert_eq!(
-            executables[0].steps,
+            accept.steps,
             vec![
                 RemedyStep::Accept(planned.raw.narrowing.clone().expect("the block narrows")),
                 RemedyStep::Authorize(AuthorityName::new("steward")),
             ]
         );
         assert_eq!(
-            executables[1].steps,
+            sanitize.steps,
             vec![
                 RemedyStep::Authorize(AuthorityName::new("steward")),
                 RemedyStep::Sanitize(SanitizerName::new("declassify")),
@@ -3133,6 +3244,66 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowing_marks_the_tools_an_annotator_labels_per_call() {
+        let fetch = ToolAnnotation {
+            delta: Delta {
+                trust: None,
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "insider",
+                )]))),
+            },
+            ..plain_tool("fetch")
+        };
+        let annotated = |name: &str| ToolDeclaration::Annotated {
+            name: ToolName::new(name),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: crate::names::AnnotatorName::new("classifier"),
+        };
+        let with = |others: Vec<ToolDeclaration>| {
+            build(RegistryConfig {
+                tools: std::iter::once(ToolDeclaration::Declared(fetch.clone()))
+                    .chain(others)
+                    .collect(),
+                annotators: vec![crate::registry::AnnotatorDeclaration {
+                    name: crate::names::AnnotatorName::new("classifier"),
+                    trust: None,
+                    audiences: None,
+                    marks: None,
+                    effects: None,
+                }],
+                ..config(vec![])
+            })
+        };
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        assert_eq!(
+            plan_of(&with(vec![]), &log, &call("fetch", json!({}))).narrowing_impact,
+            None,
+            "a policy of fixed labels only has nothing the narrowing leaves unjudged"
+        );
+        assert_eq!(
+            plan_of(
+                &with(vec![annotated("shell"), annotated("mcp/*/search"), annotated("*")]),
+                &log,
+                &call("fetch", json!({}))
+            )
+            .narrowing_impact,
+            Some(NarrowingImpact {
+                sign_off: vec![],
+                blocked: vec![],
+                recipient_checked: vec![],
+                per_call: vec![
+                    ToolName::new("shell"),
+                    ToolName::new("mcp/*/search"),
+                    ToolName::new("*")
+                ],
+            }),
+            "the annotated tool, the annotated name selector and the wildcard are labeled per call, so the impact marks them unjudged"
+        );
+    }
+
+    #[test]
     fn a_narrowing_names_the_tools_it_moves_to_sign_off_or_blocked() {
         let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
         let insider = || DeclaredAudience::restricted([ReaderId::new("insider")]);
@@ -3216,6 +3387,7 @@ mod tests {
                 sign_off: vec![ToolName::new("post")],
                 blocked: vec![ToolName::new("drain"), ToolName::new("read")],
                 recipient_checked: vec![ToolName::new("post"), ToolName::new("reply")],
+                per_call: vec![],
             }),
             "post needs desk; read's org variant has no remedy, and drain's consumed is committed by accepting \
              fetch; share and notify (an input hop through scrub), gated (a call to approve) and reply (its arguments) are \
@@ -3312,6 +3484,7 @@ mod tests {
                 sign_off: vec![ToolName::new("lookup"), ToolName::new("post")],
                 blocked: vec![],
                 recipient_checked: vec![],
+                per_call: vec![],
             }),
             "audit's org variant is blocked before and after, so its other variant's move is no news"
         );
@@ -3321,6 +3494,7 @@ mod tests {
                 sign_off: vec![ToolName::new("post")],
                 blocked: vec![],
                 recipient_checked: vec![],
+                per_call: vec![],
             }),
             "under a trusted floor lookup's drop to suspicious never settles, before or after"
         );
@@ -4176,23 +4350,12 @@ mod tests {
                 }
                 strictly_less
             };
-            let mut expected: Vec<Vec<(AuthorityName, Vec<Gap>)>> = Vec::with_capacity(enumerated.len());
-            let mut used = vec![false; enumerated.len()];
-            for _ in 0..enumerated.len() {
-                let next = (0..enumerated.len())
-                    .filter(|&i| !used[i])
-                    .find(|&i| (0..enumerated.len())
-                        .filter(|&j| !used[j] && j != i)
-                        .all(|j| !precedes(&enumerated[j], &enumerated[i])))
-                    .expect("a finite strict partial order has a minimal element");
-                used[next] = true;
-                expected.push(enumerated[next].clone());
-            }
+            let mut expected = enumerated;
             if raw.narrowing.is_some() && !contract.emits.is_empty() {
                 expected = expected.into_iter().flat_map(|assignment| [assignment.clone(), assignment]).collect();
             }
 
-            let actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
+            let mut actual: Vec<Vec<(AuthorityName, Vec<Gap>)>> = planned.plans.iter()
                 .filter_map(RemedyPlan::executable)
                 .map(|p| p.required.iter().map(|r| (r.authority.clone(), r.covers.clone())).collect())
                 .collect();
@@ -4202,6 +4365,10 @@ mod tests {
                         "presented order inverts a dominance edge: {:?} precedes {:?}", actual[j], actual[i]);
                 }
             }
+            // The menu is checked as a multiset: presentation order is constrained only by the
+            // dominance loop above, not by the reference's enumeration order.
+            actual.sort_by_cached_key(|assignment| format!("{assignment:?}"));
+            expected.sort_by_cached_key(|assignment| format!("{assignment:?}"));
             prop_assert_eq!(actual, expected);
         }
     }
