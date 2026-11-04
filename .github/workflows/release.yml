@@ -122,7 +122,7 @@ jobs:
       # required for pull_request events generated with GITHUB_TOKEN.
       - name: Generate release PR token
         id: release-pr-token
-        uses: archestra-ai/.github/actions/github-app-token@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
+        uses: archestra-ai/.github/actions/github-app-token@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
           app-id: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
           private-key: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
