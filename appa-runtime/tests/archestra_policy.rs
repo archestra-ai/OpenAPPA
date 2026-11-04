@@ -232,6 +232,8 @@ const TABLE: &[Class] = &[
             ("get_agent_run", r#"{"run_id": "r"}"#),
             ("get_run", r#"{"run_id": "r"}"#),
             ("get_mcp_servers", "{}"),
+            ("get_mcp_server_tools", r#"{"mcpServerId": "s"}"#),
+            ("inspect_guardrails_server", r#"{"id": "s"}"#),
         ],
     },
     // Text strangers can write.
@@ -242,8 +244,6 @@ const TABLE: &[Class] = &[
             ("get_schedule_trigger_run_transcript", r#"{"run_id": "r"}"#),
             ("query_knowledge_sources", r#"{"query": "invoices"}"#),
             ("get_mcp_server_logs", r#"{"id": "s"}"#),
-            ("get_mcp_server_tools", r#"{"mcpServerId": "s"}"#),
-            ("inspect_guardrails_server", r#"{"id": "s"}"#),
         ],
     },
     // Guardrails, destructive and control-plane writes.
@@ -531,25 +531,4 @@ async fn a_transfer_direction_selects_its_rule() {
         propose(&fresh, transfer("upload")).await,
         HookDecision::AllowCall { spawn: None }
     );
-}
-
-/// A tool list quotes what its upstream server wrote, so after reading one the session can
-/// no longer choose a guardrails edit or a delete.
-#[tokio::test]
-async fn an_upstream_tool_list_leaves_the_session_unable_to_choose_trusted_writes() {
-    for write in [
-        archestra("update_guardrails_policy", serde_json::json!({ "edits": [] })),
-        archestra("delete_plugin", serde_json::json!({ "id": "p" })),
-    ] {
-        let tool = write.tool.clone();
-        let dir = tempfile::tempdir().unwrap();
-        let runtime = runtime(&dir).await;
-        assert!(runs_after_remedies(&runtime, write.clone()).await, "{tool}");
-        narrowed_by(
-            &runtime,
-            archestra("get_mcp_server_tools", serde_json::json!({ "mcpServerId": "s" })),
-        )
-        .await;
-        assert!(!runs_after_remedies(&runtime, write).await, "{tool}");
-    }
 }

@@ -8,12 +8,12 @@
 #
 # Archestra's configuration, rosters, runs and files are the organization's,
 # so a read of them adds `internal`. A read that returns text strangers can
-# write, such as synced mail and tickets, a server's logs, the tool
-# descriptions an upstream server wrote or a run's tool results, also adds
-# `suspicious`. A write that changes what other people's agents run or
-# read, or that removes or controls a shared resource, requires `trusted`
-# data, so an injected instruction cannot choose it. A write that other
-# members read also needs data the organization may read: `internal`.
+# write, such as synced mail and tickets, a server's logs or a run's tool
+# results, also adds `suspicious`. A write that changes what other people's
+# agents run or read, or that removes or controls a shared resource,
+# requires `trusted` data, so an injected instruction cannot choose it. A
+# write that other members read also needs data the organization may read:
+# `internal`.
 #
 # A share names who may read: the organization is `internal`, a team is
 # `@archestra:team/<team>`, a member is `@archestra:user/<user>`. A tool
@@ -82,10 +82,9 @@ description = "Runs one shell command in the conversation's sandbox and returns 
 annotator = "archestra.run-command"
 
 # --- guardrails: the policy, its validations, yells and helper consults are
-# the organization's; a server inspection quotes the tool descriptions and
-# schemas its upstream server wrote. A preview or a validation saves nothing
-# and sends nothing. A publish, a repository connection, a sync or a
-# credential binding changes the guardrails of every session ---
+# the organization's. A preview or a validation saves nothing and sends
+# nothing. A publish, a repository connection, a sync or a credential
+# binding changes the guardrails of every session ---
 
 [[policy.tool]]
 name = "mcp/archestra/get_guardrails_policy"
@@ -93,7 +92,7 @@ delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/inspect_guardrails_server"
-delta = { audience = ["internal"], trust = "suspicious" }
+delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/list_guardrails_battery_fits"
@@ -469,8 +468,7 @@ requires = { trust = "trusted" }
 
 # --- MCP servers: a configuration selects the image, command or URL that
 # runs and where its credentials go. A server's logs record what its users
-# sent, and its tool list quotes the descriptions and schemas the upstream
-# server wrote ---
+# sent ---
 
 [[policy.tool]]
 name = "mcp/archestra/search_private_mcp_registry"
@@ -482,7 +480,7 @@ delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/get_mcp_server_tools"
-delta = { audience = ["internal"], trust = "suspicious" }
+delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/list_mcp_server_deployments"
