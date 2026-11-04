@@ -43,8 +43,7 @@ const INTERNAL_BASH: &str =
     "[[policy.tool]]\nname = \"host/claude-code/Bash\"\ndelta = { audience = [\"internal\"] }\n";
 
 /// A Bash result narrows the session to `self`.
-const SELF_BASH: &str =
-    "[[policy.tool]]\nname = \"host/claude-code/Bash\"\ndelta = { audience = [\"self\"] }\n";
+const SELF_BASH: &str = "[[policy.tool]]\nname = \"host/claude-code/Bash\"\ndelta = { audience = [\"self\"] }\n";
 
 fn open(dir: &Path) -> Runtime {
     Runtime::open(config(dir, INTERNAL_BASH), dir.join("appa.db"), None).expect("the deployment opens")
@@ -394,8 +393,8 @@ async fn a_send_by_name_is_an_internal_sink_and_points_at_the_peers_address() {
     assert_eq!(decision, "allow", "{reason}");
 
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let runtime = Runtime::open(config(dir.path(), SELF_BASH), dir.path().join("appa.db"), None)
-        .expect("the deployment opens");
+    let runtime =
+        Runtime::open(config(dir.path(), SELF_BASH), dir.path().join("appa.db"), None).expect("the deployment opens");
     start(&runtime, "a", A_ADDRESS, None).await;
     start(&runtime, "b", B_ADDRESS, None).await;
     accepted(&runtime, "a", "Bash", json!({ "command": "cat report" }), "a4").await;
