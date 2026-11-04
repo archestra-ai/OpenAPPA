@@ -209,12 +209,8 @@ const TABLE: &[Class] = &[
             ("ask_user", r#"{"question": "Apply?"}"#),
             ("validate_guardrails_policy", r#"{"content": ""}"#),
             ("reload_mcp_server_tools", r#"{"id": "s"}"#),
-            ("update_knowledge_base", r#"{"id": "k", "name": "n"}"#),
             ("cancel_agent_run", r#"{"run_id": "r"}"#),
             ("cancel_run", r#"{"run_id": "r"}"#),
-            ("create_agent", r#"{"name": "a"}"#),
-            ("create_agent", r#"{"name": "a", "initialGrantPrincipals": []}"#),
-            ("create_plugin", r#"{"name": "a"}"#),
             ("scaffold_app", r#"{"name": "a", "initialGrantPrincipals": []}"#),
             ("transfer_credential", r#"{"agent_id": "a", "transferModes": ["link"]}"#),
         ],
@@ -263,10 +259,14 @@ const TABLE: &[Class] = &[
             ("delete_plugin", r#"{"id": "p"}"#),
             ("unassign_knowledge_base_from_agent", r#"{"agent_id": "a"}"#),
             ("create_mcp_server", r#"{"name": "s"}"#),
+            ("create_agent", r#"{"name": "a"}"#),
+            ("create_agent", r#"{"name": "a", "initialGrantPrincipals": []}"#),
+            ("create_plugin", r#"{"name": "a"}"#),
+            ("create_knowledge_base", r#"{"name": "k"}"#),
         ],
     },
-    // Writes other members read or run, creates that share with someone, and credential
-    // transfers that carry a value or send no modes.
+    // Writes other members read or run, writes a later read returns as trusted, creates that
+    // share with someone, and credential transfers that carry a value or send no modes.
     Class {
         adds: Adds::Nothing,
         needs: Needs::TrustedInternal,
@@ -286,6 +286,12 @@ const TABLE: &[Class] = &[
             ("create_mcp_server", ORGANIZATION),
             ("scaffold_app", ORGANIZATION),
             ("create_knowledge_connector", r#"{"name": "c"}"#),
+            ("update_knowledge_base", r#"{"id": "k", "name": "n"}"#),
+            ("refine_app", r#"{"appId": "a", "spec": {}}"#),
+            ("save_file", r#"{"filename": "n.md", "content": "n"}"#),
+            ("edit_file", r#"{"id": "f", "content": "n"}"#),
+            ("copy_file", r#"{"id": "f"}"#),
+            ("download_file", r#"{"path": "out.csv"}"#),
             (
                 "transfer_credential",
                 r#"{"agent_id": "a", "transferModes": ["value"]}"#,
@@ -294,14 +300,13 @@ const TABLE: &[Class] = &[
             ("transfer_credential", r#"{"agent_id": "a"}"#),
         ],
     },
-    // Writes into a run or to files a project or app can share.
+    // Writes into a run.
     Class {
         adds: Adds::Nothing,
         needs: Needs::Internal,
         calls: &[
             ("start_agent_run", r#"{"agent_id": "a", "message": "m"}"#),
             ("start_run", r#"{"agent_id": "a", "message": "m"}"#),
-            ("save_file", r#"{"filename": "n.md", "content": "n"}"#),
         ],
     },
 ];
@@ -531,4 +536,19 @@ async fn a_transfer_direction_selects_its_rule() {
         propose(&fresh, transfer("upload")).await,
         HookDecision::AllowCall { spawn: None }
     );
+}
+
+/// A persistent file reads back as trusted, so a session that read text strangers wrote
+/// cannot save one.
+#[tokio::test]
+async fn a_suspicious_session_cannot_save_a_file() {
+    let save = archestra("save_file", serde_json::json!({ "filename": "n.md", "content": "n" }));
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir).await;
+    narrowed_by(
+        &runtime,
+        archestra("query_knowledge_sources", serde_json::json!({ "query": "invoices" })),
+    )
+    .await;
+    assert!(!runs_after_remedies(&runtime, save).await);
 }

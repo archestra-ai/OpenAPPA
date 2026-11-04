@@ -13,7 +13,9 @@
 # agents run or read, or that removes or controls a shared resource,
 # requires `trusted` data, so an injected instruction cannot choose it. A
 # write that other members read also needs data the organization may read:
-# `internal`.
+# `internal`. A write that a later read returns as trusted, such as a
+# persistent file, a prompt, an app spec or a knowledge base description,
+# requires `trusted` too, so suspicious text cannot come back trusted.
 #
 # A share names who may read: the organization is `internal`, a team is
 # `@archestra:team/<team>`, a member is `@archestra:user/<user>`. A tool
@@ -409,6 +411,7 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 name = "mcp/archestra/create_agent"
 parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
+requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/edit_agent"
@@ -645,10 +648,12 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 name = "mcp/archestra/create_knowledge_base"
 parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
+requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/update_knowledge_base"
 delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/delete_knowledge_base"
@@ -764,6 +769,7 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 name = "mcp/archestra/create_plugin"
 parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
+requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/update_plugin"
@@ -818,22 +824,22 @@ delta = {}
 [[policy.tool]]
 name = "mcp/archestra/download_file"
 delta = {}
-requires = { audience = { contains = ["internal"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/save_file"
 delta = {}
-requires = { audience = { contains = ["internal"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/edit_file"
 delta = {}
-requires = { audience = { contains = ["internal"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/copy_file"
 delta = {}
-requires = { audience = { contains = ["internal"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/delete_file"
@@ -866,6 +872,7 @@ delta = { audience = ["internal"] }
 [[policy.tool]]
 name = "mcp/archestra/refine_app"
 delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/set_app_labels"

@@ -14,8 +14,8 @@ sharing tool, first match wins:
 | Organization records | configuration, rosters, the guardrails policy and its previews, yells, consults, files, apps, run state | `internal` | nothing |
 | Text strangers write | `query_knowledge_sources`, `get_mcp_server_logs`, `get_schedule_trigger_run_transcript` | `internal`, `suspicious` | nothing |
 | Control plane | deletes and unassigns, guardrails publishes, repository connection and sync, credential bindings, schedule controls, team changes, limits, tool assignments | nothing | `trusted` |
-| Read or run by others | agents, gateways, MCP servers, hooks, skills, plugins, apps, scheduled tasks, run posts, credential transfers | nothing | `trusted`, `internal` |
-| Shared files and runs | persistent file writes, `start_agent_run`, `steer_agent_run` (and their Archestra 1.4 names), workspace writes and uploads | nothing | `internal` |
+| Read or run by others, or read back as trusted | agents, gateways, MCP servers, hooks, skills, plugins, apps and app specs, knowledge base updates, scheduled tasks, run posts, credential transfers, persistent file writes | nothing | `trusted`, `internal` |
+| Runs | `start_agent_run`, `steer_agent_run` (and their Archestra 1.4 names), workspace writes and uploads | nothing | `internal` |
 | Shares | `publish_app` by `scope`, `update_knowledge_connector` by `visibility` or a sent `team_ids`, `add_team_member` | nothing | `trusted` and `internal` / `@archestra:team/<team>` / `@archestra:user/$user` |
 | Sandbox | `run_command` | the `archestra.run-command` Annotator | |
 

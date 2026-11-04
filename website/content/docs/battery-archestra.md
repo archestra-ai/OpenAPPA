@@ -30,7 +30,7 @@ The battery declares no rule for these tools:
 
 - A write that removes or controls a shared resource requires `trusted` data. This covers deletes and unassigns, guardrails policy and validation publishes, policy repository connection and sync, credential bindings, schedule controls, team changes, limits, and tool assignments.
 - A write that other members read or run also requires data sharable with `internal`. This covers agents, MCP gateways and servers, hooks, skills, plugins, apps, scheduled tasks, posts to a run's messaging thread, and credential transfers.
-- A write to persistent files, which a project or app can share, requires data sharable with `internal`.
+- A write to persistent files, which a project or app can share and a later read returns as trusted, requires `trusted` data sharable with `internal`. So does an app spec or a knowledge base update; a personal agent, plugin or knowledge base create requires `trusted`.
 - `run_command` routes to the `archestra.run-command` Annotator. An Archestra root answers it with its own model (`builtin = "archestra"`).
 
 ## Sharing
