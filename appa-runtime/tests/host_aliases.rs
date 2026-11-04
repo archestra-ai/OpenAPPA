@@ -187,9 +187,9 @@ async fn without_the_alias_no_battery_rule_names_the_hosts_tools() {
 
 /// A host alias rebinds only what the battery declares. The protected-peer exceptions for
 /// `SendMessage` belong to a root whose runtime verifies peer addresses, so under the alias
-/// every send is the battery's public sink.
+/// every send is the battery's internal sink.
 #[tokio::test]
-async fn an_aliased_send_to_a_socket_address_is_a_public_sink() {
+async fn an_aliased_send_to_a_socket_address_is_an_internal_sink() {
     let (runtime, actor) = session("[aliases]\nhost = { claude-code = [\"archestra\"] }\n").await;
     let send = || {
         proposed(
