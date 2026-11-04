@@ -16,7 +16,7 @@ digest = "sha256:df31d0373f8bd220e5dcb2581904a63fc323cf3db261f4d34088b707950e63c
 
 [packages.battery.coding]
 path = "batteries/coding"
-digest = "sha256:f5a7b6ca189a22977a2470a38ffbc1e3c980501a43f35f89648931bf652eabc4"
+digest = "sha256:6822d5f77b3e7eb6ad8214168a65751df75f8261d0b9ce55d30ee730e5730a7b"
 
 [packages.battery.databricks]
 path = "batteries/databricks"
@@ -28,7 +28,7 @@ digest = "sha256:dec43373a5376f11af1df1265d1fca3b2b31545a8481d5c4b4a40374d2f6406
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
-digest = "sha256:be3641a15d625c6ae9d9d6bd706bfb8766ff81886bfe0f10e5dcb1d69b3aa998"
+digest = "sha256:bdd58b36bae6ab75ee4e3b00a6e28ea27f646f791e3baffacc35a246bfdae03a"
 
 [packages.battery.grain]
 path = "batteries/grain"
