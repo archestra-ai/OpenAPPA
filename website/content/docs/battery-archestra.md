@@ -2,14 +2,36 @@
 title: Archestra battery
 category: Batteries
 order: 6.75
-description: Checks every share made through Archestra's built-in tools against who it makes data readable by.
+description: Rules for every tool of Archestra's built-in MCP server, with shares checked against the teams and members they reach.
 sidebar: false
 breadcrumb: Archestra
 ---
 
-The Archestra battery covers the sharing, discovery, reporting, and agent run tools of Archestra's built-in MCP server, and builds audiences from Archestra's organization, teams, and members.
+The Archestra battery gives a rule to every tool of Archestra's built-in MCP server, and builds audiences from Archestra's organization, teams, and members.
 
 [View the battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/archestra).
+
+## Tools Archestra rules itself
+
+The battery declares no rule for these tools:
+
+- `yell` is ruled as `mcp/appa/yell`. Archestra gives it an empty rule, so no label the session picked up can refuse a report.
+- `run_tool` and `preview_app_tool` are ruled as the tool they run.
+- `execute_remedy_plan`, `get_remedy_plans`, `list_peer_messages`, and `read_peer_message` carry the runtime's own recovery and peer messages.
+- The app data and `llm_complete` tools exist only inside a running app. No agent lists them.
+
+## Reads
+
+- Discovery and the session's own surfaces add no label: `search_tools`, `search_files`, `load_skill`, `ask_user`, `todo_write`, and `whoami`. A validation or a yell resolve adds no label either.
+- A read of Archestra's configuration, rosters, guardrails policy, yells, helper consults, files, apps, and run state adds `internal`.
+- A read that returns text that strangers can write adds `internal` and `suspicious`: `query_knowledge_sources` (synced mail and tickets) and `get_schedule_trigger_run_transcript` (every tool result the run read).
+
+## Writes
+
+- A write that removes or controls a shared resource requires `trusted` data. This covers deletes and unassigns, guardrails policy and validation publishes, policy repository connection and sync, credential bindings, schedule controls, team changes, limits, and tool assignments.
+- A write that other members read or run also requires data sharable with `internal`. This covers agents, MCP gateways and servers, hooks, skills, plugins, apps, scheduled tasks, posts to a run's messaging thread, and credential transfers.
+- A write to persistent files, which a project or app can share and a later read returns as trusted, requires `trusted` data sharable with `internal`. So does an app spec or a knowledge base update; a personal agent, plugin or knowledge base create requires `trusted`.
+- `run_command` routes to the `archestra.run-command` Annotator. An Archestra root answers it with its own model (`builtin = "archestra"`).
 
 ## Sharing
 
@@ -19,15 +41,9 @@ A share makes something readable by more people, so it needs trusted data those 
 - sharing with teams requires data sharable with each team, `@archestra:team/<team>`; and
 - adding a member to a team requires data sharable with that member, `@archestra:user/<user>`.
 
-This covers projects, apps, knowledge bases, knowledge connectors, plugins, agents, and MCP gateways, including a personal plugin shared with named members. An update that sends a team or member list is checked against that list even when it names no scope, since it replaces who the resource is shared with. A connector that mirrors its source system's permissions has readers no source here can list; they are assumed to be within the organization, so it requires data sharable with `internal`. Keeping a resource personal or private requires nothing. A call may name at most 100 teams.
+`publish_app` and `update_knowledge_connector` select their rule by scope or visibility. An update that sends a `team_ids` list is checked against that list even when it names no visibility, since it replaces who the connector is shared with. A connector that mirrors its source system's permissions has readers no source here can list, so it requires data sharable with `internal`. A call may name at most 100 teams.
 
-## Discovery
-
-`search_tools` lists the tools an agent can call. `search_files` lists the files an agent can reach. `load_skill` loads a skill's instructions and bundled files. These tools add no label and require nothing. An agent can look up tools, files, and skills at any point in a session.
-
-## Reporting
-
-`yell` files a guardrails report with the organization's admins. It is how an agent escalates a block, so it adds no label and requires nothing: no label the session picked up can refuse it.
+The Archestra proxy adds string arrays no selector could read from the original objects: `initialGrantPrincipals` (`<type>:<id>`, the organization as `organization`, sent only with a non-empty `initialGrants`) and `transferModes` (`value` or `link` per credential). A create that sends grants requires `trusted` data sharable with `internal`, which holds every principal a grant can name; without grants it requires what the create alone needs. A credential transfer that only returns links requires nothing; any other transfer requires `trusted` and `internal`.
 
 ## Agent runs
 
@@ -37,8 +53,7 @@ A run and its workspace are one container the organization may read, because adm
 - `get_agent_run`, `read_workspace_file`, and a `transfer_workspace_file` download bring the run's data into the session. They add `internal` and keep the session's trust.
 - `cancel_agent_run` returns only the run's state. It adds no label and requires nothing.
 - `list_agent_runs` adds `internal`, because it names the organization's agents, requesters, and channels.
-
-The tools that post to a run's messaging thread have no rule in this battery. The deployment's annotator labels them.
+- `post_agent_run_message` and `post_agent_run_file` post to the run's messaging thread. They require `trusted` data sharable with `internal`.
 
 ## Audiences
 
