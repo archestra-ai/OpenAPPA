@@ -170,10 +170,11 @@ impl Engine {
             &|views, call| {
                 views
                     .approvals_for(call)
-                    .find(|(offer, approval)| {
+                    .filter(|(offer, approval)| {
                         approval.basis == views.basis_after(&admissions, &crate::basis::SubjectKey::Approval(*offer))
                     })
                     .map(|(offer, _)| offer)
+                    .collect()
             },
             &|views, call, taken| {
                 views
@@ -349,6 +350,7 @@ impl Engine {
         act: &ActEvidence,
     ) -> Result<(Blocked, Vec<Fact>), TransitionError> {
         let call = blocked.call;
+        let spawn = blocked.role.spawn();
         let planned = plan::plan(&self.registry, views, blocked, &self.context(act))?;
         let (block_id, offers, opened) =
             self.open_offers(views, opening, &call.digest(), &Engine::executable(&planned), act);
@@ -357,6 +359,7 @@ impl Engine {
                 call: call.clone(),
                 block: planned,
                 block_id,
+                spawn,
                 offers,
             },
             opened,

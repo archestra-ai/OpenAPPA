@@ -1570,13 +1570,30 @@ mod tests {
 
     #[test]
     fn inventory_on_an_event_that_does_not_consume_it_is_refused() {
-        for event in ["ping", "prompt", "turn_end", "tool_result", "child_end"] {
-            let body = serde_json::json!({"protocol":1,"adapter":"kagent","event":event,"root_id":"r1","inventory":{}});
-            assert!(
-                WireEvent::read(&serde_json::to_vec(&body).unwrap())
+        for (event, fields) in [
+            ("ping", serde_json::json!({})),
+            ("prompt", serde_json::json!({"text":"hi"})),
+            ("turn_end", serde_json::json!({})),
+            (
+                "tool_result",
+                serde_json::json!({"tool":"read","arguments":{},"outcome":{"status":"success","body":{"content":"done"}}}),
+            ),
+            ("child_end", serde_json::json!({"child_id":"c1"})),
+        ] {
+            let mut body = serde_json::json!({"protocol":1,"adapter":"kagent","event":event,"root_id":"r1"});
+            body.as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let parsed = |body: &serde_json::Value| {
+                WireEvent::read(&serde_json::to_vec(body).unwrap())
                     .unwrap()
                     .into_event(&SERVED, PrincipalSource::None)
-                    .is_err()
+            };
+            assert!(parsed(&body).is_ok(), "{event} is accepted without the inventory");
+            body["inventory"] = serde_json::json!({});
+            assert!(
+                matches!(parsed(&body), Err(ParseRefusal::Malformed { detail }) if detail.contains("inventory")),
+                "{event} is refused for its inventory"
             );
         }
     }

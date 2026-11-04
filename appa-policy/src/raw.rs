@@ -38,6 +38,8 @@ pub(crate) struct RawDeployment {
     pub(crate) confined_results: Vec<String>,
     #[serde(default)]
     pub(crate) provider_surfaces: BTreeMap<String, SurfaceMode>,
+    /// Runtime-owned prose for the Annotators, never part of the engine's deployment profile.
+    pub(crate) hint: Option<String>,
 }
 
 #[derive(Deserialize)]

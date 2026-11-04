@@ -1,7 +1,10 @@
 //! The `claude-code` builtin: one isolated, tool-less `claude` process per consult.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+
 use crate::config::ClaudeCode;
-use crate::consult::ModelPrompt;
+use crate::consult::{AnnotationAnswer, AnnotationDeclaration, ModelPrompt};
 use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
 use appa_policy::AnnotatorBuiltin;
 
@@ -38,6 +41,33 @@ pub(crate) struct ClaudeCodeBackend {
     config: ClaudeCode,
     max_body_bytes: usize,
     gates: ConsultGates,
+    verdicts: Arc<Mutex<VerdictCache>>,
+}
+
+/// The most annotation answers one backend keeps; the oldest is dropped first.
+const VERDICT_CACHE_ENTRIES: usize = 512;
+/// The longest answer it keeps, serialized; an ordinary annotation is well under 1 KiB.
+const VERDICT_CACHE_ANSWER_BYTES: usize = 16 * 1024;
+
+/// Annotation answers this backend already gave, keyed by [`ClaudeCodeBackend::verdict_key`].
+#[derive(Default)]
+struct VerdictCache {
+    answers: HashMap<[u8; 32], serde_json::Value>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl VerdictCache {
+    fn insert(&mut self, key: [u8; 32], answer: serde_json::Value) {
+        if self.answers.insert(key, answer).is_some() {
+            return;
+        }
+        self.order.push_back(key);
+        if self.order.len() > VERDICT_CACHE_ENTRIES
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.answers.remove(&oldest);
+        }
+    }
 }
 
 impl ClaudeCodeBackend {
@@ -46,7 +76,53 @@ impl ClaudeCodeBackend {
             config: config.clone(),
             max_body_bytes,
             gates: gates.clone(),
+            verdicts: Arc::default(),
         }
+    }
+
+    /// Everything that reaches the model: the executable, the model, and the rendered prompt.
+    fn verdict_key(&self, prompt: &ModelPrompt) -> [u8; 32] {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        let schema = prompt.schema.to_string();
+        for part in [
+            self.config.command.as_os_str().as_encoded_bytes(),
+            self.config.model.as_bytes(),
+            prompt.system.as_bytes(),
+            prompt.input.as_bytes(),
+            schema.as_bytes(),
+        ] {
+            hasher.update((part.len() as u64).to_le_bytes());
+            hasher.update(part);
+        }
+        hasher.finalize().into()
+    }
+
+    fn verdicts(&self) -> std::sync::MutexGuard<'_, VerdictCache> {
+        self.verdicts.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// An annotation consult answered from an identical earlier prompt where one gave an answer
+    /// inside `declaration`'s mandate, and otherwise asked, keeping only such an answer.
+    pub(crate) async fn annotate(
+        &self,
+        prompt: &ModelPrompt,
+        declaration: &AnnotationDeclaration,
+        name: &str,
+        seen: Option<&mut Transcript>,
+    ) -> Result<serde_json::Value, NoAnswerReason> {
+        let admitted = |answer: &serde_json::Value| AnnotationAnswer::from_wire(answer, declaration).is_ok();
+        let key = self.verdict_key(prompt);
+        let recalled = self.verdicts().answers.get(&key).cloned();
+        if let Some(answer) = recalled.filter(admitted) {
+            tracing::debug!(name, "claude consult answered from an identical earlier prompt");
+            return Ok(answer);
+        }
+        let answer = self.consult(prompt, name, seen).await?;
+        if admitted(&answer) && answer.to_string().len() <= VERDICT_CACHE_ANSWER_BYTES {
+            self.verdicts().insert(key, answer.clone());
+        }
+        Ok(answer)
     }
 
     /// One consult. The deadline covers the permit wait and the subprocess: queueing behind
@@ -310,5 +386,48 @@ if [ "$verbose" = true ]; then printf '[{"type":"system"},%s]' "$envelope"; else
         let answer = fake_consult(dir.path(), &script).await;
         assert_eq!(answer, Ok(serde_json::json!({"ruling": "approve", "reason": "ok"})));
         assert_process_gone(recorded_pid(&pid_file).await).await;
+    }
+
+    /// The mandate admits `suspicious` and `trusted`; the out-of-mandate answer is complete
+    /// and well formed, and differs only in a trust rank the declaration does not list.
+    #[tokio::test]
+    async fn only_an_answer_inside_the_mandate_is_stored() {
+        let declaration = AnnotationDeclaration {
+            hint: None,
+            deployment_hint: None,
+            context_hints: Default::default(),
+            inputs: vec![],
+            trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
+            audiences: appa_engine::registry::AudienceVocabulary::parse_entries(&["internal".to_string()])
+                .expect("a fixture vocabulary parses"),
+            attention_marks: vec![],
+            effects: vec![],
+        };
+        let prompt = ModelPrompt {
+            system: "rule".to_string(),
+            input: "{}".to_string(),
+            schema: serde_json::json!({"type": "object"}),
+        };
+        let stored = async |trust: &str| {
+            let answer = serde_json::json!({
+                "delta": {"trust": trust},
+                "forwards": {},
+                "requires": {"history": [], "attention": []},
+                "emits": [],
+            });
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let envelope = serde_json::json!({"type": "result", "structured_output": answer});
+            let command =
+                crate::test_support::fake_claude(dir.path(), &format!("cat > /dev/null\nprintf '%s' '{envelope}'"));
+            let config = ClaudeCode {
+                command,
+                ..ClaudeCode::default()
+            };
+            let backend = ClaudeCodeBackend::new(&config, 65_536, &crate::external::ConsultGates::per_runtime());
+            assert_eq!(backend.annotate(&prompt, &declaration, "judge", None).await, Ok(answer));
+            backend.verdicts().answers.len()
+        };
+        assert_eq!(stored("suspicious").await, 1, "an admitted answer is stored");
+        assert_eq!(stored("root").await, 0, "an answer outside the mandate is not stored");
     }
 }

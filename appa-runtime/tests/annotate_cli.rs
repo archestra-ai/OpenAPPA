@@ -146,6 +146,45 @@ fn the_annotator_asked_by_the_cli_sees_what_the_context_providers_answered() {
     assert_eq!(page["answer"]["delta"]["trust"], "trusted");
 }
 
+/// Trusts a call only when its declaration carries the deployment hint and the hints of
+/// exactly the providers with an entry in its context: `quiet` declines the call.
+const HINTED_CLASSIFIER: &str = r#"
+input="$(cat)"
+case "$input" in
+  *'"context_hints":{"broken":"broken hint","owner":"owner hint"}'*'"deployment_hint":"deployment hint"'*) trust=trusted ;;
+  *) trust=suspicious ;;
+esac
+echo "{\"version\":1,\"answer\":{\"delta\":{\"trust\":\"$trust\"},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}"
+"#;
+
+#[test]
+fn the_annotator_asked_by_the_cli_reads_the_deployer_hints() {
+    let providers = r#"
+[externals.context.owner]
+command = ["/bin/sh", "owner.sh"]
+hint = "owner hint"
+
+[externals.context.broken]
+command = ["/bin/sh", "-c", "exit 1"]
+hint = "broken hint"
+
+[externals.context.quiet]
+command = ["/bin/sh", "-c", 'cat > /dev/null; printf "%s" "{\"version\":1,\"answer\":null}"']
+hint = "quiet hint"
+
+[policy.deployment]
+hint = "deployment hint"
+"#;
+    let policy = format!("{POLICY}{providers}");
+    let rows = annotate_with(&policy, HINTED_CLASSIFIER, "1");
+    let page = rows
+        .iter()
+        .find(|row| row["id"] == "page")
+        .expect("the page call is reported");
+    assert_eq!(page["outcome"], "answer");
+    assert_eq!(page["answer"]["delta"]["trust"], "trusted");
+}
+
 #[test]
 fn zero_concurrency_is_refused_rather_than_hanging() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

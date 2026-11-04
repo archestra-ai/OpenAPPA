@@ -933,5 +933,22 @@ mod tests {
         let description = render(&directory.path().join("appa.toml"), &[], AdapterName::ClaudeCode, &[]);
 
         assert!(!description.valid);
+        let text = &description.text;
+        // The MCP server section reports this machine's configuration, so it is not counted.
+        let machine = text
+            .find("MCP servers:")
+            .zip(text.find("Session tools:"))
+            .map_or(0, |(start, end)| text[start..end].lines().count());
+        assert!(text.lines().count() - machine <= 15, "{text}");
+        assert!(
+            text.contains(
+                "Session tools: unavailable to this command; pass the names this session sees with --session-tools"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("Connector accounts: unavailable to this command"),
+            "{text}"
+        );
     }
 }

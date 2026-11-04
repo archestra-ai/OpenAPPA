@@ -461,26 +461,44 @@ fn a_fork_preparation_replays_only_as_its_marked_release() {
         .iter()
         .position(|fact| matches!(fact, Fact::ForkPrepared { .. }))
         .expect("the release prepares the fork");
+    // The first fact of a batch the sequence refuses, with the refusal.
+    let refused_at = |facts: &[Fact]| {
+        let mut sequence = crate::transition::Sequence::resuming(&e, &view);
+        facts
+            .iter()
+            .enumerate()
+            .find_map(|(at, fact)| sequence.admit(fact).err().map(|refusal| (at, refusal)))
+    };
 
-    let mut unmarked = batch.clone();
-    let decided_at = unmarked
-        .iter()
-        .position(|fact| matches!(fact, Fact::ProposalBatchDecided { .. }))
-        .expect("the release records its decision");
-    if let Fact::ProposalBatchDecided { spawn, .. } = &mut unmarked[decided_at] {
-        *spawn = None;
-    }
-    let unmarked = e.validate_replay(&[records.clone(), unmarked].concat());
-    assert!(unmarked.is_err(), "an unmarked release backs no fork, got {unmarked:?}");
-    let mut displaced = batch.clone();
-    displaced.insert(
-        prepared_at,
-        stray_admission(&traj(), Label::new(SUSPICIOUS, Audience::public())),
+    let unmarked = e
+        .handle(&view, spawn_batch("b1", None))
+        .expect("an unmarked spawn releases")
+        .append
+        .expect("the release appends")
+        .facts()
+        .to_vec();
+    assert_eq!(e.validate_replay(&[records.clone(), unmarked.clone()].concat()), Ok(()));
+    let unmarked = [unmarked, vec![batch[prepared_at].clone()]].concat();
+    assert_eq!(
+        refused_at(&unmarked),
+        Some((
+            unmarked.len() - 1,
+            crate::transition::TransitionRefusal::UnbackedDecision
+        )),
+        "an unmarked release backs no fork"
     );
-    let displaced = e.validate_replay(&[records, displaced].concat());
-    assert!(
-        displaced.is_err(),
-        "a preparation lands in its release's batch, got {displaced:?}"
+
+    let opened_at = batch
+        .iter()
+        .position(|fact| matches!(fact, Fact::DispatchOpened { .. }))
+        .expect("the release opens its dispatch");
+    let mut displaced = batch.clone();
+    let preparation = displaced.remove(prepared_at);
+    displaced.insert(opened_at, preparation);
+    assert_eq!(
+        refused_at(&displaced),
+        Some((opened_at, crate::transition::TransitionRefusal::UnbackedDecision)),
+        "a preparation lands only in its release's fork slot, after the opening"
     );
 }
 

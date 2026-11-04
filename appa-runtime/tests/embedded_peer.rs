@@ -654,8 +654,66 @@ async fn a_noop_arrival_returns_the_body_and_a_narrowing_read_folds_only_the_chi
     );
 }
 
+const SCRUBBED_POLICY: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "send"
+delta = {}
+
+[[policy.tool]]
+name = "read"
+delta = {}
+
+[[policy.tool]]
+name = "narrow"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "open"
+delta = {}
+
+[[policy.tool]]
+name = "spawn"
+delta = {}
+
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_output"]
+
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
+
+[policy.deployment]
+context_control = true
+CONFINED
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.sanitizers.scrub]
+builtin = "redact-email"
+"#;
+
+/// A runtime under an unscoped `scrub` output sanitizer, which also serves as a child-return
+/// sanitizer, with `confined` spliced into `[policy.deployment]`.
+fn scrubbed_runtime(confined: &str) -> (tempfile::TempDir, Runtime) {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("policy.toml");
+    std::fs::write(&path, SCRUBBED_POLICY.replace("CONFINED", confined)).expect("the sanitizer policy writes");
+    let runtime = Runtime::open(
+        Config::load(&path).expect("the sanitizer policy loads"),
+        dir.path().join("appa.db"),
+        None,
+    )
+    .expect("the runtime opens");
+    (dir, runtime)
+}
+
 #[tokio::test]
-async fn a_peer_read_refuses_a_non_top_delta_and_an_output_sanitizer() {
+async fn a_peer_read_refuses_a_non_top_delta_and_a_confined_result() {
     let (_dir, runtime) = runtime();
     start(&runtime).await;
     assert!(matches!(
@@ -682,56 +740,16 @@ async fn a_peer_read_refuses_a_non_top_delta_and_an_output_sanitizer() {
         .expect("the inbox lists");
     assert_eq!(listed.len(), 1, "the refused tool does not consume the message");
 
-    let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let path = dir.path().join("policy.toml");
-    std::fs::write(
-        &path,
-        r#"
-[policy]
-version = 2
-
-[[policy.tool]]
-name = "send"
-delta = {}
-
-[[policy.tool]]
-name = "read"
-delta = {}
-
-[[policy.sanitizer]]
-name = "scrub"
-on = ["tool_output"]
-
-[policy.sanitizer.permits]
-audience = { from = ["internal"], to = ["public"] }
-
-[policy.deployment]
-context_control = true
-
-[externals]
-timeout_ms = 2000
-max_body_bytes = 65536
-
-[externals.sanitizers.scrub]
-builtin = "redact-email"
-"#,
-    )
-    .expect("the sanitizer policy writes");
-    let scrubbed = Runtime::open(
-        Config::load(&path).expect("the sanitizer policy loads"),
-        dir.path().join("appa.db"),
-        None,
-    )
-    .expect("the runtime opens");
-    start(&scrubbed).await;
+    let (_dir, confined) = scrubbed_runtime(r#"confined_results = ["read"]"#);
+    start(&confined).await;
     assert!(matches!(
-        release(&scrubbed, None, "send", "send-1").await,
+        release(&confined, None, "send", "send-1").await,
         HookDecision::AllowCall { .. }
     ));
-    let notice = scrubbed
+    let notice = confined
         .send_embedded_peer(&family(), &family(), &family(), None, "send-1", "secret")
         .expect("the send records");
-    let refused = scrubbed
+    let refused = confined
         .read_embedded_peer(
             &actor(None),
             "read-1",
@@ -741,6 +759,110 @@ builtin = "redact-email"
         .await;
     assert!(
         matches!(refused, Err(EmbeddedPeerError::Refused(_))),
-        "an output sanitizer cannot replace the captured label, got {refused:?}"
+        "a confined read could be sanitized in place of the captured label, got {refused:?}"
+    );
+
+    let (_dir, selected) = scrubbed_runtime(
+        r#"confined_results = ["mcp/demo/read"]
+
+[[policy.tool]]
+name = "mcp/*/read"
+delta = {}"#,
+    );
+    start(&selected).await;
+    assert!(matches!(
+        release(&selected, None, "send", "send-1").await,
+        HookDecision::AllowCall { .. }
+    ));
+    let notice = selected
+        .send_embedded_peer(&family(), &family(), &family(), None, "send-1", "secret")
+        .expect("the send records");
+    let refused = selected
+        .read_embedded_peer(
+            &actor(None),
+            "read-1",
+            &notice.id,
+            call("mcp/demo/read", json!({"message_id": notice.id.as_str()})),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(EmbeddedPeerError::Refused(_))),
+        "a read confined by its concrete name under a selector rule is refused, got {refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_unscoped_output_sanitizer_leaves_a_peer_read_its_stored_body_and_label() {
+    let (_dir, runtime) = scrubbed_runtime("");
+    start(&runtime).await;
+    open_child(&runtime).await;
+    let blocked = release(&runtime, None, "narrow", "narrow-1").await;
+    let HookDecision::DenyCall { offers, .. } = &blocked else {
+        panic!("narrowing blocks until accepted, got {blocked:?}");
+    };
+    let accepted = runtime
+        .execute_remedy(&actor(None), OfferId(offers[0].id.clone()))
+        .await;
+    assert!(matches!(accepted, RemedyOutcome::Authorized { .. }), "{accepted:?}");
+    assert!(matches!(
+        release(&runtime, None, "narrow", "narrow-1").await,
+        HookDecision::AllowCall { .. }
+    ));
+    result(&runtime, None, "narrow", "narrow-1", "secret").await;
+    assert!(matches!(
+        release(&runtime, None, "send", "send-1").await,
+        HookDecision::AllowCall { .. }
+    ));
+    let body = "write to bob@example.com";
+    let notice = runtime
+        .send_embedded_peer(&family(), &family(), &child(), None, "send-1", body)
+        .expect("the send records");
+
+    let read = runtime
+        .read_embedded_peer(
+            &actor(Some(&child())),
+            "read-1",
+            &notice.id,
+            call("read", json!({"message_id": notice.id.as_str()})),
+        )
+        .await
+        .expect("the read is admissible under an unscoped output sanitizer");
+    let HookDecision::DenyCall { offers, .. } = &read.decision else {
+        panic!("the internal message narrows the public child, got {:?}", read.decision);
+    };
+    assert_eq!(
+        offers.len(),
+        1,
+        "the read offers its acceptance and no sanitized delivery: {offers:?}"
+    );
+    let accepted = runtime
+        .execute_remedy(&actor(Some(&child())), OfferId(offers[0].id.clone()))
+        .await;
+    assert!(matches!(accepted, RemedyOutcome::Authorized { .. }), "{accepted:?}");
+    let read = runtime
+        .read_embedded_peer(
+            &actor(Some(&child())),
+            "read-1",
+            &notice.id,
+            call("read", json!({"message_id": notice.id.as_str()})),
+        )
+        .await
+        .expect("the accepted read admits");
+    assert_eq!(
+        read.decision,
+        HookDecision::DeliverValue {
+            value: body.to_string()
+        }
+    );
+    let audit = runtime.audit(&family()).expect("the family audits");
+    assert!(
+        audit.iter().any(|entry| {
+            entry.trajectory == child().0
+                && matches!(
+                    &entry.event,
+                    appa_runtime::api::AuditEvent::Admitted { label } if label.audience.contains("internal")
+                )
+        }),
+        "the child admits the read at the message's own label, audit={audit:?}"
     );
 }

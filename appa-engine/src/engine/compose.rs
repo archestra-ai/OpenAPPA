@@ -146,7 +146,7 @@ pub(crate) fn compose_batch<'a>(
     batch: ComposingBatch<'_>,
     proposals: &[ResolvedCall],
     spawn: Option<SpawnMark>,
-    approval: &impl Fn(&Views, &ResolvedCall) -> Option<crate::value::OfferId>,
+    approval: &impl Fn(&Views, &ResolvedCall) -> Vec<crate::value::OfferId>,
     staged: &impl Fn(
         &Views,
         &ResolvedCall,
@@ -171,11 +171,22 @@ pub(crate) fn compose_batch<'a>(
             // An approval declaring a child's return policy spends only at the marked spawn's
             // position, and one declaring none only at an ordinary one.
             let marked = matches!(CallRole::of(spawn, position), CallRole::MarkedSpawn(_));
-            let spends = if singleton { approval(&views, call) } else { None }.filter(|offer| {
-                views
-                    .approval(offer)
-                    .is_some_and(|prepared| prepared.return_policy.is_some() == marked)
-            });
+            //
+            // A marked spawn may hold its return declaration beside the approval that covers its
+            // other gaps, which carries the same declaration; the covering one is spent.
+            let spendable: Vec<crate::value::OfferId> = if singleton { approval(&views, call) } else { Vec::new() }
+                .into_iter()
+                .filter(|offer| {
+                    views
+                        .approval(offer)
+                        .is_some_and(|prepared| prepared.return_policy.is_some() == marked)
+                })
+                .collect();
+            let spends = spendable
+                .iter()
+                .find(|offer| views.approval(offer).is_some_and(|prepared| !prepared.declares_only()))
+                .or(spendable.first())
+                .copied();
             let under = match spends.and_then(|offer| views.approval(&offer)) {
                 Some(prepared) => std::borrow::Cow::Owned(
                     act.overlay(&prepared.evidence, registry.audience())
@@ -270,10 +281,15 @@ pub(crate) fn compose_batch<'a>(
                     }
                 }
             };
-            let consumes = match outcome {
+            // A declaration alone covers no gap and settles no narrowing.
+            let covers = |raw: &crate::check::RawBlock, offer: &crate::value::OfferId| {
+                views.approval(offer).is_some_and(|prepared| !prepared.declares_only())
+                    || (raw.requirement_gaps.is_empty() && raw.narrowing.is_none())
+            };
+            let consumes = match &outcome {
                 CheckOutcome::Allow => None,
-                CheckOutcome::Block(_) => match spends {
-                    Some(offer) => Some(*offer),
+                CheckOutcome::Block(raw) => match spends.filter(|offer| covers(raw, offer)) {
+                    Some(offer) => Some(offer),
                     None => {
                         refused = true;
                         composed.push(None);

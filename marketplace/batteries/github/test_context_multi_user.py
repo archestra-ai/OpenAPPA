@@ -194,6 +194,38 @@ class MultiUserAnswers(unittest.TestCase):
             },
         )
 
+    def test_a_call_with_its_own_token_is_answered_for_the_repository_it_names(self):
+        for command in (
+            'GH_TOKEN="$CODE_REVIEW_GITHUB_TOKEN" timeout 30 gh api repos/acme/widget/pulls/12',
+            "GITHUB_TOKEN=other gh pr view 12 --repo acme/widget",
+            "(export GH_TOKEN=other; gh pr view https://github.com/acme/widget/pull/12)",
+            'if [ -n "$CODE_REVIEW_GITHUB_TOKEN" ]; then export GH_TOKEN="$CODE_REVIEW_GITHUB_TOKEN"; fi\n'
+            "gh api repos/acme/widget/issues/12/comments",
+            "GH_TOKEN=$(gh auth token) gh pr checks 12 -R acme/widget",
+        ):
+            with Loopback(PULL_REQUEST_PAYLOAD) as github:
+                result = run_script(consult({"command": command}, "host/claude-code/Bash"), github.env())
+            self.assertEqual(result.returncode, 0, result.stderr)
+            [request] = github.seen
+            self.assertEqual(request["variables"], CONTEXT.variables_of("acme/widget", 12), command)
+            answer = json.loads(result.stdout)["answer"]
+            self.assertEqual(answer["repository"], {"name": "acme/widget", "visibility": "private", "fork_of": None}, command)
+            self.assertEqual(answer["pull_request"]["author"], {"person": "github:11", "association": "MEMBER"}, command)
+
+    def test_a_setting_that_moves_the_host_or_repository_is_still_refused(self):
+        for command in (
+            "GH_HOST=ghe.example GH_TOKEN=x gh pr view 1 --repo acme/api",
+            "GH_ENTERPRISE_TOKEN=x gh pr view 1 --repo acme/api",
+            "GITHUB_ENTERPRISE_TOKEN=x gh pr view 1 --repo acme/api",
+            "GH_CONFIG_DIR=/tmp/evil GH_TOKEN=x gh pr view 1",
+            "GH_TOKEN=x; GH_REPO=acme/secret; gh pr create",
+            "export GH_TOKEN=x GIT_DIR=/tmp/evil; git push origin",
+            'B=https://github.com/acme/public.git; GH_TOKEN=x git push "$B"',
+            "GH_TOKEN=x git config url.https://github.com/acme/public.insteadOf origin && git push origin",
+        ):
+            with self.assertRaises(CONTEXT.Unfollowable, msg=command):
+                CONTEXT.call_targets({"tool": "host/claude-code/Bash", "arguments": {"command": command}, "cwd": "/w"}, CONTEXT.Deployment.MULTI_USER)
+
     def test_the_single_user_query_still_reads_the_viewer_and_logins(self):
         fields = selected_fields(CONTEXT.query_of(CONTEXT.Deployment.SINGLE_USER))
         self.assertTrue({"viewer", "viewerPermission", "login"} <= fields, fields)

@@ -145,7 +145,7 @@ and `commit_authors`. `participants` are the author and every comment,
 review, and review-comment author; a deleted account is `null`.
 `truncated` is `true` when a list had more pages than the query reads
 (100 comments, 50 reviews of 30 comments each, 100 commits). A command
-the provider cannot follow — a shell, a subshell, a computed target, a
+the provider cannot follow — a shell, a computed target, a
 setting that moves git, several repositories or items at once — a
 repository the token cannot see, or any GitHub error exits nonzero, and
 the annotator receives an error entry instead of an answer.

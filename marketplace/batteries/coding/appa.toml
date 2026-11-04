@@ -18,8 +18,74 @@ version = 2
 
 # A command naming a credential path narrows the session to `self`, the
 # requester. The `credentials` tag records why a rule is here.
+#
+# A dotenv file is matched as a path, not a substring: `.env` after a space,
+# `/` or `=`, and at the end of the command, before a space, or before
+# `.<suffix>` (`.env.local`, also `.env.example`); also a double-quoted
+# `".env"`, `".env.local"` or `"$DIR/.env"`, and `source .env;`. `os.environ`,
+# `process.env.X` and `.envrc` reach the Annotator below.
 [[policy.tool]]
-name = "tool/coding/shell(command:*.env*)"
+name = "tool/coding/shell(command:* .env)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .env *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .env.*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env.*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env.*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:* .env;*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -158,11 +224,11 @@ tags = ["credentials"]
 
 # A command no credential selector above names is labeled per call. The GitHub
 # battery's context provider, when installed, tells the repository Annotator
-# which repository a command reaches and who wrote what it reads.
+# which repository a command reaches and who wrote what it reads, with its own
+# hint on how to read that.
 [[policy.annotator]]
 name = "claude-code.bash-repository-requirements"
 builtin = "claude-code"
-hint = "`context.github` is the deployment's finding about the repository and pull request or issue the command reaches. A push, pull request, issue, release, or comment into a public repository, or one it does not establish, requires audience public; into a private or internal one, internal. A read keeps the session's audience."
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*git push*)"
@@ -201,9 +267,9 @@ description = "Runs one shell command and returns its output."
 annotator = "claude-code.bash-repository-requirements"
 
 # How a model Annotator classifies — trust by who wrote the returned text,
-# audience by the visible destination — is the runtime's. Add a `hint` with
-# what only this deployment knows: which hosts are its own and which paths hold
-# whose data. The mandate leaves `audiences` omitted, so it may name readers.
+# audience by the visible destination — is the runtime's. What only this
+# deployment knows — which hosts are its own and which paths hold whose data —
+# belongs in the root's `[policy.deployment] hint`. The mandate leaves `audiences` omitted, so it may name readers.
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
 builtin = "claude-code"
@@ -224,7 +290,87 @@ annotator = "claude-code.bash-requirements"
 # `Get-Secret` are named here too, and `/proc/*/environ` for a WSL command. A
 # selector matches case-sensitively, so another spelling reaches the Annotator.
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.env*)'
+name = 'tool/coding/powershell(command:* .env)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env.*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env"*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -1746,12 +1892,17 @@ delta = { trust = "suspicious" }
 name = "tool/coding/fetch_url(url:https://google.com/search?*)"
 delta = { trust = "suspicious" }
 
-# Web pages are authored outside the session, and the URL leaves it for any
-# host: a public sink and an untrusted source at once.
+# Any other URL is labeled per call: whether anyone can write the page decides
+# its trust, and what the URL or body carries decides who it reaches. The
+# deployment hint can mark a source trusted or suspicious either way.
+[[policy.annotator]]
+name = "claude-code.fetch-requirements"
+builtin = "claude-code"
+
 [[policy.tool]]
 name = "tool/coding/fetch_url"
-requires = { audience = { contains = ["public"] } }
-delta = { trust = "suspicious" }
+description = "Fetches one URL and returns its content."
+annotator = "claude-code.fetch-requirements"
 
 # The search provider sees the query, as Google does above; strangers write
 # the results.

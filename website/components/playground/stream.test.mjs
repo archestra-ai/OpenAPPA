@@ -91,3 +91,21 @@ test("a remedy's delivered value resolves the held call whose ruling offered it"
     [["second+resolved", "clean customers"]],
   );
 });
+
+test("a sanitizer's badge lands on the call whose result it rewrote", () => {
+  // Both remedies are taken before either re-run reports, so two calls are
+  // running when the first derivation arrives.
+  const thread = replay([
+    { type: "tool_proposed", trajectory: T, call_id: "recordings", tool: "list_recordings", arguments: {} },
+    { type: "tool_proposed", trajectory: T, call_id: "issues", tool: "list_issues", arguments: {} },
+    { type: "tool_result", trajectory: T, call_id: "recordings", body: "summary" },
+    { type: "tool_closed", trajectory: T, call_id: "recordings", outcome: "ran", effects: [] },
+    { type: "sanitized", trajectory: T, call_id: "recordings", sanitizer: "strip-customer-data" },
+    { type: "tool_result", trajectory: T, call_id: "issues", body: "facts" },
+    { type: "tool_closed", trajectory: T, call_id: "issues", outcome: "ran", effects: [] },
+    { type: "sanitized", trajectory: T, call_id: "issues", sanitizer: "strip-instructions" },
+  ]);
+
+  assert.equal(call(thread, "recordings").sanitizedBy, "strip-customer-data");
+  assert.equal(call(thread, "issues").sanitizedBy, "strip-instructions");
+});

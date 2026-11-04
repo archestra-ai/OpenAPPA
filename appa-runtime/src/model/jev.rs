@@ -161,13 +161,15 @@ impl JevBackend {
         if !declaration.inputs.is_empty() {
             return Err(unsupported);
         }
-        // Context that would carry the consult over the cap is dropped, each provider
-        // recorded as having told Jev nothing, before the call itself is given up on.
+        // Context that would carry the consult over the cap is dropped, largest answer
+        // first, each dropped provider recorded as having told Jev nothing, before the call
+        // itself is given up on.
         let trimmed;
-        let artifact = if consult_size(consult)? <= MAX_CONSULT_BYTES {
+        let size = consult_size(consult)?;
+        let artifact = if size <= MAX_CONSULT_BYTES {
             artifact
         } else {
-            trimmed = without_context_answers(artifact);
+            trimmed = without_largest_answers(artifact, size)?;
             let size = consult_size(&Consult {
                 name: consult.name.clone(),
                 body: ConsultBody::Annotation {
@@ -200,7 +202,7 @@ impl JevBackend {
         let request = JevRequest {
             state,
             model: MODEL,
-            questions: Questions::new(declaration.hint.as_deref()),
+            questions: Questions::new(declaration),
         };
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
@@ -478,30 +480,56 @@ struct JevRequest<'a> {
 }
 
 fn consult_size(consult: &Consult) -> Result<usize, (JevFailure, NoAnswerReason)> {
-    serde_json::to_vec(consult)
+    json_size(consult)
+}
+
+fn json_size(value: &impl Serialize) -> Result<usize, (JevFailure, NoAnswerReason)> {
+    serde_json::to_vec(value)
         .map(|bytes| bytes.len())
         .map_err(|_| (JevFailure::UnsupportedConsult, NoAnswerReason::Malformed))
 }
 
-/// The artifact with every provider's answer replaced by the reason Jev does not see it.
-fn without_context_answers(artifact: &AnnotationArtifact) -> AnnotationArtifact {
+/// The artifact of a consult `size` bytes long with its largest provider answers replaced,
+/// one by one, by the reason Jev does not see them, until the consult fits the cap or no
+/// answer is larger than that reason. The result can still exceed the cap, so the caller
+/// checks its final size. An entry's serialized length is its whole share of the
+/// consult's, so the size is tracked without serializing the consult again.
+fn without_largest_answers(
+    artifact: &AnnotationArtifact,
+    mut size: usize,
+) -> Result<AnnotationArtifact, (JevFailure, NoAnswerReason)> {
+    let dropped = ContextEntry::Error(format!(
+        "the context exceeds jev's {MAX_CONSULT_BYTES}-byte consult cap"
+    ));
+    let dropped_size = json_size(&dropped)?;
+    let mut answers = Vec::new();
+    for (provider, entry) in artifact.context.entries() {
+        if let ContextEntry::Answer(_) = entry {
+            answers.push((json_size(entry)?, provider));
+        }
+    }
+    answers.sort_by_key(|&(answer_size, _)| std::cmp::Reverse(answer_size));
+    let mut cut = std::collections::BTreeSet::new();
+    for (answer_size, provider) in answers {
+        if size <= MAX_CONSULT_BYTES || answer_size <= dropped_size {
+            break;
+        }
+        cut.insert(provider);
+        size -= answer_size - dropped_size;
+    }
     let entries = artifact
         .context
         .entries()
-        .keys()
-        .map(|provider| {
-            (
-                provider.clone(),
-                ContextEntry::Error(format!(
-                    "the context exceeds jev's {MAX_CONSULT_BYTES}-byte consult cap"
-                )),
-            )
+        .iter()
+        .map(|(provider, entry)| match cut.contains(provider) {
+            true => (provider.clone(), dropped.clone()),
+            false => (provider.clone(), entry.clone()),
         })
         .collect();
-    AnnotationArtifact {
+    Ok(AnnotationArtifact {
         args: artifact.args.clone(),
         context: AnnotationContext::new(entries),
-    }
+    })
 }
 
 // ---------------------------------------------------------------- labels
@@ -781,6 +809,8 @@ mod tests {
     fn declaration(ranks: &[&str], audiences: &[&str]) -> AnnotationDeclaration {
         AnnotationDeclaration {
             hint: None,
+            deployment_hint: None,
+            context_hints: std::collections::BTreeMap::new(),
             inputs: vec![],
             trust_ranks: ranks.iter().map(ToString::to_string).collect(),
             audiences: AudienceVocabulary::parse_entries(
@@ -1381,17 +1411,37 @@ mod tests {
         );
     }
 
+    /// Only as much context as the cap needs is dropped, the largest answer first: a
+    /// smaller answer and another provider's error still reach Jev.
     #[tokio::test]
-    async fn context_past_the_input_bound_is_dropped_before_the_call_is() {
+    async fn context_past_the_input_bound_is_dropped_largest_first_before_the_call_is() {
         let (url, stub) = serve(vec![Scripted::Answers], vec![]).await;
-        let consult = with_context(call(), json!({"blob": "x".repeat(MAX_CONSULT_BYTES)}));
+        let mut consult = with_context(call(), json!({"blob": "x".repeat(MAX_CONSULT_BYTES / 2 - 1024)}));
+        let ConsultBody::Annotation { artifact, .. } = &mut consult.body else {
+            unreachable!("the fixture is an annotation consult")
+        };
+        let mut entries = artifact.context.entries().clone();
+        entries.insert(
+            appa_engine::names::ContextProviderName::new("jira"),
+            ContextEntry::Answer(json!({"blob": "y".repeat(MAX_CONSULT_BYTES / 2 + 1024)})),
+        );
+        entries.insert(
+            appa_engine::names::ContextProviderName::new("slack"),
+            ContextEntry::Answer(json!({"channel": "eng"})),
+        );
+        artifact.context = AnnotationContext::new(entries);
         let (answered, _) = backend(&url, Duration::from_secs(2), FAST).consult(&consult).await;
         assert_eq!(answered, Ok(jev_annotation()), "the call is still judged");
         let [(_, request)] = stub.requests().try_into().expect("one request");
         let dropped = format!("the context exceeds jev's {MAX_CONSULT_BYTES}-byte consult cap");
         assert_eq!(
             request["state"]["context"],
-            json!({"databricks": {"error": dropped}, "github": {"error": dropped}})
+            json!({
+                "databricks": {"error": "timeout"},
+                "github": {"answer": {"blob": "x".repeat(MAX_CONSULT_BYTES / 2 - 1024)}},
+                "jira": {"error": dropped},
+                "slack": {"answer": {"channel": "eng"}},
+            })
         );
     }
 

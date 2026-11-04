@@ -813,6 +813,7 @@ async fn a_redirected_providers_lookups_go_to_the_named_entry() {
     ));
     assert_eq!(audit_len(&runtime), decided);
     assert!(decided > before);
+    let asked = source.requests().len();
     drop(runtime);
 
     // The reopened deployment replays the pinned lookups without consulting anyone; only
@@ -824,7 +825,11 @@ async fn a_redirected_providers_lookups_go_to_the_named_entry() {
         propose(&reopened, send("@team")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(source.requests().len(), 8);
+    assert_eq!(
+        source.requests().len(),
+        asked + 2,
+        "the fresh act reads the selector and the lookup entry once each"
+    );
 }
 
 #[tokio::test]
@@ -883,6 +888,7 @@ async fn a_group_recipient_is_read_per_act_and_replayed_from_the_pin() {
 
     let audit = serde_json::to_string(&runtime.audit(&root()).expect("the audit reads")).expect("the audit serializes");
     assert!(!audit.contains("carol"), "the audit leaks a directory member: {audit}");
+    let asked = source.requests().len();
     drop(runtime);
 
     // The reopened deployment replays the log — its pinned answers included — without
@@ -894,7 +900,11 @@ async fn a_group_recipient_is_read_per_act_and_replayed_from_the_pin() {
         propose(&reopened, send("@team")).await,
         HookDecision::AllowCall { spawn: None }
     );
-    assert_eq!(source.requests().len(), 4);
+    assert_eq!(
+        source.requests().len(),
+        asked + 1,
+        "the fresh act reads the selector once"
+    );
 }
 
 /// `POLICY` with a channel-keyed sink: posting to a channel requires that channel's members

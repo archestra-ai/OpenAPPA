@@ -135,6 +135,8 @@ jobs:
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
               - 'website-chat-playground/**'
+              # Generated from the service's `WireEvent`; its test fails on drift.
+              - 'website/components/playground/wire-events.ts'
               - 'bench/corp-agent/**'
               - 'bench/corp-systems/**'
               - 'bench/corp/policies/**'
@@ -322,7 +324,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: runtime-binary
-          env-vars: CARGO_PROFILE_DEV_DEBUG
+          env-vars: CARGO_PROFILE_DEV_DEBUG ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
@@ -373,7 +375,7 @@ jobs:
           retention-days: 7
 
       - name: Setup uv for OTLP verification
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
 
       - name: Verify value-safe OTLP export with a real runtime
         run: uv run scripts/verify-runtime-telemetry.py target/debug/appa
@@ -439,6 +441,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: marketplace
+          env-vars: ImageOS
 
       - name: Manifest tests
         run: cargo test -p appa-package --all-targets --locked
@@ -495,7 +498,10 @@ jobs:
   # is omitted: clippy --all-targets is a superset. Each rust-cache key is
   # per job: clippy and test write different target/ trees, so they must
   # not share one entry. A job that runs on main seeds the key later PRs
-  # restore.
+  # restore. Every rust-cache key on a floating runner label also hashes
+  # `ImageOS`: build scripts record what they found on the image (pyo3 links
+  # the image's libpython3.x) and cargo does not rerun them when the image
+  # changes, so an entry built on one image must not restore on another.
   rust-lint:
     name: Rust Lint
     needs: [changes, cargo-release-age]
@@ -516,6 +522,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: rust-lint
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust formatting
@@ -566,7 +573,7 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: rust-tests
-          env-vars: CARGO_PROFILE_TEST_DEBUG
+          env-vars: CARGO_PROFILE_TEST_DEBUG ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rust tests
@@ -694,6 +701,7 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build runtime
@@ -733,10 +741,11 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -779,7 +788,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -800,7 +809,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -826,7 +835,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -852,7 +861,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -963,13 +972,14 @@ jobs:
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          env-vars: ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build the runtime binary
         run: cargo build --package appa --locked
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -1139,7 +1149,7 @@ jobs:
         run: bash integrations/kagent/e2e/ci/install.sh
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: true
 
@@ -1208,7 +1218,7 @@ jobs:
           helm version
           kubectl version --client
       - name: Setup fixture test environment
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           enable-cache: false
       - name: Check fixture and evidence contracts

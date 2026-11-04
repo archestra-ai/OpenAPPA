@@ -375,20 +375,22 @@ async fn the_stand_in_owns_its_answers_and_live_remedies_rewrite() {
     );
 
     let live = run(&open(Remedies::Live), &traces).await;
-    let rewritten = serde_json::json!({"body": "write to [redacted-email] today"});
-    assert_eq!(
-        outcomes(&live[0])[1],
-        (
-            6,
-            &StepOutcome::Passed {
-                got: Got::Blocked(BTreeSet::from([redactor()])),
-                taken: Some(Taken {
-                    offer: redactor(),
-                    rewritten: Some(rewritten.clone()),
-                }),
-            }
-        )
-    );
+    let (line, outcome) = outcomes(&live[0])[1];
+    let StepOutcome::Passed {
+        got: Got::Blocked(blocked),
+        taken: Some(Taken {
+            offer,
+            rewritten: Some(rewritten),
+        }),
+    } = outcome
+    else {
+        panic!("the live redactor rewrites the export: {outcome:?}");
+    };
+    assert_eq!((line, blocked, offer), (6, &BTreeSet::from([redactor()]), &redactor()));
+    // What the redactor writes in place of the address is its own choice; the address is gone.
+    let body = rewritten["body"].as_str().expect("the rewrite keeps the body a string");
+    assert_eq!(rewritten, &serde_json::json!({"body": body}));
+    assert!(!body.contains("bob@example.com"), "{rewritten}");
     assert!(matches!(&live[1].steps[0].outcome, StepOutcome::CannotRun(_)));
     let shown = render_text(&live, Remedies::Live);
     assert!(
@@ -411,7 +413,7 @@ async fn the_stand_in_owns_its_answers_and_live_remedies_rewrite() {
     .expect("one JSON value");
     assert_eq!(
         (&export["answered_by"], &export["rewritten"]),
-        (&serde_json::json!("live"), &rewritten)
+        (&serde_json::json!("live"), rewritten)
     );
 }
 
@@ -719,10 +721,7 @@ async fn a_requirement_the_policy_cannot_state_cannot_run() {
             "names an audience the policy does not",
         ),
         (r#"{"audience": {"contains": ["$to"]}}"#, "names a call argument"),
-        (
-            r#"{"audiences": {"contains": ["public"]}}"#,
-            "unknown field `audiences`",
-        ),
+        (r#"{"audiences": {"contains": ["public"]}}"#, "audiences"),
     ] {
         let reports = run(&runtime, &[trace("refused.appa", &do_something(requires, "deny"))]).await;
         assert!(

@@ -585,16 +585,24 @@ fn the_session_start_entry_starts_the_deployed_runtime_then_posts_to_it() {
     );
     let health = common::http(&format!("{url}/health"), "GET", None);
     let fingerprint = common::http(&format!("{url}/binary-fingerprint"), "GET", None);
-    // Whatever the assertions below say, the runtime this test started is stopped.
-    if let Some(pid) = fingerprint
-        .as_deref()
-        .and_then(|answer| answer.lines().next())
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|pid| pid.parse::<i32>().ok())
-    {
-        // SAFETY: the pid was read from the runtime this test started on its own port.
-        unsafe { libc::kill(pid, libc::SIGTERM) };
+    let served_pid = |fingerprint: Option<&str>| {
+        fingerprint
+            .and_then(|answer| answer.lines().next())
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|pid| pid.parse::<i32>().ok())
+    };
+    // Whatever the assertions below say, the runtime this test started is
+    // stopped when the test ends, and not before the second ensure probes it.
+    struct Stopped(Option<i32>);
+    impl Drop for Stopped {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                // SAFETY: the pid was read from the runtime this test started on its own port.
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+            }
+        }
     }
+    let started = Stopped(served_pid(fingerprint.as_deref()));
     assert_eq!(code, 0, "{stdout}");
     assert_eq!(
         health.as_deref().map(str::trim),
@@ -627,6 +635,11 @@ fn the_session_start_entry_starts_the_deployed_runtime_then_posts_to_it() {
         session_start,
     );
     assert_eq!(code, 0);
+    assert_eq!(
+        served_pid(common::http(&format!("{url}/binary-fingerprint"), "GET", None).as_deref()),
+        started.0,
+        "the runtime the first ensure started still answers"
+    );
 }
 
 /// Without a policy on disk the hook blocks at once: nothing is started, and

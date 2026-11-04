@@ -216,6 +216,7 @@ pub(crate) struct BlockContext {
     call: ResolvedCall,
     stage: CallStage,
     role: CallRole,
+    declaring: plan::Declaring,
     floor: Option<plan::Floor>,
     denied: BTreeSet<AuthorityName>,
     expansions: Expansions,
@@ -266,6 +267,7 @@ impl BlockContext {
         let denied = views.denied_authorities(&call.digest()).cloned().unwrap_or_default();
         let floor = plan::floor_of(registry, views);
         Ok(BlockContext {
+            declaring: plan::Declaring::of(role, views, &call),
             contract,
             call,
             stage,
@@ -514,6 +516,8 @@ impl<'a> Search<'a> {
                 &context.call,
                 &context.stage,
                 context.role,
+                context.declaring,
+                &context.denied,
                 context.floor.as_ref(),
                 &membership,
             )? {
@@ -1153,6 +1157,7 @@ mod tests {
             call: call.clone(),
             stage: CallStage::default(),
             role: CallRole::Ordinary,
+            declaring: plan::Declaring::No,
             floor: None,
             denied: views.denied_authorities(&call.digest()).cloned().unwrap_or_default(),
             expansions: registry
