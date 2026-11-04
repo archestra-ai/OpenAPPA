@@ -4,7 +4,7 @@ description = "File-tracker rules for a coding agent's shell and file tools: a l
 
 [battery]
 policy = "appa.toml"
-hosts = ["claude-code"]
+hosts = ["claude-code", "opencode"]
 namespaces = ["file-tracker"]
 helpers = []
 benefit = "Keeps a label on every file the agent reads or writes, across sessions, and confines shell commands to the files and hosts they declare."

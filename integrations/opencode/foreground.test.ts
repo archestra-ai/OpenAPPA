@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test'
 import { OpenCode } from '@opencode/client'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
-import { configuration, guide, install } from './setup'
+import { configuration, FILE_TRACKER, guide, install } from './setup'
 
 // Only inference is scripted. The published CLI, plugin, native tools, APPA
 // daemon, policy store and MCP remedy execution are real.
@@ -50,7 +50,9 @@ async function ready(check: () => Promise<unknown>, process: ReturnType<typeof B
 async function startRuntime(config = `${directory}/appa.toml`, env: Record<string, string> = {}) {
   runtime = Bun.spawn([resolve(process.env.APPA_TEST_BINARY || '../../target/debug/appa'), 'runtime', '--adapter', 'opencode',
     '--listen', `127.0.0.1:${runtimePort}`, '--config', config, '--db', `${directory}/appa.db`],
-  { env: { ...process.env, ...env }, stdout: 'ignore', stderr: Bun.file(`${directory}/appa.log`) })
+  // The runtime serves the file tracker itself; its configuration and store stay private to the test.
+  { env: { ...process.env, XDG_CONFIG_HOME: `${directory}/config`, XDG_STATE_HOME: `${directory}/state`, ...env },
+    stdout: 'ignore', stderr: Bun.file(`${directory}/appa.log`) })
   await ready(async () => { if (!(await fetch(`http://127.0.0.1:${runtimePort}/health`)).ok) throw new Error() }, runtime, `${directory}/appa.log`)
 }
 
@@ -90,6 +92,8 @@ beforeAll(async () => {
   await writeFile(`${directory}/private/data.txt`, 'Contact alice@corp.example')
   await writeFile(`${directory}/suspicious.txt`, 'Untrusted source')
   const policy = await readFile(new URL('./appa.toml', import.meta.url), 'utf8')
+  await mkdir(`${directory}/config/appa`, { recursive: true })
+  await copyFile(new URL('./file-tracker.toml', import.meta.url), `${directory}/config/appa/file-tracker.toml`)
   await writeFile(`${directory}/appa.toml`, `${policy.replace('version = 2', `version = 2
 [[policy.tool]]
 name = "host/opencode/read(path:*/suspicious.txt)"
@@ -193,8 +197,16 @@ builtin = "redact-email"
         : completion(null, [{ name: 'webfetch', input: { url: 'https://example.invalid/' } }])
     }
     if (user.startsWith('probe-shell:')) {
-      return last?.role === 'tool' ? completion(`Public shell: ${output}`)
-        : completion(null, [{ name: 'shell', input: { command: user === 'probe-shell:setup' ? 'printf setup-proof' : 'pwd' } }])
+      // A command over a private input narrows the session, so the probe accepts the offer once.
+      if (output.includes('offer_id:') && previous !== 'appa_execute_remedy_plan') {
+        return completion(null, [{ name: 'appa_execute_remedy_plan', input: { offer_id: output.match(/offer_id: "([a-f0-9]+)"/)[1] } }])
+      }
+      return last?.role === 'tool' && previous !== 'appa_execute_remedy_plan' ? completion(`Public shell: ${output}`)
+        : completion(null, [{ name: 'appa_safebash', input: user === 'probe-shell:setup'
+          // The file tracker narrows this command to the private input's internal Label until
+          // setup publishes a root contract for it.
+          ? { command: 'printf setup-proof', input_files: ['private/data.txt'], output_files: [], network_hosts: ['setup-proof.invalid'] }
+          : { command: 'pwd', input_files: [], output_files: [], network_hosts: ['example.com'] } }])
     }
     if (output.includes('offer_id:')) {
       const lines = output.split('\n')
@@ -347,7 +359,7 @@ test('real child sanitizer replaces the return before the parent receives it', a
   await client.session.prompt({ sessionID: session.id, text: 'probe-shell:after-sanitizer' })
   await client.session.wait({ sessionID: session.id })
   expect(hooks.some(hook => hook.event.root_id === session.id && !hook.event.child_id &&
-    hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
+    hook.event.tool === 'appa_safebash' && hook.reply.decision === 'allow_call')).toBe(true)
 }, 45_000)
 
 test('distinct concurrent children return in reverse order without exchanging identities', async () => {
@@ -491,7 +503,7 @@ test('wire launch acknowledgment releases the parent while the background child 
     expect(flow.some(hook => hook.event.event === 'child_end')).toBe(false)
     await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:while-child-active' })
     await client.session.wait({ sessionID: live.session.id })
-    expect(hooks.some(hook => hook.event.root_id === live.session.id && hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
+    expect(hooks.some(hook => hook.event.root_id === live.session.id && hook.event.tool === 'appa_safebash' && hook.reply.decision === 'allow_call')).toBe(true)
     const history = await client.session.context({ sessionID: live.session.id })
     expect(history.some(message => message.type === 'synthetic')).toBe(false)
     expect(JSON.stringify(history.filter(message => message.type === 'assistant' && message.finish === 'stop'))).not.toContain('child:bg-wire')
@@ -520,7 +532,7 @@ test('a finished background return is admitted, narrows the parent and arrives o
     }
     await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:after-notice' })
     await client.session.wait({ sessionID: live.session.id })
-    const shell = hooks.filter(hook => hook.event.root_id === live.session.id && !hook.event.child_id && hook.event.tool === 'shell' && hook.event.event === 'tool_call').at(-1)!
+    const shell = hooks.filter(hook => hook.event.root_id === live.session.id && !hook.event.child_id && hook.event.tool === 'appa_safebash' && hook.event.event === 'tool_call').at(-1)!
     expect(shell.reply.decision).toBe(mode === 'private raw' ? 'deny_call' : 'allow_call')
     const returns = hooks.filter(hook => hook.event.root_id === live.session.id && hook.event.event === 'child_end')
     const collected = JSON.stringify(await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: live.handle } }]))
@@ -534,7 +546,7 @@ test('a finished background return is admitted, narrows the parent and arrives o
 test('a background task without delivery narrows the parent only when collected', async () => {
   const live = await background('quiet private raw')
   await client.session.wait({ sessionID: live.child.id })
-  const shell = () => hooks.filter(hook => hook.event.root_id === live.session.id && !hook.event.child_id && hook.event.tool === 'shell' && hook.event.event === 'tool_call').at(-1)!
+  const shell = () => hooks.filter(hook => hook.event.root_id === live.session.id && !hook.event.child_id && hook.event.tool === 'appa_safebash' && hook.event.event === 'tool_call').at(-1)!
   // A delivering watcher admits within milliseconds of the child ending; give it ample time to misbehave.
   await Bun.sleep(1500)
   await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:finished-uncollected' })
@@ -717,7 +729,7 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   const before = await client.session.create({ location: { directory } })
   await client.session.prompt({ sessionID: before.id, text: 'probe-shell:setup' })
   await client.session.wait({ sessionID: before.id })
-  expect(JSON.stringify(await client.session.context({ sessionID: before.id }))).toContain('arguments match no registered contract')
+  expect(JSON.stringify(await client.session.context({ sessionID: before.id }))).toContain("narrow this session's audience")
   const target = `${directory}/deployment/appa.toml`
   const projectSettings = await readFile(`${directory}/opencode.json`, 'utf8')
   await install(`${directory}/config/opencode`, target, proxy.url.toString().replace(/\/$/, ''))
@@ -753,7 +765,7 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   } } }))
   const original = await readFile(target, 'utf8')
   setupPolicy = original.replace('opencode/appa.toml"]', 'opencode/appa.toml", "batteries/microsoft-learn/appa.toml"]')
-    .replace('[policy]\nversion = 2', '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/shell(command:printf setup-proof)"\nrequires = { trust = "trusted", audience = { contains = ["public"] } }')
+    .replace('[policy]\nversion = 2', '[policy]\nversion = 2\n[[policy.tool]]\nname = "host/opencode/appa_safebash(command:printf setup-proof)"\nrequires = { trust = "trusted", audience = { contains = ["public"] } }')
   server.kill(); await server.exited
   runtime.kill(); await runtime.exited
   setupDirectory = await mkdtemp(`${tmpdir()}/appa-operator-`)
@@ -798,7 +810,7 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   expect(setupInspection.inventory.servers).toContainEqual({ name: 'project-only', status: 'connected' })
   expect(JSON.stringify(await client.session.context({ sessionID: session.id }))).toContain('Approve, or tell me what to change.')
   expect(await readFile(target, 'utf8')).toBe(original)
-  expect(setupInspection.tools.some((tool: any) => tool.canonical === 'host/opencode/shell')).toBe(true)
+  expect(setupInspection.tools.some((tool: any) => tool.canonical === 'host/opencode/appa_safebash')).toBe(true)
   expect(setupInspection.batteries.some((battery: any) => battery.name === 'microsoft-learn' && battery.hosts.includes('opencode'))).toBe(true)
   const setupRequest = [...requests].reverse().find(request => request.messages.some((message: any) => message.content === 'setup:init'))
   expect(setupRequest.tools.map((tool: any) => tool.function.name).sort()).toEqual(['appa_setup', 'read'])
@@ -880,18 +892,18 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   const normal = await client.session.create({ location: { directory } })
   await client.session.prompt({ sessionID: normal.id, text: 'probe-shell:setup' })
   await client.session.wait({ sessionID: normal.id })
-  expect(JSON.stringify(await client.session.context({ sessionID: normal.id }))).toContain('setup-proof')
-  expect(hooks.some(hook => hook.event.root_id === normal.id && hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
+  expect(hooks.some(hook => hook.event.root_id === normal.id && hook.event.tool === 'appa_safebash' && hook.reply.decision === 'allow_call')).toBe(true)
   const normalRequest = [...requests].reverse().find(request => request.messages.some((message: any) => message.content === 'probe-shell:setup'))
   expect(normalRequest.tools.some((tool: any) => tool.function.name === 'appa_setup')).toBe(false)
   const other = `${directory}/other-project`
   await mkdir(other)
+  await mkdir(`${other}/private`)
+  await writeFile(`${other}/private/data.txt`, 'Contact alice@corp.example')
   await writeFile(`${other}/opencode.json`, projectSettings)
   const second = await client.session.create({ location: { directory: other } })
   await client.session.prompt({ sessionID: second.id, text: 'probe-shell:setup' })
   await client.session.wait({ sessionID: second.id })
-  expect(JSON.stringify(await client.session.context({ sessionID: second.id }))).toContain('setup-proof')
-  expect(hooks.some(hook => hook.event.root_id === second.id && hook.event.tool === 'shell' && hook.reply.decision === 'allow_call')).toBe(true)
+  expect(hooks.some(hook => hook.event.root_id === second.id && hook.event.tool === 'appa_safebash' && hook.reply.decision === 'allow_call')).toBe(true)
   const refusal = await fetch(`${proxy.url}hook`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ protocol: 1, adapter: 'opencode', event: 'tool_call', root_id: normal.id,
       call_id: 'not-an-operator', tool: 'appa_setup', arguments: { operation: 'inspect' } }) })
@@ -945,7 +957,7 @@ test('catalog batteries enforce MCP flows, GitHub helper audiences, and explicit
     await install(`${directory}/battery-settings`, target, proxy.url.toString().replace(/\/$/, ''))
     const setup = await configuration(target, resolve(process.env.APPA_TEST_BINARY || '../../target/debug/appa'))
     const inspected = JSON.parse((await setup({ operation: 'inspect' }, []))!)
-    expect(inspected.batteries.map((battery: any) => battery.name)).toEqual(['cloudflare', 'github', 'microsoft-learn', 'notion', 'opencode'])
+    expect(inspected.batteries.map((battery: any) => battery.name)).toEqual(['cloudflare', 'file-tracker', 'github', 'microsoft-learn', 'notion', 'opencode'])
     const policy = `include = ["batteries/opencode/appa.toml", "batteries/cloudflare/appa.toml", "batteries/notion/appa.toml", "batteries/github/appa.toml"]
 [aliases.mcp]
 cloudflare = ["docs", "logs"]
@@ -966,7 +978,7 @@ review_timeout_ms = 30000
 max_body_bytes = 1048576
 [externals.authorities.notion-operator]
 builtin = "hitl"
-[externals.audience.people]
+${FILE_TRACKER}[externals.audience.people]
 url = "${fixture.url}audience"
 selectors = [{ template = "members", feeds = "internal" }]
 `

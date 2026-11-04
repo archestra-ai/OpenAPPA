@@ -1284,7 +1284,10 @@ mod tests {
                     vec!["file-tracker".to_owned(), "coding".to_owned(), "claude-code".to_owned()]
                 ),
                 ("kagent".to_owned(), vec![]),
-                ("opencode".to_owned(), vec!["opencode".to_owned()]),
+                (
+                    "opencode".to_owned(),
+                    vec!["file-tracker".to_owned(), "opencode".to_owned()]
+                ),
             ])
         );
     }

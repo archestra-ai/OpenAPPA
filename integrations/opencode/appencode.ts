@@ -8,7 +8,13 @@ import { Cause, Effect, Fiber, Schedule, Schema, Semaphore } from 'effect'
 import { lstat, realpath, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { refusal } from './refusal'
+import { DESCRIPTION, checkedSafeBash, checkedWrite, runSafeBash, typedShell } from './safebash'
 import { configuration } from './setup'
+
+// Native tools that run commands, write files outside a declared path set, or read file
+// content out of the file tracker's sight. appa_safebash replaces the shell and grep;
+// edit and write name one path per call.
+const UNMEDIATED = ['shell', 'patch', 'grep']
 
 type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 type Proposal = { tool: string; arguments: unknown; call_id: string }
@@ -42,6 +48,9 @@ export default Plugin.define({
   id: 'appa.appencode',
   effect: Effect.fn(function* (ctx) {
     const base = process.env.APPA_OPENCODE_RUNTIME_URL || ctx.options?.runtimeURL || 'http://127.0.0.1:8789'
+    // The APPA executable that serves the file tracker and runs appa_safebash, and the srt a
+    // typed command runs in.
+    const sandbox = { appa: process.env.APPA_FILE_TRACKER || ctx.options?.appa, srt: process.env.APPA_OPENCODE_SRT || ctx.options?.srt }
     const setupConfig = process.env.APPA_OPENCODE_SETUP_CONFIG
     const setup = setupConfig ? yield* Effect.tryPromise(() => configuration(setupConfig, process.env.APPA_OPENCODE_SETUP_BINARY || '')).pipe(Effect.orDie) : undefined
     let setupGuide: { path: string; dev: number; ino: number } | undefined
@@ -293,6 +302,33 @@ export default Plugin.define({
 
     yield* ctx.tool.transform(editor => {
       editor.remove('subagent')
+      for (const name of UNMEDIATED) editor.remove(name)
+      // Setup sessions list it for the operator's inventory; their context hook hides it.
+      editor.add({
+        name: 'appa_safebash',
+        options: { codemode: false },
+        description: DESCRIPTION,
+        input: Schema.Struct({
+          command: Schema.String,
+          input_files: Schema.Array(Schema.String),
+          output_files: Schema.Array(Schema.String),
+          network_hosts: Schema.Array(Schema.String),
+        }),
+        output: Schema.String,
+        execute: (input, call) => Effect.gen(function* () {
+          // Run only the exact canonical arguments APPA released for this call.
+          const approved = pending.get(`${call.sessionID}:${call.id}`)
+          if (!approved || JSON.stringify(approved.proposal.arguments) !== JSON.stringify(input)) {
+            return yield* Effect.fail(new Tool.Error({ message: '[appencode] appa_safebash runs only APPA-released calls.' }))
+          }
+          const output = yield* Effect.tryPromise({
+            try: signal => runSafeBash(input, ctx.location.directory, sandbox, signal),
+            catch: error => new Tool.Error({ message: error instanceof Error && error.message.startsWith('[appencode]')
+              ? error.message : '[appencode] appa_safebash sandbox failed to start.' }),
+          })
+          return { output, content: output }
+        }),
+      })
       if (setup) editor.add({
         name: 'appa_setup',
         options: { codemode: false },
@@ -503,6 +539,29 @@ export default Plugin.define({
       }
     }))
 
+    // Every host shell passes this hook, and its output reaches the conversation with no
+    // tool call to label it. The native shell tool is removed and refused, so what remains
+    // is a command the person types (`!`): it runs in the file tracker's typed confinement,
+    // which needs no Label. The hook cannot fail, so a command that cannot be confined, or
+    // runs outside the project, is replaced with a refusal. appa_safebash runs commands
+    // through `appa file-tracker run`.
+    yield* ctx.shell.hook('create.before', event => Effect.promise(async () => {
+      try {
+        const root = await realpath(ctx.location.directory)
+        const within = relative(root, await realpath(event.cwd))
+        if (isAbsolute(within) || within === '..' || within.startsWith(`..${sep}`)) {
+          throw new Error('[appencode] Shell commands run only in the project directory.')
+        }
+        Object.assign(event, await typedShell(event.command, event.cwd, sandbox))
+      } catch (error) {
+        const reason = error instanceof Error && error.message.startsWith('[appencode]')
+          ? error.message : '[appencode] The sandbox for shell commands failed to start.'
+        event.shell = '/bin/sh'
+        event.env = {}
+        event.command = `printf '%s\\n' '${reason.replace(/'/g, `'\\''`)} Use appa_safebash.' >&2; exit 126`
+      }
+    }))
+
     yield* ctx.session.hook('prompt', event => Effect.tryPromise({
       try: async () => {
         // Refuse at prompt admission, not plugin registration: OpenCode can skip
@@ -554,6 +613,7 @@ export default Plugin.define({
         const { context } = await open(event.sessionID)
         delete event.tools.execute
         delete event.tools.subagent
+        for (const name of UNMEDIATED) delete event.tools[name]
         if (children.has(event.sessionID)) {
           delete event.tools.appa_subagent
           delete event.tools.appa_collect
@@ -596,9 +656,8 @@ export default Plugin.define({
         if (event.tool === 'execute' || event.tool === 'subagent') {
           throw new Error('[appencode] Code Mode and native subagents are refused. Use direct tools or appa_subagent.')
         }
-        if (event.tool === 'shell' && typeof event.input === 'object' && event.input !== null &&
-            'background' in event.input && event.input.background === true) {
-          throw new Error('[appencode] Background shell results use an unchecked notification path. Use a foreground call.')
+        if (UNMEDIATED.includes(event.tool)) {
+          throw new Error('[appencode] Unsandboxed shell, patch and grep tools are refused. Use appa_safebash, read, write or edit.')
         }
         const { actor } = await open(event.sessionID)
         if (actor.child && (event.tool === 'appa_collect' || event.tool === 'appa_cancel')) {
@@ -609,6 +668,13 @@ export default Plugin.define({
         if (!tool) throw new Error('[appencode] Tool is absent from the current registry.')
         if (event.tool === 'read') {
           event.input = await checkedRead(event.input, ctx.location.directory)
+        }
+        if (event.tool === 'write' || event.tool === 'edit') {
+          event.input = await checkedWrite(event.input, ctx.location.directory)
+        }
+        if (event.tool === 'appa_safebash') {
+          // Policy, file tracker and sandbox all see the same resolved paths.
+          event.input = await checkedSafeBash(event.input, ctx.location.directory)
         }
         const proposal = { tool: tool.tool, arguments: structuredClone(event.input), call_id: event.id }
         const decision = await post('tool_call', actor, {

@@ -49,7 +49,8 @@ recorder = "file-tracker"
 # reaches, and a sandbox confines it to exactly those. Under Claude Code,
 # `clappa` adds the three lists to Claude Code's own Bash and confines each
 # call in Claude Code's sandbox; where it cannot, it serves SafeBash instead,
-# which runs in Anthropic's sandbox runtime `srt`. A shell call that names no
+# which runs in Anthropic's sandbox runtime `srt`. Under OpenCode, AppenCode
+# runs appa_safebash in `srt`, confined the same way. A shell call that names no
 # lists — Claude Code started without `clappa` — is refused: the file-tracker
 # cannot judge it.
 #
