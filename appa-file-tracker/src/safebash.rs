@@ -58,7 +58,12 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
         std::fs::File::create(output).map_err(|error| format!("{}: {error}", output.display()))?;
     }
 
-    let settings = settings(config, &named.reads, &named.writes, &named.hosts)?;
+    // The sandbox runtime opens its proxy's sockets under its temporary directory, which the
+    // command must reach; the temporary directories it would otherwise use stay hidden. This
+    // one is the call's own and holds nothing of the user's.
+    let scratch = std::env::temp_dir().join(format!("appa-safebash-{}-{}", std::process::id(), crate::store::now()));
+    std::fs::create_dir(&scratch).map_err(|error| format!("{}: {error}", scratch.display()))?;
+    let settings = settings(config, &named.reads, &named.writes, &named.hosts, &scratch)?;
     let file = tempfile_in_temp(&settings)?;
     let (program, prefix) = config
         .sandbox
@@ -71,6 +76,7 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
         .arg(&file)
         .arg("-c")
         .arg(command)
+        .env("TMPDIR", &scratch)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -91,6 +97,7 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
         std::thread::sleep(Duration::from_millis(20));
     };
     let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir_all(&scratch);
     let stdout = stdout.join().unwrap_or_default();
     let stderr = stderr.join().unwrap_or_default();
     let (code, failed) = match status {
@@ -111,8 +118,15 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
 /// The sandbox runtime's settings for one call. Reads are hidden wherever the user's files
 /// live — home, the working directory, the temporary directories, and every file the store
 /// has recorded — and reopened for the inputs alone; writes are allowed to the outputs alone;
-/// the proxy admits the declared hosts alone.
-fn settings(config: &Config, inputs: &[PathBuf], outputs: &[PathBuf], hosts: &[String]) -> Result<Value, String> {
+/// the proxy admits the declared hosts alone. `scratch` is the sandbox runtime's own
+/// temporary directory, readable so the command reaches the proxy.
+fn settings(
+    config: &Config,
+    inputs: &[PathBuf],
+    outputs: &[PathBuf],
+    hosts: &[String],
+    scratch: &Path,
+) -> Result<Value, String> {
     let mut hidden: Vec<PathBuf> = ["/tmp", "/var/tmp"].iter().map(PathBuf::from).collect();
     hidden.extend(std::env::var_os("HOME").map(PathBuf::from));
     hidden.extend(std::env::current_dir().ok());
@@ -123,6 +137,7 @@ fn settings(config: &Config, inputs: &[PathBuf], outputs: &[PathBuf], hosts: &[S
     }
     let mut readable: Vec<PathBuf> = inputs.to_vec();
     readable.extend(config.sandbox.readable.iter().cloned());
+    readable.push(scratch.to_path_buf());
     Ok(json!({
         "filesystem": {
             "denyRead": hidden,

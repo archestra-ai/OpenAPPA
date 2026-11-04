@@ -86,6 +86,23 @@ fn a_command_sees_only_what_it_declares() {
         "an undeclared write never reaches the disk"
     );
 
+    // A declared host is reached through the sandbox's proxy, while the temporary
+    // directories stay hidden. Skipped where this machine cannot reach it either.
+    let reachable = Command::new("curl")
+        .args(["-sS", "-m", "10", "-o", "/dev/null", "https://example.com"])
+        .status()
+        .is_ok_and(|status| status.success());
+    if reachable {
+        let (text, failed) = safebash(
+            &config,
+            serde_json::json!({
+                "command": "curl -sS -m 10 -o /dev/null -w 'status=%{http_code}' https://example.com",
+                "input_files": [], "output_files": [], "network_hosts": ["example.com"],
+            }),
+        );
+        assert!(!failed && text.contains("status=200"), "{text}");
+    }
+
     // An undeclared file as an input is refused before anything runs.
     let (text, failed) = safebash(
         &config,
