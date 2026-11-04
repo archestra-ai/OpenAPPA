@@ -23,7 +23,7 @@ Two batteries cover Claude Code's built-in `Read`, `Grep`, `Write`, `Edit` and `
 
 The default config `appa plugin install claude-code` writes handles tools that the batteries do not name.
 
-APPA does not verify what a sanitizer's model removed: including the `coding` battery registers both sanitizers as trusted. The host that runs OpenAPPA needs the `claude` command for them.
+APPA does not verify what a sanitizer's model removed: including the `coding` battery registers both sanitizers as trusted. Both run the Claude Code model by default; a root `[[policy.sanitizer]]` with the same name replaces either, for example with `builtin = "llm"`.
 
 ## Files
 

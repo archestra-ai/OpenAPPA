@@ -30,7 +30,7 @@ pub use package::{
 };
 pub use tree::canonical_tree_digest;
 pub use validate::{
-    BINDABLE_KINDS, BINDABLE_SANITIZER_BUILTINS, DeclarationKind, INCLUDABLE_POLICY_FIELDS, NamedDeclaration,
+    BINDABLE_KINDS, BINDABLE_STOCK_SANITIZERS, DeclarationKind, INCLUDABLE_POLICY_FIELDS, NamedDeclaration,
     NamedExternal, PackageError, validate_package,
 };
 

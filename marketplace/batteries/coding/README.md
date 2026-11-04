@@ -85,7 +85,9 @@ claude-code` includes both. A rule no map binds is inactive.
   at the session's own trust. The sanitizer is tagged `web` and applies only
   to the `suspicious` fetch and search rules.
 
-Both sanitizers run the Claude Code model with the battery's `hint`. APPA
+Both sanitizers run the Claude Code model with the battery's `hint`; a root
+`[[policy.sanitizer]]` with the same name replaces either, for example with
+`builtin = "llm"`. APPA
 does not verify what the model removed: including the battery registers them
 as trusted. A root rule for a tool precedes the battery's, and a root rule
 without the battery's tag offers no sanitizer.

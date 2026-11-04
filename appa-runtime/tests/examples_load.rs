@@ -324,7 +324,7 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     }
 }
 
-/// The coding battery's `coding.strip-secrets` rebound from the Claude Code model to a
+/// The coding battery's `coding.strip-secrets` moved from the Claude Code model to a
 /// stand-in that masks every value after `=`, so the masked delivery runs without the
 /// `claude` CLI. The deployment is loaded again over the rebound battery.
 #[cfg(unix)]
@@ -336,13 +336,12 @@ fn with_a_stand_in_masker(dir: &Path) -> Config {
     std::fs::write(battery.join("mask.py"), MASK).expect("the stand-in is writable");
     let policy = battery.join("appa.toml");
     let shipped = std::fs::read_to_string(&policy).expect("the battery is readable");
-    let rebound = shipped.replace(
-        "[externals.sanitizers.\"coding.strip-secrets\"]\nbuiltin = \"claude-code\"",
-        "[externals.sanitizers.\"coding.strip-secrets\"]\ncommand = [\"python3\", \"mask.py\"]",
-    );
-    assert_ne!(
-        rebound, shipped,
-        "the battery binds coding.strip-secrets to the Claude Code model"
+    let declared = "name = \"coding.strip-secrets\"\non = [\"tool_output\"]\nbuiltin = \"claude-code\"\n";
+    let rebound = shipped.replace(declared, &declared.replace("builtin = \"claude-code\"\n", ""))
+        + "\n[externals.sanitizers.\"coding.strip-secrets\"]\ncommand = [\"python3\", \"mask.py\"]\n";
+    assert!(
+        shipped.contains(declared),
+        "the battery names the Claude Code model on coding.strip-secrets"
     );
     std::fs::write(&policy, rebound).expect("the battery is writable");
     Config::load(&dir.join("appa.toml")).expect("the rebound deployment composes")

@@ -46,6 +46,10 @@ pub enum ConfigError {
     )]
     UnknownAnnotatorBuiltin { name: String, builtin: String },
     #[error(
+        "sanitizer {name} names unknown builtin {builtin:?}; the model sanitizer builtins are \"claude-code\" and \"llm\""
+    )]
+    UnknownSanitizerBuiltin { name: String, builtin: String },
+    #[error(
         "annotator {annotator} input {input} reads {spelling:?}, which is not an input source: an input reads `$tool_call`, `$tool_call.name`, `$tool_call.description`, `$tool_call.arguments`, or `$tool_call.arguments.<name>`"
     )]
     UnknownCallSource {

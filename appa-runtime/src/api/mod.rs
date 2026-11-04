@@ -465,11 +465,11 @@ pub enum OpenError {
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
     UndeclaredExternal { kind: &'static str, name: String },
     #[error(
-        "annotator {0} names a builtin on its declaration and takes no [externals.annotators] binding — remove the binding"
+        "{kind} {name} names a builtin on its declaration and takes no [externals.{kind}s] binding — remove the binding"
     )]
-    BoundBuiltinAnnotator(String),
-    #[error("annotator {0} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
-    LlmNotConfigured(String),
+    BoundBuiltin { kind: &'static str, name: String },
+    #[error("{kind} {name} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
+    LlmNotConfigured { kind: &'static str, name: String },
     #[error(
         "{kind} {name} names the builtin \"{builtin}\", but [externals.{builtin}] cannot serve it: {missing}; set the key and reload"
     )]
@@ -854,7 +854,18 @@ impl Deployment {
             .annotators()
             .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
             .collect();
-        let mut externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
+        // A Sanitizer naming a model builtin on its declaration is served by the same backend
+        // a binding naming that builtin resolves to.
+        let mut bindings = config.externals.clone();
+        bindings
+            .sanitizers
+            .extend(policy.sanitizer_builtins().map(|(name, builtin)| {
+                (
+                    name.as_str().to_string(),
+                    crate::config::Implementation::Builtin(builtin.wire_name().to_string()),
+                )
+            }));
+        let mut externals = ExternalServices::new(bindings, modules, annotator_builtins, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         externals.credential_store = config.credential_store.clone();
         Ok(Deployment {
@@ -3872,12 +3883,34 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
                 .to_string(),
         ));
     }
+    // A Sanitizer that names a model builtin on its declaration is served by the runtime,
+    // as such an Annotator is below: refused when it is also bound, or when the deployment
+    // declares no profile for it. Every other Sanitizer is bound exactly once.
+    let declared_builtins: std::collections::BTreeMap<&str, appa_policy::AnnotatorBuiltin> = policy
+        .sanitizer_builtins()
+        .map(|(name, builtin)| (name.as_str(), builtin))
+        .collect();
+    for (name, builtin) in &declared_builtins {
+        if externals.sanitizers.contains_key(*name) {
+            return Err(OpenError::BoundBuiltin {
+                kind: "sanitizer",
+                name: name.to_string(),
+            });
+        }
+        if *builtin == appa_policy::AnnotatorBuiltin::Llm && externals.llm.is_none() {
+            return Err(OpenError::LlmNotConfigured {
+                kind: "sanitizer",
+                name: name.to_string(),
+            });
+        }
+    }
     bound_exactly(
         "sanitizer",
         rc.sanitizers
             .iter()
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-            .map(|sanitizer| sanitizer.name.as_str()),
+            .map(|sanitizer| sanitizer.name.as_str())
+            .filter(|name| !declared_builtins.contains_key(name)),
         &externals.sanitizers,
     )?;
     // A declared builtin is served by the runtime itself, so it is refused when it is also
@@ -3892,11 +3925,17 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             continue;
         };
         if externals.annotators.contains_key(name) {
-            return Err(OpenError::BoundBuiltinAnnotator(name.to_string()));
+            return Err(OpenError::BoundBuiltin {
+                kind: "annotator",
+                name: name.to_string(),
+            });
         }
         match builtin {
             appa_policy::AnnotatorBuiltin::Llm if externals.llm.is_none() => {
-                return Err(OpenError::LlmNotConfigured(name.to_string()));
+                return Err(OpenError::LlmNotConfigured {
+                    kind: "annotator",
+                    name: name.to_string(),
+                });
             }
             appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
                 return Err(OpenError::JevNotConfigured(name.to_string()));
@@ -3945,6 +3984,10 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             .annotators()
             .filter(|(_, binding)| binding.builtin == Some(builtin))
             .map(|(name, _)| ("annotator", name.as_str()));
+        let sanitizers = policy
+            .sanitizer_builtins()
+            .filter(|(_, declared)| *declared == builtin)
+            .map(|(name, _)| ("sanitizer", name.as_str()));
         let bindings = [
             ("authority", &externals.authorities),
             ("sanitizer", &externals.sanitizers),
@@ -3953,7 +3996,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         .flat_map(|(kind, table)| table.iter().map(move |(name, bound)| (kind, name.as_str(), bound)))
         .filter(|(_, _, bound)| matches!(bound, Implementation::Builtin(named) if named == builtin.wire_name()))
         .map(|(kind, name, _)| (kind, name));
-        if let Some((kind, name)) = annotators.chain(bindings).next() {
+        if let Some((kind, name)) = annotators.chain(sanitizers).chain(bindings).next() {
             return Err(OpenError::ModelKeyMissing {
                 kind,
                 name: name.to_string(),
@@ -4547,7 +4590,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         bound.externals.annotators.insert("classifier".to_string(), endpoint());
         assert!(matches!(
             load(bound),
-            Err(OpenError::BoundBuiltinAnnotator(name)) if name == "classifier"
+            Err(OpenError::BoundBuiltin { kind: "annotator", name }) if name == "classifier"
         ));
     }
 
@@ -4573,7 +4616,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         assert!(matches!(
             load(claude_config(policy)),
-            Err(OpenError::LlmNotConfigured(name)) if name == "classifier"
+            Err(OpenError::LlmNotConfigured { kind: "annotator", name }) if name == "classifier"
         ));
         assert!(load(with_profile()).is_ok());
 
@@ -4581,8 +4624,58 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let runtime = Runtime::open(with_profile(), dir.path().join("appa.db"), None).expect("the deployment opens");
         assert!(matches!(
             runtime.reload(claude_config(policy)),
-            Err(OpenError::LlmNotConfigured(name)) if name == "classifier"
+            Err(OpenError::LlmNotConfigured { kind: "annotator", name }) if name == "classifier"
         ));
+    }
+
+    /// A Sanitizer naming a model builtin on its declaration opens with no binding, is
+    /// refused beside one, and names `llm` only over a deployment declaring the profile.
+    #[test]
+    fn a_declared_sanitizer_builtin_opens_unbound_and_llm_needs_its_profile() {
+        let policy = |builtin: &str| {
+            format!(
+                r#"
+            [policy]
+            version = 2
+            [[policy.tool]]
+            name = "lookup"
+            delta = {{ trust = "suspicious" }}
+            tags = ["records"]
+            [[policy.sanitizer]]
+            name = "clean"
+            on = ["tool_output"]
+            builtin = "{builtin}"
+            tags = ["records"]
+            [policy.sanitizer.permits]
+            trust = {{ from = "suspicious", to = "trusted" }}
+            [policy.deployment]
+            confined_results = ["lookup"]
+        "#
+            )
+        };
+        assert!(load(claude_config(&policy("claude-code"))).is_ok());
+
+        let mut bound = claude_config(&policy("claude-code"));
+        bound.externals.sanitizers.insert(
+            "clean".to_string(),
+            crate::config::Implementation::Builtin("claude-code".to_string()),
+        );
+        assert!(matches!(
+            load(bound),
+            Err(OpenError::BoundBuiltin { kind: "sanitizer", name }) if name == "clean"
+        ));
+
+        assert!(matches!(
+            load(claude_config(&policy("llm"))),
+            Err(OpenError::LlmNotConfigured { kind: "sanitizer", name }) if name == "clean"
+        ));
+        assert!(
+            load(claude_config(&format!(
+                "{}\n[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n",
+                policy("llm")
+            )))
+            .is_ok()
+        );
     }
 
     fn keyed_config(document: &str) -> Config {

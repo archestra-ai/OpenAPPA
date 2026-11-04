@@ -38,7 +38,10 @@ confined result, which then keeps the session's trust. `cloudflare`, `linear`,
 `internal` record at `public` once the model removes what outside readers may
 not see. `coding` and `monday` add `<battery>.strip-secrets`, which returns a
 credential read at `internal` instead of `self`. Each battery lists the tools
-it confines in `[policy.deployment] confined_results`. `archestra` and
+it confines in `[policy.deployment] confined_results`. A root
+`[[policy.sanitizer]]` with a battery sanitizer's name replaces it, as a root
+annotator replaces a battery's: a deployment without the `claude` command
+names `builtin = "llm"` there. `archestra` and
 `xmemory` ship none: their reads keep the session's trust, and their records
 have no public core to release. `claude-code` ships none either: Claude Code's
 replacement of a result is not verified live for the `suspicious` tools it

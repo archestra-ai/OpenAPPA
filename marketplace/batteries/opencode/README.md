@@ -10,8 +10,10 @@ audience and return `suspicious` data. The battery confines both web results
 and offers `opencode.strip-instructions` beside the trust narrowing: the
 Claude Code model removes every instruction from the page and keeps its facts,
 code and links, and the result returns at the session's own trust. APPA does
-not verify what the model removed. The host that runs OpenAPPA needs the
-`claude` command for it. Edits and writes require `trusted` data.
+not verify what the model removed. It runs the Claude Code model by
+default; a root `[[policy.sanitizer]]` named `opencode.strip-instructions`
+replaces it, for example with `builtin = "llm"` and the root's
+`[externals.llm]`. Edits and writes require `trusted` data.
 The shell permits only `pwd`, while the audience remains `public` and trust
 remains `trusted`. Other commands require explicit root contracts.
 

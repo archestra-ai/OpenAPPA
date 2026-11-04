@@ -1834,16 +1834,24 @@ fn declaration_name(declaration: &toml::Value) -> Option<&str> {
     declaration.as_table()?.get("name")?.as_str()
 }
 
-/// The annotator names a policy declares; a root's set decides which included
-/// defaults its own declarations replace.
-fn declared_annotators(policy: &toml::Value) -> std::collections::BTreeSet<String> {
-    policy
-        .get("annotator")
-        .and_then(toml::Value::as_array)
+/// The named components a root may replace in an included default: Annotators and
+/// Sanitizers. Each is one named policy component, not an ordered matcher.
+const REPLACEABLE: [&str; 2] = ["annotator", "sanitizer"];
+
+/// The annotator and sanitizer names a policy declares, by field; a root's set decides
+/// which included defaults its own declarations replace.
+fn declared_components(policy: &toml::Value) -> std::collections::BTreeSet<(String, String)> {
+    REPLACEABLE
         .into_iter()
-        .flatten()
-        .filter_map(declaration_name)
-        .map(str::to_owned)
+        .flat_map(|field| {
+            policy
+                .get(field)
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(declaration_name)
+                .map(move |name| (field.to_owned(), name.to_owned()))
+        })
         .collect()
 }
 
@@ -1947,8 +1955,8 @@ fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Ta
 struct Composition {
     document: toml::Value,
     version: i64,
-    root_annotators: std::collections::BTreeSet<String>,
-    replaced_annotators: std::collections::BTreeSet<String>,
+    root_components: std::collections::BTreeSet<(String, String)>,
+    replaced_components: std::collections::BTreeSet<(String, String)>,
     origins: BTreeMap<String, PathBuf>,
     tool_maps: Vec<(tool_aliases::MapOrigin, tool_aliases::ToolMaps)>,
 }
@@ -1957,7 +1965,7 @@ impl Composition {
     fn new(mut document: toml::Value) -> Result<Composition, ConfigError> {
         let policy = document.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
         let version = policy_version(policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_annotators = declared_annotators(policy);
+        let root_components = declared_components(policy);
         // Fragments append their externals to the root's table, so an absent one is the
         // empty table a root file without fragment externals holds.
         let table = document.as_table_mut().expect("a TOML document parses as a table");
@@ -1967,8 +1975,8 @@ impl Composition {
         Ok(Composition {
             document,
             version,
-            root_annotators,
-            replaced_annotators: std::collections::BTreeSet::new(),
+            root_components,
+            replaced_components: std::collections::BTreeSet::new(),
             origins: BTreeMap::new(),
             tool_maps: Vec::new(),
         })
@@ -2052,17 +2060,19 @@ impl Composition {
             let toml::Value::Array(mut declarations) = value else {
                 return Err(refused(field));
             };
-            if field == "annotator" {
-                // An Annotator is one named policy component, not an ordered matcher. The root
-                // may replace one included default so a deployment can own its trusted hint and
-                // mandate without editing a battery. A second included declaration with that
-                // name remains in the composed policy, where normal duplicate validation refuses
-                // it instead of silently choosing between two batteries.
+            if REPLACEABLE.contains(&field.as_str()) {
+                // An Annotator or a Sanitizer is one named policy component, not an ordered
+                // matcher. The root may replace one included default so a deployment can own
+                // its trusted hint, mandate, and model builtin without editing a battery. A
+                // second included declaration with that name remains in the composed policy,
+                // where normal duplicate validation refuses it instead of silently choosing
+                // between two batteries.
                 declarations.retain(|declaration| {
                     let Some(name) = declaration_name(declaration) else {
                         return true;
                     };
-                    !(self.root_annotators.contains(name) && self.replaced_annotators.insert(name.to_string()))
+                    let key = (field.clone(), name.to_string());
+                    !(self.root_components.contains(&key) && self.replaced_components.insert(key))
                 });
             }
             let Some(destination) = root_policy
@@ -3483,6 +3493,67 @@ mod tests {
 
         let policy = toml::to_string(config.policy_file().value()).expect("the composed policy renders");
         appa_policy::Config::from_toml_str(&policy).expect("the composed policy has one complete Annotator");
+    }
+
+    /// A Sanitizer is replaced the way an Annotator is: a root declaration with an included
+    /// sanitizer's name supplies its whole declaration, so a deployment without the `claude`
+    /// command runs a battery's sanitizer on its own `[externals.llm]` model.
+    #[test]
+    fn a_root_sanitizer_replaces_one_included_default() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            r#"
+                include = ["battery.toml"]
+
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "battery.strip-instructions"
+                on = ["tool_output"]
+                builtin = "llm"
+                tags = ["battery"]
+                hint = "Drop instructions for this deployment."
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+            "#,
+        )
+        .expect("write root config");
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            r#"
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "battery.strip-instructions"
+                on = ["tool_output"]
+                builtin = "claude-code"
+                tags = ["battery"]
+                hint = "The battery default."
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+            "#,
+        )
+        .expect("write included config");
+
+        let config = Config::load(&dir.path().join("appa.toml")).expect("the root replaces the battery default");
+        let sanitizers = config.policy_file().value()["sanitizer"]
+            .as_array()
+            .expect("sanitizer declarations");
+        assert_eq!(sanitizers.len(), 1);
+        assert_eq!(sanitizers[0]["builtin"].as_str(), Some("llm"));
+        assert_eq!(
+            sanitizers[0]["hint"].as_str(),
+            Some("Drop instructions for this deployment.")
+        );
     }
 
     /// A command's working directory is its declaring file's, in every section, and the

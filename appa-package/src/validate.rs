@@ -723,12 +723,13 @@ impl DeclarationKind {
 
     /// Whether the runtime refuses to open a policy that declares this without an
     /// `[externals]` binding: an authority may stay unbound, an annotator naming a
-    /// builtin is complete as written, and the engine applies its reserved sanitizer.
+    /// builtin is complete as written, so is a sanitizer naming one, and the engine
+    /// applies its reserved sanitizer.
     fn binds_at_open(self, name: &str, declaration: &Value) -> bool {
         match self {
             Self::Authority => false,
             Self::Annotator => declaration.get("builtin").is_none(),
-            Self::Sanitizer => name != RESERVED_SANITIZER,
+            Self::Sanitizer => name != RESERVED_SANITIZER && declaration.get("builtin").is_none(),
         }
     }
 }
@@ -899,22 +900,17 @@ fn check_jev_profile(policy: &Path, profile: &Value, name: &PackageName) -> Resu
 /// fragment, so this is exactly the set the config loader accepts from one.
 pub const BINDABLE_KINDS: [&str; 5] = ["authorities", "sanitizers", "annotators", "audience", "context"];
 
-/// The builtins a battery may bind a sanitizer to by name: the stock rewrites
-/// the runtime ships (`builtins::Stock::for_section`), and the `claude-code`
-/// model transport, which runs the model the root configures under
-/// `[externals.claude_code]` (or its defaults). The battery chooses the
-/// transformation its sanitizer's hint asks for; the root still chooses the
-/// model. `llm` is not among them: it opens only beside a root's
-/// `[externals.llm]` and key, so a battery naming it would refuse to load in
-/// every deployment that configures none.
-pub const BINDABLE_SANITIZER_BUILTINS: [&str; 3] = ["claude-code", "redact-email", "redact-secrets"];
+/// The stock sanitizers a battery may bind by `builtin` name: pure rewrites the
+/// runtime ships, which reach nothing outside the process. The loader's stock
+/// names for its sanitizer section (`builtins::Stock::for_section`).
+pub const BINDABLE_STOCK_SANITIZERS: [&str; 2] = ["redact-email", "redact-secrets"];
 
 /// One binding of one external. A battery runs the programs it ships and
 /// nothing else: the `command` shape naming a declared helper is the one
 /// program it may bind. The `url` shape would reach the network from inside a
-/// fragment the deployment merely included, and a `builtin` other than a
-/// sanitizer builtin would name a runtime module, or an approving authority,
-/// the deployment did not choose — those are the root's to bind.
+/// fragment the deployment merely included, and a `builtin` other than a stock
+/// sanitizer would name a runtime module, or a model, the deployment did not
+/// choose — those are the root's to bind.
 /// Returns the credential variables the binding names: one, a list, or none.
 fn check_binding(
     policy: &Path,
@@ -934,16 +930,16 @@ fn check_binding(
     // The loader takes exactly one transport per binding, and a credential
     // only beside a program that could receive it.
     let mut transports = 0;
-    let mut builtin = false;
+    let mut stock = false;
     let mut credentials = Vec::new();
     for (key, value) in table {
         match key.as_str() {
             "command" if string_argv(value).is_some_and(|argv| runs_a_declared_helper(&argv, helpers)) => {
                 transports += 1;
             }
-            "builtin" if external.starts_with("sanitizers.") && names_a_sanitizer_builtin(value) => {
+            "builtin" if external.starts_with("sanitizers.") && names_a_stock_sanitizer(value) => {
                 transports += 1;
-                builtin = true;
+                stock = true;
             }
             // The runtime injects these variables into the helper process, so
             // whatever a package names here it receives. A package names only
@@ -979,16 +975,16 @@ fn check_binding(
             _ => return Err(refuse()),
         }
     }
-    match (transports, builtin && !credentials.is_empty()) {
+    match (transports, stock && !credentials.is_empty()) {
         (1, false) => Ok(credentials),
         _ => Err(refuse()),
     }
 }
 
-fn names_a_sanitizer_builtin(builtin: &Value) -> bool {
+fn names_a_stock_sanitizer(builtin: &Value) -> bool {
     builtin
         .as_str()
-        .is_some_and(|name| BINDABLE_SANITIZER_BUILTINS.contains(&name))
+        .is_some_and(|name| BINDABLE_STOCK_SANITIZERS.contains(&name))
 }
 
 /// A `selectors` array as the config loader reads it: a non-empty list of
@@ -1833,11 +1829,9 @@ mod tests {
             "[externals.audience.github]\nurl = \"https://elsewhere.example/audience\"\n",
             "[externals.audience.github]\nbuiltin = \"llm\"\n",
             "[externals.authorities.review]\nurl = \"https://elsewhere.example/review\"\n",
-            // Builtin names bind only sanitizers: an authority that approves on
-            // its own, or one a model answers, is the root's choice, and `llm`
-            // opens only beside the root's own model profile.
+            // Stock names bind only sanitizers: an authority that approves on
+            // its own, or a model, is the root's choice.
             "[externals.authorities.review]\nbuiltin = \"approve\"\n",
-            "[externals.authorities.review]\nbuiltin = \"claude-code\"\n",
             "[externals.sanitizers.mask]\nbuiltin = \"llm\"\n",
             // A command beside a url is still a url binding on the wire.
             "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n             url = \"https://elsewhere.example/audience\"\n",
@@ -1918,20 +1912,20 @@ mod tests {
     }
 
     #[test]
-    fn a_battery_binds_a_sanitizer_builtin_by_name() {
-        for stock in BINDABLE_SANITIZER_BUILTINS {
+    fn a_battery_binds_a_stock_sanitizer_by_name() {
+        for stock in BINDABLE_STOCK_SANITIZERS {
             let directory = battery(&format!(
                 "{BATTERY_POLICY}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\n\
                  [externals.sanitizers.mask]\nbuiltin = \"{stock}\"\n"
             ));
             assert!(
                 validate_package(directory.path()).is_ok(),
-                "refused the sanitizer builtin {stock}"
+                "refused the stock sanitizer {stock}"
             );
         }
 
         // The loader takes one transport per binding and hands a credential
-        // only to a program; either beside a builtin name would validate here
+        // only to a program; either beside a stock name would validate here
         // and refuse to load there.
         for extra in [
             "command = [\"python3\", \"audience-source.py\"]\n",
@@ -1946,7 +1940,7 @@ mod tests {
                     validate_package(directory.path()),
                     Err(PackageError::PolicyExternalCommand { .. })
                 ),
-                "accepted a sanitizer builtin beside {extra}"
+                "accepted a stock sanitizer beside {extra}"
             );
         }
     }
