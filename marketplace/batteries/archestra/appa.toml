@@ -491,7 +491,7 @@ delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/get_mcp_server_logs"
-delta = { audience = ["internal"], trust = "suspicious" }
+delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/create_mcp_server(initialGrantPrincipals:*)"

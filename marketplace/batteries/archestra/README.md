@@ -12,7 +12,7 @@ sharing tool, first match wins:
 | --- | --- | --- | --- |
 | Own surfaces | `search_tools`, `search_files`, `load_skill`, `ask_user`, `todo_write`, `whoami`, `validate_guardrails_policy`, `resolve_openappa_yell`, credential setup cards, `cancel_agent_run` and other writes that carry no session data | nothing | nothing |
 | Organization records | configuration, rosters, the guardrails policy and its previews, yells, consults, files, apps, run state | `internal` | nothing |
-| Text strangers write | `query_knowledge_sources`, `get_mcp_server_logs`, `get_schedule_trigger_run_transcript` | `internal`, `suspicious` | nothing |
+| Text strangers write | `query_knowledge_sources`, `get_schedule_trigger_run_transcript` | `internal`, `suspicious` | nothing |
 | Control plane | deletes and unassigns, guardrails publishes, repository connection and sync, credential bindings, schedule controls, team changes, limits, tool assignments | nothing | `trusted` |
 | Read or run by others, or read back as trusted | agents, gateways, MCP servers, hooks, skills, plugins, apps and app specs, knowledge base updates, scheduled tasks, run posts, credential transfers, persistent file writes | nothing | `trusted`, `internal` |
 | Runs | `start_agent_run`, `steer_agent_run` (and their Archestra 1.4 names), workspace writes and uploads | nothing | `internal` |
