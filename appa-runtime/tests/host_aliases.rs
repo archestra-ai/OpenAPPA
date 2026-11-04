@@ -35,6 +35,10 @@ name = "host/claude-code/FetchInboxMessage(message_id:local)"
 delta = {}
 
 [[policy.tool]]
+name = "host/archestra/FetchInboxMessage(message_id:internal)"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
 name = "host/archestra/FetchInboxMessage(message_id:private)"
 delta = { audience = ["self"] }
 
@@ -151,6 +155,45 @@ async fn fetch(runtime: &Runtime, actor: &Actor, message: &str) -> HookDecision 
     propose(runtime, actor, call, &format!("fetch {message}")).await
 }
 
+/// A fetch whose result narrows the session: denied until the narrowing is accepted, then run.
+async fn narrow_by_fetching(runtime: &Runtime, actor: &Actor, message: &str, contents: &str) {
+    let HookDecision::DenyCall { offers, .. } = fetch(runtime, actor, message).await else {
+        panic!("the {message} message narrows the session");
+    };
+    let plan = serde_json::json!({ "offer_id": offers[0].id });
+    let control = ProposedCall {
+        tool: appa_runtime_api::CONTROL_TOOL.into(),
+        arguments: serde_json::value::RawValue::from_string(plan.to_string()).expect("an object"),
+        cwd: None,
+    };
+    assert_eq!(
+        propose(runtime, actor, control, &format!("accept {message}")).await,
+        HookDecision::PassControl
+    );
+    let accepted = runtime
+        .execute_embedded_remedy(actor, serde_json::from_value(plan).expect("a plan"))
+        .await;
+    assert!(!matches!(accepted, RemedyOutcome::Refused { .. }), "{accepted:?}");
+    let call = proposed("FetchInboxMessage", serde_json::json!({ "message_id": message }));
+    let id = format!("fetch {message} accepted");
+    assert_eq!(
+        propose(runtime, actor, call.clone(), &id).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    hooks::handle(
+        runtime,
+        HookEvent::ToolResult {
+            actor: actor.clone(),
+            call,
+            call_id: Some(id),
+            outcome: appa_runtime_api::ToolOutcome::Success {
+                body: appa_runtime_api::OutcomeBody::Available(contents.into()),
+            },
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn a_host_alias_routes_the_hosts_tools_through_the_batterys_rules_after_the_roots() {
     let (runtime, actor) = session("[aliases]\nhost = { claude-code = [\"archestra\"] }\n").await;
@@ -200,9 +243,9 @@ async fn without_the_alias_no_battery_rule_names_the_hosts_tools() {
 
 /// A host alias rebinds only what the battery declares. The protected-peer exceptions for
 /// `SendMessage` belong to a root whose runtime verifies peer addresses, so under the alias
-/// every send is the battery's public sink.
+/// every send is the battery's internal sink.
 #[tokio::test]
-async fn an_aliased_send_to_a_socket_address_is_a_public_sink() {
+async fn an_aliased_send_to_a_socket_address_is_an_internal_sink() {
     let (runtime, actor) = session("[aliases]\nhost = { claude-code = [\"archestra\"] }\n").await;
     let send = || {
         proposed(
@@ -215,41 +258,13 @@ async fn an_aliased_send_to_a_socket_address_is_a_public_sink() {
         HookDecision::AllowCall { spawn: None }
     );
 
-    let HookDecision::DenyCall { offers, .. } = fetch(&runtime, &actor, "private").await else {
-        panic!("the private message narrows the session");
-    };
-    let plan = serde_json::json!({ "offer_id": offers[0].id });
-    let control = ProposedCall {
-        tool: appa_runtime_api::CONTROL_TOOL.into(),
-        arguments: serde_json::value::RawValue::from_string(plan.to_string()).expect("an object"),
-        cwd: None,
-    };
+    narrow_by_fetching(&runtime, &actor, "internal", "TOKEN=internal").await;
     assert_eq!(
-        propose(&runtime, &actor, control, "accept").await,
-        HookDecision::PassControl
-    );
-    let accepted = runtime
-        .execute_embedded_remedy(&actor, serde_json::from_value(plan).expect("a plan"))
-        .await;
-    assert!(!matches!(accepted, RemedyOutcome::Refused { .. }), "{accepted:?}");
-    let private = proposed("FetchInboxMessage", serde_json::json!({ "message_id": "private" }));
-    assert_eq!(
-        propose(&runtime, &actor, private.clone(), "fetch private accepted").await,
+        propose(&runtime, &actor, send(), "send while internal").await,
         HookDecision::AllowCall { spawn: None }
     );
-    hooks::handle(
-        &runtime,
-        HookEvent::ToolResult {
-            actor: actor.clone(),
-            call: private,
-            call_id: Some("fetch private accepted".into()),
-            outcome: appa_runtime_api::ToolOutcome::Success {
-                body: appa_runtime_api::OutcomeBody::Available("TOKEN=secret".into()),
-            },
-        },
-    )
-    .await;
 
+    narrow_by_fetching(&runtime, &actor, "private", "TOKEN=secret").await;
     let narrowed = propose(&runtime, &actor, send(), "send while self").await;
     assert!(
         matches!(narrowed, HookDecision::DenyCall { .. }),

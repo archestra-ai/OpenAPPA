@@ -60,7 +60,7 @@ delta = {}
 
 # A socket address reaches only a live protected session under this policy:
 # the runtime refuses any other, and the message arrives carrying this
-# session's label. A send by name falls through to the battery's public sink.
+# session's label. A send by name falls through to the battery's internal sink.
 [[policy.tool]]
 name = "host/claude-code/SendMessage(to:uds:*)"
 delta = {}
