@@ -49,9 +49,11 @@ The plugin's built-in path rules give credential paths such as `.env*` and `~/.s
 
 A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. The file-tracker therefore serves one shell tool, `SafeBash`, with four arguments: `command`, `input_files`, `output_files`, and `network_hosts`. The command runs in Anthropic's sandbox runtime (`srt`): bubblewrap on Linux, Seatbelt on macOS. The command can read only its input files and system directories, write only its output files, and connect only to its hosts through the sandbox proxy. Every other file in the home directory, the working directory, or a temporary directory is hidden from it.
 
-The annotator forwards the combined label of the input files. A call with network hosts also lowers trust to the lowest rank and requires `public`. The recorder applies the published label to every output file.
+The annotator forwards the combined label of the input files, and the call's result carries it. The recorder applies the published label to every output file.
 
-The two-step leak is then refused before it runs. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later `SafeBash` upload of `/tmp/notes.txt` forwards `self`, so its `public` requirement fails, in this session or in any other.
+The label of a copied secret therefore survives across sessions. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later `SafeBash` command that reads `/tmp/notes.txt` narrows its session to `self`, in this session or in any other, so a later public sink such as `WebFetch` is refused.
+
+The hosts a call declares do not change its label. The sandbox confines the command to them, but APPA does not check what a host may receive.
 
 ### Per harness
 
@@ -65,6 +67,7 @@ The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Cod
 
 ### Limits
 
+- A `SafeBash` command can send its input files to any host it declares. Network destinations carry no policy yet.
 - A file that changes outside a mediated call keeps its recorded label. A process outside the sandbox can still copy a file without its label.
 - A read waits while a write of the same file has not yet reached the recorder. If the write does not settle within the wait, the read fails and the agent can propose it again.
 - The stored audience must be one clause of audiences the policy declares. A file that two unrelated restricted audiences wrote fails its next annotation.

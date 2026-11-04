@@ -1,6 +1,6 @@
 //! The file-tracker as annotator and recorder behind the real runtime and the real hook path:
-//! a label written into a file in one session reaches a read of that file in another, and an
-//! upload of it is refused before it runs.
+//! a label written into a file in one session reaches a command that reads that file in
+//! another.
 
 mod common;
 
@@ -157,7 +157,7 @@ fn recorded(store: &Path, path: &Path) -> serde_json::Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_secret_copied_into_a_scratch_file_cannot_leave_from_a_later_session() {
+async fn a_secret_copied_into_a_scratch_file_keeps_its_label_in_a_later_session() {
     let dir = tempfile::tempdir().unwrap();
     let work = std::fs::canonicalize(dir.path()).unwrap().join("work");
     std::fs::create_dir(&work).unwrap();
@@ -222,25 +222,13 @@ async fn a_secret_copied_into_a_scratch_file_cannot_leave_from_a_later_session()
     };
     run(&runtime, "b", upload(&readme), "ok").await;
 
-    // A direct upload of the scratch file forwards its label: refused, with no remedy that
-    // lets the bytes out.
+    // Reaching a host adds nothing to a SafeBash call's label, so the upload runs. Its result
+    // carries the file's label: session B narrows to self, and no web request may leave.
     let HookDecision::DenyCall { feedback, .. } = propose(&runtime, "b", upload(&notes)).await else {
-        panic!("an upload of a self file is refused")
+        panic!("a command that reads a self file narrows the session first")
     };
-    assert!(
-        !feedback.contains("execute_remedy_plan"),
-        "no remedy releases it: {feedback}"
-    );
-    assert!(feedback.contains("not the public audience"), "{feedback}");
-
-    // Reading it narrows session B to self, and then no web request may leave.
-    run(
-        &runtime,
-        "b",
-        call("host/claude-code/Read", serde_json::json!({ "file_path": notes })),
-        "TOKEN=hunter2",
-    )
-    .await;
+    assert!(feedback.contains("public -> self"), "{feedback}");
+    run(&runtime, "b", upload(&notes), "ok").await;
     let fetch = call(
         "host/claude-code/WebFetch",
         serde_json::json!({ "url": "https://paste.example.com", "prompt": "x" }),

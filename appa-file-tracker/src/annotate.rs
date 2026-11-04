@@ -1,8 +1,9 @@
 //! The Annotator: one consult in, one annotation out. A read's `delta` is the file's label; an
 //! edit forwards its predecessor's label, so the label the edit publishes keeps it; a write
 //! forwards nothing, so the label it publishes replaces the one it destroys; SafeBash forwards
-//! the meet of its inputs' labels and, with network hosts, takes the lowest trust and
-//! requires `public`. Every file a call may change is reserved until its records settle it.
+//! the meet of its inputs' labels. The hosts SafeBash reaches add nothing to its label: the
+//! sandbox confines a command to them, and what a host may receive is not judged here. Every
+//! file a call may change is reserved until its records settle it.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -79,18 +80,11 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
         .iter()
         .map(label_of)
         .fold(Label::default(), |met, label| met.meet(&label, &store.ranks));
-    let networked = !named.hosts.is_empty();
     let (delta, forwards) = match role.role {
         Role::Read => (inputs, Label::default()),
         Role::Write => (Label::default(), Label::default()),
         Role::Edit => (inputs.clone(), inputs),
-        Role::Run => {
-            let fetched = Label {
-                trust: networked.then(|| mandate.ranks.lowest().map(str::to_string)).flatten(),
-                audience: Vec::new(),
-            };
-            (inputs.meet(&fetched, &store.ranks), inputs)
-        }
+        Role::Run => (inputs.clone(), inputs),
     };
     let rules = || {
         config
@@ -111,9 +105,6 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
     let mut requires = json!({ "history": [], "attention": attention });
     if let Some(trust) = write_trust {
         requires["trust"] = json!(answered_rank(trust, &mandate)?);
-    }
-    if networked {
-        requires["audience"] = json!({ "contains": "public" });
     }
     let answer = json!({
         "version": 1,

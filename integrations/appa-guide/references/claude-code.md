@@ -116,9 +116,9 @@ audience or the proposal configures an audience source for it.
 The Claude Code battery runs every shell command as SafeBash and blocks
 `Bash`, `PowerShell`, `Monitor`, `Grep` and `NotebookEdit`. Propose no rule and
 no Annotator hint for those tools. A CLI command that reaches a service an MCP
-battery covers declares its `network_hosts`, so it requires `public` and takes
-the lowest trust; recommend the service's MCP battery when the user needs
-finer rules. `Read`, `Write` and `Edit` go through the file-tracker. Label
+battery covers declares its `network_hosts`, and no rule judges that host;
+recommend the service's MCP battery when the user needs rules for the
+service. `Read`, `Write` and `Edit` go through the file-tracker. Label
 paths in `~/.config/appa/file-tracker.toml`, never with root `Read`, `Write`
 or `Edit` rules: a root rule for those tools precedes the battery's and
 stops the file-tracker from recording the label.

@@ -201,8 +201,8 @@ every statement either way.
 Databricks' own agent skills route data work through the Databricks CLI
 in a shell rather than the managed servers, and this battery's rules do not
 reach a shell. Under the `claude-code` battery a shell command runs only as
-SafeBash, which must declare the hosts it reaches, so a CLI call that
-reaches the workspace requires `public` and takes the lowest trust. The
+SafeBash, which must declare the hosts it reaches; no rule judges a CLI
+call that reaches the workspace. The
 `coding` battery narrows the CLI's credential commands (`auth token`,
 `auth env`, `secrets get-secret`, `configure`) and its profile file to
 `self` for a client whose map binds its shell tool. A shell selector is a
