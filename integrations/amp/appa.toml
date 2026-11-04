@@ -1,9 +1,16 @@
-# A small, explicit starting policy for amppa. Adapt the paths and tool names to
-# your deployment. Undeclared tools are refused; there is no permissive wildcard.
+# A small, explicit starting policy for amppa in an Amp orb. Adapt the paths,
+# tool names and hosts to your deployment. Undeclared tools are refused; there is
+# no permissive wildcard. The first declaration whose selector matches a call wins.
 [policy]
 version = 2
 
-# Amp modes use different builtin names. These are independent host identities.
+# The orb's filesystem is created for the thread and discarded with it, so it is
+# part of the trajectory: writing a file keeps its content inside the trajectory,
+# and no file tracking is needed. Data that leaves the orb crosses the network
+# proxy (`host/amp/appa_network` below) or a thread tool, and those are checked.
+#
+# Data the orb starts with is classified where the trajectory reads it. Reads of
+# `*/private/*` narrow the trajectory to internal.
 [[policy.tool]]
 name = "host/amp/Read(path:*/private/*)"
 delta = { audience = ["internal"] }
@@ -18,8 +25,41 @@ delta = { audience = ["internal"] }
 [[policy.tool]]
 name = "host/amp/read_file"
 
-# A web request exposes its arguments to the public destination. Its result
-# also lowers trust, so subsequent trusted-only calls stop.
+# A shell can read any file in the orb, so its result carries the label of the
+# most restricted data the orb holds. An orb without private data drops this delta.
+# Its network traffic leaves through the proxy, which checks each connection.
+[[policy.tool]]
+name = "host/amp/shell_command"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/amp/Bash"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "host/amp/apply_patch"
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "host/amp/edit_file"
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "host/amp/create_file"
+requires = { trust = "trusted" }
+
+# One outbound connection through `appa amp-proxy`. Any process in the orb can
+# send any file over it, so `forwards` carries the label of the most restricted
+# data the orb holds, whatever the model has read. An orb that holds only public
+# data omits `forwards`. Declare hosts trusted with internal data, such as a
+# company package mirror, above this declaration without the `public` requirement.
+[[policy.tool]]
+name = "host/amp/appa_network"
+forwards = { audience = ["internal"] }
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+# Amp runs these requests itself, outside the orb.
 [[policy.tool]]
 name = "host/amp/read_web_page"
 requires = { audience = { contains = ["public"] } }
@@ -30,23 +70,21 @@ name = "host/amp/web_search"
 requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
+# A message or file sent to another thread leaves this trajectory, like an upload.
+# The receiving thread starts with no label, so only public data may go there.
+# Attached files come from the orb and carry its label, as on the proxy.
 [[policy.tool]]
-name = "host/amp/apply_patch"
-requires = { trust = "trusted" }
+name = "host/amp/send_thread_message(media_paths:*)"
+forwards = { audience = ["internal"] }
+requires = { audience = { contains = ["public"] } }
 
 [[policy.tool]]
-name = "host/amp/edit_file"
-requires = { trust = "trusted" }
-
-# Arbitrary shell can both read files and transmit them without an intervening
-# hook. This example permits only this exact diagnostic command, not general shell.
-[[policy.tool]]
-name = "host/amp/shell_command(command:pwd)"
-requires = { trust = "trusted", audience = { contains = ["public"] } }
+name = "host/amp/send_thread_message"
+requires = { audience = { contains = ["public"] } }
 
 [[policy.tool]]
-name = "host/amp/Bash(cmd:pwd)"
-requires = { trust = "trusted", audience = { contains = ["public"] } }
+name = "host/amp/create_thread"
+requires = { audience = { contains = ["public"] } }
 
 [externals]
 timeout_ms = 2000

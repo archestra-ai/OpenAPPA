@@ -25,12 +25,20 @@ test -e "$HOME/.config/appa/amp/appa.toml" || \
   cp integrations/amp/appa.toml "$HOME/.config/appa/amp/appa.toml"
 ```
 
-Review that policy before using it. It labels reads whose `path` matches
-`*/private/*` as internal, refuses public web requests after those reads, and
-refuses trusted-only edits after untrusted web results. It permits only `pwd`
-through shell tools. **This is an example policy, not a general-purpose coding
-policy.** Declare your other tools or bind an Annotator through the usual APPA
-configuration. Undeclared tools stop with an operational refusal.
+Review that policy before using it. It treats the orb's filesystem as part of
+the trajectory and assumes the orb holds internal data under `*/private/*`:
+
+- Reads of `*/private/*` and every shell result narrow the trajectory to
+  internal. Public web requests and messages to other threads then stop.
+- Each outbound connection through the [network proxy](#network-proxy-in-an-orb)
+  forwards the orb's internal label, so no public host receives orb data.
+- Untrusted web results and connections lower trust, which stops edits.
+
+**This is an example policy, not a general-purpose coding policy.** Declare
+your other tools, hosts trusted with internal data, or an Annotator through the
+usual APPA configuration. An orb that holds only public data drops the internal
+`delta` on shells and the `forwards` on outbound flows. Undeclared tools stop
+with an operational refusal.
 
 Start the runtime in a separate terminal, leaving it running:
 
@@ -85,6 +93,53 @@ runtime cannot be reached. Calls fail closed on connection errors, timeouts,
 invalid replies, or runtime refusals; unchecked results are replaced with a
 withholding message.
 
+## Network proxy in an orb
+
+An orb's filesystem is created for the thread and discarded with it, so amppa
+treats it as part of the trajectory: a file write keeps its content inside the
+trajectory, and no file tracking is needed. Data leaves the orb through Amp's
+own tools, which the plugin checks, or over the network, which
+`appa amp-proxy` checks.
+
+Start the proxy beside the runtime, as a supervised service:
+
+```sh
+amp orb service start amppa-proxy --command "\"$(pwd)/target/debug/appa\" amp-proxy --listen 127.0.0.1:8789 --runtime http://127.0.0.1:8788 --thread $AMP_THREAD_ID"
+```
+
+Then route the agent's processes through it, for example in the orb's
+environment variables:
+
+```sh
+HTTP_PROXY=http://127.0.0.1:8789
+HTTPS_PROXY=http://127.0.0.1:8789
+NO_PROXY=127.0.0.1,localhost
+```
+
+The proxy serves HTTP `CONNECT` tunnels, such as HTTPS, and plain `http://`
+requests. Each connection is one call of `host/amp/appa_network` with the
+string arguments `host` and `port`, in the thread's trajectory:
+
+- `requires` is checked against the trajectory's label and the tool's
+  `forwards` before the proxy opens the connection. A refused connection
+  answers `403`, and its body carries the policy feedback and any remedy offer.
+- The outcome is admitted after the connection opens and before the proxy
+  relays a byte, so the host's `delta` narrows the trajectory before its answer
+  reaches a file, a shell, or the model.
+- Bytes reach only the checked host. The proxy resolves the name itself; a
+  selector such as `host/amp/appa_network(host:*.example.com)` matches the
+  lowercased name the client asked for.
+
+HTTPS clients often hide a refused tunnel's body. `curl` reports only
+`CONNECT tunnel failed, response 403`; retry with `curl -v` or read the proxy's
+log to see the remedy offer.
+
+Sending a message or a file to another thread with `send_thread_message` or
+`create_thread` is an outbound flow, like an upload, and `requires` governs it.
+The receiving thread starts without this thread's label, so the example policy
+requires public data, and files attached through `media_paths` forward the orb's
+label.
+
 ## Contracts and remedy plans
 
 | Amp tool spelling | Policy identity |
@@ -129,9 +184,15 @@ example policy leaves `code_exec` undeclared.
   labels, and child returns and transferred files have no cross-thread
   provenance guarantee. Add delegation contracts only with that limitation
   understood; the example policy declares none.
-- Path selectors are not filesystem mediation. Aliases, symlinks, alternate
-  read tools, arbitrary shell programs, and nested calls need their own policy
-  coverage. The plugin is not OS-level taint tracking or network confinement.
+- Path selectors are not filesystem mediation. Aliases, symlinks and alternate
+  read tools reach `*/private/*` without its selector; the example's shell
+  `delta` covers shells only.
+- The proxy checks the connections routed through it. Proxy variables are
+  advisory: a program that ignores them, raw sockets, and DNS queries leave the
+  orb directly. An egress firewall that admits only the proxy closes that path,
+  but Amp's own executor shares the agent's user and process group in an orb and
+  needs direct access to Amp, so such a firewall must exempt Amp's endpoints.
+  An agent's shell can reach those endpoints too.
 - Amp, its plugin host, the runtime, and other installed plugins are trusted.
   Disabling amppa removes protection. Plugin crash/unload behavior and hook
   ordering between plugins are host limitations, not guarantees supplied here.
@@ -153,7 +214,9 @@ bun test integrations/amp
 The Bun suite drives the exported plugin against mock replies and a real
 runtime with disposable data. It checks audience and trust denials, successful
 reads, output sanitization, failures, cancellation, parallel result correlation,
-and persistence across a runtime restart. Its MCP client follows remedy offers
+persistence across a runtime restart, files sent to another thread, and proxied
+connections: refused before the host receives a request, and labelled before
+the answer is relayed. Its MCP client follows remedy offers
 directly; this does not test Amp's MCP discovery or human-approval UI. It makes
 no inference calls. A successful `amp plugins exec` exit alone is not evidence
 that the installed Amp version delivered the requested hook.

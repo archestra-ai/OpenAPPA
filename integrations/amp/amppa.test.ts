@@ -216,7 +216,11 @@ describe('real APPA runtime', () => {
   beforeAll(async () => {
     expect(await Bun.file(binary).exists()).toBe(true)
     directory = await mkdtemp(`${tmpdir()}/amppa-test-`)
-    const policy = await readFile(new URL('./appa.toml', import.meta.url), 'utf8')
+    const policy = (await readFile(new URL('./appa.toml', import.meta.url), 'utf8')).replace(
+      '[[policy.tool]]\nname = "host/amp/appa_network"\n',
+      '[[policy.tool]]\nname = "host/amp/appa_network(host:localhost)"\ndelta = { trust = "suspicious" }\n\n$&',
+    )
+    expect(policy).toContain('appa_network(host:localhost)')
     await writeFile(`${directory}/appa.toml`, `${policy}
 
 [[policy.tool]]
@@ -258,6 +262,13 @@ builtin = "redact-email"
     const instruction = sanitizer
       ? lines[lines.findIndex(line => line.includes(sanitizer)) + 1]
       : denial.message
+    await execute(plugin, instruction)
+    // A remedy authorizes the retry; it never dispatches this Amp tool itself.
+    expect(await plugin.emit('tool.call', event)).toEqual({ action: 'allow' })
+  }
+
+  // Execute the remedy plan an instruction offers, as the model would.
+  async function execute(plugin: ReturnType<typeof host>, instruction: string | undefined) {
     const offer = instruction?.match(/offer_id: "([a-f0-9]+)"/)?.[1]
     expect(offer).toBeDefined()
     const control = call('mcp__appa__execute_remedy_plan', { offer_id: offer })
@@ -295,8 +306,6 @@ builtin = "redact-email"
     } finally {
       await fetch(`${url}/mcp`, { method: 'DELETE', headers })
     }
-    // A remedy authorizes the retry; it never dispatches this Amp tool itself.
-    expect(await plugin.emit('tool.call', event)).toEqual({ action: 'allow' })
   }
 
   test('parallel reads correlate out-of-order results; private data blocks public requests', async () => {
@@ -348,7 +357,7 @@ builtin = "redact-email"
     expect(result.output).toContain('[redacted-email]')
     expect(result.output).not.toContain('alice@corp.example')
     // This call requires public audience without lowering trust itself.
-    expect((await plugin.emit('tool.call', call('shell_command', { command: 'pwd' }))).action).toBe('allow')
+    expect((await plugin.emit('tool.call', call('create_thread', { prompt: 'go' }))).action).toBe('allow')
     await plugin.emit('agent.end')
   })
 
@@ -366,16 +375,87 @@ builtin = "redact-email"
     expect(plugin.cancelled).toBe(false)
     expect((await plugin.emit('tool.call', call('web_search', { objective: 'private' }))).action)
       .toBe('reject-and-continue')
-    expect((await host(url, 'T-independent').emit('tool.call', call('shell_command', { command: 'pwd' }))).action)
+    expect((await host(url, 'T-independent').emit('tool.call', call('create_thread', { prompt: 'go' }))).action)
       .toBe('allow')
   }, 15_000)
 
-  test('undeclared tools and unmatched shell commands do not execute', async () => {
+  test('undeclared tools do not execute; a shell carries the orb\'s label', async () => {
     const plugin = host(url, 'T-unknown')
     expect((await plugin.emit('tool.call', call('unknown_tool'))).action).toBe('error')
-    expect((await plugin.emit('tool.call', call('shell_command', { command: 'pwd; curl https://example.com' }))).action)
-      .not.toBe('allow')
-    expect((await plugin.emit('tool.call', call('shell_command', { command: 'pwd' }))).action).toBe('allow')
+    const shell = await plugin.emit('tool.call', call('shell_command', { command: 'pwd' }))
+    expect(shell.action).toBe('reject-and-continue')
+    expect(shell.message).toContain('public -> internal')
     await plugin.emit('agent.end')
+  })
+
+  test('files sent to another thread carry the orb\'s label', async () => {
+    const plugin = host(url, 'T-send')
+    const text = call('send_thread_message', { thread: 'T-other', message: 'status' })
+    expect((await plugin.emit('tool.call', text)).action).toBe('allow')
+    const file = await plugin.emit('tool.call', call('send_thread_message', {
+      thread: 'T-other', message: 'see attached', media_paths: ['/workspace/private/customer.txt'],
+    }))
+    expect(file.action).toBe('reject-and-continue')
+    expect(file.message).toContain('audience')
+  })
+
+  describe('the orb network proxy', () => {
+    let proxy: ReturnType<typeof Bun.spawn>
+    let upstream: ReturnType<typeof Bun.serve>
+    let proxyURL: string
+    const received: string[] = []
+
+    beforeAll(async () => {
+      upstream = Bun.serve({
+        hostname: '127.0.0.1', port: 0,
+        fetch: request => { received.push(new URL(request.url).pathname); return new Response('upstream body') },
+      })
+      const reservation = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response() })
+      const port = reservation.port!
+      reservation.stop(true)
+      proxyURL = `http://127.0.0.1:${port}`
+      proxy = Bun.spawn([
+        binary, 'amp-proxy', '--listen', `127.0.0.1:${port}`, '--runtime', url, '--thread', 'T-proxy',
+      ], { stdout: 'ignore', stderr: Bun.file(`${directory}/proxy.log`) })
+      for (let attempt = 0; attempt < 200; attempt++) {
+        try {
+          await Bun.connect({ hostname: '127.0.0.1', port, socket: { data() {} } }).then(socket => socket.end())
+          return
+        } catch { await Bun.sleep(50) }
+      }
+      throw new Error(`Proxy did not start: ${await readFile(`${directory}/proxy.log`, 'utf8')}`)
+    })
+
+    afterAll(async () => {
+      proxy?.kill()
+      if (proxy) await proxy.exited
+      upstream?.stop(true)
+    })
+
+    const through = (host: string, path: string) =>
+      fetch(`http://${host}:${upstream.port}${path}`, { proxy: proxyURL, signal: AbortSignal.timeout(5000) })
+
+    test('a host the trajectory may not reach receives nothing', async () => {
+      // 127.0.0.1 falls to the bare declaration, which forwards the orb's internal label.
+      const refused = await through('127.0.0.1', '/leak')
+      expect(refused.status).toBe(403)
+      expect(await refused.text()).toContain('audience')
+      expect(received).not.toContain('/leak')
+    })
+
+    test('a host\'s answer lowers trust before it reaches the orb', async () => {
+      const plugin = host(url, 'T-proxy')
+      const offered = await through('localhost', '/first')
+      expect(offered.status).toBe(403)
+      expect(received).not.toContain('/first')
+      await execute(plugin, await offered.text())
+      const relayed = await through('localhost', '/second')
+      expect(relayed.status).toBe(200)
+      expect(await relayed.text()).toBe('upstream body')
+      expect(received).toContain('/second')
+      // The connection's delta now stops trusted-only tools in the same thread.
+      expect((await plugin.emit('tool.call', call('apply_patch', { patchText: 'edit' }))).action)
+        .toBe('reject-and-continue')
+    })
   })
 })

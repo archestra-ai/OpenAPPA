@@ -191,6 +191,21 @@ enum Command {
         arguments: Vec<String>,
     },
 
+    /// Run an Amp orb's network proxy: check each outbound connection as a flow of the thread.
+    AmpProxy {
+        /// Where the proxy listens; point HTTP_PROXY and HTTPS_PROXY here. Loopback only.
+        #[arg(long, default_value = "127.0.0.1:8789")]
+        listen: std::net::SocketAddr,
+
+        /// The runtime serving `--adapter amp`.
+        #[arg(long, env = "APPA_AMP_RUNTIME_URL", default_value = "http://127.0.0.1:8788")]
+        runtime: String,
+
+        /// The Amp thread whose trajectory every connection belongs to.
+        #[arg(long, env = "AMP_THREAD_ID")]
+        thread: String,
+    },
+
     /// Post one harness hook event to the running runtime.
     #[command(hide = true)]
     Hook {
@@ -241,6 +256,35 @@ enum PluginCommand {
 enum OpencodeCommand {
     /// Inspect and tune the policy with the project's live OpenCode tool inventory.
     Setup(appa_runtime::installation::opencode::Setup),
+}
+
+fn amp_proxy(listen: std::net::SocketAddr, runtime: &str, thread: &str) -> ExitCode {
+    if !listen.ip().is_loopback() {
+        eprintln!("appa amp-proxy: {listen} is not loopback; the proxy serves this orb only");
+        return ExitCode::FAILURE;
+    }
+    let runtime = match appa_adapter_amp::proxy::Runtime::new(runtime, thread) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("appa amp-proxy: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    tracing_subscriber::fmt().with_writer(std::io::stderr).init();
+    let served = tokio::runtime::Runtime::new().and_then(|tokio| {
+        tokio.block_on(async {
+            let listener = tokio::net::TcpListener::bind(listen).await?;
+            eprintln!("appa amp-proxy: listening on {listen} for thread {thread}");
+            appa_adapter_amp::proxy::serve(listener, runtime).await
+        })
+    });
+    match served {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("appa amp-proxy: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn claude_exit<T>(outcome: Result<T, appa_runtime::init::InitError>) -> ExitCode {
@@ -332,6 +376,11 @@ fn main() -> ExitCode {
             appa_runtime::hook_client::run(&target.resolve(), turn_end, deployment.as_ref())
         }
         Command::FileTracker { arguments } => appa_file_tracker::run(arguments),
+        Command::AmpProxy {
+            listen,
+            runtime,
+            thread,
+        } => amp_proxy(listen, &runtime, &thread),
         Command::Statusline { target } => appa_runtime::statusline::run(&target.resolve()),
         Command::SessionContext { subagent } => appa_runtime::session_context::run(if subagent {
             appa_runtime::session_context::Delivery::SubagentContext
