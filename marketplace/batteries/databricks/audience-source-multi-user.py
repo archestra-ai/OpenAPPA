@@ -1,5 +1,7 @@
-"""The databricks audience source of a multi-user deployment: one consult in,
-one answer out.
+"""The databricks audience source of a multi-user deployment. The runtime
+runs this script once for each membership read or member lookup, passes
+the consult request as JSON on standard input, and reads one JSON answer
+from standard output.
 
 The single-user source's selectors and member lookup without `viewer`: the
 login is a service principal's, with no person behind it. Readers are spelled

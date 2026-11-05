@@ -1,4 +1,7 @@
-"""The google-workspace.drive-readers annotator: one consult in, one answer out.
+"""The google-workspace.drive-readers annotator. The runtime runs this
+script once for each tool call it annotates, passes the consult request
+as JSON on standard input, and reads one JSON answer from standard
+output.
 
 Drive gives a file the sharing of its folder, so a write reaches
 everyone who can read the file or folder it lands in. Before

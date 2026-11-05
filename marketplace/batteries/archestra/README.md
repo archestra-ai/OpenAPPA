@@ -31,8 +31,9 @@ organization as `organization`, sent only with a non-empty
 A create that sends grants requires `trusted` data sharable with
 `internal`, which holds every principal a grant can name; without grants
 it requires what the create alone needs. A credential transfer that only
-returns links requires nothing; any other transfer requires `trusted` and
-`internal`. An update that sends `team_ids` replaces who the
+returns links declares a `key` and `label` every reader of the agent
+sees, so it requires `internal`; any other transfer requires `trusted`
+and `internal`. An update that sends `team_ids` replaces who the
 connector is shared with whatever visibility it already has, so the list
 is checked on its own. Auto-synced connector permissions mirror the
 connected system's own ACLs, which this source cannot read, so such a

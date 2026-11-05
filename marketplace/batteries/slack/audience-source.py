@@ -1,4 +1,6 @@
-"""The slack audience source: one consult in, one answer out.
+"""The slack audience source. The runtime runs this script once for each
+membership read or member lookup, passes the consult request as JSON on
+standard input, and reads one JSON answer from standard output.
 
 Serves these selector templates over the Slack Web API:
 
