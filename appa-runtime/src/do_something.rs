@@ -45,6 +45,7 @@ pub(crate) fn declarations() -> (ToolDeclaration, AnnotatorDeclaration) {
         description: None,
         parameters: ToolParameters::open(),
         annotator: annotator.clone(),
+        on_no_answer: None,
     };
     let mandate = AnnotatorDeclaration {
         name: annotator,
