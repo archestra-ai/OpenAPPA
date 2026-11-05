@@ -131,7 +131,7 @@ impl EffectKind {
 /// carries: unique and sorted, serialized as exactly that sorted sequence — so
 /// permutation-equivalent declarations converge to one value, engine-produced facts are
 /// byte-identical, and replayed histories agree.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct EffectSet(Vec<EffectKind>);
 
