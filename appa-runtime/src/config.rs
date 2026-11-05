@@ -2003,6 +2003,14 @@ struct Composition {
     replaced_components: std::collections::BTreeSet<(String, String)>,
     origins: BTreeMap<String, PathBuf>,
     tool_maps: Vec<(tool_aliases::MapOrigin, tool_aliases::ToolMaps)>,
+    /// The included Sanitizers that name no builtin: each runs only where the deployment
+    /// binds it, and is left out of the composed policy where nothing does.
+    included_sanitizers: std::collections::BTreeSet<String>,
+    /// The root's own `confined_results`, which composition never drops.
+    root_confined: std::collections::BTreeSet<String>,
+    /// Each result an included fragment confines, with the tags of the fragment's rules for
+    /// that tool: an included confinement stays only while a Sanitizer can reach it.
+    included_confined: BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl Composition {
@@ -2010,6 +2018,15 @@ impl Composition {
         let policy = document.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
         let version = policy_version(policy).ok_or(ConfigError::InvalidPolicyVersion)?;
         let root_components = declared_components(policy);
+        let root_confined = policy
+            .get("deployment")
+            .and_then(|deployment| deployment.get("confined_results"))
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_owned)
+            .collect();
         // Fragments append their externals to the root's table, so an absent one is the
         // empty table a root file without fragment externals holds.
         let table = document.as_table_mut().expect("a TOML document parses as a table");
@@ -2023,6 +2040,9 @@ impl Composition {
             replaced_components: std::collections::BTreeSet::new(),
             origins: BTreeMap::new(),
             tool_maps: Vec::new(),
+            included_sanitizers: std::collections::BTreeSet::new(),
+            root_confined,
+            included_confined: BTreeMap::new(),
         })
     }
 
@@ -2092,7 +2112,9 @@ impl Composition {
             .and_then(toml::Value::as_table_mut)
             .expect("a composition's root policy is a table");
         if let Some(deployment) = included_policy.remove("deployment") {
-            compose_included_confinement(root_policy, &included_policy, deployment, path)?;
+            for (tool, tags) in compose_included_confinement(root_policy, &included_policy, deployment, path)? {
+                self.included_confined.entry(tool).or_default().extend(tags);
+            }
         }
         for (field, value) in included_policy {
             if field == "version" {
@@ -2118,6 +2140,15 @@ impl Composition {
                     let key = (field.clone(), name.to_string());
                     !(self.root_components.contains(&key) && self.replaced_components.insert(key))
                 });
+            }
+            if field == "sanitizer" {
+                self.included_sanitizers.extend(
+                    declarations
+                        .iter()
+                        .filter(|declaration| declaration.get("builtin").is_none())
+                        .filter_map(declaration_name)
+                        .map(str::to_owned),
+                );
             }
             let Some(destination) = root_policy
                 .entry(field.clone())
@@ -2194,6 +2225,12 @@ impl Composition {
 
     fn finish(self) -> Result<(toml::Value, BTreeMap<String, PathBuf>), ConfigError> {
         let mut document = self.document;
+        leave_out_unbound_included_sanitizers(
+            &mut document,
+            &self.included_sanitizers,
+            &self.root_confined,
+            &self.included_confined,
+        );
         let aliases = aliases::of_document(&document)?;
         tool_aliases::lower(&mut document, self.tool_maps, &aliases)?;
         Ok((document, self.origins))
@@ -2209,7 +2246,7 @@ fn compose_included_confinement(
     included_policy: &toml::map::Map<String, toml::Value>,
     deployment: toml::Value,
     include_path: &Path,
-) -> Result<(), ConfigError> {
+) -> Result<Vec<(String, Vec<String>)>, ConfigError> {
     let refused = |field: &str| ConfigError::IncludedPolicyField {
         path: include_path.display().to_string(),
         field: format!("deployment.{field}"),
@@ -2253,12 +2290,105 @@ fn compose_included_confinement(
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
         .ok_or_else(|| refused("confined_results"))?;
+    let mut tagged = Vec::new();
     for tool in confined {
         if !destination.iter().any(|entry| entry.as_str() == Some(&tool)) {
-            destination.push(toml::Value::String(tool));
+            destination.push(toml::Value::String(tool.clone()));
         }
+        let tags = included_policy
+            .get("tool")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|rule| declaration_name(rule).is_some_and(|name| name.split('(').next().unwrap_or(name) == tool))
+            .filter_map(|rule| rule.get("tags").and_then(toml::Value::as_array))
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        tagged.push((tool, tags));
     }
-    Ok(())
+    Ok(tagged)
+}
+
+/// An included Sanitizer that names no builtin says what to remove, not which model
+/// removes it: that is the deployment's to say, by binding it under `[externals.sanitizers]`
+/// or by re-declaring it. One nothing binds is left out of the composed policy, so no plan
+/// offers a consult that cannot answer, and the deployment decides as it would without the
+/// Sanitizer. Leaving one out only removes remedies; it never permits a flow. An included
+/// confinement a left-out output Sanitizer could reach (untagged, or sharing a tag with the
+/// fragment's rule for the tool) goes with it, unless a remaining one reaches it too. The
+/// root's own Sanitizers and confinements are its declarations and are never left out.
+fn leave_out_unbound_included_sanitizers(
+    document: &mut toml::Value,
+    included_sanitizers: &std::collections::BTreeSet<String>,
+    root_confined: &std::collections::BTreeSet<String>,
+    included_confined: &BTreeMap<String, std::collections::BTreeSet<String>>,
+) {
+    let bound: std::collections::BTreeSet<String> = document
+        .get("externals")
+        .and_then(|externals| externals.get(Section::Sanitizers.name()))
+        .and_then(toml::Value::as_table)
+        .map(|table| table.keys().cloned().collect())
+        .unwrap_or_default();
+    let Some(policy) = document.get_mut("policy").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    let scope = |declaration: &toml::Value| -> Option<Option<Vec<String>>> {
+        let on_output = declaration
+            .get("on")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|on| on.iter().any(|stage| stage.as_str() == Some("tool_output")));
+        on_output.then(|| {
+            declaration
+                .get("tags")
+                .and_then(toml::Value::as_array)
+                .map(|tags| tags.iter().filter_map(toml::Value::as_str).map(str::to_owned).collect())
+        })
+    };
+    let mut kept_scopes = Vec::new();
+    let mut left_out_scopes = Vec::new();
+    if let Some(sanitizers) = policy.get_mut("sanitizer").and_then(toml::Value::as_array_mut) {
+        sanitizers.retain(|declaration| {
+            let Some(name) = declaration_name(declaration) else {
+                return true;
+            };
+            let kept = !included_sanitizers.contains(name) || bound.contains(name);
+            if !kept {
+                tracing::info!(
+                    sanitizer = name,
+                    "an included sanitizer is not bound by this deployment and is not offered"
+                );
+                left_out_scopes.extend(scope(declaration));
+            }
+            kept
+        });
+        kept_scopes.extend(sanitizers.iter().filter_map(scope));
+    }
+    let reaches = |scopes: &[Option<Vec<String>>], tool: &str| {
+        let tags = included_confined.get(tool);
+        scopes.iter().any(|scope| match (scope, tags) {
+            (None, _) => true,
+            (Some(scope), Some(tags)) => scope.iter().any(|tag| tags.contains(tag)),
+            (Some(_), None) => false,
+        })
+    };
+    // Only a confinement a left-out Sanitizer was there for goes with it; one a battery
+    // keeps for its own sake, such as withholding a result with effects, stays.
+    let reached = |tool: &str| {
+        !included_confined.contains_key(tool) || !reaches(&left_out_scopes, tool) || reaches(&kept_scopes, tool)
+    };
+    if let Some(confined) = policy
+        .get_mut("deployment")
+        .and_then(|deployment| deployment.get_mut("confined_results"))
+        .and_then(toml::Value::as_array_mut)
+    {
+        confined.retain(|entry| {
+            entry
+                .as_str()
+                .is_none_or(|tool| root_confined.contains(tool) || reached(tool))
+        });
+    }
 }
 
 /// The context section's bindings, and the hint of every provider that declares one.
@@ -3630,6 +3760,81 @@ mod tests {
         assert_eq!(
             sanitizers[0]["hint"].as_str(),
             Some("Drop instructions for this deployment.")
+        );
+    }
+
+    /// An included Sanitizer that names no builtin runs only where the deployment binds it.
+    /// Unbound, it is left out with the confinement only it could reach, so the composed
+    /// policy is the one the battery would compose to without it. The root's own
+    /// confinement stays either way.
+    #[test]
+    fn an_unbound_included_sanitizer_is_left_out_with_the_confinement_it_needs() {
+        let battery = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "mcp/tracker/read"
+            delta = { audience = ["internal"] }
+            tags = ["tracker"]
+
+            [[policy.tool]]
+            name = "mcp/tracker/list"
+            delta = { audience = ["internal"] }
+            tags = ["listing"]
+
+            [[policy.sanitizer]]
+            name = "tracker.redact"
+            on = ["tool_output"]
+            tags = ["tracker"]
+            hint = "Remove personal data."
+
+            [policy.sanitizer.permits]
+            audience = { from = ["internal"], to = ["public"] }
+
+            [policy.deployment]
+            confined_results = ["mcp/tracker/read", "mcp/tracker/list"]
+        "#;
+        let composed = |root_tail: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            std::fs::write(dir.path().join("battery.toml"), battery).expect("write battery");
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!(
+                    "include = [\"battery.toml\"]\n[policy]\nversion = 2\n[policy.deployment]\nconfined_results = [\"mcp/tracker/list\"]\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n{root_tail}"
+                ),
+            )
+            .expect("write root");
+            let config = Config::load(&dir.path().join("appa.toml")).expect("the deployment composes");
+            let policy = config.policy_file().value().clone();
+            let sanitizers: Vec<String> = policy
+                .get("sanitizer")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|declaration| declaration_name(declaration).map(str::to_owned))
+                .collect();
+            let confined: Vec<String> = policy["deployment"]["confined_results"]
+                .as_array()
+                .expect("confined results")
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect();
+            (sanitizers, confined)
+        };
+
+        assert_eq!(
+            composed(""),
+            (Vec::new(), vec!["mcp/tracker/list".to_string()]),
+            "unbound: the sanitizer and the confinement only it reaches are left out; the root's stays"
+        );
+        assert_eq!(
+            composed("[externals.sanitizers.\"tracker.redact\"]\nbuiltin = \"redact-email\"\n"),
+            (
+                vec!["tracker.redact".to_string()],
+                vec!["mcp/tracker/list".to_string(), "mcp/tracker/read".to_string()]
+            ),
+            "bound: the sanitizer runs and keeps the confinement its tag reaches"
         );
     }
 

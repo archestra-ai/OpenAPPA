@@ -4070,7 +4070,10 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             });
         }
     }
-    bound_exactly(
+    // A binding with no declaration stays idle rather than refused, as an unreferenced
+    // audience source does: a root binds the sanitizers of the batteries it may include,
+    // and composition leaves out a battery's sanitizer the root does not bind.
+    no_unbound(
         "sanitizer",
         rc.sanitizers
             .iter()

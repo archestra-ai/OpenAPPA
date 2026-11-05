@@ -22,7 +22,7 @@ claude-code` includes both. A rule no map binds is inactive.
   `.netrc`, `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows
   the session to `self`, the requester. A client whose map entry sets
   `confined = true` withholds the command's result, and the battery offers
-  `coding.strip-secrets` beside the narrowing: the Claude Code model replaces
+  `coding.strip-secrets` beside the narrowing: the model replaces
   every secret value in the output with `[redacted-secret]`, and the masked
   output returns at `internal`, not `self`. It never reaches `public` without
   another remedy. The sanitizer is tagged `credentials`, so it applies only to
@@ -86,14 +86,16 @@ claude-code` includes both. A rule no map binds is inactive.
   the query goes only to the search provider. Where a client's map confines the result
   (Claude Code confines WebFetch), a fetch the Annotator labels `suspicious`
   and every search offer `coding.strip-instructions` beside the trust
-  narrowing: the Claude Code model removes every instruction from the page
+  narrowing: the model removes every instruction from the page
   and keeps its facts, code and links, and the result returns at the
   session's own trust. The sanitizer is tagged `web`.
 
-Both sanitizers run the Claude Code model with the battery's `hint`; a root
-`[[policy.sanitizer]]` with the same name replaces either, for example with
-`builtin = "llm"`. APPA does not verify what the model removed: including
-the battery registers them as trusted. A root rule for a tool precedes the
+Both sanitizers name no model. A deployment runs one by binding it under
+`[externals.sanitizers]`, for example to `builtin = "llm"` or, where the
+`claude` CLI is installed, `builtin = "claude-code"`; the Claude Code
+plugin's default config binds both. A sanitizer the root does not bind is
+not offered. APPA does not verify what the model removed: binding a
+sanitizer registers it as trusted. A root rule for a tool precedes the
 battery's, and a root rule without the battery's tag offers no sanitizer.
 
 The Annotators run the local `claude` command (`builtin = "claude-code"`); on

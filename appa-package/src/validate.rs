@@ -584,7 +584,7 @@ fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(
         .flat_map(|kind| {
             declarations(base, kind.field()).filter_map(move |declaration| {
                 let name = declaration.get("name").and_then(Value::as_str)?;
-                kind.binds_at_open(name, declaration).then(|| NamedDeclaration {
+                kind.binds_at_open(declaration).then(|| NamedDeclaration {
                     kind,
                     name: name.to_owned(),
                 })
@@ -723,19 +723,15 @@ impl DeclarationKind {
 
     /// Whether the runtime refuses to open a policy that declares this without an
     /// `[externals]` binding: an authority may stay unbound, an annotator naming a
-    /// builtin is complete as written, so is a sanitizer naming one, and the engine
-    /// applies its reserved sanitizer.
-    fn binds_at_open(self, name: &str, declaration: &Value) -> bool {
+    /// builtin is complete as written, and a battery's sanitizer is never required: the
+    /// deployment binds the ones it serves, and composition leaves the rest out.
+    fn binds_at_open(self, declaration: &Value) -> bool {
         match self {
-            Self::Authority => false,
+            Self::Authority | Self::Sanitizer => false,
             Self::Annotator => declaration.get("builtin").is_none(),
-            Self::Sanitizer => name != RESERVED_SANITIZER && declaration.get("builtin").is_none(),
         }
     }
 }
-
-/// The sanitizer the engine applies itself (`SanitizerName::ATTEST_SCHEMA`).
-const RESERVED_SANITIZER: &str = "attest-schema";
 
 /// One `[[policy.<kind>]]` declaration, by name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2342,35 +2338,29 @@ mod tests {
             directory
         };
 
-        for (base, target_binding, kind, name) in [
-            (
-                annotator.as_str(),
-                "[externals.annotators.classifier]\ncommand = [\"python3\", \"classifier.py\"]\n",
-                DeclarationKind::Annotator,
-                "classifier",
-            ),
-            (sanitizer.as_str(), stock_mask, DeclarationKind::Sanitizer, "mask"),
-        ] {
-            let expected = NamedDeclaration {
-                kind,
-                name: name.to_owned(),
-            };
-            assert!(matches!(
-                validate_package(with_targets(base, target_binding).path()),
-                Err(PackageError::BaseDeclarationUnbound { declaration, .. }) if declaration == expected
-            ));
-        }
+        let expected = NamedDeclaration {
+            kind: DeclarationKind::Annotator,
+            name: "classifier".to_owned(),
+        };
+        assert!(matches!(
+            validate_package(with_targets(
+                &annotator,
+                "[externals.annotators.classifier]\ncommand = [\"python3\", \"classifier.py\"]\n"
+            ).path()),
+            Err(PackageError::BaseDeclarationUnbound { declaration, .. }) if declaration == expected
+        ));
 
         let builtin_annotator =
             annotator.replace("name = \"classifier\"\n", "name = \"classifier\"\nbuiltin = \"llm\"\n");
         let base_bound_sanitizer = format!("{sanitizer}\n{stock_mask}");
-        let reserved_sanitizer = sanitizer.replace("\"mask\"", &format!("\"{RESERVED_SANITIZER}\""));
+        // A sanitizer the base leaves unbound is the deployment's to bind, or is left out.
+        let unbound_sanitizer = format!("{sanitizer}\n");
         let unbound_authority =
             format!("{TARGETED_BASE}\n[[policy.authority]]\nname = \"operator\"\nhint = \"Ask the operator.\"\n");
         for base in [
             builtin_annotator,
             base_bound_sanitizer,
-            reserved_sanitizer,
+            unbound_sanitizer,
             unbound_authority,
         ] {
             validate_package(with_targets(&base, "").path()).unwrap();

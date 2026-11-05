@@ -14,7 +14,23 @@ fn call(tool: &str, request: serde_json::Value) -> ProposedCall {
     }
 }
 
+/// The deployment with the battery's sanitizers bound, as a deployment that runs them
+/// binds them. Nothing consults them here.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
+    runtime_binding(
+        dir,
+        r#"
+[externals.sanitizers."pagerduty.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."pagerduty.redact-for-public"]
+builtin = "claude-code"
+"#,
+    )
+    .await
+}
+
+async fn runtime_binding(dir: &tempfile::TempDir, bindings: &str) -> Arc<Runtime> {
     let source = members_source().await;
     battery_runtime(
         dir.path(),
@@ -41,10 +57,28 @@ builtin = "approve"
 [externals.audience.people]
 url = "{source}"
 selectors = [{{ template = "members", feeds = "internal" }}]
-"#
+{bindings}"#
         ),
     )
     .await
+}
+
+/// A deployment that binds none of the battery's sanitizers decides as if the battery
+/// declared none: the read offers only the narrowing.
+#[tokio::test]
+async fn an_unbound_sanitizer_is_never_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime_binding(&dir, "").await;
+    let read = call(
+        "browse_incidents",
+        serde_json::json!({ "action": "list", "statuses": ["triggered"] }),
+    );
+    let blocked = propose(&runtime, read).await;
+    let HookDecision::DenyCall { feedback, offers, .. } = &blocked else {
+        panic!("an incident read narrows the trajectory, got {blocked:?}");
+    };
+    assert_eq!(offers.len(), 1, "the narrowing alone: {feedback}");
+    assert!(!feedback.contains("sanitizer pagerduty."), "{feedback}");
 }
 
 /// An incident read narrows the trajectory to internal unless one of the battery's

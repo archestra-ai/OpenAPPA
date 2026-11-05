@@ -124,6 +124,9 @@ trust = { from = "suspicious", to = "trusted" }
 # check the subagent's return as a branch of the parent.
 [policy.deployment]
 context_control = true
+# WebFetch's result is withheld until `coding.strip-instructions`, bound
+# below, has run on it, when the agent chooses that sanitizer.
+confined_results = ["host/claude-code/WebFetch"]
 
 # Batteries and Annotators can require fresh attention, trusted data, or a
 # wider audience before a tool runs. This authority shows the person running
@@ -164,6 +167,15 @@ max_body_bytes = 65536
 builtin = "hitl"
 
 [externals.sanitizers.redact-for-public]
+builtin = "claude-code"
+
+# The `coding` battery's sanitizers name no model; a Claude Code session has
+# the `claude` CLI, so this policy binds them to it. A sanitizer of another
+# battery runs once it is bound here the same way.
+[externals.sanitizers."coding.strip-secrets"]
+builtin = "claude-code"
+
+[externals.sanitizers."coding.strip-instructions"]
 builtin = "claude-code"
 
 # Who `self` and `internal` are, read from a directory when a decision needs

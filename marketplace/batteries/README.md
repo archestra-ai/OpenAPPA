@@ -31,17 +31,20 @@ so a deployment can customize its hint without editing the battery.
 | `jev/` | no tools; one Annotator a deployment routes its own tools to | TypeSafe's Jev model annotates each routed call's audience and trust; the call's name, description, and arguments are sent to the TypeSafe API |
 
 Every battery with a `suspicious` read except `claude-code` also ships a
-tagged `tool_output` sanitizer, `<battery>.strip-instructions`, served by the
-Claude Code model (`builtin = "claude-code"`): it removes instructions from a
-confined result, which then keeps the session's trust. `cloudflare`, `linear`,
-`pagerduty` and `sentry` add `<battery>.redact-for-public`, which returns an
-`internal` record at `public` once the model removes what outside readers may
-not see. `coding` and `monday` add `<battery>.strip-secrets`, which returns a
-credential read at `internal` instead of `self`. Each battery lists the tools
-it confines in `[policy.deployment] confined_results`. A root
-`[[policy.sanitizer]]` with a battery sanitizer's name replaces it, as a root
-annotator replaces a battery's: a deployment without the `claude` command
-names `builtin = "llm"` there. `archestra` and
+tagged `tool_output` sanitizer, `<battery>.strip-instructions`: it removes
+instructions from a confined result, which then keeps the session's trust.
+`cloudflare`, `linear`, `pagerduty` and `sentry` add
+`<battery>.redact-for-public`, which returns an `internal` record at `public`
+once the model removes what outside readers may not see. `coding` and
+`monday` add `<battery>.strip-secrets`, which returns a credential read at
+`internal` instead of `self`. A battery sanitizer names no model: the root
+binds the ones the deployment runs under `[externals.sanitizers]`, for
+example to `builtin = "llm"` or, where the `claude` CLI is installed,
+`builtin = "claude-code"`. A battery sanitizer the root does not bind is left
+out, and the battery's `[policy.deployment] confined_results` entries that
+only it covers are dropped with it, so the battery decides as it would
+without sanitizers. The Claude Code plugin's default config binds the
+`coding` sanitizers. `archestra` and
 `xmemory` ship none: their reads keep the session's trust, and their records
 have no public core to release. `claude-code` ships none either: Claude Code's
 replacement of a result is not verified live for the `suspicious` tools it

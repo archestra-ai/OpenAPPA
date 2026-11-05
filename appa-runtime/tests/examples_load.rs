@@ -55,8 +55,18 @@ fn every_shipped_example_opens() {
         !examples.is_empty(),
         "the shipped examples were found and checked, not {examples:?}"
     );
+    // The install writes each policy with the plugin's batteries included; the default
+    // binds the coding battery's sanitizers, so it opens only beside that battery.
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
     for path in &examples {
-        opens(path, BatteryTarget::SingleUser);
+        let installed = dir.path().join(path.file_name().expect("a policy file has a name"));
+        let text = std::fs::read_to_string(path).expect("the shipped policy is readable");
+        std::fs::write(
+            &installed,
+            format!("include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{text}"),
+        )
+        .expect("the installed policy is writable");
+        opens(&installed, BatteryTarget::SingleUser);
     }
 }
 
@@ -353,27 +363,29 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
     }
 }
 
-/// The coding battery's `coding.strip-secrets` moved from the Claude Code model to a
-/// stand-in that masks every value after `=`, so the masked delivery runs without the
-/// `claude` CLI. The deployment is loaded again over the rebound battery.
+/// The default root binds the coding battery's `coding.strip-secrets` to the Claude Code
+/// model; here the root binds it to a stand-in that masks every value after `=` instead,
+/// so the masked delivery runs without the `claude` CLI. The deployment is loaded again
+/// over the rebound root.
 #[cfg(unix)]
 fn with_a_stand_in_masker(dir: &Path) -> Config {
     const MASK: &str = "import json, re, sys\n\
                         body = json.load(sys.stdin)['artifact']['body']\n\
                         print(json.dumps({'version': 1, 'answer': {'body': re.sub(r'=.*', '=[redacted-secret]', body)}}))\n";
-    let battery = dir.join("batteries/coding");
-    std::fs::write(battery.join("mask.py"), MASK).expect("the stand-in is writable");
-    let policy = battery.join("appa.toml");
-    let shipped = std::fs::read_to_string(&policy).expect("the battery is readable");
-    let declared = "name = \"coding.strip-secrets\"\non = [\"tool_output\"]\nbuiltin = \"claude-code\"\n";
-    let rebound = shipped.replace(declared, &declared.replace("builtin = \"claude-code\"\n", ""))
-        + "\n[externals.sanitizers.\"coding.strip-secrets\"]\ncommand = [\"python3\", \"mask.py\"]\n";
+    std::fs::write(dir.join("mask.py"), MASK).expect("the stand-in is writable");
+    let root = dir.join("appa.toml");
+    let shipped = std::fs::read_to_string(&root).expect("the root is readable");
+    let bound = "[externals.sanitizers.\"coding.strip-secrets\"]\nbuiltin = \"claude-code\"\n";
     assert!(
-        shipped.contains(declared),
-        "the battery names the Claude Code model on coding.strip-secrets"
+        shipped.contains(bound),
+        "the default root binds coding.strip-secrets to the Claude Code model"
     );
-    std::fs::write(&policy, rebound).expect("the battery is writable");
-    Config::load(&dir.join("appa.toml")).expect("the rebound deployment composes")
+    let rebound = shipped.replace(
+        bound,
+        "[externals.sanitizers.\"coding.strip-secrets\"]\ncommand = [\"python3\", \"mask.py\"]\n",
+    );
+    std::fs::write(&root, rebound).expect("the root is writable");
+    Config::load(&root).expect("the rebound deployment composes")
 }
 
 /// The offer the feedback attributes to `sanitizer`. An offer's `returns` describes a
