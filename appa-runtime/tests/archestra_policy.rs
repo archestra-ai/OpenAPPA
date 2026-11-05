@@ -212,7 +212,6 @@ const TABLE: &[Class] = &[
             ("cancel_agent_run", r#"{"run_id": "r"}"#),
             ("cancel_run", r#"{"run_id": "r"}"#),
             ("scaffold_app", r#"{"name": "a", "initialGrantPrincipals": []}"#),
-            ("transfer_credential", r#"{"agent_id": "a", "transferModes": ["link"]}"#),
         ],
     },
     // The organization's records, written by its own members and agents.
@@ -300,13 +299,14 @@ const TABLE: &[Class] = &[
             ("transfer_credential", r#"{"agent_id": "a"}"#),
         ],
     },
-    // Writes into a run.
+    // Writes into a run, and credential declarations an agent's readers see.
     Class {
         adds: Adds::Nothing,
         needs: Needs::Internal,
         calls: &[
             ("start_agent_run", r#"{"agent_id": "a", "message": "m"}"#),
             ("start_run", r#"{"agent_id": "a", "message": "m"}"#),
+            ("transfer_credential", r#"{"agent_id": "a", "transferModes": ["link"]}"#),
         ],
     },
 ];
