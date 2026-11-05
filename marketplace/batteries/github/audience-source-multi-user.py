@@ -1,7 +1,7 @@
 """The github audience source of a multi-user deployment. The runtime
-runs this script once for each membership read or member lookup, passes
-the consult request as JSON on standard input, and reads one JSON answer
-from standard output.
+runs this script once for each membership read, passes the consult
+request as JSON on standard input, and reads one JSON answer from
+standard output.
 
 The token is a GitHub App installation's, which has no user behind it:
 there is no viewer, and no profile or email it may read for a person.
