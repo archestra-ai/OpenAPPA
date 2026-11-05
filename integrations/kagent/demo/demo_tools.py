@@ -34,9 +34,11 @@ protocol, not the Python API.)
 from __future__ import annotations
 
 import argparse
+from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -205,8 +207,12 @@ def lookup_runbook(runbook: str) -> dict:
     return {"runbook": runbook, "text": text}
 
 
+# The schema FastMCP derives gives `name` the title "Name". Without a
+# description, the demo model often copies that title as the argument
+# key. The person then approves a call the tool rejects, and the
+# corrected call is a new call that needs its own approval.
 @mcp.tool()
-def restart_deployment(name: str) -> dict:
+def restart_deployment(name: Annotated[str, Field(description="The name of the deployment to restart.")]) -> dict:
     """Restart a deployment. An effectful action on the live cluster."""
     return {"restarted": name, "at": "2026-09-01T22:00:00Z"}
 
