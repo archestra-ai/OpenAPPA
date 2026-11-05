@@ -1,4 +1,6 @@
-"""The github repository annotators: one consult in, one answer out.
+"""The github repository annotators. The runtime runs this script once for
+each tool call either annotator annotates, passes the consult request as
+JSON on standard input, and reads one JSON answer from standard output.
 
 Two annotators share this script, told apart by the consult's name. Both
 read the repository the call names (`owner`, `repo`) and ask GitHub for

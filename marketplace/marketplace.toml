@@ -4,7 +4,7 @@ name = "appa"
 
 [packages.battery.archestra]
 path = "batteries/archestra"
-digest = "sha256:ae883e165b3c8b2a92c0efed17258b993badc1066d52fda57e76c5801ad60929"
+digest = "sha256:1c38b56f1a36e2c1537379ef2f43df5e769d057d59708adde807a7d852054040"
 
 [packages.battery.claude-code]
 path = "batteries/claude-code"
@@ -20,15 +20,15 @@ digest = "sha256:6822d5f77b3e7eb6ad8214168a65751df75f8261d0b9ce55d30ee730e5730a7
 
 [packages.battery.databricks]
 path = "batteries/databricks"
-digest = "sha256:a3822d95a2e05ef8071a8aded9e6a73a47980085d35c3e0a149496c410bfb5cf"
+digest = "sha256:917b51cd94f6cf47094ada259074716d77a82a5a21e5947db161ab50a10a9c29"
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:dec43373a5376f11af1df1265d1fca3b2b31545a8481d5c4b4a40374d2f6406e"
+digest = "sha256:88eaf94b6db6984780b95fe47acf71e0896a2175b92c4d85634cf061053a72c1"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
-digest = "sha256:bdd58b36bae6ab75ee4e3b00a6e28ea27f646f791e3baffacc35a246bfdae03a"
+digest = "sha256:dafdec5b9e6d35d159ac00b4265adb5a7f5afd4f3eeabc57c43bc25914cc001a"
 
 [packages.battery.grain]
 path = "batteries/grain"
@@ -36,7 +36,7 @@ digest = "sha256:e0e7beb6f648976ac44369edc96244af6185bcf8a441ae93756b8ebf4c2e663
 
 [packages.battery.huggingface]
 path = "batteries/huggingface"
-digest = "sha256:ae53bae219bb2e83c7e43f6f175212fcd167606288265b820c914a459debe33e"
+digest = "sha256:7854f41eff39bd5b63194eff8291f126aade8555888e773f309e4f2b3aa28234"
 
 [packages.battery.jev]
 path = "batteries/jev"
@@ -48,7 +48,7 @@ digest = "sha256:858754bfe3ab9ad8ce4d5a7544ff8e4d43fb0e4320298aea33efaac93c79c65
 
 [packages.battery.linear]
 path = "batteries/linear"
-digest = "sha256:311bb46544f752f21f2758b448aac645f96b99af7591ca91b02e6d6dfcb75eb0"
+digest = "sha256:3bc56e65aa704f4c9ab84c14c911193b763524330beec83173c1171175d6ae33"
 
 [packages.battery.microsoft-learn]
 path = "batteries/microsoft-learn"
@@ -80,7 +80,7 @@ digest = "sha256:03440096368e95659cef265a0cf2cf84d75eea826afec477f247c490e253b2f
 
 [packages.battery.slack]
 path = "batteries/slack"
-digest = "sha256:6a419a513d5519ea90a41faf719d4b29babd51244f9b307d618219d8ea70b73a"
+digest = "sha256:6b5febcab9dcfc42e0a6591e55c54f84709bede0f0ab9d2d7948c4c184661da5"
 
 [packages.battery.xmemory]
 path = "batteries/xmemory"

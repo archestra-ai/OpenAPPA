@@ -1,5 +1,7 @@
-"""The linear audience source of a multi-user deployment: one consult in,
-one answer out.
+"""The linear audience source of a multi-user deployment. The runtime
+runs this script once for each membership read or member lookup, passes
+the consult request as JSON on standard input, and reads one JSON answer
+from standard output.
 
 The token is an OAuth app's access token issued with `actor=app`: no
 person stands behind it, so there is no viewer, and a personal API key,

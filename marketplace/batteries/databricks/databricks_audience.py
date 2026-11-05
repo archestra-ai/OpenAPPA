@@ -1,4 +1,7 @@
-"""The databricks audience source's reads: one consult in, one answer out.
+"""The databricks audience source's reads, imported by both of its
+scripts. The runtime runs a script once for each membership read or
+member lookup, passes the consult request as JSON on standard input, and
+reads one JSON answer from standard output.
 
 audience-source.py serves these selector templates over one workspace,
 through the Databricks CLI, and audience-source-multi-user.py all but
