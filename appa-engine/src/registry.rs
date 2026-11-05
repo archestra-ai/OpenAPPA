@@ -11,7 +11,7 @@ use crate::contract::{
     AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
     ToolDeclaration,
 };
-use crate::fact::EffectKind;
+use crate::fact::{EffectKind, EffectSet};
 use crate::label::{
     Audience, AudienceSpelling, ChainAudience, Clause, DeclaredAudience, Evaluation, Expansions, GroupRef,
     MembershipContext, ReaderId, SymbolicAtom, Trust,
@@ -830,11 +830,97 @@ struct Remedies<'a> {
     attention_marks: &'a BTreeSet<MarkName>,
 }
 
+/// The checkable tools a blocked call may redispatch through, indexed once so the planner-cap lint
+/// does not rescan the catalogue for every declaration.
+#[derive(Default)]
+struct RedispatchCandidates<'a> {
+    annotated: usize,
+    emitting: usize,
+    emitters: BTreeMap<&'a EffectKind, usize>,
+    /// Per kind, every effect set of two or more kinds holding it. Such a candidate is in
+    /// `emitters` once per kind, but a declaration counts it once however many priors it meets.
+    overlapping: BTreeMap<&'a EffectKind, Vec<WideEffectSet>>,
+}
+
+struct WideEffectSet {
+    ordinal: usize,
+    candidates: usize,
+}
+
+impl<'a> RedispatchCandidates<'a> {
+    fn new(tools: &[&'a ToolDeclaration]) -> Self {
+        let mut index = Self::default();
+        let mut wide_sets: BTreeMap<&EffectSet, usize> = BTreeMap::new();
+        for candidate in tools {
+            match candidate {
+                ToolDeclaration::Annotated { .. } => index.annotated += 1,
+                ToolDeclaration::Declared(tool) if tool.emits.is_empty() => {}
+                ToolDeclaration::Declared(tool) => {
+                    index.emitting += 1;
+                    for kind in tool.emits.iter() {
+                        *index.emitters.entry(kind).or_default() += 1;
+                    }
+                    if tool.emits.len() > 1 {
+                        *wide_sets.entry(&tool.emits).or_default() += 1;
+                    }
+                }
+            }
+        }
+        for (ordinal, (set, candidates)) in wide_sets.into_iter().enumerate() {
+            for kind in set.iter() {
+                let sets = index.overlapping.entry(kind).or_default();
+                sets.push(WideEffectSet { ordinal, candidates });
+            }
+        }
+        index
+    }
+
+    fn redispatches(&self, declaration: &ToolDeclaration) -> usize {
+        let tool = match declaration {
+            // What the Annotator may require is unknown at load, so every candidate that emits
+            // at all stays counted.
+            ToolDeclaration::Annotated { .. } => return self.annotated + self.emitting,
+            ToolDeclaration::Declared(tool) => tool,
+        };
+        let priors: BTreeSet<&EffectKind> = tool
+            .requires
+            .history
+            .iter()
+            .filter_map(|requirement| match requirement {
+                HistoryRequirement::Prior(kind) => Some(kind),
+                HistoryRequirement::NoPrior(_) => None,
+            })
+            .collect();
+        let emitted: usize = priors.iter().filter_map(|kind| self.emitters.get(kind)).sum();
+        // An Annotated candidate's emits are unknown at load; the cap is the only bound, so it
+        // stays counted wherever a prior could match it.
+        match priors.len() {
+            0 => 0,
+            1 => self.annotated + emitted,
+            _ => {
+                let mut met: Vec<&WideEffectSet> = priors
+                    .iter()
+                    .filter_map(|prior| self.overlapping.get(prior))
+                    .flatten()
+                    .collect();
+                // Stable: each kind's sets are already in ordinal order, so this merges runs.
+                met.sort_by_key(|set| set.ordinal);
+                let repeated: usize = met
+                    .windows(2)
+                    .filter(|pair| pair[0].ordinal == pair[1].ordinal)
+                    .map(|pair| pair[1].candidates)
+                    .sum();
+                self.annotated + emitted - repeated
+            }
+        }
+    }
+}
+
 fn worst_case_plan_alternatives(
     declaration: &ToolDeclaration,
     confined: bool,
     context_control: bool,
-    tools: &[&ToolDeclaration],
+    candidates: &RedispatchCandidates<'_>,
     remedies: &Remedies<'_>,
     context: &MembershipContext<'_>,
 ) -> u128 {
@@ -1016,32 +1102,7 @@ fn worst_case_plan_alternatives(
         multiply(worst_case_return_options(sanitizers));
     }
 
-    // What the Annotator may require is unknown at load, so every candidate that emits at all
-    // stays counted as a redispatch.
-    let priors: Vec<&EffectKind> = match declaration {
-        ToolDeclaration::Annotated { .. } => Vec::new(),
-        ToolDeclaration::Declared(tool) => tool
-            .requires
-            .history
-            .iter()
-            .filter_map(|requirement| match requirement {
-                HistoryRequirement::Prior(kind) => Some(kind),
-                HistoryRequirement::NoPrior(_) => None,
-            })
-            .collect(),
-    };
-    let any_prior = matches!(declaration, ToolDeclaration::Annotated { .. });
-    let redispatches = tools
-        .iter()
-        .filter(|candidate| match candidate {
-            ToolDeclaration::Declared(tool) => {
-                tool.emits.iter().any(|kind| priors.contains(&kind)) || (any_prior && !tool.emits.is_empty())
-            }
-            // An Annotated candidate's emits are unknown at load; the cap is the only bound, so
-            // it stays counted wherever a prior could match it.
-            ToolDeclaration::Annotated { .. } => any_prior || !priors.is_empty(),
-        })
-        .count() as u128;
+    let redispatches = candidates.redispatches(declaration) as u128;
     let input_hops = sanitizers
         .iter()
         .filter(|sanitizer| sanitizer.on.input && sanitizer.applies_to(tags))
@@ -1399,12 +1460,13 @@ impl Registry {
             .flat_map(|(_, variants)| variants)
             .map(|(_, d)| d)
             .collect();
+        let redispatch_candidates = RedispatchCandidates::new(&checkable_tools);
         for declaration in tools.values().flatten().map(|(_, d)| d).chain(wildcard.as_ref()) {
             let count = worst_case_plan_alternatives(
                 declaration,
                 profile.confines_result(declaration.name()),
                 profile.context_control(),
-                &checkable_tools,
+                &redispatch_candidates,
                 &Remedies {
                     authorities: &config.authorities,
                     sanitizers: &sanitizer_list,
@@ -3775,6 +3837,52 @@ mod tests {
             Registry::build_covered_with_cap(prior_target_config(4), cap),
             Err(LoadError::TooManyPlanAlternatives { count: 5, max: 4, ref tool }) if tool == "wire"
         ));
+    }
+
+    #[test]
+    fn redispatches_count_each_candidate_once_on_every_small_catalogue() {
+        let kinds = |bits: usize| {
+            (0..3)
+                .filter(move |k| bits & (1 << k) != 0)
+                .map(|k| EffectKind::new(k.to_string()))
+        };
+        let annotated = ToolDeclaration::Annotated {
+            name: ToolName::new("annotated"),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: AnnotatorName::new("any"),
+        };
+        let emitters: Vec<ToolDeclaration> = (0..8)
+            .map(|bits| {
+                let mut emitter = tool("emitter");
+                emitter.emits = EffectSet::new(kinds(bits)).unwrap();
+                ToolDeclaration::Declared(emitter)
+            })
+            .collect();
+        for chosen in 0..256usize {
+            // Each chosen emitter twice, so a repeated effect set keeps its multiplicity.
+            let masks: Vec<usize> = (0..8).filter(|bits| chosen & (1 << bits) != 0).collect();
+            let doubled = masks.iter().flat_map(|bits| [&emitters[*bits], &emitters[*bits]]);
+            let plain: Vec<&ToolDeclaration> = doubled.collect();
+            let with_annotated: Vec<&ToolDeclaration> = plain.iter().copied().chain([&annotated]).collect();
+            for (tools, extra) in [(&plain, 0), (&with_annotated, 1)] {
+                let index = RedispatchCandidates::new(tools);
+                let emitting = 2 * masks.iter().filter(|bits| **bits != 0).count();
+                assert_eq!(index.redispatches(&annotated), emitting + extra);
+                for priors in 0..8usize {
+                    let mut requiring = tool("requiring");
+                    requiring.requires.history = kinds(priors)
+                        .chain(kinds(priors))
+                        .map(HistoryRequirement::Prior)
+                        .chain(kinds(!priors & 7).map(HistoryRequirement::NoPrior))
+                        .collect();
+                    let met = 2 * masks.iter().filter(|bits| **bits & priors != 0).count();
+                    let expected = if priors == 0 { 0 } else { met + extra };
+                    assert_eq!(index.redispatches(&ToolDeclaration::Declared(requiring)), expected);
+                }
+            }
+        }
     }
 
     #[test]
