@@ -133,9 +133,9 @@ impl PolicyFile {
     }
 }
 
-/// The two mandatory `[externals]` settings a host supplies for a hosted document that
-/// states neither, and what the host itself serves. A document that states a setting keeps
-/// its own.
+/// The `[externals]` `timeout_ms` and `max_body_bytes` a host supplies for a hosted document
+/// that states neither, in place of the defaults a file takes, and what the host itself
+/// serves. A document that states a setting keeps its own.
 #[derive(Debug, Clone)]
 pub struct HostDefaults {
     pub consult_timeout: Duration,
@@ -1014,6 +1014,7 @@ struct RawConfig {
     include: Vec<String>,
     appa_composed: Option<RawComposedMetadata>,
     policy: toml::Value,
+    #[serde(default)]
     externals: RawExternals,
     /// Root-file only, and stripped before the composed document is rendered, so it never
     /// reaches [`PolicyFile::bytes`]. See [`Config::load`].
@@ -1074,26 +1075,41 @@ struct RawComposedMetadata {
     command_cwd: BTreeMap<String, String>,
 }
 
+/// `[externals]` as written. Every field is optional, and an absent one takes the value
+/// [`RawExternals::default`] names.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 struct RawExternals {
     timeout_ms: u64,
-    #[serde(default = "default_review_timeout_ms")]
     review_timeout_ms: u64,
     max_body_bytes: usize,
-    #[serde(default)]
     authorities: BTreeMap<String, RawBinding>,
-    #[serde(default)]
     sanitizers: BTreeMap<String, RawBinding>,
-    #[serde(default)]
     annotators: BTreeMap<String, RawBinding>,
-    #[serde(default)]
     audience: BTreeMap<String, RawAudienceBinding>,
-    #[serde(default)]
     context: BTreeMap<String, RawContextBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
     jev: Option<RawJev>,
+}
+
+impl Default for RawExternals {
+    /// A consult answers within 5 s and in 64 KiB; a human review stays open 10 minutes.
+    fn default() -> RawExternals {
+        RawExternals {
+            timeout_ms: 5_000,
+            review_timeout_ms: 600_000,
+            max_body_bytes: 65_536,
+            authorities: BTreeMap::new(),
+            sanitizers: BTreeMap::new(),
+            annotators: BTreeMap::new(),
+            audience: BTreeMap::new(),
+            context: BTreeMap::new(),
+            claude_code: None,
+            llm: None,
+            jev: None,
+        }
+    }
 }
 
 impl RawExternals {
@@ -1220,10 +1236,6 @@ struct RawAudienceBinding {
     lookup: Option<String>,
     /// The selector templates this source serves, with what each may feed.
     selectors: Option<Vec<SelectorDeclaration>>,
-}
-
-fn default_review_timeout_ms() -> u64 {
-    600_000
 }
 
 impl Config {
@@ -2881,6 +2893,18 @@ mod tests {
             Some("the runtime does not interpret this"),
         );
         assert_eq!(config.policy_file().bytes(), MINIMAL.as_bytes());
+    }
+
+    #[test]
+    fn an_unstated_externals_setting_takes_its_default() {
+        let bare = parse("[policy]\nversion = 2\n").expect("a file without [externals] validates");
+        assert_eq!(bare.externals.timeout, Duration::from_millis(5_000));
+        assert_eq!(bare.externals.review_timeout, Duration::from_millis(600_000));
+        assert_eq!(bare.externals.max_body_bytes, 65_536);
+
+        let partial = parse("[policy]\nversion = 2\n[externals]\ntimeout_ms = 1500\n").expect("validates");
+        assert_eq!(partial.externals.timeout, Duration::from_millis(1_500));
+        assert_eq!(partial.externals.max_body_bytes, 65_536);
     }
 
     #[test]
