@@ -166,12 +166,12 @@ builtin = "hitl"
 [externals.sanitizers.redact-for-public]
 builtin = "claude-code"
 
-# The Claude Code battery routes Read, Write, Edit and SafeBash through the
-# file-tracker, which the `appa` executable serves. While it is bound,
-# `clappa` starts Claude Code with Bash, PowerShell, Monitor, Grep and
-# NotebookEdit disabled and SafeBash registered. SafeBash runs a command that
-# declares no host under bubblewrap on Linux, and every other command in
-# Anthropic's sandbox runtime, `srt`, which must be on PATH.
+# The Claude Code battery routes Read, Write, Edit, Bash and SafeBash through
+# the file-tracker, which the `appa` executable serves. While it is bound,
+# `clappa` confines each Bash call in Claude Code's own sandbox, or, where the
+# preload's self-test fails, disables Bash and registers SafeBash, which runs
+# in Anthropic's sandbox runtime, `srt`. It disables PowerShell, Monitor, Grep
+# and NotebookEdit either way.
 [externals.annotators.file-tracker]
 command = ["appa", "file-tracker", "annotate"]
 

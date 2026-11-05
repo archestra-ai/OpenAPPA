@@ -4,11 +4,15 @@
 //! - `annotate` reads one annotation consult on stdin and writes its answer.
 //! - `record` reads one recorder delivery on stdin and writes its acknowledgement.
 //! - `mcp` serves SafeBash as an MCP server on stdio.
+//! - `sandbox` reads one Claude Code `Bash` call's arguments on stdin and writes the
+//!   confinement `clappa`'s preload gives Claude Code's sandbox for that call.
 //!
 //! Each takes `--config <file-tracker.toml>`.
 
+/// The preload `clappa` loads into Claude Code to confine its own Bash per call; see the file.
+pub const CLAUDE_BASH_PRELOAD: &str = include_str!("../claude-bash.js");
+
 mod annotate;
-mod bubblewrap;
 mod config;
 mod label;
 mod paths;
@@ -24,7 +28,7 @@ use std::process::ExitCode;
 pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
     let mut arguments = arguments.into_iter();
     let Some(command) = arguments.next() else {
-        eprintln!("usage: appa file-tracker annotate|record|mcp [--config <file-tracker.toml>]");
+        eprintln!("usage: appa file-tracker annotate|record|mcp|sandbox [--config <file-tracker.toml>]");
         return ExitCode::from(2);
     };
     let mut explicit: Option<PathBuf> = None;
@@ -48,6 +52,7 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
         "annotate" => answer(|request| annotate::annotate(&config, request)),
         "record" => answer(|delivery| record::record(&config, delivery)),
         "mcp" => safebash::serve(&config),
+        "sandbox" => answer(|arguments| safebash::sandbox(&config, arguments)),
         other => Err(format!("unknown command {other:?}")),
     };
     match outcome {

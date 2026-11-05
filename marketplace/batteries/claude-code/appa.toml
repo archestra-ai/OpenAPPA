@@ -42,10 +42,17 @@ name = "host/claude-code/Edit"
 annotator = "file-tracker"
 recorder = "file-tracker"
 
-# A shell command runs only as SafeBash, which the file-tracker serves over
-# MCP: the command declares the files it reads and writes and the hosts it
-# reaches, and a sandbox confines it to exactly those: bubblewrap on Linux for
-# a command that declares no host, Anthropic's sandbox runtime `srt` otherwise.
+# A shell command declares the files it reads and writes and the hosts it
+# reaches, and a sandbox confines it to exactly those. `clappa` adds the three
+# lists to Claude Code's own Bash and confines each call in Claude Code's
+# sandbox; where it cannot, it serves SafeBash instead, which runs in
+# Anthropic's sandbox runtime `srt`. A Bash call that names no lists — Claude
+# Code started without `clappa` — is refused: the file-tracker cannot judge it.
+[[policy.tool]]
+name = "host/claude-code/Bash"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
 [[policy.tool]]
 name = "mcp/file-tracker/SafeBash"
 annotator = "file-tracker"
@@ -57,10 +64,6 @@ recorder = "file-tracker"
 # file-tracker's sight. `clappa` starts Claude Code with them disabled; these
 # rules refuse them at the hook too, so a session started some other way
 # cannot run them either.
-[[policy.tool]]
-name = "host/claude-code/Bash"
-requires = { attention = ["blocked"] }
-
 [[policy.tool]]
 name = "host/claude-code/PowerShell"
 requires = { attention = ["blocked"] }

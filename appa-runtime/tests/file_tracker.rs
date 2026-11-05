@@ -240,10 +240,11 @@ async fn a_secret_copied_into_a_scratch_file_keeps_its_label_in_a_later_session(
 }
 
 /// The shipped Claude Code deployment, laid out as `appa plugin install claude-code` lays it
-/// out: the Claude Code battery routes Read and Write to the file-tracker the root policy
-/// binds, and refuses Bash and the other unmediated tools with no remedy.
+/// out: the Claude Code battery routes Read, Write and Bash to the file-tracker the root
+/// policy binds, refuses a Bash call that declares nothing, and refuses the other unmediated
+/// tools with no remedy.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_claude_code_battery_routes_file_tools_to_the_tracker_and_blocks_unmediated_tools() {
+async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_blocks_unmediated_tools() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
@@ -278,7 +279,7 @@ async fn the_claude_code_battery_routes_file_tools_to_the_tracker_and_blocks_unm
         "TOKEN=1",
     )
     .await;
-    for tool in ["Bash", "PowerShell", "Monitor", "Grep", "NotebookEdit"] {
+    for tool in ["PowerShell", "Monitor", "Grep", "NotebookEdit"] {
         let HookDecision::DenyCall { feedback, .. } = propose(
             &runtime,
             "s",
@@ -296,6 +297,48 @@ async fn the_claude_code_battery_routes_file_tools_to_the_tracker_and_blocks_unm
             "{tool}: {feedback}"
         );
     }
+    // Claude Code without `clappa`'s preload sends Bash without the three lists: nothing the
+    // call could be confined to, so the file-tracker gives no annotation and it does not run.
+    let undeclared = propose(
+        &runtime,
+        "s",
+        call("host/claude-code/Bash", serde_json::json!({ "command": "cat .env" })),
+    )
+    .await;
+    assert!(
+        matches!(&undeclared, HookDecision::Refuse { detail, .. } if detail.contains("names no")),
+        "{undeclared:?}"
+    );
+
+    // With the lists, a Bash call is a SafeBash call: its result carries its inputs' label,
+    // and its outputs take the label it published, in a session that never read the file.
+    start(&runtime, "t").await;
+    let send = || {
+        call(
+            "host/claude-code/SendMessage",
+            serde_json::json!({ "to": "peer", "message": "hi" }),
+        )
+    };
+    run(&runtime, "t", send(), "sent").await;
+    let copy = root.join("copy.txt");
+    run(
+        &runtime,
+        "t",
+        call(
+            "host/claude-code/Bash",
+            serde_json::json!({
+                "command": format!("cp {} {}; cat {}", secret.display(), copy.display(), copy.display()),
+                "input_files": [secret], "output_files": [copy], "network_hosts": [],
+            }),
+        ),
+        "TOKEN=1",
+    )
+    .await;
+    assert_eq!(recorded(&store, &copy)["audience"], serde_json::json!([["self"]]));
+    // The session now holds `self` data, so a send to another session is refused.
+    let narrowed = propose(&runtime, "t", send()).await;
+    assert!(matches!(narrowed, HookDecision::DenyCall { .. }), "{narrowed:?}");
+
     let notes = root.join("notes.txt");
     std::fs::write(&notes, "TOKEN=1\n").unwrap();
     run(

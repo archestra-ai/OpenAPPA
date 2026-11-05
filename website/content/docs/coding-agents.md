@@ -23,7 +23,7 @@ This lets a subagent read a private ticket or credential-adjacent log and return
 
 ## Shell and native file tools
 
-Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code). It routes `Read`, `Write`, and `Edit` through the [file-tracker](#files-that-keep-their-labels), runs shell commands only as [SafeBash](#safebash), and blocks `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`.
+Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code). It routes `Read`, `Write`, and `Edit` through the [file-tracker](#files-that-keep-their-labels), confines every shell command to the files and hosts it declares ([SafeBash](#safebash)), and blocks `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`.
 
 The `coding` battery gives the canonical shell and file tools of other harnesses these contracts:
 
@@ -47,20 +47,20 @@ The plugin's built-in path rules give credential paths such as `.env*` and `~/.s
 
 ### SafeBash
 
-A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. The file-tracker therefore serves one shell tool, `SafeBash`, with four arguments: `command`, `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and system directories, write only its output files, and connect only to its hosts. Every other file in the home directory, the working directory, or a temporary directory is hidden from it. Two sandboxes enforce this:
+A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and system directories, write only its output files, and connect only to its hosts. Every other file in the home directory, the working directory, or a temporary directory is hidden from it, and a write to an undeclared path does not reach the disk. Each output file is emptied before the command runs.
 
-| Command | Sandbox | Inputs | Outputs | Network |
-|---|---|---|---|---|
-| Declares no host, on Linux | `bubblewrap`, with an empty environment and no capabilities | Read-only copies at their own paths | Written back only when the command exits 0, so a failed command leaves them unchanged | None |
-| Declares a host, or not on Linux | Anthropic's sandbox runtime (`srt`): bubblewrap on Linux, Seatbelt on macOS | The files themselves | Emptied before the command runs, then written in place | The declared hosts, through the sandbox proxy |
+APPA builds no sandbox of its own. It confines each command in the best sandbox the harness has:
 
-Both take the same arguments and return the same result: the exit code, then standard output and standard error.
+| Where | Tool | Sandbox |
+|---|---|---|
+| Claude Code started by `clappa`, on a tested release | Claude Code's own `Bash`, with the three lists added | Claude Code's built-in sandbox (bubblewrap on Linux, Seatbelt on macOS) and its proxy, configured for each call |
+| Claude Code otherwise | `mcp/file-tracker/SafeBash`, served by the file-tracker | Anthropic's sandbox runtime `srt`, the same runtime, started for each call |
 
-Claude Code links the same runtime into its own `Bash` tool, but SafeBash starts a separate sandbox for each call. Claude Code keeps one sandbox configuration for the whole session. A settings change applies only to the commands after the one in progress, and the working directory stays readable and writable. Neither of these allows a command to be confined to the files it declares.
+Before each session, `clappa` loads a preload into Claude Code and runs its self-test. The self-test checks that the lists survive Claude Code's input handling, that an undeclared file is hidden and an undeclared write does not reach the disk, and that each command reaches only its own hosts. If the release is not on the tested list or any check fails, `clappa` disables `Bash`, registers SafeBash, and prints why. A `Bash` call that declares no lists, such as one from Claude Code started without `clappa`, is refused. Both tools return the exit code, standard output and standard error as a successful result, so the call's label applies whatever the exit code.
 
 The annotator forwards the combined label of the input files, and the call's result carries it. The recorder applies the published label to every output file.
 
-The label of a copied secret therefore survives across sessions. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later `SafeBash` command that reads `/tmp/notes.txt` narrows its session to `self`, in this session or in any other, so a later public sink such as `WebFetch` is refused.
+The label of a copied secret therefore survives across sessions. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later shell command that reads `/tmp/notes.txt` narrows its session to `self`, in this session or in any other, so a later public sink such as `WebFetch` is refused.
 
 The hosts a call declares do not change its label. The sandbox confines the command to them, but APPA does not check what a host may receive.
 
@@ -68,15 +68,15 @@ The hosts a call declares do not change its label. The sandbox confines the comm
 
 | Harness | File tools | Shell |
 |---|---|---|
-| Claude Code | `Read`, `Write`, `Edit`, and `mcp/file-tracker/SafeBash` use the file-tracker annotator and recorder. | `clappa` starts Claude Code without `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`, and the battery blocks them. |
+| Claude Code | `Read`, `Write`, `Edit`, `Bash`, and `mcp/file-tracker/SafeBash` use the file-tracker annotator and recorder. | `clappa` confines `Bash` per call in Claude Code's sandbox, or serves SafeBash where it cannot. It starts Claude Code without `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`, and the battery blocks them. |
 | OpenCode | `read`, `write`, `edit`, and `appa_safebash` use the file-tracker annotator and recorder. | AppenCode removes native `shell` and `patch`. `appa_safebash` runs in a sandbox extension with a proxy. |
 | Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. No file-tracker runs. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
 
-The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. SafeBash needs `bwrap` on Linux and `srt` on `PATH`.
+The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. The SafeBash fallback needs `srt` on `PATH`.
 
 ### Limits
 
-- A `SafeBash` command can send its input files to any host it declares. Network destinations carry no policy yet.
+- A shell command can send its input files to any host it declares. Network destinations carry no policy yet.
 - A file that changes outside a mediated call keeps its recorded label. A process outside the sandbox can still copy a file without its label.
 - A read waits while a write of the same file has not yet reached the recorder. If the write does not settle within the wait, the read fails and the agent can propose it again.
 - The stored audience must be one clause of audiences the policy declares. A file that two unrelated restricted audiences wrote fails its next annotation.

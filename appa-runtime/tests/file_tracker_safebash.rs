@@ -1,8 +1,6 @@
-//! SafeBash through its MCP server and the real sandboxes: a command sees the files it
+//! SafeBash through its MCP server and the real sandbox runtime: a command sees the files it
 //! declares and nothing else of the user's, writes only its outputs, and reaches no host it
-//! did not declare. A command declaring no host runs under bubblewrap, which writes its
-//! outputs back only when it succeeds; one declaring a host runs in the sandbox runtime `srt`.
-//! Each part is skipped where its sandbox is not installed.
+//! did not declare. Skipped where the sandbox runtime `srt` is not installed.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -52,7 +50,7 @@ fn installed(program: &str) -> bool {
 
 #[test]
 fn a_command_sees_only_what_it_declares() {
-    if !installed("bwrap") || !installed("srt") {
+    if !installed("srt") {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -95,22 +93,20 @@ fn a_command_sees_only_what_it_declares() {
         "an undeclared write never reaches the disk"
     );
 
-    // An offline command that fails leaves its declared output as it was, and an input
-    // is a read-only copy. The command ran and its output reaches the model, so the result
-    // is no error: the harness reports an error result as a failed call, whose label the
-    // engine never applies.
+    // A command that exits non-zero ran, and its output reaches the model, so the result is
+    // no error: the harness reports an error result as a failed call, whose label the engine
+    // never applies. An input stays read-only.
     let (text, failed) = safebash(
         &config,
         serde_json::json!({
-            "command": format!("echo partial > {output}; echo tamper > {input}; exit 3", output = output.display(), input = input.display()),
+            "command": format!("cat {input}; echo tamper > {input}; exit 3", input = input.display()),
             "input_files": [input], "output_files": [output], "network_hosts": [],
         }),
     );
     assert!(
-        !failed && text.contains("exit: 3") && text.contains("not written"),
+        !failed && text.contains("exit: 3") && text.contains("declared"),
         "{text}"
     );
-    assert_eq!(std::fs::read_to_string(&output).unwrap(), "DECLARED\n");
     assert_eq!(std::fs::read_to_string(&input).unwrap(), "declared\n");
 
     // A declared host is reached through the sandbox's proxy, while the temporary
@@ -136,4 +132,59 @@ fn a_command_sees_only_what_it_declares() {
         serde_json::json!({ "command": "true", "input_files": [root.join("missing")], "output_files": [], "network_hosts": [] }),
     );
     assert!(failed && text.contains("refused"), "{text}");
+}
+
+/// What `clappa`'s preload hands Claude Code's sandbox for one Bash call: the declared input
+/// alone readable inside the hidden home, working and temporary directories, the declared
+/// output alone writable and emptied, the declared host alone reachable, and nothing for a
+/// call that declares no lists.
+#[test]
+fn a_bash_call_is_confined_to_what_it_declares() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let config = root.join("file-tracker.toml");
+    std::fs::write(
+        &config,
+        format!("store = {:?}\n", root.join("store.json").display().to_string()),
+    )
+    .unwrap();
+    let input = root.join("in.txt");
+    let output = root.join("out.txt");
+    std::fs::write(&input, "declared\n").unwrap();
+    std::fs::write(&output, "stale\n").unwrap();
+    let confine = |arguments: serde_json::Value| {
+        let mut tracker = Command::new(env!("CARGO_BIN_EXE_appa"))
+            .args(["file-tracker", "sandbox", "--config"])
+            .arg(&config)
+            .current_dir(&root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(tracker.stdin.take().unwrap(), "{arguments}").unwrap();
+        let output = tracker.wait_with_output().unwrap();
+        (output.status.success(), String::from_utf8(output.stdout).unwrap())
+    };
+
+    let (ok, answer) = confine(serde_json::json!({
+        "command": "cat in.txt > out.txt", "input_files": [input], "output_files": [output],
+        "network_hosts": ["Example.COM"],
+    }));
+    assert!(ok, "{answer}");
+    let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+    let paths = |field: &str| answer["filesystem"][field].clone();
+    for hidden in ["/tmp", std::env::var("HOME").unwrap().as_str(), root.to_str().unwrap()] {
+        assert!(
+            paths("denyRead").as_array().unwrap().iter().any(|path| path == hidden),
+            "{hidden} is hidden"
+        );
+    }
+    assert_eq!(paths("allowRead"), serde_json::json!([input]));
+    assert_eq!(paths("allowWrite"), serde_json::json!([output]));
+    assert_eq!(answer["network"]["allowedDomains"], serde_json::json!(["example.com"]));
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "", "the output is emptied");
+
+    let (ok, _) = confine(serde_json::json!({ "command": "cat in.txt" }));
+    assert!(!ok, "a call that declares no lists has no confinement");
 }

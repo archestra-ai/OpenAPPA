@@ -47,7 +47,9 @@ pub fn named(role: &ToolRole, arguments: &serde_json::Value) -> Result<Named, St
     };
     let list = |field: &str| -> Result<Vec<String>, String> {
         match &arguments[field] {
-            serde_json::Value::Null => Ok(Vec::new()),
+            // A call that names no list declares nothing it could be confined to: Claude
+            // Code drops these arguments from `Bash` unless `clappa`'s preload declares them.
+            serde_json::Value::Null => Err(format!("{} names no {field} list", role.name)),
             serde_json::Value::Array(items) => items
                 .iter()
                 .map(|item| {

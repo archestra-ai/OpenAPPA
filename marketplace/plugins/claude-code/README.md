@@ -45,14 +45,17 @@ The plugin cannot prevent that observation by denying the later hook.
 ### File labels and SafeBash
 
 The Claude Code battery routes `Read`, `Write` and `Edit` through the
-file-tracker, as both Annotator and recorder, and confines shell commands to
-`mcp/file-tracker/SafeBash`. The default policy binds the file-tracker to
-`appa file-tracker`, which the runtime executable serves. SafeBash needs
-`bwrap` on Linux for commands that declare no host, and Anthropic's sandbox
-runtime `srt` on `PATH` for every other command. While the policy binds the
-`file-tracker` recorder, `clappa` starts Claude Code with `Bash`, `PowerShell`,
-`Monitor`, `Grep` and `NotebookEdit` disabled and the file-tracker's MCP server
-registered; the battery also blocks those tools at the hook.
+file-tracker, as both Annotator and recorder, and confines each shell command
+to the files and hosts it declares. The default policy binds the file-tracker
+to `appa file-tracker`, which the runtime executable serves. While the policy
+binds the `file-tracker` recorder, `clappa` loads a preload into Claude Code
+that adds `input_files`, `output_files` and `network_hosts` to `Bash` and
+confines each call in Claude Code's own sandbox. It first runs the preload's
+self-test; on a Claude Code release it was not checked against, or when a
+check fails, it disables `Bash` and registers the file-tracker's SafeBash,
+which needs Anthropic's sandbox runtime `srt` on `PATH`. Either way it starts
+Claude Code with `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` disabled;
+the battery also blocks those tools at the hook.
 The [coding-agents guide](../../../website/content/docs/coding-agents.md#files-that-keep-their-labels)
 describes the labels and the sandbox.
 

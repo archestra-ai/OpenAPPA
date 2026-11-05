@@ -4,14 +4,11 @@
 //! reaches only its `network_hosts`. Anything
 //! it does not declare is invisible to it, so its output carries no label it did not name.
 //!
-//! A command that declares no host runs, on Linux, under bubblewrap (`crate::bubblewrap`),
-//! which writes its outputs back only when it succeeds. Every other command runs in
-//! Anthropic's sandbox runtime (`srt`), whose proxy admits the declared hosts.
-//!
-//! Each call starts its own sandbox, rather than going through Claude Code's Bash tool.
-//! Claude Code holds one sandbox configuration per session: a settings change reaches only
-//! the commands after the one it precedes, and the working directory always stays readable
-//! and writable. Per-call confinement needs neither.
+//! Two sandboxes enforce it, and the file-tracker builds neither. Where `clappa` confines
+//! Claude Code's own `Bash` per call ([`sandbox`] answers each call's confinement), Claude
+//! Code's built-in sandbox runs the command. Everywhere else, SafeBash runs it in Anthropic's
+//! sandbox runtime (`srt`) — the runtime Claude Code links into its Bash tool — whose proxy
+//! admits the declared hosts.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -29,10 +26,10 @@ const STREAM_LIMIT: usize = 64 * 1024;
 
 pub const DESCRIPTION: &str = "Runs one shell command in a sandbox. The command can read only the files listed in \
     input_files (plus system directories such as /usr and /etc), write only the files listed in output_files, and \
-    connect only to the hosts listed in network_hosts. Use absolute paths. Each output file starts empty. A command \
-    that declares no host gets its output files written only when it exits 0; one that declares a host writes them \
-    in place. Declare every file the command reads or writes: any other file in your workspace, home or /tmp is \
-    hidden from it.";
+    connect only to the hosts listed in network_hosts. Use absolute paths. Each output file is emptied before the \
+    command runs. Declare every file the command reads or writes: any other file in your workspace, home or /tmp is \
+    hidden from it, so ls and find there show only what the call declares. To find files, use the Glob tool, then \
+    declare the ones the command needs.";
 
 pub fn schema() -> Value {
     json!({
@@ -56,35 +53,13 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
         path: None,
     };
     let named = named(&role, arguments)?;
-    for input in &named.reads {
-        if !std::fs::metadata(input).is_ok_and(|metadata| metadata.is_file()) {
-            return Err(format!("input {} is not a regular file", input.display()));
-        }
-    }
-    for output in &named.writes {
-        if std::fs::metadata(output).is_ok_and(|metadata| !metadata.is_file()) {
-            return Err(format!("output {} is not a regular file", output.display()));
-        }
-    }
-    match &config.sandbox.bubblewrap {
-        Some(bwrap) if cfg!(target_os = "linux") && named.hosts.is_empty() => {
-            crate::bubblewrap::run(bwrap, config, command, &named)
-        }
-        _ => run_in_srt(config, command, &named),
-    }
-}
-
-/// One command in the sandbox runtime, which writes the declared outputs in place.
-fn run_in_srt(config: &Config, command: &str, named: &Named) -> Result<String, String> {
-    for output in &named.writes {
-        std::fs::File::create(output).map_err(|error| format!("{}: {error}", output.display()))?;
-    }
+    prepare(&named)?;
     // The sandbox runtime opens its proxy's sockets under its temporary directory, which the
     // command must reach; the temporary directories it would otherwise use stay hidden. This
     // one is the call's own and holds nothing of the user's.
     let scratch = std::env::temp_dir().join(format!("appa-safebash-{}-{}", std::process::id(), crate::store::now()));
     std::fs::create_dir(&scratch).map_err(|error| format!("{}: {error}", scratch.display()))?;
-    let settings = settings(config, &named.reads, &named.writes, &named.hosts, &scratch)?;
+    let settings = settings(config, &named, Some(&scratch))?;
     let file = tempfile_in_temp(&settings)?;
     let (program, prefix) = config
         .sandbox
@@ -105,21 +80,55 @@ fn run_in_srt(config: &Config, command: &str, named: &Named) -> Result<String, S
     Ok(finished?.report(config.sandbox.timeout_secs, ""))
 }
 
+/// The confinement of one Claude Code `Bash` call, for `clappa`'s preload to hand to Claude
+/// Code's built-in sandbox: the same filesystem and network settings SafeBash gives `srt`,
+/// with the call's outputs emptied as SafeBash empties them. A call that does not name all
+/// three lists, or names an input that is not a regular file, is refused.
+pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
+    let role = ToolRole {
+        name: "Bash".to_string(),
+        role: Role::Run,
+        path: None,
+    };
+    let named = named(&role, arguments)?;
+    prepare(&named)?;
+    settings(config, &named, None)
+}
+
+/// Check what a call names and empty its outputs: every input an existing regular file, every
+/// output a regular file or absent.
+fn prepare(named: &Named) -> Result<(), String> {
+    for input in &named.reads {
+        if !std::fs::metadata(input).is_ok_and(|metadata| metadata.is_file()) {
+            return Err(match std::fs::metadata(input).is_ok_and(|metadata| metadata.is_dir()) {
+                true => format!(
+                    "input {} is a directory: declare the files the command reads, and find them with the Glob tool",
+                    input.display()
+                ),
+                false => format!("input {} is not a regular file", input.display()),
+            });
+        }
+    }
+    for output in &named.writes {
+        if std::fs::metadata(output).is_ok_and(|metadata| !metadata.is_file()) {
+            return Err(format!("output {} is not a regular file", output.display()));
+        }
+        std::fs::File::create(output).map_err(|error| format!("{}: {error}", output.display()))?;
+    }
+    Ok(())
+}
+
 /// How a sandboxed command ended.
-pub struct Finished {
+struct Finished {
     /// The exit status, or none when the command ran past its time.
-    pub status: Option<std::process::ExitStatus>,
-    pub stdout: String,
-    pub stderr: String,
+    status: Option<std::process::ExitStatus>,
+    stdout: String,
+    stderr: String,
 }
 
 impl Finished {
-    pub fn succeeded(&self) -> bool {
-        self.status.is_some_and(|status| status.success())
-    }
-
     /// The result as the model reads it, `note` appended.
-    pub fn report(&self, timeout_secs: u64, note: &str) -> String {
+    fn report(&self, timeout_secs: u64, note: &str) -> String {
         let code = match self.status {
             Some(status) => status
                 .code()
@@ -134,7 +143,7 @@ impl Finished {
 }
 
 /// Run `command` with no input, its streams captured, and kill it after `timeout_secs`.
-pub fn supervise(mut command: Command, timeout_secs: u64) -> Result<Finished, String> {
+fn supervise(mut command: Command, timeout_secs: u64) -> Result<Finished, String> {
     let program = command.get_program().to_owned();
     let mut child = command
         .stdin(Stdio::null())
@@ -163,38 +172,39 @@ pub fn supervise(mut command: Command, timeout_secs: u64) -> Result<Finished, St
     })
 }
 
-/// The sandbox runtime's settings for one call. Reads are hidden wherever the user's files
-/// live — home, the working directory, the temporary directories, and every file the store
-/// has recorded — and reopened for the inputs alone; writes are allowed to the outputs alone;
-/// the proxy admits the declared hosts alone. `scratch` is the sandbox runtime's own
-/// temporary directory, readable so the command reaches the proxy.
-fn settings(
-    config: &Config,
-    inputs: &[PathBuf],
-    outputs: &[PathBuf],
-    hosts: &[String],
-    scratch: &Path,
-) -> Result<Value, String> {
+/// The sandbox settings for one call. Reads are hidden wherever the user's files live — home,
+/// the working directory, the temporary directories, and every file the store has recorded —
+/// and reopened for the inputs alone; writes are allowed to the outputs alone; the proxy
+/// admits the declared hosts alone. `scratch`, when given, is `srt`'s own temporary
+/// directory, readable so the command reaches the proxy.
+fn settings(config: &Config, named: &Named, scratch: Option<&Path>) -> Result<Value, String> {
     let mut hidden: Vec<PathBuf> = ["/tmp", "/var/tmp"].iter().map(PathBuf::from).collect();
     hidden.extend(std::env::var_os("HOME").map(PathBuf::from));
     hidden.extend(std::env::current_dir().ok());
     hidden.extend(config.store.parent().map(Path::to_path_buf));
     {
         let locked = Locked::open(&config.store)?;
-        hidden.extend(locked.store.files.keys().filter(|path| !inputs.contains(path)).cloned());
+        hidden.extend(
+            locked
+                .store
+                .files
+                .keys()
+                .filter(|path| !named.reads.contains(path))
+                .cloned(),
+        );
     }
-    let mut readable: Vec<PathBuf> = inputs.to_vec();
+    let mut readable: Vec<PathBuf> = named.reads.clone();
     readable.extend(config.sandbox.readable.iter().cloned());
-    readable.push(scratch.to_path_buf());
+    readable.extend(scratch.map(Path::to_path_buf));
     Ok(json!({
         "filesystem": {
             "denyRead": hidden,
             "allowRead": readable,
-            "allowWrite": outputs,
+            "allowWrite": named.writes,
             "denyWrite": ["/tmp/claude"],
         },
         "network": {
-            "allowedDomains": hosts,
+            "allowedDomains": named.hosts,
             "deniedDomains": [],
         },
     }))

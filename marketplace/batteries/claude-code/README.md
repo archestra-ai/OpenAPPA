@@ -20,7 +20,7 @@ The `coding` battery's README describes those rules.
 
 ## Files and shell commands
 
-`Read`, `Write`, `Edit` and `mcp/file-tracker/SafeBash` name the
+`Read`, `Write`, `Edit`, `Bash` and `mcp/file-tracker/SafeBash` name the
 `file-tracker` as their Annotator and recorder. The file-tracker keeps a label
 on every file a call writes, and a later read of that file, in this session or
 another, carries that label. Its built-in path rules give credential paths
@@ -29,17 +29,19 @@ session to write instructions, hooks and shell profiles. Writes to Claude
 Code settings, `.mcp.json` and the OpenAPPA policy ask the person running the
 session. Add rules in `~/.config/appa/file-tracker.toml`.
 
-A shell command runs only as SafeBash. It declares its `input_files`,
-`output_files` and `network_hosts`, and a sandbox confines it to exactly
-those: bubblewrap on Linux for a command that declares no host, Anthropic's
-sandbox runtime `srt` otherwise. `Bash`, `PowerShell`, `Monitor`, `Grep` and
-`NotebookEdit` require the `blocked` mark: they read or write file content
-out of the file-tracker's sight.
+A shell command declares its `input_files`, `output_files` and
+`network_hosts`, and a sandbox confines it to exactly those. `clappa` adds
+the three lists to Claude Code's own `Bash` and confines each call in Claude
+Code's sandbox; where its self-test fails, it serves SafeBash in Anthropic's
+sandbox runtime `srt` instead. A `Bash` call that declares no lists is
+refused. `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` require the
+`blocked` mark: they read or write file content out of the file-tracker's
+sight.
 
 The battery declares the `file-tracker` Annotator; the root binds it. The
 default config `appa plugin install claude-code` writes binds it to
 `appa file-tracker`, and `clappa` then starts Claude Code with the blocked
-tools disabled and SafeBash registered. A root that includes this battery
+tools disabled and `Bash` confined, or SafeBash registered. A root that includes this battery
 binds the file-tracker the same way; see the example below.
 
 The [coding-agents guide](../../../website/content/docs/coding-agents.md#files-that-keep-their-labels)

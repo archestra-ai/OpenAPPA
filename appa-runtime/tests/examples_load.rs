@@ -163,7 +163,7 @@ fn composed(dir: &tempfile::TempDir, include: &str, root_tail: &str) -> Config {
 }
 
 /// Composed with the default and the coding battery, the Claude Code battery hands Read,
-/// Write, Edit and SafeBash to the file-tracker as their Annotator and recorder, blocks
+/// Write, Edit, Bash and SafeBash to the file-tracker as their Annotator and recorder, blocks
 /// the tools that run commands or touch file content out of its sight, and keeps its web
 /// and fallback Annotators.
 #[cfg(unix)]
@@ -186,6 +186,7 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         "host/claude-code/Read",
         "host/claude-code/Write",
         "host/claude-code/Edit",
+        "host/claude-code/Bash",
         "mcp/file-tracker/SafeBash",
     ] {
         let rule = rule(name);
@@ -193,7 +194,6 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         assert_eq!(rule["recorder"].as_str(), Some("file-tracker"), "{name}");
     }
     for name in [
-        "host/claude-code/Bash",
         "host/claude-code/PowerShell",
         "host/claude-code/Monitor",
         "host/claude-code/Grep",

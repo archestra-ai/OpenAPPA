@@ -113,9 +113,9 @@ audience or the proposal configures an audience source for it.
 
 ### Shell commands and files
 
-The Claude Code battery runs every shell command as SafeBash and blocks
-`Bash`, `PowerShell`, `Monitor`, `Grep` and `NotebookEdit`. Propose no rule and
-no Annotator hint for those tools. A CLI command that reaches a service an MCP
+The Claude Code battery confines every shell command, `Bash` or SafeBash, to
+the files and hosts it declares, and blocks `PowerShell`, `Monitor`, `Grep`
+and `NotebookEdit`. Propose no rule and no Annotator hint for those tools. A CLI command that reaches a service an MCP
 battery covers declares its `network_hosts`, and no rule judges that host;
 recommend the service's MCP battery when the user needs rules for the
 service. `Read`, `Write` and `Edit` go through the file-tracker. Label
