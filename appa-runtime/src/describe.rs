@@ -918,7 +918,7 @@ mod tests {
     fn a_config_that_parses_but_does_not_load_names_the_reason() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("appa.toml");
-        std::fs::write(&path, "[policy]\nversion = 2\n[externals]\nmax_body_bytes = 65536\n").expect("config");
+        std::fs::write(&path, "[policy]\nversion = 2\n[externals]\ntimeout_ms = 0\n").expect("config");
 
         let (config, _, _) = inspect(&path, &[]);
         let output = render(&path, &[], AdapterName::ClaudeCode, &[]).text;
