@@ -48,7 +48,8 @@ The Claude Code battery routes `Read`, `Write` and `Edit` through the
 file-tracker, as both Annotator and recorder, and confines shell commands to
 `mcp/file-tracker/SafeBash`. The default policy binds the file-tracker to
 `appa file-tracker`, which the runtime executable serves. SafeBash needs
-Anthropic's sandbox runtime `srt` on `PATH`. While the policy binds the
+`bwrap` on Linux for commands that declare no host, and Anthropic's sandbox
+runtime `srt` on `PATH` for every other command. While the policy binds the
 `file-tracker` recorder, `clappa` starts Claude Code with `Bash`, `PowerShell`,
 `Monitor`, `Grep` and `NotebookEdit` disabled and the file-tracker's MCP server
 registered; the battery also blocks those tools at the hook.

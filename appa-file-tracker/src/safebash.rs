@@ -1,13 +1,17 @@
-//! SafeBash: one shell command, run in Anthropic's sandbox runtime (`srt`), confined to the
-//! files and hosts its call declares — the same values the annotator labeled. The command
-//! reads only its `input_files` and the system outside the user's files, writes only its
-//! `output_files`, and reaches only its `network_hosts` through the sandbox's proxy. Anything
+//! SafeBash: one shell command, run in a sandbox confined to the files and hosts its call
+//! declares — the same values the annotator labeled. The command reads only its
+//! `input_files` and the system outside the user's files, writes only its `output_files`, and
+//! reaches only its `network_hosts`. Anything
 //! it does not declare is invisible to it, so its output carries no label it did not name.
 //!
-//! Each call starts its own `srt`, the runtime Claude Code links into its Bash tool, rather
-//! than going through that Bash tool. Claude Code holds one sandbox configuration per session:
-//! a settings change reaches only the commands after the one it precedes, and the working
-//! directory always stays readable and writable. Per-call confinement needs neither.
+//! A command that declares no host runs, on Linux, under bubblewrap (`crate::bubblewrap`),
+//! which writes its outputs back only when it succeeds. Every other command runs in
+//! Anthropic's sandbox runtime (`srt`), whose proxy admits the declared hosts.
+//!
+//! Each call starts its own sandbox, rather than going through Claude Code's Bash tool.
+//! Claude Code holds one sandbox configuration per session: a settings change reaches only
+//! the commands after the one it precedes, and the working directory always stays readable
+//! and writable. Per-call confinement needs neither.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,7 +21,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::config::{Config, Role, ToolRole};
-use crate::paths::named;
+use crate::paths::{Named, named};
 use crate::store::Locked;
 
 /// How much of each stream a result carries.
@@ -25,8 +29,9 @@ const STREAM_LIMIT: usize = 64 * 1024;
 
 pub const DESCRIPTION: &str = "Runs one shell command in a sandbox. The command can read only the files listed in \
     input_files (plus system directories such as /usr and /etc), write only the files listed in output_files, and \
-    connect only to the hosts listed in network_hosts. Use absolute paths. Each output file is emptied before the \
-    command runs. Declare every file the command reads or writes: any other file in your workspace, home or /tmp is \
+    connect only to the hosts listed in network_hosts. Use absolute paths. Each output file starts empty. A command \
+    that declares no host gets its output files written only when it exits 0; one that declares a host writes them \
+    in place. Declare every file the command reads or writes: any other file in your workspace, home or /tmp is \
     hidden from it.";
 
 pub fn schema() -> Value {
@@ -60,9 +65,20 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
         if std::fs::metadata(output).is_ok_and(|metadata| !metadata.is_file()) {
             return Err(format!("output {} is not a regular file", output.display()));
         }
+    }
+    match &config.sandbox.bubblewrap {
+        Some(bwrap) if cfg!(target_os = "linux") && named.hosts.is_empty() => {
+            crate::bubblewrap::run(bwrap, config, command, &named)
+        }
+        _ => run_in_srt(config, command, &named),
+    }
+}
+
+/// One command in the sandbox runtime, which writes the declared outputs in place.
+fn run_in_srt(config: &Config, command: &str, named: &Named) -> Result<(String, bool), String> {
+    for output in &named.writes {
         std::fs::File::create(output).map_err(|error| format!("{}: {error}", output.display()))?;
     }
-
     // The sandbox runtime opens its proxy's sockets under its temporary directory, which the
     // command must reach; the temporary directories it would otherwise use stay hidden. This
     // one is the call's own and holds nothing of the user's.
@@ -75,13 +91,55 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
         .command
         .split_first()
         .ok_or("the sandbox command is empty")?;
-    let mut child = Command::new(program)
+    let mut sandbox = Command::new(program);
+    sandbox
         .args(prefix)
         .arg("--settings")
         .arg(&file)
         .arg("-c")
         .arg(command)
-        .env("TMPDIR", &scratch)
+        .env("TMPDIR", &scratch);
+    let finished = supervise(sandbox, config.sandbox.timeout_secs);
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir_all(&scratch);
+    Ok(finished?.report(config.sandbox.timeout_secs, ""))
+}
+
+/// How a sandboxed command ended.
+pub struct Finished {
+    /// The exit status, or none when the command ran past its time.
+    pub status: Option<std::process::ExitStatus>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Finished {
+    pub fn succeeded(&self) -> bool {
+        self.status.is_some_and(|status| status.success())
+    }
+
+    /// The result as the model reads it, `note` appended, and whether it failed.
+    pub fn report(&self, timeout_secs: u64, note: &str) -> (String, bool) {
+        let code = match self.status {
+            Some(status) => status
+                .code()
+                .map_or("killed by a signal".to_string(), |code| code.to_string()),
+            None => format!("timed out after {timeout_secs}s"),
+        };
+        (
+            format!(
+                "exit: {code}\n--- stdout ---\n{}\n--- stderr ---\n{}{note}",
+                self.stdout, self.stderr
+            ),
+            !self.succeeded(),
+        )
+    }
+}
+
+/// Run `command` with no input, its streams captured, and kill it after `timeout_secs`.
+pub fn supervise(mut command: Command, timeout_secs: u64) -> Result<Finished, String> {
+    let program = command.get_program().to_owned();
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -89,7 +147,7 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
         .map_err(|error| format!("the sandbox {program:?} cannot start: {error}"))?;
     let stdout = drain(child.stdout.take().expect("stdout is piped"));
     let stderr = drain(child.stderr.take().expect("stderr is piped"));
-    let deadline = Instant::now() + Duration::from_secs(config.sandbox.timeout_secs);
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
             break Some(status);
@@ -101,23 +159,11 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let _ = std::fs::remove_file(&file);
-    let _ = std::fs::remove_dir_all(&scratch);
-    let stdout = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
-    let (code, failed) = match status {
-        Some(status) => (
-            status
-                .code()
-                .map_or("killed by a signal".to_string(), |code| code.to_string()),
-            !status.success(),
-        ),
-        None => (format!("timed out after {}s", config.sandbox.timeout_secs), true),
-    };
-    Ok((
-        format!("exit: {code}\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"),
-        failed,
-    ))
+    Ok(Finished {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 /// The sandbox runtime's settings for one call. Reads are hidden wherever the user's files

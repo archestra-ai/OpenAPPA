@@ -17,11 +17,11 @@ The `claude-code` battery covers Claude Code's built-in tools. It routes `Read`,
 |---|---|
 | `host/claude-code/Read` | The file-tracker returns the file's label. A file that a mediated call wrote carries the label that call published, in this session or another. A credential path such as `.env*`, `~/.ssh/*`, or a private key carries the audience `self` before any call writes it. |
 | `host/claude-code/Write`, `host/claude-code/Edit` | The file-tracker records the label the call published on the file. Writing a credential path, an instruction file such as `CLAUDE.md`, a hook, or a shell profile requires a `trusted` session. Writing Claude Code settings, `.mcp.json`, or the deployment's policy asks the person running the session. |
-| `mcp/file-tracker/SafeBash` | The command declares its `input_files`, `output_files`, and `network_hosts`, and the sandbox runtime `srt` confines it to exactly those. The call forwards its input files' label, and its result carries it. The hosts it declares do not change its label. Its output files take the label the call published. |
+| `mcp/file-tracker/SafeBash` | The command declares its `input_files`, `output_files`, and `network_hosts`, and a sandbox confines it to exactly those: bubblewrap on Linux when it declares no host, the sandbox runtime `srt` otherwise. The call forwards its input files' label, and its result carries it. The hosts it declares do not change its label. Its output files take the label the call published. |
 | `host/claude-code/Bash`, `PowerShell`, `Monitor`, `Grep`, `NotebookEdit` | Blocked. They read or write file content out of the file-tracker's sight. `clappa` starts Claude Code with them disabled. |
 | `host/claude-code/WebFetch`, `host/claude-code/WebSearch` | The `coding` battery's web rules. Listed documentation sites keep the session's label, a search returns `suspicious` content, and an Annotator labels a fetch of any other URL per call. |
 
-The default config `appa plugin install claude-code` writes binds the file-tracker to `appa file-tracker`, which the runtime executable serves. It also handles tools that the batteries do not name. SafeBash needs `srt` on `PATH`.
+The default config `appa plugin install claude-code` writes binds the file-tracker to `appa file-tracker`, which the runtime executable serves. It also handles tools that the batteries do not name. SafeBash needs `bwrap` on Linux and `srt` on `PATH`.
 
 ## Files
 

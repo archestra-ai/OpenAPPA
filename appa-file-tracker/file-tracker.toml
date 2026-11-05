@@ -309,11 +309,16 @@ path = "path"
 name = "host/opencode/appa_safebash"
 role = "run"
 
-# SafeBash runs each command in Anthropic's sandbox runtime, `srt` — the
-# runtime Claude Code links into its Bash tool: Seatbelt on macOS, bubblewrap
-# on Linux — with a network proxy that admits only the declared hosts. Each
-# call starts its own `srt` with that call's files and hosts.
+# SafeBash confines each command to the files and hosts its call declares.
+# On Linux, a command that declares no host runs under `bubblewrap`: it reads
+# private copies of its inputs, has no network, and its output files are
+# written back only when it exits 0. Every other command runs in Anthropic's
+# sandbox runtime, `srt` — the runtime Claude Code links into its Bash tool:
+# Seatbelt on macOS, bubblewrap on Linux — with a network proxy that admits
+# only the declared hosts. Each call starts its own sandbox. Remove
+# `bubblewrap` to run every command in `srt`.
 [sandbox]
 command = ["srt"]
+bubblewrap = "bwrap"
 readable = []
 timeout_secs = 600

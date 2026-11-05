@@ -47,9 +47,16 @@ The plugin's built-in path rules give credential paths such as `.env*` and `~/.s
 
 ### SafeBash
 
-A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. The file-tracker therefore serves one shell tool, `SafeBash`, with four arguments: `command`, `input_files`, `output_files`, and `network_hosts`. The command runs in Anthropic's sandbox runtime (`srt`): bubblewrap on Linux, Seatbelt on macOS. The command can read only its input files and system directories, write only its output files, and connect only to its hosts through the sandbox proxy. Every other file in the home directory, the working directory, or a temporary directory is hidden from it.
+A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. The file-tracker therefore serves one shell tool, `SafeBash`, with four arguments: `command`, `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and system directories, write only its output files, and connect only to its hosts. Every other file in the home directory, the working directory, or a temporary directory is hidden from it. Two sandboxes enforce this:
 
-Claude Code links the same runtime into its own `Bash` tool, but SafeBash starts a separate `srt` for each call. Claude Code keeps one sandbox configuration for the whole session. A settings change applies only to the commands after the one in progress, and the working directory stays readable and writable. Neither of these allows a command to be confined to the files it declares.
+| Command | Sandbox | Inputs | Outputs | Network |
+|---|---|---|---|---|
+| Declares no host, on Linux | `bubblewrap`, with an empty environment and no capabilities | Read-only copies at their own paths | Written back only when the command exits 0, so a failed command leaves them unchanged | None |
+| Declares a host, or not on Linux | Anthropic's sandbox runtime (`srt`): bubblewrap on Linux, Seatbelt on macOS | The files themselves | Emptied before the command runs, then written in place | The declared hosts, through the sandbox proxy |
+
+Both take the same arguments and return the same result: the exit code, then standard output and standard error.
+
+Claude Code links the same runtime into its own `Bash` tool, but SafeBash starts a separate sandbox for each call. Claude Code keeps one sandbox configuration for the whole session. A settings change applies only to the commands after the one in progress, and the working directory stays readable and writable. Neither of these allows a command to be confined to the files it declares.
 
 The annotator forwards the combined label of the input files, and the call's result carries it. The recorder applies the published label to every output file.
 
@@ -65,7 +72,7 @@ The hosts a call declares do not change its label. The sandbox confines the comm
 | OpenCode | `read`, `write`, `edit`, and `appa_safebash` use the file-tracker annotator and recorder. | AppenCode removes native `shell` and `patch`. `appa_safebash` runs in a sandbox extension with a proxy. |
 | Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. No file-tracker runs. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
 
-The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. SafeBash needs `srt` on `PATH`.
+The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. SafeBash needs `bwrap` on Linux and `srt` on `PATH`.
 
 ### Limits
 

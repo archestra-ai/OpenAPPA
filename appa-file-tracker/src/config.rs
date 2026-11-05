@@ -85,7 +85,14 @@ pub enum Role {
 #[serde(deny_unknown_fields)]
 pub struct Sandbox {
     /// The sandbox runtime and its arguments; SafeBash appends `--settings <file> -c <command>`.
+    /// It runs every command that declares a host, and every command where `bubblewrap` does
+    /// not apply.
     pub command: Vec<String>,
+    /// The bubblewrap executable that runs, on Linux, every command declaring no host: over
+    /// snapshots of its inputs, with no network, and with its outputs written back only when it
+    /// succeeds. Absent: `command` runs every command.
+    #[serde(default)]
+    pub bubblewrap: Option<PathBuf>,
     /// Paths a command may read besides its inputs: toolchains under the home directory.
     #[serde(default)]
     pub readable: Vec<PathBuf>,

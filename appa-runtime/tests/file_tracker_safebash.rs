@@ -1,6 +1,8 @@
-//! SafeBash through its MCP server and the real sandbox runtime: a command sees the files it
+//! SafeBash through its MCP server and the real sandboxes: a command sees the files it
 //! declares and nothing else of the user's, writes only its outputs, and reaches no host it
-//! did not declare. Skipped where the sandbox runtime `srt` is not installed.
+//! did not declare. A command declaring no host runs under bubblewrap, which writes its
+//! outputs back only when it succeeds; one declaring a host runs in the sandbox runtime `srt`.
+//! Each part is skipped where its sandbox is not installed.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -40,10 +42,17 @@ fn safebash(config: &std::path::Path, arguments: serde_json::Value) -> (String, 
     )
 }
 
+fn installed(program: &str) -> bool {
+    let found = Command::new(program).arg("--version").output().is_ok();
+    if !found {
+        eprintln!("skipped: {program} is not installed");
+    }
+    found
+}
+
 #[test]
 fn a_command_sees_only_what_it_declares() {
-    if Command::new("srt").arg("--version").output().is_err() {
-        eprintln!("skipped: the sandbox runtime srt is not installed");
+    if !installed("bwrap") || !installed("srt") {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -85,6 +94,22 @@ fn a_command_sees_only_what_it_declares() {
         !root.join("new.txt").exists(),
         "an undeclared write never reaches the disk"
     );
+
+    // An offline command that fails leaves its declared output as it was, and an input
+    // is a read-only copy.
+    let (text, failed) = safebash(
+        &config,
+        serde_json::json!({
+            "command": format!("echo partial > {output}; echo tamper > {input}; exit 3", output = output.display(), input = input.display()),
+            "input_files": [input], "output_files": [output], "network_hosts": [],
+        }),
+    );
+    assert!(
+        failed && text.contains("exit: 3") && text.contains("not written"),
+        "{text}"
+    );
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "DECLARED\n");
+    assert_eq!(std::fs::read_to_string(&input).unwrap(), "declared\n");
 
     // A declared host is reached through the sandbox's proxy, while the temporary
     // directories stay hidden. Skipped where this machine cannot reach it either.

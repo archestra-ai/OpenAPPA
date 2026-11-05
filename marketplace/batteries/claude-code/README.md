@@ -30,8 +30,9 @@ Code settings, `.mcp.json` and the OpenAPPA policy ask the person running the
 session. Add rules in `~/.config/appa/file-tracker.toml`.
 
 A shell command runs only as SafeBash. It declares its `input_files`,
-`output_files` and `network_hosts`, and Anthropic's sandbox runtime, `srt`,
-confines it to exactly those. `Bash`, `PowerShell`, `Monitor`, `Grep` and
+`output_files` and `network_hosts`, and a sandbox confines it to exactly
+those: bubblewrap on Linux for a command that declares no host, Anthropic's
+sandbox runtime `srt` otherwise. `Bash`, `PowerShell`, `Monitor`, `Grep` and
 `NotebookEdit` require the `blocked` mark: they read or write file content
 out of the file-tracker's sight.
 

@@ -8,6 +8,7 @@
 //! Each takes `--config <file-tracker.toml>`.
 
 mod annotate;
+mod bubblewrap;
 mod config;
 mod label;
 mod paths;
