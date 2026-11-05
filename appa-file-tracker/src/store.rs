@@ -125,9 +125,10 @@ impl Store {
         self.files.get(path).map(|recorded| &recorded.label)
     }
 
-    /// Settle one released call's outcome on the files it reserved. A success replaces each
-    /// file's label with what the call published. A failure leaves a file it did not change
-    /// as it was, and meets the published label into one it did change.
+    /// Settle one released call's outcome on the files it reserved. A success replaces the
+    /// label of each file it changed with what the call published, and meets that label into
+    /// a file it left unchanged, whose old content may be what it held. A failure leaves a
+    /// file it did not change as it was, and meets the published label into one it did change.
     pub fn settle(&mut self, reservation: Reservation, success: bool) {
         let published = reservation
             .published
@@ -138,7 +139,8 @@ impl Store {
             if !success && &now == seen {
                 continue;
             }
-            let label = match (success, self.files.get(path)) {
+            let changed = &now != seen;
+            let label = match (success && changed, self.files.get(path)) {
                 (false, Some(previous)) => previous.label.meet(&published, &self.ranks),
                 _ => published.clone(),
             };
@@ -171,4 +173,64 @@ pub fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_success_relabels_only_the_files_it_changed() {
+        let dir = std::env::temp_dir().join(format!("appa-file-tracker-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "secret copy").unwrap();
+        let private = Label {
+            trust: None,
+            audience: vec![vec!["self".to_string()]],
+        };
+        let settle_public = |store: &mut Store| {
+            store.settle(
+                Reservation {
+                    tool: "mcp/file-tracker/SafeBash".to_string(),
+                    arguments: serde_json::Value::Null,
+                    evidence: String::new(),
+                    writes: [(file.clone(), version(&file))].into(),
+                    created: 0,
+                    dispatch: None,
+                    published: Some(Label::default()),
+                },
+                true,
+            );
+        };
+        let mut store = Store::default();
+        store.files.insert(
+            file.clone(),
+            Recorded {
+                label: private.clone(),
+                version: version(&file),
+            },
+        );
+
+        // Declared as an output but left as it was: its old content keeps its old label.
+        settle_public(&mut store);
+        assert_eq!(store.files[&file].label, private);
+
+        // Rewritten between the annotation and the outcome: the new content is the call's.
+        std::fs::write(&file, "public text").unwrap();
+        store.settle(
+            Reservation {
+                tool: "mcp/file-tracker/SafeBash".to_string(),
+                arguments: serde_json::Value::Null,
+                evidence: String::new(),
+                writes: [(file.clone(), "sha256:before".to_string())].into(),
+                created: 0,
+                dispatch: None,
+                published: Some(Label::default()),
+            },
+            true,
+        );
+        assert_eq!(store.files[&file].label, Label::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

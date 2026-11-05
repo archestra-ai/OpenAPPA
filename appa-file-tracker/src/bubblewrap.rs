@@ -22,7 +22,7 @@ const SYSTEM: &[&str] = &["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "
 /// The largest output file written back.
 const MAX_OUTPUT_BYTES: u64 = 64 << 20;
 
-pub fn run(bwrap: &Path, config: &Config, command: &str, named: &Named) -> Result<(String, bool), String> {
+pub fn run(bwrap: &Path, config: &Config, command: &str, named: &Named) -> Result<String, String> {
     let job = std::env::temp_dir().join(format!("appa-safebash-{}-{}", std::process::id(), crate::store::now()));
     fs::create_dir(&job).map_err(|error| format!("{}: {error}", job.display()))?;
     let outcome = run_in(&job, bwrap, config, command, named);
@@ -30,7 +30,7 @@ pub fn run(bwrap: &Path, config: &Config, command: &str, named: &Named) -> Resul
     outcome
 }
 
-fn run_in(job: &Path, bwrap: &Path, config: &Config, command: &str, named: &Named) -> Result<(String, bool), String> {
+fn run_in(job: &Path, bwrap: &Path, config: &Config, command: &str, named: &Named) -> Result<String, String> {
     let mut mounted: Vec<PathBuf> = SYSTEM.iter().map(PathBuf::from).collect();
     mounted.extend(config.sandbox.readable.iter().cloned());
     let mut sandbox = Command::new(bwrap);

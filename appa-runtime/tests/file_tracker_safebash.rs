@@ -96,7 +96,9 @@ fn a_command_sees_only_what_it_declares() {
     );
 
     // An offline command that fails leaves its declared output as it was, and an input
-    // is a read-only copy.
+    // is a read-only copy. The command ran and its output reaches the model, so the result
+    // is no error: the harness reports an error result as a failed call, whose label the
+    // engine never applies.
     let (text, failed) = safebash(
         &config,
         serde_json::json!({
@@ -105,7 +107,7 @@ fn a_command_sees_only_what_it_declares() {
         }),
     );
     assert!(
-        failed && text.contains("exit: 3") && text.contains("not written"),
+        !failed && text.contains("exit: 3") && text.contains("not written"),
         "{text}"
     );
     assert_eq!(std::fs::read_to_string(&output).unwrap(), "DECLARED\n");

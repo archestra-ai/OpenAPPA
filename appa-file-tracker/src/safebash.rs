@@ -47,8 +47,8 @@ pub fn schema() -> Value {
     })
 }
 
-/// The command's result as the model reads it, and whether it failed.
-pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String> {
+/// The command's result as the model reads it, or why it was refused before it ran.
+pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
     let command = arguments["command"].as_str().ok_or("command is a string")?;
     let role = ToolRole {
         name: "SafeBash".to_string(),
@@ -75,7 +75,7 @@ pub fn run(config: &Config, arguments: &Value) -> Result<(String, bool), String>
 }
 
 /// One command in the sandbox runtime, which writes the declared outputs in place.
-fn run_in_srt(config: &Config, command: &str, named: &Named) -> Result<(String, bool), String> {
+fn run_in_srt(config: &Config, command: &str, named: &Named) -> Result<String, String> {
     for output in &named.writes {
         std::fs::File::create(output).map_err(|error| format!("{}: {error}", output.display()))?;
     }
@@ -118,20 +118,17 @@ impl Finished {
         self.status.is_some_and(|status| status.success())
     }
 
-    /// The result as the model reads it, `note` appended, and whether it failed.
-    pub fn report(&self, timeout_secs: u64, note: &str) -> (String, bool) {
+    /// The result as the model reads it, `note` appended.
+    pub fn report(&self, timeout_secs: u64, note: &str) -> String {
         let code = match self.status {
             Some(status) => status
                 .code()
                 .map_or("killed by a signal".to_string(), |code| code.to_string()),
             None => format!("timed out after {timeout_secs}s"),
         };
-        (
-            format!(
-                "exit: {code}\n--- stdout ---\n{}\n--- stderr ---\n{}{note}",
-                self.stdout, self.stderr
-            ),
-            !self.succeeded(),
+        format!(
+            "exit: {code}\n--- stdout ---\n{}\n--- stderr ---\n{}{note}",
+            self.stdout, self.stderr
         )
     }
 }
@@ -258,8 +255,12 @@ pub fn serve(config: &Config) -> Result<(), String> {
                 "tools": [{ "name": "SafeBash", "description": DESCRIPTION, "inputSchema": schema() }]
             })),
             Some("tools/call") if message["params"]["name"] == "SafeBash" => {
+                // A command that ran is a success whatever its exit code: its output reaches
+                // the model, and the harness reports an error result as a failed call, whose
+                // label the engine never applies. Only a refusal, which ran nothing and
+                // carries no file content, is an error.
                 let (text, failed) = match run(config, &message["params"]["arguments"]) {
-                    Ok(outcome) => outcome,
+                    Ok(text) => (text, false),
                     Err(refusal) => (format!("SafeBash refused: {refusal}"), true),
                 };
                 Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": failed }))
