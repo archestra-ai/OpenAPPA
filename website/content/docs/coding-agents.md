@@ -49,6 +49,8 @@ The plugin's built-in path rules give credential paths such as `.env*` and `~/.s
 
 A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. The file-tracker therefore serves one shell tool, `SafeBash`, with four arguments: `command`, `input_files`, `output_files`, and `network_hosts`. The command runs in Anthropic's sandbox runtime (`srt`): bubblewrap on Linux, Seatbelt on macOS. The command can read only its input files and system directories, write only its output files, and connect only to its hosts through the sandbox proxy. Every other file in the home directory, the working directory, or a temporary directory is hidden from it.
 
+Claude Code links the same runtime into its own `Bash` tool, but SafeBash starts a separate `srt` for each call. Claude Code keeps one sandbox configuration for the whole session. A settings change applies only to the commands after the one in progress, and the working directory stays readable and writable. Neither of these allows a command to be confined to the files it declares.
+
 The annotator forwards the combined label of the input files, and the call's result carries it. The recorder applies the published label to every output file.
 
 The label of a copied secret therefore survives across sessions. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later `SafeBash` command that reads `/tmp/notes.txt` narrows its session to `self`, in this session or in any other, so a later public sink such as `WebFetch` is refused.

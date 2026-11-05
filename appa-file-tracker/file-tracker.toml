@@ -309,9 +309,10 @@ path = "path"
 name = "host/opencode/appa_safebash"
 role = "run"
 
-# SafeBash runs each command in Anthropic's sandbox runtime — the one Claude
-# Code bundles: Seatbelt on macOS, bubblewrap on Linux — with a network proxy
-# that admits only the declared hosts.
+# SafeBash runs each command in Anthropic's sandbox runtime, `srt` — the
+# runtime Claude Code links into its Bash tool: Seatbelt on macOS, bubblewrap
+# on Linux — with a network proxy that admits only the declared hosts. Each
+# call starts its own `srt` with that call's files and hosts.
 [sandbox]
 command = ["srt"]
 readable = []

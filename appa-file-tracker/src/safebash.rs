@@ -1,8 +1,13 @@
-//! SafeBash: one shell command, run in the sandbox runtime Claude Code bundles, confined to
-//! the files and hosts its call declares — the same values the annotator labeled. The command
+//! SafeBash: one shell command, run in Anthropic's sandbox runtime (`srt`), confined to the
+//! files and hosts its call declares — the same values the annotator labeled. The command
 //! reads only its `input_files` and the system outside the user's files, writes only its
 //! `output_files`, and reaches only its `network_hosts` through the sandbox's proxy. Anything
 //! it does not declare is invisible to it, so its output carries no label it did not name.
+//!
+//! Each call starts its own `srt`, the runtime Claude Code links into its Bash tool, rather
+//! than going through that Bash tool. Claude Code holds one sandbox configuration per session:
+//! a settings change reaches only the commands after the one it precedes, and the working
+//! directory always stays readable and writable. Per-call confinement needs neither.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};

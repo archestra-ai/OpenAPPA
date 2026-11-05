@@ -44,7 +44,7 @@ recorder = "file-tracker"
 
 # A shell command runs only as SafeBash, which the file-tracker serves over
 # MCP: the command declares the files it reads and writes and the hosts it
-# reaches, and Claude Code's sandbox runtime confines it to exactly those.
+# reaches, and Anthropic's sandbox runtime, `srt`, confines it to exactly those.
 [[policy.tool]]
 name = "mcp/file-tracker/SafeBash"
 annotator = "file-tracker"
