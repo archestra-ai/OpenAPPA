@@ -1,4 +1,7 @@
-"""The huggingface repository annotators: one consult in, one answer out.
+"""The huggingface repository annotators. The runtime runs this script
+once for each tool call either annotator annotates, passes the consult
+request as JSON on standard input, and reads one JSON answer from
+standard output.
 
 Two annotators share this script, told apart by the consult's name. Both
 read every repository the call names — inside `repo_ids` or inside an
