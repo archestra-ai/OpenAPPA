@@ -15,7 +15,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .corpus import POLICY, ROOT, Case
+from .corpus import POLICY, ROOT, Case, sanitizers
 
 REPO_ROOT = ROOT.parents[1]
 APPA_BIN = REPO_ROOT / "target" / "debug" / "appa"
@@ -50,8 +50,11 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def deployment(backend: Backend, sanitizers: list[str], identity_command: list[str] | None = None) -> str:
-    """The bench policy with `[externals]` binding every sanitizer to `backend`."""
+def deployment(backend: Backend, identity_command: list[str] | None = None) -> str:
+    """The bench policy with `[externals]` binding every sanitizer it registers to `backend`.
+
+    The runtime refuses a policy that names an unbound sanitizer, so a run that asks only some
+    sanitizers still binds them all."""
     lines = [
         POLICY.read_text().rstrip(),
         "",
@@ -59,7 +62,7 @@ def deployment(backend: Backend, sanitizers: list[str], identity_command: list[s
         f"timeout_ms = {SHIPPED_TIMEOUT_MS}",
         f"max_body_bytes = {backend.max_body_bytes}",
     ]
-    for name in sanitizers:
+    for name in sanitizers():
         lines += ["", f"[externals.sanitizers.{name}]"]
         if backend.builtin == "identity":
             assert identity_command is not None, "the identity backend runs a command"
@@ -137,9 +140,8 @@ def ask(
     """Every case asked `repeat` times. Writes `policy.toml`, `values.jsonl`, `answers.jsonl`."""
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    names = sorted({case.sanitizer for case in cases})
     command = identity_command(output) if backend.builtin == "identity" else None
-    (output / "policy.toml").write_text(deployment(backend, names, command))
+    (output / "policy.toml").write_text(deployment(backend, command))
     values = "".join(json.dumps(case.value()) + "\n" for case in cases)
     (output / "values.jsonl").write_text(values)
     env = {key: value for key, value in os.environ.items() if key != TOKEN_VARIABLE}

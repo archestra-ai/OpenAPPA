@@ -101,6 +101,17 @@ def test_the_identity_arm_derives_every_value_through_the_runtime(tmp_path: Path
         assert entry.get("redaction", {"recall": 0.0})["recall"] == 0.0
 
 
+@pytest.mark.skipif(not runner.APPA_BIN.is_file(), reason="needs target/debug/appa")
+def test_a_run_that_asks_one_sanitizer_still_binds_every_registered_one(tmp_path: Path):
+    # The runtime refuses a policy naming an unbound sanitizer, so `--sanitizer` must not
+    # narrow the bindings.
+    asked = sorted(corpus.sanitizers())[0]
+    cases = [c for c in corpus.load() if c.kind != "size" and c.sanitizer == asked]
+    rows = runner.ask(cases, runner.Backend(builtin="identity"), tmp_path, repeat=1, concurrency=8)
+    assert {row["outcome"] for row in rows} == {"derived"}
+    assert len(rows) == len(cases)
+
+
 def test_the_cli_lists_without_a_model():
     out = subprocess.run(["appa-sanitizer-bench", "list"], capture_output=True, text=True, check=True).stdout
     assert len(out.splitlines()) == len(corpus.load())
