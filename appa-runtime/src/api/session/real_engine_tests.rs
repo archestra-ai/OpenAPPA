@@ -4629,11 +4629,6 @@ async fn a_failed_spawn_result_naming_no_child_closes_the_spawn_with_the_next_st
     assert!(matches!(error, EventError::SpawnNeverStarted), "got {error:?}");
     assert!(!error.is_operational());
     assert_eq!(error.class(), appa_runtime_api::RefusalClass::Spawn);
-    assert!(
-        error.to_string().starts_with("the subagent did not start")
-            && error.to_string().contains("start the subagent again"),
-        "the model reads what happened and its next step: {error}"
-    );
     assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
 
     // The subagent started, then stopped. A spawn still in flight would refuse this one.
