@@ -100,7 +100,10 @@ enum RuntimeCommand {
         target: crate::runtime_url::RuntimeUrl,
     },
     /// Ask the policy's Annotators about the calls on standard input, without a session.
-    #[command(hide = true)]
+    ///
+    /// Standard input is JSON lines, one call each: `id`, `tool`, `arguments`, and an
+    /// optional `cwd`. Standard output is one JSON line per answer, with its `outcome`.
+    /// No tool runs. See https://openappa.com/contracts#test-an-annotator.
     Annotate {
         /// How many times each call is asked.
         #[arg(long, default_value_t = 1)]
