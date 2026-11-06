@@ -118,6 +118,26 @@ pub(crate) struct Decided<'a> {
     pub(super) log: &'a appa_eventlog::Log,
 }
 
+impl Session {
+    /// Read the family's log as it stands, without an event: the view under this event's
+    /// deployment snapshot.
+    pub(super) fn with_view<T>(
+        &self,
+        read: impl FnOnce(&Decided<'_>) -> Result<T, EventError>,
+    ) -> Result<T, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        read(&Decided {
+            session: self,
+            policy: &policy,
+            view: &view,
+            log: &log,
+        })
+    }
+}
+
 impl Decided<'_> {
     pub(super) fn engine(&self) -> &crate::engine::RuntimeEngine {
         self.policy.engine()

@@ -205,14 +205,12 @@ impl Session {
         &self,
         arguments: &RemedyArguments,
     ) -> Result<appa_engine::label::Label, EventError> {
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
-        policy
-            .engine()
-            .declare_ahead(&view, &self.trajectory, arguments)
-            .map_err(|detail| EventError::RemedyArguments { detail })
+        self.with_view(|context| {
+            context
+                .engine()
+                .declare_ahead(context.view, &self.trajectory, arguments)
+                .map_err(|detail| EventError::RemedyArguments { detail })
+        })
     }
 
     /// A return this trajectory declared ahead covers its next spawn, which takes it whatever
@@ -259,18 +257,18 @@ impl Session {
             },
             None => appa_runtime_api::OfferedReturn::AsSpoken,
         };
-        let (offer, label) = {
-            let log = self.inner.log(&self.root)?;
-            let deployment = self.deployment();
-            let policy = self.inner.resolve_policy(&deployment, &log)?;
-            let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        let (offer, label) = self.with_view(|context| {
             let offer = offers
                 .iter()
                 .filter(|offer| offer.returns.as_ref() == Some(&route))
-                .filter_map(|offer| crate::engine::resolve_rendered(&log, &OfferId(offer.id.clone())))
-                .find(|offer| policy.engine().offer_declares_only(&view, &self.trajectory, offer));
-            (offer, policy.engine().label_of(&view, &self.trajectory))
-        };
+                .filter_map(|offer| crate::engine::resolve_rendered(context.log, &OfferId(offer.id.clone())))
+                .find(|offer| {
+                    context
+                        .engine()
+                        .offer_declares_only(context.view, &self.trajectory, offer)
+                });
+            Ok((offer, context.engine().label_of(context.view, &self.trajectory)))
+        })?;
         // A lapse is told first: at a changed label no offer may fit, and the cause is the change.
         if label != Some(held.label) {
             return Ok(noted(LAPSED_AHEAD, apply));

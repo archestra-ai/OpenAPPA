@@ -121,19 +121,21 @@ impl Session {
     /// ended by returning nothing has nothing left to cross: an empty stop
     /// replays, a message is held until the child gives it up.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
-        if policy.engine().liveness(&view, &self.trajectory) == Liveness::Ended {
+        let open = self.with_view(|context| {
+            Ok(match context.engine().liveness(context.view, &self.trajectory) {
+                Liveness::Ended => None,
+                Liveness::Live | Liveness::Unopened => Some(context.open_dispatches()),
+            })
+        })?;
+        let Some(open) = open else {
             return Ok(match value {
                 None => ChildReturnDecision::NoValue,
                 Some(_) => ChildReturnDecision::Blocked {
                     feedback: ENDED_CHILD.to_string(),
                 },
             });
-        }
-        self.settle_open_call(&policy, &view).await?;
+        };
+        self.settle_open_call(open).await?;
         self.cross_return(value).await
     }
 
@@ -168,12 +170,8 @@ impl Session {
 
     /// Close whatever calls this child still has open before it returns. Each got no outcome
     /// hook and closes as unreported, exactly as a turn end closes it.
-    pub(super) async fn settle_open_call(
-        &self,
-        policy: &crate::engine::PolicyEngine<'_>,
-        view: &EngineView,
-    ) -> Result<(), EventError> {
-        for open in policy.engine().open_dispatches(view, &self.trajectory) {
+    pub(super) async fn settle_open_call(&self, open: Vec<OpenDispatch>) -> Result<(), EventError> {
+        for open in open {
             match self
                 .abandon_dispatch(open.id.clone(), &ToolOutcome::Indeterminate)
                 .await
@@ -195,10 +193,6 @@ impl Session {
     }
 
     pub(super) fn liveness_of(&self, trajectory: &TrajectoryId) -> Result<Liveness, EventError> {
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
-        Ok(policy.engine().liveness(&view, trajectory))
+        self.with_view(|context| Ok(context.engine().liveness(context.view, trajectory)))
     }
 }

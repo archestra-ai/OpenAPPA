@@ -197,11 +197,7 @@ impl Session {
 
     /// The reader this session's family acts for, as its opening pinned it.
     pub(crate) fn principal(&self) -> Result<Option<ReaderId>, EventError> {
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
-        Ok(view.principal().cloned())
+        self.with_view(|context| Ok(context.view.principal().cloned()))
     }
 
     /// The calls this trajectory carries: its open dispatches. A trajectory
@@ -210,33 +206,36 @@ impl Session {
     /// the engine does not model.
     ///
     fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
-        match policy.engine().liveness(&view, &self.trajectory) {
-            Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
-            Liveness::Live => Ok(policy.engine().open_dispatches(&view, &self.trajectory)),
-        }
+        self.with_view(
+            |context| match context.engine().liveness(context.view, &self.trajectory) {
+                Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
+                Liveness::Live => Ok(context.open_dispatches()),
+            },
+        )
     }
 
     /// The calls a turn end closes: every carried call but a spawn whose child runs on past
     /// the turn. A spawn the harness did not identify closes: such a harness runs one call at
     /// a time, so the open spawn would refuse its next call.
     fn turn_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
-        let engine = policy.engine();
-        if engine.liveness(&view, &self.trajectory) != Liveness::Live {
-            return Ok(Vec::new());
-        }
-        Ok(engine
-            .open_dispatches(&view, &self.trajectory)
-            .into_iter()
-            .filter(|open| !child_runs_on(engine, &view, log.call_bindings(), &self.trajectory, open))
-            .collect())
+        self.with_view(|context| {
+            if context.engine().liveness(context.view, &self.trajectory) != Liveness::Live {
+                return Ok(Vec::new());
+            }
+            Ok(context
+                .open_dispatches()
+                .into_iter()
+                .filter(|open| {
+                    !child_runs_on(
+                        context.engine(),
+                        context.view,
+                        context.log.call_bindings(),
+                        &self.trajectory,
+                        open,
+                    )
+                })
+                .collect())
+        })
     }
 
     /// The carried calls a report can name: all of them under a call id, and without one every
@@ -246,15 +245,12 @@ impl Session {
         if call_id.is_some() || open.is_empty() {
             return Ok(open);
         }
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
-        let engine = policy.engine();
-        Ok(open
-            .into_iter()
-            .filter(|open| !identified_spawn(engine, &view, log.call_bindings(), &self.trajectory, open))
-            .collect())
+        self.with_view(|context| {
+            Ok(open
+                .into_iter()
+                .filter(|open| !context.identified_spawn(open))
+                .collect())
+        })
     }
 }
 
