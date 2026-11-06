@@ -27,14 +27,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Create releases before calculating the next release PR. A draft release
+  # needs its forced tag to exist before Release Please can anchor that calculation.
+  create-releases:
+    name: Create releases for merged release PRs
+    if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
+    permissions: {} # The shared workflow writes with the Archestra CI App token only.
+    uses: archestra-ai/.github/.github/workflows/release-please.yml@75d74747ef6874b818a5a9b1c3c9d2dc2c6bc6a3 # archestra-ai/.github#57
+    with:
+      skip-github-pull-request: true
+    secrets:
+      APP_ID: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
+
   release-please:
     name: Create or resolve release
+    needs: create-releases
+    # Also runs for the existing-release modes, which skip create-releases.
+    if: ${{ !cancelled() && (needs.create-releases.result == 'success' || needs.create-releases.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write # Required to create release tags and draft release metadata.
-      issues: write # Required to apply Release Please labels.
-      pull-requests: write # Required to create and update the release approval PR.
+      contents: write # Required to read draft releases.
     outputs:
       should_publish: ${{ steps.resolve.outputs.should_publish }}
       tag_name: ${{ steps.resolve.outputs.tag_name }}
@@ -42,25 +56,12 @@ jobs:
       source_commit: ${{ steps.resolve.outputs.source_commit }}
       registry_only: ${{ steps.resolve.outputs.registry_only }}
     steps:
-      # Create releases before calculating the next release PR. A draft release
-      # needs its forced tag to exist before Release Please can anchor that calculation.
-      - name: Create releases for merged release PRs
-        if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
-        id: release
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        with:
-          token: ${{ github.token }}
-          config-file: .github/release-please/release-please-config.json
-          manifest-file: .github/release-please/.release-please-manifest.json
-          target-branch: main
-          skip-github-pull-request: true
-
       - name: Resolve release to publish
         id: resolve
         env:
-          ACTION_RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
-          ACTION_TAG_NAME: ${{ steps.release.outputs.tag_name }}
-          ACTION_VERSION: ${{ steps.release.outputs.version }}
+          ACTION_RELEASE_CREATED: ${{ needs.create-releases.outputs.release_created }}
+          ACTION_TAG_NAME: ${{ needs.create-releases.outputs.tag_name }}
+          ACTION_VERSION: ${{ needs.create-releases.outputs.version }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           INPUT_PUBLISH_EXISTING_RELEASE: ${{ inputs.publish_existing_release }}
@@ -109,18 +110,30 @@ jobs:
             echo "registry_only=false"
           } >> "$GITHUB_OUTPUT"
 
+  # App-authenticated PR creation and pushes start CI without the approval
+  # required for pull_request events generated with GITHUB_TOKEN.
   release-pr:
     name: Create or update next release PR
     if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
     needs: release-please
+    permissions: {} # The shared workflow writes with the Archestra CI App token only.
+    uses: archestra-ai/.github/.github/workflows/release-please.yml@75d74747ef6874b818a5a9b1c3c9d2dc2c6bc6a3 # archestra-ai/.github#57
+    with:
+      skip-github-release: true
+    secrets:
+      APP_ID: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
+
+  sync-release-pr:
+    name: Synchronize release PR versions
+    if: ${{ needs.release-pr.outputs.prs_created == 'true' }}
+    needs: release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read # Required to check out the release PR; the App handles writes.
     steps:
-      # App-authenticated PR creation and pushes start CI without the approval
-      # required for pull_request events generated with GITHUB_TOKEN.
-      - name: Generate release PR token
+      - name: Generate release PR push token
         id: release-pr-token
         uses: archestra-ai/.github/actions/github-app-token@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
@@ -129,37 +142,22 @@ jobs:
           owner: archestra-ai
           repositories: OpenAPPA
           permission-contents: write
-          permission-issues: write
-          permission-pull-requests: write
-
-      - name: Create or update next release PR
-        id: release-pr
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        with:
-          token: ${{ steps.release-pr-token.outputs.token }}
-          config-file: .github/release-please/release-please-config.json
-          manifest-file: .github/release-please/.release-please-manifest.json
-          target-branch: main
-          skip-github-release: true
 
       - name: Checkout release PR
-        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ fromJSON(steps.release-pr.outputs.pr).headBranchName }}
+          ref: ${{ fromJSON(needs.release-pr.outputs.pr).headBranchName }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Synchronize release version
-        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
         uses: $/.github/actions/check-release-versions
         with:
           relock: "true"
 
       - name: Update release PR
-        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
         env:
-          RELEASE_PR: ${{ steps.release-pr.outputs.pr }}
+          RELEASE_PR: ${{ needs.release-pr.outputs.pr }}
           RELEASE_PUSH_TOKEN: ${{ steps.release-pr-token.outputs.token }}
         run: |
           release_branch=$(jq -er '.headBranchName' <<<"$RELEASE_PR")
