@@ -19,11 +19,15 @@ version = 2
 # A command naming a credential path narrows the session to `self`, the
 # requester. The `credentials` tag records why a rule is here.
 #
-# A dotenv file is matched as a path, not a substring: `.env` after a space,
-# `/` or `=`, and at the end of the command, before a space, or before
-# `.<suffix>` (`.env.local`, also `.env.example`); also a double-quoted
-# `".env"`, `".env.local"` or `"$DIR/.env"`, and `source .env;`. `os.environ`,
-# `process.env.X` and `.envrc` reach the Annotator below.
+# A credential file is matched as a path, not a substring: its name after a
+# space, `/` or `=`, and at the end of the command or before a space; also
+# double-quoted (`".npmrc"`, `"$HOME/.npmrc"`) and before `;`. A dotenv file
+# is matched the same way, and also with a mode suffix: `.env.local`,
+# `.env.prod*`, `.env.dev*`, `.env.staging*` and `.env.test*`, which cover
+# `.env.production`, `.env.development` and `.env.<mode>.local`. Any other
+# spelling reaches the Annotator below: a name inside a word or a string
+# literal, a single-quoted name, a template such as `.env.example`, and
+# `os.environ`, `process.env.X` or `.envrc`.
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env)"
 delta = { audience = ["self"] }
@@ -35,7 +39,102 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:* .env.*)"
+name = "tool/coding/shell(command:* .env.local*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env.local*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env.local*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env.local*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .env.prod*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env.prod*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env.prod*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env.prod*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .env.dev*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env.dev*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env.dev*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env.dev*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .env.staging*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env.staging*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env.staging*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env.staging*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .env.test*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.env.test*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.env.test*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".env.test*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -50,11 +149,6 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*/.env.*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
 name = "tool/coding/shell(command:*=.env)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
@@ -65,17 +159,7 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*=.env.*)"
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
 name = 'tool/coding/shell(command:*".env"*)'
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = 'tool/coding/shell(command:*".env.*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -90,12 +174,92 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*.claude.json*)"
+name = "tool/coding/shell(command:* .claude.json)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*.credentials.json*)"
+name = "tool/coding/shell(command:* .claude.json *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.claude.json)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.claude.json *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.claude.json)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.claude.json *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".claude.json"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.claude.json"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .claude.json;*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .credentials.json)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .credentials.json *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.credentials.json)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.credentials.json *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.credentials.json)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.credentials.json *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".credentials.json"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.credentials.json"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .credentials.json;*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -110,7 +274,47 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*.netrc*)"
+name = "tool/coding/shell(command:* .netrc)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .netrc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.netrc)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.netrc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.netrc)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.netrc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".netrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.netrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .netrc;*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -120,12 +324,92 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*id_rsa*)"
+name = "tool/coding/shell(command:* id_rsa)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*id_ed25519*)"
+name = "tool/coding/shell(command:* id_rsa *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/id_rsa)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/id_rsa *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=id_rsa)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=id_rsa *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*"id_rsa"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/id_rsa"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* id_rsa;*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* id_ed25519)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* id_ed25519 *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/id_ed25519)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/id_ed25519 *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=id_ed25519)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=id_ed25519 *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*"id_ed25519"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/id_ed25519"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* id_ed25519;*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -145,7 +429,47 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*.git-credentials*)"
+name = "tool/coding/shell(command:* .git-credentials)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .git-credentials *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.git-credentials)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.git-credentials *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.git-credentials)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.git-credentials *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".git-credentials"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.git-credentials"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .git-credentials;*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -155,12 +479,92 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*.npmrc*)"
+name = "tool/coding/shell(command:* .npmrc)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*.pypirc*)"
+name = "tool/coding/shell(command:* .npmrc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.npmrc)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.npmrc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.npmrc)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.npmrc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".npmrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.npmrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .npmrc;*)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .pypirc)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .pypirc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.pypirc)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.pypirc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.pypirc)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.pypirc *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".pypirc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.pypirc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .pypirc;*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -185,7 +589,47 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = "tool/coding/shell(command:*.vault-token*)"
+name = "tool/coding/shell(command:* .vault-token)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .vault-token *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.vault-token)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.vault-token *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.vault-token)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.vault-token *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".vault-token"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.vault-token"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .vault-token;*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -196,7 +640,47 @@ tags = ["credentials"]
 # substring of the command line, so a spelling these miss (the command
 # inside `$(...)`, a heredoc, an alias) reaches the Bash Annotator below.
 [[policy.tool]]
-name = "tool/coding/shell(command:*.databrickscfg*)"
+name = "tool/coding/shell(command:* .databrickscfg)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .databrickscfg *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.databrickscfg)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*/.databrickscfg *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.databrickscfg)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:*=.databrickscfg *)"
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*".databrickscfg"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/shell(command:*/.databrickscfg"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = "tool/coding/shell(command:* .databrickscfg;*)"
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -283,8 +767,8 @@ annotator = "claude-code.bash-requirements"
 # --- powershell: the shell rules, spelled for Windows ---
 
 # Claude Code on Windows offers PowerShell beside Bash, with the same `command`
-# argument and result. PowerShell takes either path separator, so each
-# directory rule is written for both; `\\` is one literal backslash in a
+# argument and result. PowerShell takes either path separator, so each path
+# and directory rule is written for both; `\\` is one literal backslash in a
 # selector. The Windows homes of the GitHub CLI and gcloud configs, the
 # CredentialManager module's `Get-StoredCredential` and SecretManagement's
 # `Get-Secret` are named here too, and `/proc/*/environ` for a WSL command. A
@@ -300,7 +784,127 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:* .env.*)'
+name = 'tool/coding/powershell(command:* .env.local*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env.local*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env.local*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env.local*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env.local*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env.prod*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env.prod*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env.prod*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env.prod*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env.prod*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env.dev*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env.dev*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env.dev*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env.dev*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env.dev*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env.staging*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env.staging*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env.staging*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env.staging*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env.staging*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .env.test*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.env.test*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.env.test*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".env.test*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.env.test*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -315,22 +919,12 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*/.env.*)'
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env *)'
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = 'tool/coding/powershell(command:*=.env.*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -345,17 +939,7 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*\\.env.*)'
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
 name = 'tool/coding/powershell(command:*".env"*)'
-delta = { audience = ["self"] }
-tags = ["credentials"]
-
-[[policy.tool]]
-name = 'tool/coding/powershell(command:*".env.*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -375,52 +959,602 @@ delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.claude.json*)'
+name = 'tool/coding/powershell(command:* .claude.json)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.credentials.json*)'
+name = 'tool/coding/powershell(command:* .claude.json *)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.netrc*)'
+name = 'tool/coding/powershell(command:*/.claude.json)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*id_rsa*)'
+name = 'tool/coding/powershell(command:*/.claude.json *)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*id_ed25519*)'
+name = 'tool/coding/powershell(command:*=.claude.json)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.git-credentials*)'
+name = 'tool/coding/powershell(command:*=.claude.json *)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.npmrc*)'
+name = 'tool/coding/powershell(command:*".claude.json"*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.pypirc*)'
+name = 'tool/coding/powershell(command:*/.claude.json"*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.vault-token*)'
+name = 'tool/coding/powershell(command:* .claude.json;*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
-name = 'tool/coding/powershell(command:*.databrickscfg*)'
+name = 'tool/coding/powershell(command:*\\.claude.json)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.claude.json *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.claude.json"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .credentials.json)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .credentials.json *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.credentials.json)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.credentials.json *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.credentials.json)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.credentials.json *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".credentials.json"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.credentials.json"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .credentials.json;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.credentials.json)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.credentials.json *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.credentials.json"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .netrc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .netrc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.netrc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.netrc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.netrc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.netrc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".netrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.netrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .netrc;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.netrc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.netrc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.netrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* id_rsa)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* id_rsa *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/id_rsa)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/id_rsa *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=id_rsa)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=id_rsa *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*"id_rsa"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/id_rsa"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* id_rsa;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\id_rsa)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\id_rsa *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\id_rsa"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* id_ed25519)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* id_ed25519 *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/id_ed25519)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/id_ed25519 *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=id_ed25519)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=id_ed25519 *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*"id_ed25519"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/id_ed25519"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* id_ed25519;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\id_ed25519)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\id_ed25519 *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\id_ed25519"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .git-credentials)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .git-credentials *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.git-credentials)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.git-credentials *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.git-credentials)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.git-credentials *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".git-credentials"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.git-credentials"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .git-credentials;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.git-credentials)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.git-credentials *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.git-credentials"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .npmrc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .npmrc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.npmrc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.npmrc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.npmrc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.npmrc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".npmrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.npmrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .npmrc;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.npmrc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.npmrc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.npmrc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .pypirc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .pypirc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.pypirc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.pypirc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.pypirc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.pypirc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".pypirc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.pypirc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .pypirc;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.pypirc)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.pypirc *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.pypirc"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .vault-token)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .vault-token *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.vault-token)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.vault-token *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.vault-token)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.vault-token *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".vault-token"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.vault-token"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .vault-token;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.vault-token)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.vault-token *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.vault-token"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .databrickscfg)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .databrickscfg *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.databrickscfg)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.databrickscfg *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.databrickscfg)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*=.databrickscfg *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*".databrickscfg"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*/.databrickscfg"*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:* .databrickscfg;*)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.databrickscfg)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.databrickscfg *)'
+delta = { audience = ["self"] }
+tags = ["credentials"]
+
+[[policy.tool]]
+name = 'tool/coding/powershell(command:*\\.databrickscfg"*)'
 delta = { audience = ["self"] }
 tags = ["credentials"]
 

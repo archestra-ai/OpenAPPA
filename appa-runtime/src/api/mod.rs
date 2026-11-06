@@ -2,10 +2,10 @@
 //! event model this crate declares.
 
 mod embedded;
-pub(crate) mod files;
 mod host;
 mod launch;
 pub(crate) mod peer;
+mod recorders;
 mod session;
 mod spawn_hold;
 
@@ -22,7 +22,7 @@ pub use crate::engine::{
 };
 pub use crate::events::{ExternalOutcome, ExternalRole, NoAnswerClass};
 pub use crate::external::Diagnostics;
-pub use crate::recorder::{ConsultBackend, ConsultContext, ConsultRecord, ConsultRecorder};
+pub use crate::transcriber::{ConsultBackend, ConsultContext, ConsultRecord, ConsultTranscriber};
 pub use appa_runtime_api::{
     Actor, OfferedRemedy, OutcomeBody, PromptKey, ProposedCall, Review, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome,
     TrajectoryId,
@@ -53,7 +53,7 @@ use crate::external::{ConsultGates, ExternalServices};
 use crate::yell;
 use appa_engine::label::ReaderId;
 use appa_eventlog::{Backend, DeploymentName, HostObservation, Log, LogStore};
-use appa_runtime_api::{Adapter, AdapterName};
+use appa_runtime_api::Adapter;
 use host::{HostState, host_actor, inventory_at};
 
 /// One remedy offer as it is quoted and carried.
@@ -183,7 +183,7 @@ pub(crate) fn call_key(call: &ProposedCall) -> Option<PermitKey> {
     if bare == "yell" {
         return crate::yell::YellArgs::parse(&call.arguments).map(|args| args.ticket());
     }
-    if !MANAGEMENT_TOOLS.contains(&bare) && !files::owns(call) && bare != peer::READ_PEER_MESSAGE {
+    if !MANAGEMENT_TOOLS.contains(&bare) && bare != peer::READ_PEER_MESSAGE {
         return None;
     }
     let mut arguments = serde_json::from_str::<serde_json::Value>(call.arguments.get()).ok()?;
@@ -1158,11 +1158,6 @@ impl Prepared {
     }
 
     fn assemble(self, backend: Backend) -> Result<Runtime, OpenError> {
-        let state_path = if let Backend::Sqlite { path } = &backend {
-            Some(path.clone())
-        } else {
-            None
-        };
         let opened = match backend {
             Backend::Sqlite { path } => LogStore::open_archiving(&path),
             backend => LogStore::open(backend).map(|store| (store, None)),
@@ -1180,19 +1175,15 @@ impl Prepared {
                 "the database was too old to upgrade; it was moved aside and its sessions cannot resume"
             );
         }
-        self.with_store(Arc::new(store), state_path, DeploymentName::new(SERVING_LINE))
+        self.with_store(Arc::new(store), DeploymentName::new(SERVING_LINE))
     }
 
-    fn with_store(
-        self,
-        store: Arc<LogStore>,
-        state_path: Option<PathBuf>,
-        line: DeploymentName,
-    ) -> Result<Runtime, OpenError> {
+    fn with_store(self, store: Arc<LogStore>, line: DeploymentName) -> Result<Runtime, OpenError> {
         let (deployment, _) = serve(&store, &line, &self.deployment)?;
         Ok(Runtime {
             inner: Arc::new(Inner {
                 shared: Arc::new(Shared {
+                    recorder_cursors: recorders::Cursors::default(),
                     deployment: std::sync::RwLock::new(Arc::new(deployment)),
                     line,
                     revisions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -1200,14 +1191,12 @@ impl Prepared {
                     events: std::sync::Mutex::new(crate::events::EventLog::default()),
                     gates: self.gates,
                     naming: self.naming,
-                    files: None,
-                    state_path,
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
                     held_returns: std::sync::Mutex::new(std::collections::HashMap::new()),
                     spawn_holds: spawn_hold::SpawnHolds::default(),
                 }),
                 store,
-                recorder: None,
+                transcriber: None,
                 #[cfg(feature = "archestra")]
                 archestra_context: None,
                 pinned: None,
@@ -1263,7 +1252,7 @@ struct Inner {
     shared: Arc<Shared>,
     store: Arc<LogStore>,
     /// Where this view's sessions hand a record of every consult they make.
-    recorder: Option<Arc<dyn ConsultRecorder>>,
+    transcriber: Option<Arc<dyn ConsultTranscriber>>,
     #[cfg(feature = "archestra")]
     archestra_context: Option<String>,
     /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
@@ -1296,8 +1285,8 @@ struct RevisionKey {
 /// view [`Runtime::on`] makes of it, so a reload through any of them serves every view
 /// that pins no deployment.
 struct Shared {
-    files: Option<files::FileTracking>,
-    state_path: Option<PathBuf>,
+    /// How far each recorder has read each family.
+    recorder_cursors: recorders::Cursors,
     deployment: std::sync::RwLock<Arc<Deployment>>,
     /// The deployment line the shared deployment serves the head of.
     line: DeploymentName,
@@ -1354,11 +1343,7 @@ impl Runtime {
         store: Arc<LogStore>,
         modules: Option<PathBuf>,
     ) -> Result<Runtime, OpenError> {
-        Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(
-            store,
-            None,
-            DeploymentName::new(SERVING_LINE),
-        )
+        Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store, DeploymentName::new(SERVING_LINE))
     }
 
     /// [`Runtime::open_with_store`] serving `line` in place of the default one, for tests that
@@ -1370,7 +1355,7 @@ impl Runtime {
         store: Arc<LogStore>,
         line: DeploymentName,
     ) -> Result<Runtime, OpenError> {
-        Prepared::new(config, None, ToolNaming::AsAuthored)?.with_store(store, None, line)
+        Prepared::new(config, None, ToolNaming::AsAuthored)?.with_store(store, line)
     }
 
     /// [`Runtime::open_with_store`] for a host that names tools through an adapter of its
@@ -1387,11 +1372,8 @@ impl Runtime {
         if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
             return Err(OpenError::UnspelledControlTool);
         }
-        Prepared::new(config, modules, ToolNaming::Canonical { adapter })?.with_store(
-            store,
-            None,
-            DeploymentName::new(SERVING_LINE),
-        )
+        Prepared::new(config, modules, ToolNaming::Canonical { adapter })?
+            .with_store(store, DeploymentName::new(SERVING_LINE))
     }
 
     /// This runtime over another store: the same deployment, consult gates and diagnostics,
@@ -1401,15 +1383,15 @@ impl Runtime {
     pub fn on(&self, store: Arc<LogStore>) -> Runtime {
         self.view(|view| {
             view.store = store;
-            view.recorder = None;
+            view.transcriber = None;
         })
     }
 
-    /// This view with every consult its sessions make handed to `recorder`, once the
+    /// This view with every consult its sessions make handed to `transcriber`, once the
     /// consult's outcome is known. Deployment probes and [`Runtime::on`] views of it
-    /// record nothing.
-    pub fn recording(&self, recorder: Arc<dyn ConsultRecorder>) -> Runtime {
-        self.view(|view| view.recorder = Some(recorder))
+    /// transcribe nothing.
+    pub fn transcribing(&self, transcriber: Arc<dyn ConsultTranscriber>) -> Runtime {
+        self.view(|view| view.transcriber = Some(transcriber))
     }
 
     /// A request-scoped opaque context returned only to the host's archestra
@@ -1425,7 +1407,7 @@ impl Runtime {
     /// policies from one runtime publishes each to its own line and dispatches each through a
     /// view pinned to that line's head. Once the line moves past the revision the deployment
     /// was published as, the view refuses with a retryable error until the host pins the new
-    /// head. A family of another line is refused. [`Runtime::on`] and [`Runtime::recording`]
+    /// head. A family of another line is refused. [`Runtime::on`] and [`Runtime::transcribing`]
     /// views of this one keep the pin.
     ///
     /// A pin selects the policy and its externals, not whose trajectories a view reaches.
@@ -1583,13 +1565,13 @@ impl Runtime {
         }
     }
 
-    /// Another view of this runtime's shared state: this view's store, recorder and pin,
+    /// Another view of this runtime's shared state: this view's store, transcriber and pin,
     /// with what `vary` changes.
     fn view(&self, vary: impl FnOnce(&mut Inner)) -> Runtime {
         let mut inner = Inner {
             shared: Arc::clone(&self.inner.shared),
             store: Arc::clone(&self.inner.store),
-            recorder: self.inner.recorder.clone(),
+            transcriber: self.inner.transcriber.clone(),
             #[cfg(feature = "archestra")]
             archestra_context: self.inner.archestra_context.clone(),
             pinned: self.inner.pinned.clone(),
@@ -2002,136 +1984,6 @@ fn read_refused(error: appa_eventlog::ReadError) -> EventError {
 }
 
 impl Runtime {
-    #[cfg(feature = "daemon")]
-    pub(crate) fn file_initial_label(
-        &self,
-        trust: &str,
-        audience: appa_engine::label::DeclaredAudience,
-    ) -> Result<appa_engine::label::Label, OpenError> {
-        let deployment = self.inner.deployment();
-        let rank = deployment
-            .resident
-            .registry()
-            .trust_chain()
-            .rank_of(trust)
-            .ok_or_else(|| OpenError::UnsupportedPolicy(format!("unknown initial file trust rank: {trust}")))?;
-        Ok(appa_engine::label::Label::new(
-            rank,
-            appa_engine::label::Audience::of_declared(&audience),
-        ))
-    }
-
-    /// Enable experimental Read/Write/Edit tracking, not a supported security boundary.
-    /// Runtime-owned tools require native alternatives and implicit reads disabled.
-    /// Inference and final responses remain unmediated. Use disposable fixtures only.
-    /// Configure this before sharing the runtime. Each root session binds its first file call's
-    /// harness working directory and checks it for links. Each file gets the operator's source
-    /// Label when a call first touches it. Child trajectories inherit their root's workspace
-    /// event stream. All roots bound to the same canonical workspace share that stream.
-    /// Only exclusively owned Unix workspaces are supported. The host must also keep its
-    /// configuration, plugins, credentials and other execution-control files outside the root.
-    pub fn with_file_tracking(
-        mut self,
-        initial: appa_engine::label::Label,
-        config_path: PathBuf,
-    ) -> Result<Self, OpenError> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .and_then(|inner| Arc::get_mut(&mut inner.shared))
-            .ok_or_else(|| OpenError::Storage("enable file tracking before sharing the runtime".into()))?;
-        if !matches!(inner.naming, ToolNaming::Canonical { adapter } if adapter.name == AdapterName::ClaudeCode) {
-            return Err(OpenError::Storage(
-                "file tracking requires the Claude Code adapter".into(),
-            ));
-        }
-        let mut protected_paths =
-            vec![std::fs::canonicalize(config_path).map_err(|error| OpenError::Storage(error.to_string()))?];
-        if let Some(path) = &inner.state_path {
-            protected_paths.push(std::fs::canonicalize(path).map_err(|error| OpenError::Storage(error.to_string()))?);
-        }
-        let deployment = Arc::clone(
-            inner
-                .deployment
-                .get_mut()
-                .expect("the deployment lock is never poisoned: no panic runs while it is held"),
-        );
-        if deployment
-            .resident
-            .registry()
-            .sanitizers()
-            .any(|sanitizer| sanitizer.on.input)
-        {
-            return Err(OpenError::Storage(
-                "file tracking does not support tool-input sanitizer or rewrite routes".into(),
-            ));
-        }
-        if files::FileTool::ALL.into_iter().any(|tool| {
-            deployment
-                .resident
-                .registry()
-                .profile()
-                .confines_result(&appa_engine::value::ToolName::new(format!("mcp/appa/{}", tool.name())))
-        }) {
-            return Err(OpenError::Storage(
-                "file tracking cannot confine the result of a runtime-owned file tool".into(),
-            ));
-        }
-        if deployment
-            .resident
-            .registry()
-            .trust_chain()
-            .name_of(initial.trust)
-            .is_none()
-        {
-            return Err(OpenError::Storage(
-                "initial file trust must be a configured policy rank".into(),
-            ));
-        }
-        inner.files = Some(files::FileTracking {
-            policy_key: deployment.key(),
-            initial,
-            deployment: inner.line.to_string(),
-            protected_paths,
-            process_backend: None,
-        });
-        tracing::warn!(
-            "experimental file tools require Claude Code launched with native tools and implicit filesystem reads disabled"
-        );
-        Ok(self)
-    }
-
-    /// Enable the host-installed, pinned agentsh runner for declared-input processing.
-    /// The backend and system toolchain are trusted host code, outside the managed workspace.
-    pub fn with_file_process_backend(mut self, backend: PathBuf) -> Result<Self, OpenError> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .and_then(|inner| Arc::get_mut(&mut inner.shared))
-            .ok_or_else(|| OpenError::Storage("enable processing before sharing the runtime".into()))?;
-        let files = inner
-            .files
-            .as_mut()
-            .ok_or_else(|| OpenError::Storage("processing requires file tracking".into()))?;
-        let backend = std::fs::canonicalize(backend).map_err(|error| OpenError::Storage(error.to_string()))?;
-        if ["agentsh", "agentsh-unixwrap", "run.py"]
-            .iter()
-            .any(|name| std::fs::canonicalize(backend.join(name)).map_or(true, |path| !path.is_file()))
-        {
-            return Err(OpenError::Storage("processing requires a complete backend".into()));
-        }
-        files.process_backend = Some(backend);
-        Ok(self)
-    }
-
-    #[cfg(feature = "daemon")]
-    pub(crate) fn bind_file_workspace(&self, root: &TrajectoryId, workspace: &str) -> Result<(), EventError> {
-        self.inner
-            .shared
-            .files
-            .as_ref()
-            .ok_or_else(|| files::refused("file tools are not enabled"))?
-            .bind(&self.inner.store, root, workspace)
-            .map(|_| ())
-            .map_err(files::refused)
-    }
-
     /// Opens the modules, the engine, and the store. The `[policy]`
     /// table compiles through the documented dialect into the engine's
     /// registry — every surface and algebraic load lint runs here, and
@@ -3032,18 +2884,10 @@ impl Runtime {
         args: ExecuteRemedyPlanArgs,
         call: Option<&str>,
         elicitation: Option<&Elicitation>,
-        expected_actor: Option<&Actor>,
     ) -> RemedyReply {
         self.render_remedy(
-            self.execute_remedy_outcome(
-                args,
-                RemedyCaller::Daemon {
-                    call,
-                    elicitation,
-                    expected_actor,
-                },
-            )
-            .await,
+            self.execute_remedy_outcome(args, RemedyCaller::Daemon { call, elicitation })
+                .await,
         )
     }
 
@@ -3052,17 +2896,9 @@ impl Runtime {
         let (call, elicitation, expected_actor, presentation, strict_freshness) = match caller {
             RemedyCaller::Embedded { actor, presentation } => (None, None, Some(actor), presentation, true),
             #[cfg(feature = "daemon")]
-            RemedyCaller::Daemon {
-                call,
-                elicitation,
-                expected_actor,
-            } => (
-                call,
-                elicitation,
-                expected_actor,
-                EmbeddedPresentationOptions::default(),
-                false,
-            ),
+            RemedyCaller::Daemon { call, elicitation } => {
+                (call, elicitation, None, EmbeddedPresentationOptions::default(), false)
+            }
         };
         let Some(offer_id) = args.offer_id.clone() else {
             // An embedded host authenticated its actor; the daemon spends the vouch the
@@ -3173,7 +3009,6 @@ enum RemedyCaller<'a> {
     Daemon {
         call: Option<&'a str>,
         elicitation: Option<&'a Elicitation>,
-        expected_actor: Option<&'a Actor>,
     },
 }
 
@@ -4092,6 +3927,18 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
+    // A recorder a declaration names that nothing binds would keep no label, and a read of
+    // what its calls wrote would launder it; a binding nothing names is never delivered to.
+    bound_exactly(
+        "recorder",
+        policy
+            .engine()
+            .registry()
+            .recorders()
+            .into_iter()
+            .map(|name| name.as_str()),
+        &externals.recorders,
+    )?;
     // A model profile loads without its key, so a battery installs before the key is
     // exported; a deployment that consults the profile needs the key to open.
     use crate::config::Implementation;
@@ -4442,19 +4289,6 @@ mod deployment_tests {
             publications,
             vec![("diagnostic", head.revision.value(), head.key.as_str())]
         );
-    }
-
-    #[test]
-    fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
-        let fallback = EventError::annotation_refused(
-            "claude-code.undeclared-tool".to_string(),
-            "non_success status=1".to_string(),
-        )
-        .to_string();
-        assert!(fallback.contains("run /appa-guide"), "{fallback}");
-
-        let exact = EventError::annotation_refused("bash-classifier".to_string(), "timeout".to_string()).to_string();
-        assert!(!exact.contains("/appa-guide"), "{exact}");
     }
 
     /// The served adapter's inverse is what the runtime says where it addresses that

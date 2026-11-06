@@ -50,7 +50,7 @@ pub enum EngineError {
     #[error("invalid call: {0}")]
     InvalidCall(ArgumentError),
     #[error("invalid file basis evidence: {0}")]
-    InvalidFileEvidence(String),
+    InvalidHeldEvidence(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -559,20 +559,31 @@ impl Engine {
         crate::route::search(&self.registry, &views, &context, depth)
     }
 
-    /// Publication label for a file mutation released by this validated dispatch.
-    pub fn file_output_label(
+    /// The label a released call publishes to its recorder: `trajectory ⊓ forwards ⊓ delta`.
+    /// `trajectory` is the label the call's `DispatchOpened` pinned as it was released — the
+    /// substituted label, for a call an input sanitizer rewrote, because that is what the call
+    /// sent. `forwards` labels the content the call sends beyond its arguments, and `delta` the
+    /// content it brings back, which a call can write where the trajectory never sees it. Derived
+    /// from the dispatch's own record — both as the releasing revision pinned them — so it is the
+    /// same on every replay of the log and after any reload.
+    pub fn published_label(
         &self,
         view: &EngineView,
         dispatch: &DispatchId,
-    ) -> Result<Option<crate::label::Label>, TransitionError> {
+    ) -> Result<crate::label::Label, TransitionError> {
         let view = &*self.current(view)?;
         let views = view.projection().view(dispatch.trajectory());
         let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
-        let receiving = views
-            .receiving_bound(dispatch)
-            .ok_or(TransitionError::UnknownDispatch)?;
+        let sent = views.sent_label(dispatch).ok_or(TransitionError::UnknownDispatch)?;
         let contract = self.outcome_contract(&views, dispatch, call)?;
-        Ok(call.file_output_label_from(&contract.output_label(), receiving))
+        Ok(sent
+            .combine(&crate::check::forwarded_label(&contract.contract))
+            .combine(&contract.output_label()))
+    }
+
+    /// The recorder the declaration this call selects names, where it names one.
+    pub fn recorder(&self, call: &ResolvedCall) -> Option<&crate::names::RecorderName> {
+        self.registry.recorder(call)
     }
 
     /// What the runtime must resolve before it can execute one live offer.
@@ -1109,7 +1120,7 @@ fn sanitizer_evidence(evidence: &[Evidence], sanitizer: &SanitizerName, source: 
             source: from,
             derived,
         } if named == sanitizer && from == &source => Some(derived.clone()),
-        Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } | Evidence::File { .. } => None,
+        Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } | Evidence::Held { .. } => None,
     })
 }
 

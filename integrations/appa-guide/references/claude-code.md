@@ -61,7 +61,7 @@ The runtime address is
 
 ### Inspect
 
-1. List every tool this session can call: Claude Code's built-ins (`Bash`,
+1. List every tool this session can call: Claude Code's built-ins (`Glob`,
    `Read`, `Edit`, ...) and every MCP tool, spelled `mcp__<server>__<tool>`.
    A deferred tool counts: its name is enough.
 2. Run:
@@ -111,43 +111,17 @@ Check what each battery's README expects the root config to provide, and record
 anything missing. Only name a group if `appa describe` lists it as a named
 audience or the proposal configures an audience source for it.
 
-### Develop the Bash classifier hint
+### Shell commands and files
 
-During `init`, develop a concise `hint` for the
-`claude-code.bash-requirements` Annotator from the contracts of every battery
-that the approved configuration will include. This lets Claude apply the same
-policy intent when a CLI command reaches a service covered by an MCP battery.
-
-Read the batteries' `appa.toml` and README as source material. Translate their
-source and sink intent for recognizable CLI usage. Give the classifier a short
-instruction and authority to reason from the complete command; do not build an
-exhaustive command list or restate OpenAPPA's label guide. Keep the complete
-hint within the documented 512-character limit.
-
-This translation is not equivalent MCP enforcement. A Bash call does not gain
-an MCP tool's typed arguments, Annotator, audience source, or knowledge of its
-readers. Use a battery's dynamic facts only when an installed context provider
-actually supplies them for that Bash call. Otherwise, do not invent visibility,
-reader membership, account identity, or other runtime facts. State uncertainty
-conservatively in the hint when the command and supplied context cannot
-establish the boundary.
-
-Keep specialized Annotators separate. In particular, the GitHub battery
-supplies `context.github` to the existing
-`claude-code.bash-repository-requirements` Annotator; do not replace it, merge
-it into the generic Bash Annotator, or claim that a generated hint reproduces
-it. Preserve every Annotator's implementation, inputs, and mandate.
-
-Treat an existing root hint as an operator customization. Preserve it and add
-compatible battery-derived guidance only when the combined hint remains
-concise and within the limit. If the guidance conflicts or does not fit,
-propose the smallest explicit revision instead of silently replacing it.
-
-Include the exact proposed hint text and its practical effect in the proposal.
-Do not write it before approval. If the resulting hint is unchanged, propose no
-hint edit. After approval, copy the complete existing
-`claude-code.bash-requirements` declaration into the root only when needed,
-change only its `hint`, and leave the included battery files unchanged.
+The Claude Code battery confines every shell command, `Bash` or SafeBash, to
+the files and hosts it declares, and blocks `PowerShell`, `Monitor`, `Grep`
+and `NotebookEdit`. Propose no rule and no Annotator hint for those tools. A CLI command that reaches a service an MCP
+battery covers declares its `network_hosts`, and no rule judges that host;
+recommend the service's MCP battery when the user needs rules for the
+service. `Read`, `Write` and `Edit` go through the file-tracker. Label
+paths in `~/.config/appa/file-tracker.toml`, never with root `Read`, `Write`
+or `Edit` rules: a root rule for those tools precedes the battery's and
+stops the file-tracker from recording the label.
 
 ### Remaining tools
 
@@ -169,8 +143,6 @@ are included. Then group the proposal by server. Show:
 
 - batteries to include, each with its one-sentence explanation and the
   credential it needs;
-- the exact Bash classifier hint derived from the batteries, when it changes,
-  and what CLI behavior it adds;
 - rules for the remaining tools, and how those tools will behave;
 - existing behavior that stays unchanged, but only when it affects the result;
 - tools the proposal leaves to the Annotator (judged call by call, which may
@@ -203,10 +175,6 @@ After approval:
 1. Run `appa describe --config <live-path> --session-tools ...` again. If the
    config, batteries, Authorities, audience sources, or named audiences
    changed since the proposal, revise the proposal and ask for approval again.
-   Re-read the root config and compare the complete
-   `claude-code.bash-requirements` declaration, including its `hint`, with the
-   version used for the proposal. If it changed, preserve the new declaration,
-   revise the proposal, and ask for approval again.
 2. Resolve the missing prerequisites of every approved battery before including
    it, and of every already-included battery that is not `ready`. Run
    `appa battery status --config <live-path> --battery <name>,<name> --json --check`.
@@ -275,10 +243,6 @@ After approval:
    variable from its environment or the local credential database. Skip the
    mapping for a battery whose token was skipped.
 6. Add the approved rules for the remaining tools to the root config.
-   Immediately before changing the Bash hint, re-read the root and
-   replace only the exact complete `claude-code.bash-requirements` declaration
-   used in the approved proposal. If it no longer matches, stop, preserve the
-   current declaration, and revise the proposal instead of overwriting it.
 7. Reload and report the result as described below. When the battery's
    README names a replay trace, offer
    `appa replay --config <live-path> <trace>` as the check that the
@@ -322,15 +286,6 @@ not guess.
 9. Apply only the approved root-rule changes.
 10. Reload and report the result as described below.
 
-For an exact Bash command pattern, add a narrow, ordered
-`host/claude-code/Bash(command:...)` root contract: root rules precede the
-battery's Bash rules, including its credential rules. A command the root rule
-matches is not narrowed for the credential paths it names, so keep the pattern
-exact. For semantic command interpretation, declare
-`claude-code.bash-requirements` in the root with a `hint`; a root Annotator
-replaces the battery's of the same name. Preserve its implementation, inputs,
-and mandate unless the approved behavior requires a change.
-
 ## Tuning options
 
 The defaults are a middle ground: a normal coding session keeps running, and
@@ -344,7 +299,6 @@ Looser:
 |---|---|---|
 | `trust-server <server>` | Static rules with `delta = {}` for the server's tools, in place of the Annotator's call-by-call judgment or a battery's `suspicious`. | Text other people write there reaches the session at full trust. |
 | `trusted-sites <domains>` | `host/claude-code/WebFetch(url:https://<domain>/*)` with the root WebFetch rule's `requires` and `delta = {}`, placed before the root WebFetch rule. | Anyone who can edit those pages can steer the agent. |
-| `instructions-after-web` | Root Write and Edit rules for `*CLAUDE.md`, `*.claude/skills/*`, `*.claude/agents/*` and `*.claude/commands/*` with `delta = {}`. | Text from a web page can end up in instructions every later session reads. |
 
 Stricter:
 
@@ -352,7 +306,7 @@ Stricter:
 |---|---|---|
 | `no-fallback` | Remove the root's `name = "*"` rule and its `claude-code.undeclared-tool` Annotator. Tools no rule covers are refused. | A newly added MCP server does nothing until `/appa-guide` writes rules for it. |
 | `no-leak-approvals` | Remove `audience_missing` from the `hitl` Authority's permits. A call that would send private data where a wider audience can read it is refused instead of asking. | Deliberately sharing private data needs a policy change first. |
-| `private-folders <paths>` | Read, Grep and Bash selectors for the paths with `delta = { audience = ["self"] }`, before each bare rule. | After reading those folders, public sends need approval or are refused. |
+| `private-folders <paths>` | A `[[path]]` rule per path in `~/.config/appa/file-tracker.toml` with the absolute `pattern = "<path>/*"` and `audience = ["self"]`. | After reading those folders, public sends need approval or are refused. |
 | `suspicious-server <server>` | Static rules with `delta = { trust = "suspicious" }` for the server's tools. | Once the agent reads that server, writes to its own instructions and other trusted-only actions ask the user. |
 
 ## Explain a block

@@ -32,171 +32,32 @@ frontmatter the scan cannot read to its closing `---` within 64 KiB, or
 that is not in block style, blocks prompts the same way. The project and user agent directories and the installed plugins are
 scanned; agents passed on the command line are not.
 
-## Security scope and implementation order
+## Security scope
 
-The goal is to enforce the guarantees available through a Claude Code plugin
-and its bundled APPA runtime, then extend coverage through third-party isolation.
-An inference proxy remains a documented future extension, outside the current
-implementation sequence. Building a custom sandbox or modifying Claude Code
-is not a goal.
-Assume no process outside Claude Code edits workspace files. This does not
-exclude subprocesses launched by Claude Code itself.
-
-```mermaid
-flowchart LR
-    stage1["1. Plugin hardening<br/>runtime-owned Read/Write/Edit<br/>implemented, opt-in"]
-    stage2["2. Mediated Copy/Move<br/>Labels move without payloads<br/>implemented, opt-in"]
-    stage3["3. Third-party isolation<br/>isolated Process commands<br/>implemented, opt-in"]
-    proxy["Inference proxy<br/>not implemented"]
-    stage1 --> stage2 --> stage3 --> proxy
-```
-
-The three implemented stages are described in this README and in
-[the file-mediation architecture note](../../../appa-runtime/FILE-MEDIATION.md), which
-carries the component map, the call sequence, the ledger model and the boundary list.
-
-### Plugin and bundled runtime
-
-- Check proposals that reach `PreToolUse` before releasing the hooked call.
-  Admit reported observations and execute remedies against the host-bound
-  trajectory. Coverage depends on Claude invoking the corresponding hooks.
-- Keep policy evaluation, Label combination, and trajectory state in the shared
-  runtime. The plugin translates harness events; it does not define a separate
-  file-Label algebra or persistence format.
-- Runtime-owned file tools can check before content-dependent validation and
-  admit results before returning them over MCP. The draft implements this path;
-  normal plugin installation does not establish exclusive use of these tools.
-- Refuse unsupported calls where a blocking hook is available. Such refusal
-  does not cover work performed before the hook. Report missing coverage rather
-  than claiming complete provenance for a partially observed trajectory.
+The plugin enforces the guarantees available at Claude Code's hook boundary,
+with the bundled APPA runtime. An inference proxy remains a documented future
+extension. Building a custom sandbox or modifying Claude Code is not a goal.
 
 Native Edit is a known boundary gap: a Claude Code 2.1.268 probe returned a
 content-dependent match error before `PreToolUse`, with no APPA proposal.
-The plugin cannot prevent that observation by denying the later hook. Native
-Read/Write prevalidation coverage is not established. The constrained
-`appa claude-files` launcher is an experimental test path, not proof that a
-plugin installation disables native tools or implicit reads.
+The plugin cannot prevent that observation by denying the later hook.
 
-### Implementation sequence
+### File labels and SafeBash
 
-1. **Sharpen the plugin without isolation or an inference proxy.** Integrate
-   and test runtime-owned Read/Write/Edit through the installed bundle. Verify
-   identity binding, failures, concurrent calls, interruption, and session-local
-   state. Record native paths that remain unmediated. Tests must inspect actual
-   file versions and observations, not just hook responses, and include live
-   agentic exercises. An interrupted turn gives back the reservation of a call
-   the harness never ran, while the workspace still matches the pin; a workspace
-   that moved keeps it for the life of the runtime. Automatic reconciliation
-   of a moved workspace is not implemented.
-2. **Add mediated file-to-file Copy/Move.** File bytes need not enter model
-   context for their Labels to propagate. Pin source and destination versions,
-   retain the source's Label contribution, check the destination flow, and
-   record the resulting version/path change. Treat returned acknowledgements
-   and errors separately as trajectory observations. Initially support regular
-   files within one managed workspace; refuse unsupported directory, link,
-   and cross-filesystem cases. Test overwrite, identical bytes with different
-   Labels, copy/move followed by Read, and interruption without losing Labels.
-   This stage covers runtime-owned operations, not arbitrary Bash `cp` or `mv`.
-3. **Integrate third-party isolation.** Evaluate agentsh or an equivalent
-   backend for subprocess file, process, and network enforcement. Require
-   verified capabilities and refuse execution on confinement setup failure.
-   Start with enforced input/output boundaries and conservative combination of
-   all accessible input Labels, rather than relying on audit events arriving
-   before effects. Reuse the file-version and publication contracts from stage
-   two. Test descendant processes, forbidden accesses, network attempts, and
-   restart behavior before claiming coverage of shell `cp` and `mv`.
-
-Copy/Move precedes isolation because its Label and publication contracts are
-needed by either execution backend. Actual shell-command coverage still
-depends on enforcing that commands use the isolated backend; recognizing a
-command name does not establish mediation.
-
-### Implemented file-to-file contract
-
-The opt-in file runtime exposes `appa_copy_file(source_path, destination_path)`
-and `appa_move_file(source_path, destination_path)` alongside Read/Write/Edit.
-Both paths must be regular files or an absent destination within the managed
-workspace. Move requires one filesystem. Both tools replace existing destination
-content; its prior version remains in history but does not taint the new bytes.
-
-The destination Label combines the source, receiving trajectory, and tool delta.
-Policy requirements check that combined Label. Constant acknowledgements do not
-carry the payload into the trajectory; reading the destination does. The ledger
-pins both paths under one live reservation and records the source version as
-a content dependency. Move also records source-path absence. An incomplete or
-inconsistent outcome keeps the reservation and stops further file calls.
-
-Live Claude Code exercises through the installed plugin verified Copy → Move →
-acknowledgement-only Write without narrowing, then Read with narrowing and a
-tainted summary. A second exercise verified overwrite and refusal of same-path
-copy, missing-source move, and a move into `CLAUDE.md`. Unit tests cover raw bytes,
-distinct Labels on identical bytes, source-path reuse, destination requirements,
-incomplete transfers, and fresh-ledger behavior after restart. These tests establish the
-mediated tool contract, not native-tool or arbitrary subprocess confinement.
-
-### Isolated declared-input processing
-
-The opt-in `appa_process_files(input_paths, output_path, command)` tool runs a
-shell command on private input snapshots and publishes one regular output file.
-The engine checks all input Labels before execution and applies their combination
-to the output, stdout, stderr and failures. It records every declared dependency,
-even when the command does not read that input.
-
-The host-installed backend combines pinned, locally patched agentsh with bubblewrap
-namespaces. Required helper setup failures refuse execution. The fixed syscall policy
-denies sockets, keyrings and cross-process access; inherited descriptors and environment
-are cleared. Input mounts are read-only. Publication waits for descendant teardown and
-rejects symbolic/hard links or special files. Native Bash remains unsupported.
-
-See [backend setup and contract](../../../integrations/agentsh/README.md) for requirements,
-tests and limits. Live Claude tests cover a two-input invoice calculation, admitted failure
-text, refused symlink publication and actual denied control-file/network/input-write
-attempts. This confines supported subprocess calls, not Claude's native filesystem
-access, inference traffic or final response.
-
-### Running the opt-in file runtime
-
-The file runtime is off unless the operator starts it that way:
-
-```sh
-appa runtime --config /host/file-policy.toml --db /host/runtime.db \
-  --file-process-backend /host/backend
-```
-
-The `[file_tracking]` table in `file-policy.toml` enables file tracking and supplies the
-initial trust and audience. Without that table, the runtime does not expose the file tools.
-Each root session binds to the working directory in its first file call. Its subagents share
-that workspace and in-memory ledger. Another root session can use another workspace on the
-same runtime. The initial settings classify each root session's workspace snapshot. The runtime
-hashes every file and refuses a workspace that holds a symlink or hard link anywhere in it.
-Give it a dedicated directory rather than a working checkout. Keep the policy, runtime
-database, and backend outside that directory.
-
-The policy this runtime runs needs two things the shipped starting policy does not
-have, so give the file runtime a policy of its own. The
-[architecture note](../../../appa-runtime/FILE-MEDIATION.md#operating-it) includes a minimal
-complete example.
-
-- It must name all six file tools (`mcp/appa/appa_read_file`, `appa_write_file`,
-  `appa_edit_file`, `appa_copy_file`, `appa_move_file`, `appa_process_files`); a tool
-  the policy does not name is refused, not annotated.
-- It must not use tool-input sanitizers or rewrite routes. File tracking refuses to start
-  when the registry holds any, because a rewritten call would render arguments the ledger
-  never pinned. The starting policy declares the `redact-for-public` tool-input sanitizer,
-  so enabling file tracking against it stops at startup with that reason.
-
-In file mode, APPA admits declared subagent spawns so children can use the root
-session's ledger. Every other call that reaches APPA and is not one of the six file
-tools is refused — including APPA's own management tools (`appa_get_runtime_state`,
-`appa_include_battery`, `appa_match_batteries`, `appa_reload_policy`,
-`appa_refresh_batteries`, `appa_update_policy`). Run those from the `appa` command
-line. The model keeps its native tools, but their calls are refused at the hook.
-
-One file operation runs at a time per root session. The root agent and its subagents share
-the same in-memory ledger and reservation. Other root sessions have independent ledgers.
-A released call the harness never ran gives its reservation back at the turn end, and only
-while the workspace still shows the pinned state. A moved workspace keeps the reservation
-for that session until the runtime restarts.
+The Claude Code battery routes `Read`, `Write` and `Edit` through the
+file-tracker, as both Annotator and recorder, and confines each shell command
+to the files and hosts it declares. The default policy binds the file-tracker
+to `appa file-tracker`, which the runtime executable serves. While the policy
+binds the `file-tracker` recorder, `clappa` loads a preload into Claude Code
+that adds `input_files`, `output_files` and `network_hosts` to `Bash` and
+confines each call in Claude Code's own sandbox. It first runs the preload's
+self-test; on a Claude Code release it was not checked against, or when a
+check fails, it disables `Bash` and registers the file-tracker's SafeBash,
+which needs Anthropic's sandbox runtime `srt` on `PATH`. Either way it starts
+Claude Code with `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` disabled;
+the battery also blocks those tools at the hook.
+The [coding-agents guide](../../../website/content/docs/coding-agents.md#files-that-keep-their-labels)
+describes the labels and the sandbox.
 
 ### Capabilities deferred to an inference proxy
 

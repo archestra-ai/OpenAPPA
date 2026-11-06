@@ -159,13 +159,8 @@ impl Runtime {
             None => return self.open_fresh(root),
         };
         self.open_root_fork(&parent, &parent, root)
-            .map_err(|refusal| EventError::Storage(refusal.to_string()))?;
-        match &self.inner.shared.files {
-            Some(files) => files
-                .bind_as(&self.inner.store, root, &parent)
-                .map_err(|error| EventError::Storage(error.to_string())),
-            None => Ok(()),
-        }
+            .map(|_| ())
+            .map_err(|refusal| EventError::Storage(refusal.to_string()))
     }
 
     fn open_fresh(&self, root: &TrajectoryId) -> Result<(), EventError> {

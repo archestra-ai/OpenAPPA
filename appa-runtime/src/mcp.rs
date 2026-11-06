@@ -31,7 +31,6 @@ use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 
 use crate::yell::Harness;
 
-use crate::api::files::FileTool;
 use crate::api::{ExecuteRemedyPlanArgs, PermitKey, RemedyReply, Runtime};
 use crate::batteries::{BatteriesResponse, BundledBattery};
 use crate::elicit::{Elicitation, Review};
@@ -51,7 +50,6 @@ pub struct RuntimeTools {
     runtime: Arc<Runtime>,
     harness: Harness,
     tool_router: ToolRouter<Self>,
-    file_actor: Option<appa_runtime_api::Actor>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +147,6 @@ async fn execute_remedy(
     args: ExecuteRemedyPlanArgs,
     responses: Option<rmcp::model::InputResponses>,
     request: RequestContext<RoleServer>,
-    expected_actor: Option<&appa_runtime_api::Actor>,
 ) -> CallToolResponse {
     let pending = || {
         args.offer_id
@@ -166,7 +163,7 @@ async fn execute_remedy(
         Review::Ask(review) => review.into(),
         Review::Proceed(elicitation) => remedy_result(
             runtime
-                .execute_remedy_plan(args, call.as_deref(), elicitation.as_ref(), expected_actor)
+                .execute_remedy_plan(args, call.as_deref(), elicitation.as_ref())
                 .await,
         )
         .into(),
@@ -188,19 +185,10 @@ impl RuntimeTools {
         if harness != Harness::ClaudeCode {
             tool_router.remove_route(crate::api::peer::READ_PEER_MESSAGE);
         }
-        if !runtime.file_tracking_enabled() {
-            for tool in FileTool::ALL {
-                tool_router.remove_route(tool.name());
-            }
-        }
-        if !runtime.file_process_enabled() {
-            tool_router.remove_route(FileTool::Process.name());
-        }
         RuntimeTools {
             runtime,
             harness,
             tool_router,
-            file_actor: None,
         }
     }
 
@@ -219,58 +207,7 @@ impl RuntimeTools {
         InputResponses(responses): InputResponses,
         request: RequestContext<RoleServer>,
     ) -> CallToolResponse {
-        execute_remedy(&self.runtime, args, responses, request, self.file_actor.as_ref()).await
-    }
-
-    #[tool(
-        description = "Read a UTF-8 file in the tracked workspace. APPA checks its source Label before reading content."
-    )]
-    pub async fn appa_read_file(&self, Parameters(args): Parameters<crate::api::files::ReadArgs>) -> CallToolResult {
-        self.file_result(FileTool::Read, args).await
-    }
-
-    #[tool(
-        description = "Atomically replace a UTF-8 file in the tracked workspace with content derived from this trajectory."
-    )]
-    pub async fn appa_write_file(&self, Parameters(args): Parameters<crate::api::files::WriteArgs>) -> CallToolResult {
-        self.file_result(FileTool::Write, args).await
-    }
-
-    #[tool(
-        description = "Replace exactly one occurrence of old_string in a UTF-8 file. APPA checks the file Label before matching, including failed matches."
-    )]
-    pub async fn appa_edit_file(&self, Parameters(args): Parameters<crate::api::files::EditArgs>) -> CallToolResult {
-        self.file_result(FileTool::Edit, args).await
-    }
-
-    #[tool(
-        description = "Copy a tracked regular file without returning its contents. The destination retains the source Label. Replaces an existing destination."
-    )]
-    pub async fn appa_copy_file(
-        &self,
-        Parameters(args): Parameters<crate::api::files::FileTransferArgs>,
-    ) -> CallToolResult {
-        self.file_result(FileTool::Copy, args).await
-    }
-
-    #[tool(
-        description = "Move a tracked regular file within the workspace without returning its contents. The destination retains the source Label. Replaces an existing destination."
-    )]
-    pub async fn appa_move_file(
-        &self,
-        Parameters(args): Parameters<crate::api::files::FileTransferArgs>,
-    ) -> CallToolResult {
-        self.file_result(FileTool::Move, args).await
-    }
-
-    #[tool(
-        description = "Run a shell command in an isolated workspace with only declared input snapshots and a trusted system toolchain. Read inputs at inputs/<path> and write output/result. The runtime publishes that one regular file at output_path after teardown. All outputs and errors carry every input Label. No network or native-workspace access."
-    )]
-    pub async fn appa_process_files(
-        &self,
-        Parameters(args): Parameters<crate::api::files::ProcessArgs>,
-    ) -> CallToolResult {
-        self.file_result(FileTool::Process, args).await
+        execute_remedy(&self.runtime, args, responses, request).await
     }
 
     #[tool(
@@ -397,7 +334,7 @@ impl RuntimeToolService {
         InputResponses(responses): InputResponses,
         request: RequestContext<RoleServer>,
     ) -> CallToolResponse {
-        execute_remedy(&self.runtime, args, responses, request, None).await
+        execute_remedy(&self.runtime, args, responses, request).await
     }
 
     #[tool(
@@ -484,28 +421,6 @@ impl RuntimeToolService {
             return management_refused();
         }
         management_result(crate::management::run("appa-guide-refresh-batteries", Some(&args)).await)
-    }
-}
-
-impl RuntimeTools {
-    async fn file_result<T: serde::Serialize>(&self, tool: FileTool, args: T) -> CallToolResult {
-        let arguments = serde_json::to_value(args).expect("file arguments serialize");
-        let result = match &self.file_actor {
-            Some(actor) => self.runtime.execute_bound_file(actor, tool, arguments).await,
-            None => self.runtime.execute_file(tool, arguments).await,
-        };
-        match result {
-            Ok(crate::api::files::FileReply::Value(value)) => CallToolResult::success(vec![ContentBlock::text(value)]),
-            Ok(crate::api::files::FileReply::Failure(message)) => {
-                CallToolResult::error(vec![ContentBlock::text(message)])
-            }
-            Err(error) => {
-                tracing::warn!(%error, "runtime-owned file operation could not admit an observation");
-                CallToolResult::error(vec![ContentBlock::text(
-                    "file operation was not admitted; no file observation is returned",
-                )])
-            }
-        }
     }
 }
 
@@ -727,20 +642,6 @@ impl ServerHandler for RuntimeTools {
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// Private stdio transport. The actor comes from the host's process arguments, never MCP.
-pub(crate) async fn serve_files(runtime: Arc<Runtime>, actor: appa_runtime_api::Actor) -> Result<(), String> {
-    use rmcp::ServiceExt;
-    let mut tools = RuntimeTools::new(runtime, Harness::ClaudeCode);
-    tools.file_actor = Some(actor);
-    tools.tool_router.remove_route(YELL);
-    let service = tools
-        .serve(rmcp::transport::stdio())
-        .await
-        .map_err(|error| error.to_string())?;
-    service.waiting().await.map_err(|error| error.to_string())?;
-    Ok(())
-}
 
 /// MCP service served at `/mcp`.
 pub fn service(runtime: Arc<Runtime>, harness: Harness) -> StreamableHttpService<RuntimeTools, LocalSessionManager> {
@@ -1225,7 +1126,7 @@ mod tests {
             label: None,
             return_schema: None,
         };
-        let reply = runtime.execute_remedy_plan(args, None, None, None).await;
+        let reply = runtime.execute_remedy_plan(args, None, None).await;
         assert!(
             reply.is_error,
             "the attempt is refused while the claim stands: {reply:?}"
@@ -1278,24 +1179,15 @@ mod tests {
             }),
             return_schema: None,
         };
-        let unvouched = runtime.execute_remedy_plan(args(), None, None, None).await;
+        let unvouched = runtime.execute_remedy_plan(args(), None, None).await;
         assert!(unvouched.is_error, "no hook vouched for it: {unvouched:?}");
-        // A connection that names its actor declares only what that actor's hook let through,
-        // as it executes only an offer the hook vouched for.
-        let bound = runtime
-            .execute_remedy_plan(args(), None, None, Some(&acting(root.0.as_str())))
-            .await;
-        assert!(
-            bound.is_error && bound.text.contains("not tied to your session"),
-            "no hook vouched for it on the actor's own connection: {bound:?}"
-        );
 
         runtime.vouch(
             &crate::api::declaration_key(&args(), None),
             &acting(root.0.as_str()),
             None,
         );
-        let reply = runtime.execute_remedy_plan(args(), None, None, None).await;
+        let reply = runtime.execute_remedy_plan(args(), None, None).await;
         assert!(
             !reply.is_error && reply.text.starts_with("[appa] Declared."),
             "{reply:?}"

@@ -90,6 +90,7 @@ fn engine() -> Engine {
         },
         planner_cap: PlannerCap::default(),
         registry: RegistryConfig {
+            recorders: Default::default(),
             trust_chain: chain,
             tools: vec![ToolDeclaration::Declared(wire)],
             annotators: vec![],

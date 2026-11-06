@@ -181,8 +181,9 @@ pub enum ExternalRequest {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalEvidence {
-    /// Trusted runtime ledger input, never an external Annotator answer.
-    File { basis: appa_engine::value::FileBasis },
+    /// The held peer message a read pins from the runtime's own store, never an external
+    /// Annotator answer.
+    Held { message: appa_engine::value::HeldMessage },
     Authority {
         authority: String,
         verdict: AuthorityVerdict,
@@ -1265,33 +1266,109 @@ impl RuntimeEngine {
             .map(|arguments| arguments.canonical_bytes().to_vec())
     }
 
-    pub(crate) fn file_dispatch(
+    /// The records `facts` — a stretch of `view`'s log — hold for each recorder: every release,
+    /// outcome and unreleased proposal of a call whose declaration names that recorder, in log
+    /// order. A release carries the label the call published
+    /// ([`appa_engine::engine::Engine::published_label`]) and the evidence its Annotator pinned.
+    pub(crate) fn recorder_records(
         &self,
         view: &EngineView,
-        trajectory: &TrajectoryId,
-        call: &ProposedCall,
-    ) -> Result<EngineDispatchId, EngineRefusal> {
-        let resolved = self
-            .engine
-            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
-            .map_err(|error| EngineRefusal::Arguments {
-                detail: error.to_string(),
-            })?;
-        let views = view.views(trajectory).ok_or(EngineRefusal::Ended)?;
-        let digest = resolved.digest();
-        let occurrence = views.dispatch_count(&digest);
-        Ok(EngineDispatchId::new(trajectory.clone(), digest, occurrence))
+        facts: &[Fact],
+    ) -> std::collections::BTreeMap<String, Vec<serde_json::Value>> {
+        let mut records: std::collections::BTreeMap<String, Vec<serde_json::Value>> = Default::default();
+        let call_of = |dispatch: &EngineDispatchId| {
+            view.views(dispatch.trajectory())
+                .and_then(|views| views.dispatch_call(dispatch).cloned())
+        };
+        for fact in facts {
+            let (call, record) = match fact {
+                Fact::DispatchOpened { dispatch, .. } => {
+                    let Some(call) = call_of(dispatch) else { continue };
+                    let label = match self.engine.published_label(view, dispatch) {
+                        Ok(label) => label,
+                        Err(error) => {
+                            tracing::warn!(?error, "a release's published label could not be derived");
+                            continue;
+                        }
+                    };
+                    let record = serde_json::json!({
+                        "record": "released",
+                        "dispatch": dispatch_key(dispatch),
+                        "tool": call.tool().as_str(),
+                        "arguments": call.arguments(),
+                        "label": self.wire_label(&label),
+                        "evidence": annotation_evidence(&call),
+                    });
+                    (call, record)
+                }
+                Fact::DispatchSucceeded { dispatch, .. } => {
+                    let Some(call) = call_of(dispatch) else { continue };
+                    let record = outcome_record(dispatch, "success");
+                    (call, record)
+                }
+                Fact::DispatchClosed { dispatch, outcome, .. } => {
+                    let Some(call) = call_of(dispatch) else { continue };
+                    let outcome = match outcome {
+                        CloseOutcome::Success { .. } => "success",
+                        CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => "failure",
+                        CloseOutcome::Indeterminate => "indeterminate",
+                    };
+                    (call, outcome_record(dispatch, outcome))
+                }
+                Fact::ProposalBatchDecided {
+                    trajectory,
+                    batch,
+                    proposals,
+                    released,
+                    ..
+                } => {
+                    let digests: Vec<_> = proposals.iter().map(|call| call.digest()).collect();
+                    let released: Vec<_> = released.iter().map(|dispatch| *dispatch.digest()).collect();
+                    for at in unreleased(&digests, &released) {
+                        let call = &proposals[at];
+                        if let Some(recorder) = self.engine.recorder(call) {
+                            records
+                                .entry(recorder.as_str().to_string())
+                                .or_default()
+                                .push(serde_json::json!({
+                                    "record": "unreleased",
+                                    "trajectory": trajectory.as_str(),
+                                    "batch": batch.as_str(),
+                                    "tool": call.tool().as_str(),
+                                    "arguments": call.arguments(),
+                                    "evidence": annotation_evidence(call),
+                                }));
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            if let Some(recorder) = self.engine.recorder(&call) {
+                records.entry(recorder.as_str().to_string()).or_default().push(record);
+            }
+        }
+        records
     }
 
-    pub(crate) fn file_output_label(
-        &self,
-        view: &EngineView,
-        dispatch: &EngineDispatchId,
-    ) -> Result<Label, EngineRefusal> {
-        self.engine
-            .file_output_label(view, dispatch)
-            .map(|label| label.unwrap_or_else(Label::top))
-            .map_err(outcome_refusal)
+    /// A label as a recorder reads it: the rank's name, and the audience as `"public"` or as its
+    /// intersection of union clauses, each clause the list of its entries in the policy's own
+    /// spellings — so a single clause is exactly the audience an annotation answer can return.
+    fn wire_label(&self, label: &Label) -> serde_json::Value {
+        let chain = self.engine.registry().trust_chain();
+        let top = Trust::new((chain.len() - 1) as u8);
+        let trust = chain.name_of(label.trust.min(top)).unwrap_or_default();
+        let audience = match label.audience.is_public() {
+            true => serde_json::json!("public"),
+            false => serde_json::json!(
+                label
+                    .audience
+                    .clauses()
+                    .map(crate::consult::clause_entries)
+                    .collect::<Vec<_>>()
+            ),
+        };
+        serde_json::json!({ "trust": trust, "audience": audience })
     }
 
     /// Render one trajectory's current label from the rebuilt view, for the
@@ -1594,9 +1671,9 @@ impl RuntimeEngine {
                         evidence: evidence
                             .iter()
                             .filter_map(|entry| match entry {
-                                ExternalEvidence::File { basis } => Some(Evidence::File {
+                                ExternalEvidence::Held { message } => Some(Evidence::Held {
                                     position: 0,
-                                    basis: basis.clone(),
+                                    message: message.clone(),
                                 }),
                                 _ => None,
                             })
@@ -1698,9 +1775,9 @@ impl RuntimeEngine {
                 .iter()
                 .enumerate()
                 .filter_map(|(position, call)| {
-                    call.file_basis().map(|basis| Evidence::File {
+                    call.held().map(|message| Evidence::Held {
                         position,
-                        basis: basis.clone(),
+                        message: message.clone(),
                     })
                 })
                 .collect(),
@@ -1988,7 +2065,7 @@ impl RuntimeEngine {
                             if view
                                 .views(dispatch.trajectory())
                                 .and_then(|views| views.dispatch_call(dispatch).cloned())
-                                .is_some_and(|call| call.file_basis().is_some()) =>
+                                .is_some_and(|call| call.held().is_some()) =>
                         {
                             CoreToolOutcome::FailureWithBody {
                                 body: ValueBody::new(message.clone()),
@@ -2844,6 +2921,7 @@ impl RuntimeEngine {
             audience: answered.audience.clone().map(DeltaAudience::Static),
         };
         ProducedAnnotation {
+            evidence: answer.evidence.clone(),
             delta: delta(&answer.delta),
             forwards: delta(&answer.forwards),
             emits: EffectSet::new(answer.emits.iter().map(|kind| EffectKind::new(kind.as_str())))
@@ -3601,6 +3679,26 @@ pub(crate) fn policy_file_key(bytes: &[u8]) -> String {
     EnginePolicyFileKey::of(bytes).as_str().to_string()
 }
 
+/// The positions of a batch's proposals it did not release, given the digests it proposed
+/// and the digests of the dispatches it opened. Identical siblings are counted, not matched
+/// by digest alone: one released sibling leaves each other one unreleased.
+fn unreleased<D: PartialEq>(proposed: &[D], released: &[D]) -> Vec<usize> {
+    let mut released: Vec<&D> = released.iter().collect();
+    proposed
+        .iter()
+        .enumerate()
+        .filter_map(
+            |(at, digest)| match released.iter().position(|opened| *opened == digest) {
+                Some(found) => {
+                    released.swap_remove(found);
+                    None
+                }
+                None => Some(at),
+            },
+        )
+        .collect()
+}
+
 /// Every offer a log opened, as the model was shown them. A test reads the
 /// identity it would have quoted back rather than reaching into the engine.
 #[cfg(test)]
@@ -3888,6 +3986,27 @@ fn clause_wire(clause: &Clause) -> String {
     }
 }
 
+/// A dispatch as a recorder keys it: trajectory, call digest and occurrence.
+fn dispatch_key(dispatch: &EngineDispatchId) -> String {
+    format!(
+        "{}/{}/{}",
+        dispatch.trajectory().as_str(),
+        hex(dispatch.digest().bytes()),
+        dispatch.occurrence()
+    )
+}
+
+fn outcome_record(dispatch: &EngineDispatchId, outcome: &str) -> serde_json::Value {
+    serde_json::json!({ "record": "outcome", "dispatch": dispatch_key(dispatch), "outcome": outcome })
+}
+
+/// What the call's Annotator said it judged, where it said anything.
+fn annotation_evidence(call: &appa_engine::value::ResolvedCall) -> Option<&str> {
+    call.annotation()
+        .and_then(|pinned| pinned.produced().evidence.as_ref())
+        .map(appa_engine::contract::AnnotationEvidence::as_str)
+}
+
 /// The dispatch a fact concerns, when it concerns exactly one.
 fn dispatch_of(fact: &Fact) -> Option<&appa_engine::value::DispatchId> {
     match fact {
@@ -4157,6 +4276,9 @@ struct ReturnBounds {
 /// Formats the example return floor label and permitted trust ranks.
 struct ReturnSpelling {
     floor: String,
+    /// The floor at the lowest trust a return may carry, with this session's audience; `None`
+    /// when that is this session's own trust.
+    lowest_trust_floor: Option<String>,
     ranks: String,
 }
 
@@ -4169,13 +4291,15 @@ impl ReturnSpelling {
         } else {
             usize::from(label.trust.rank()) + 1
         };
-        let lowest = usize::from(lowest.rank());
+        let lowest_rank = usize::from(lowest.rank());
         ReturnSpelling {
             floor: label_spelling(chain, label),
+            lowest_trust_floor: (lowest_rank + 1 < held)
+                .then(|| label_spelling(chain, &Label::new(*lowest, label.audience.clone()))),
             ranks: chain
                 .names()
-                .skip(lowest)
-                .take(held.saturating_sub(lowest))
+                .skip(lowest_rank)
+                .take(held.saturating_sub(lowest_rank))
                 .map(|name| format!("\"{}\"", terminal_safe(name)))
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -4191,7 +4315,7 @@ fn return_instruction(
     description: &str,
     include_display_plan: bool,
 ) -> String {
-    let ReturnSpelling { floor, ranks } = spelling;
+    let ReturnSpelling { floor, ranks, .. } = spelling;
     let body = match route {
         ReturnRoute::Void => {
             let call = remedy_call(control, id, "", description, include_display_plan);
@@ -4628,11 +4752,18 @@ fn block_feedback(
         // Steer toward declaring ahead, so the next spawn meets no block for it. A fan-out spawn
         // declares at its block.
         if spawn == Some(appa_engine::transition::SpawnKind::Single) {
+            let control = control_spelling(naming, presentation);
             reason.push_str(&format!(
-                " Next time, declare right before the subagent call: {}(label: {}).",
-                control_spelling(naming, presentation),
+                " Next time, declare right before the subagent call: {control}(label: {}) when the subagent does \
+                 only what this session may.",
                 spelling.floor,
             ));
+            if let Some(lowest) = &spelling.lowest_trust_floor {
+                reason.push_str(&format!(
+                    " When the subagent must be able to lower its trust, declare {control}(label: {lowest}) \
+                     instead; its return can then lower this session's trust to that floor."
+                ));
+            }
         }
         reasons.push(reason);
     }
@@ -4801,6 +4932,14 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::TrustChain;
+
+    #[test]
+    fn of_identical_siblings_only_as_many_are_released_as_dispatches_opened() {
+        assert_eq!(super::unreleased(&["a", "a", "b", "a"], &["a", "b"]), vec![1, 3]);
+        assert_eq!(super::unreleased(&["a", "a"], &[]), vec![0, 1]);
+        assert!(super::unreleased(&["a", "a"], &["a", "a"]).is_empty());
+    }
+
     use super::{
         BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
         Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId,
@@ -5002,7 +5141,7 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_file_basis_survives_call_delivery_replay() {
+    fn a_recorded_held_read_survives_call_delivery_replay() {
         let policy = appa_policy::Config::from_toml_str(
             r#"
             version = 2
@@ -5035,13 +5174,13 @@ mod tests {
                     }],
                     spawn: None,
                     offer_nonce: super::engine_nonce(&OfferNonce([1; 32])),
-                    evidence: vec![super::Evidence::File {
+                    evidence: vec![super::Evidence::Held {
                         position: 0,
-                        basis: appa_engine::value::FileBasis::Read(appa_engine::value::FileSource {
-                            version: "v1".into(),
+                        message: appa_engine::value::HeldMessage {
+                            id: "v1".into(),
                             digest: "content".into(),
                             label: appa_engine::label::Label::top(),
-                        }),
+                        },
                     }],
                     audience: Default::default(),
                 }),
@@ -5171,6 +5310,7 @@ mod tests {
         );
 
         let answer = AnnotationAnswer {
+            evidence: None,
             delta: AnswerDelta {
                 trust: Some("trusted".to_string()),
                 audience: Some(DeclaredAudience::Public),
@@ -5224,6 +5364,7 @@ mod tests {
             annotator: "classifier".to_string(),
             call: asked,
             answer: AnnotationAnswer {
+                evidence: None,
                 delta: AnswerDelta {
                     trust: Some("suspicious".to_string()),
                     audience: None,
@@ -5304,6 +5445,7 @@ mod tests {
         );
 
         let answer = || AnnotationAnswer {
+            evidence: None,
             delta: AnswerDelta {
                 trust: Some("suspicious".to_string()),
                 audience: Some(DeclaredAudience::Public),
@@ -5410,6 +5552,7 @@ mod tests {
         ];
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
+            lowest_trust_floor: None,
             ranks: String::new(),
         };
         assert_eq!(
@@ -5473,6 +5616,7 @@ mod tests {
             &OfferId("offer-1".to_string()),
             &super::ReturnSpelling {
                 floor: "{}".to_string(),
+                lowest_trust_floor: None,
                 ranks: String::new(),
             },
             BARE_CONTROL_TOOL,
@@ -5507,6 +5651,7 @@ mod tests {
         };
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
+            lowest_trust_floor: None,
             ranks: String::new(),
         };
         let lines = |naming| {
@@ -5563,6 +5708,7 @@ mod tests {
         let offers = vec![(OfferId("offer-1".to_string()), PlanId::new(1))];
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
+            lowest_trust_floor: None,
             ranks: String::new(),
         };
         let blocked = |naming| {
@@ -5616,12 +5762,70 @@ mod tests {
         );
     }
 
+    fn audience_of(chain: appa_engine::label::ChainAudience) -> appa_engine::label::Audience {
+        use appa_engine::label::{Audience, Clause};
+        Audience::of_declared(&DeclaredAudience::Union(
+            Clause::new([chain], [], []).expect("a chain clause"),
+        ))
+    }
+
+    fn suspicious_trusted() -> TrustChain {
+        TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()])
+    }
+
+    /// The strict floor is this session's label. The lower-trust floor keeps its audience
+    /// and takes the lowest trust a return may carry; it is absent where that trust is this
+    /// session's own.
+    #[test]
+    fn a_return_spelling_names_the_current_label_and_the_lowest_trust_floor_with_this_audience() {
+        use appa_engine::label::{Audience, ChainAudience, Label};
+        let chain = suspicious_trusted();
+        let internal = audience_of(ChainAudience::Internal);
+        for (label, lowest, floor, lowest_trust_floor) in [
+            (
+                Label::top(),
+                Trust::new(0),
+                "{trust: \"trusted\", audience: [\"public\"]}",
+                Some("{trust: \"suspicious\", audience: [\"public\"]}"),
+            ),
+            (
+                Label::new(Trust::new(1), internal.clone()),
+                Trust::new(0),
+                "{trust: \"trusted\", audience: [\"internal\"]}",
+                Some("{trust: \"suspicious\", audience: [\"internal\"]}"),
+            ),
+            (
+                Label::new(Trust::new(1), Audience::public()),
+                Trust::new(1),
+                "{trust: \"trusted\", audience: [\"public\"]}",
+                None,
+            ),
+            (
+                Label::new(Trust::new(0), internal),
+                Trust::new(0),
+                "{trust: \"suspicious\", audience: [\"internal\"]}",
+                None,
+            ),
+        ] {
+            let spelling = super::ReturnSpelling::of(&chain, &ReturnBounds { label, lowest });
+            assert_eq!(spelling.floor, floor);
+            assert_eq!(spelling.lowest_trust_floor.as_deref(), lowest_trust_floor);
+        }
+    }
+
     #[test]
     fn a_declaration_renders_a_ready_call_and_a_gap_plan_says_it_asks_for_approval() {
-        let spelling = super::ReturnSpelling {
-            floor: "{trust: \"suspicious\", audience: [\"self\"]}".to_string(),
-            ranks: "\"suspicious\"".to_string(),
-        };
+        let spelling = super::ReturnSpelling::of(
+            &suspicious_trusted(),
+            &ReturnBounds {
+                label: appa_engine::label::Label::new(
+                    Trust::new(0),
+                    audience_of(appa_engine::label::ChainAudience::Self_),
+                ),
+                lowest: Trust::new(0),
+            },
+        );
+        assert_eq!(spelling.ranks, "\"suspicious\"");
         let render = |plan: &ExecutableRemedyPlan, display: bool| {
             remedy_instruction(
                 plan,

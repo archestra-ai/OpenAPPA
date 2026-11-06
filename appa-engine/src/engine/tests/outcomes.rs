@@ -278,5 +278,5 @@ fn a_failure_body_on_a_call_that_touches_no_file_is_refused() {
             audience: crate::audience::AudienceEvidence::default(),
         }),
     );
-    assert_eq!(reported.unwrap_err(), TransitionError::FailureBodyOutsideFile);
+    assert_eq!(reported.unwrap_err(), TransitionError::FailureBodyOutsideHeld);
 }

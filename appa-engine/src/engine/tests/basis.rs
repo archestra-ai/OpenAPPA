@@ -212,3 +212,44 @@ fn a_declaration_that_disagrees_with_its_records_is_refused() {
         Err(TransitionRefusal::UnbackedAdvance)
     );
 }
+
+/// What a released call publishes keeps the `forwards` the releasing revision declared: a
+/// later revision that forwards nothing does not lift the label a recorder stores.
+#[test]
+fn a_release_publishes_the_forwards_its_revision_declared_after_a_reload_drops_them() {
+    let at = |forwards: Delta, revision: u64| {
+        let tool = ToolAnnotation {
+            forwards,
+            ..plain_tool("save_note")
+        };
+        engine(vec![tool]).at(DeploymentName::new("default"), PolicyRevision::new(revision))
+    };
+    let private = Delta {
+        trust: None,
+        audience: Some(crate::contract::DeltaAudience::Static(DeclaredAudience::restricted([
+            ReaderId::new("owner"),
+        ]))),
+    };
+    let first = at(private, 1);
+    let second = at(Delta::NONE, 2);
+    let log = vec![opened(&first)];
+    let release =
+        appended_facts(proposed(&first, &log, "b1", nonce(), call("save_note", json!({}))).expect("the call releases"));
+    let dispatch = release
+        .iter()
+        .find_map(|fact| match fact {
+            Fact::DispatchOpened { dispatch, .. } => Some(dispatch.clone()),
+            _ => None,
+        })
+        .expect("a plain call releases at once");
+    let log = [log, release].concat();
+    let batches = [StampedBatch {
+        revision: Some(PolicyRevision::new(1)),
+        facts: &log,
+    }];
+    let view = second.replay(&traj(), &batches, &[&first]).expect("the log replays");
+    let published = second
+        .published_label(&view, &dispatch)
+        .expect("the dispatch publishes");
+    assert_eq!(published.audience, Audience::restricted([ReaderId::new("owner")]));
+}

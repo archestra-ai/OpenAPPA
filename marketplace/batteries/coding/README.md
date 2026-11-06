@@ -3,9 +3,10 @@
 This battery gives a coding agent policy-aware shell commands and `self`
 labels on the requester's own secrets. It writes its rules once, for
 canonical tools under `tool/coding/`. A client battery binds each canonical
-tool to the client's own tool with an `[aliases.tool.coding]` map; the
-`claude-code` battery is that map for Claude Code, and `appa plugin install
-claude-code` includes both. A rule no map binds is inactive.
+tool to the client's own tool with an `[aliases.tool.coding]` map. A rule
+no map binds is inactive. The `claude-code` battery binds only `fetch_url`
+and `web_search`: Claude Code's file tools and its `Bash` go through the
+file-tracker instead.
 
 | Canonical tool | What it is | Argument the rules read |
 | --- | --- | --- |
@@ -20,7 +21,12 @@ claude-code` includes both. A rule no map binds is inactive.
 
 - **shell** — A command that names a credential path (`.env`, `.ssh/`,
   `.netrc`, `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows
-  the session to `self`, the requester. Before any other command runs, the
+  the session to `self`, the requester. A credential file name matches as a
+  path: after a space, `/` or `=`, at the end or before a space, or
+  double-quoted. A dotenv file also matches with a mode suffix (`.env.local`,
+  `.env.production`, `.env.development`, `.env.staging`, `.env.test`). A name
+  inside a word or a string literal, a single-quoted name, and a template such
+  as `.env.example` reach the Annotator. Before any other command runs, the
   `claude-code.bash-requirements` Annotator decides what trust and fresh
   attention it requires and labels its output for trust and audience, inside
   the vocabulary static rules write: a command that visibly reads the
@@ -93,6 +99,5 @@ version = 2
 ```
 
 The `coding` battery alone declares no client tool. Root rules take
-precedence over both batteries, and a root rule names the client's tool
-(`host/claude-code/Bash(command:kubectl *)`); the `claude-code` battery's
-README shows overrides and Annotator hints.
+precedence over both batteries, and a root rule names the client's tool,
+such as `host/claude-code/WebFetch(url:https://wiki.example/*)`.

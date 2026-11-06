@@ -196,23 +196,37 @@ sqlite3 appa.db "SELECT seq, facts FROM logs WHERE root = 'cc:<session-id>' ORDE
 over HTTP without SQL, and is the supported way to look — it is what the
 statusline reads.
 
-## File mediation (draft)
+## Recorders
 
-A second, opt-in mode makes the runtime own the file tools themselves. Add `[file_tracking]`
-with `initial_trust` and `initial_audience` to the APPA configuration. The table's presence
-enables the mode. Each root session binds its first file call to that session's working
-directory, so one runtime can serve different workspaces.
-The runtime serves `appa_read_file`,
-`appa_write_file`, `appa_edit_file`, `appa_copy_file`, `appa_move_file` and, with
-`--file-process-backend`, `appa_process_files`. The runtime pins each file version, checks
-the call with the pinned Label, performs the operation and records the version it published,
-so file content is checked before it is read and Labels survive operations that never show
-bytes to the model. The mode is experimental, it assumes the runtime owns the workspace, and
-it refuses every call that is not one of those tools.
+A tool declaration may name a `recorder` beside its `annotator`. The runtime pushes
+the records of every call that declaration selects to the recorder, after the batch
+that holds them is appended:
 
-[`FILE-MEDIATION.md`](FILE-MEDIATION.md) is the architecture note: component map, call
-sequence, the workspace event stream and its reservation lifecycle, the Label algebra, the
-isolated Process contract, and the boundary between covered and uncovered behavior.
+```toml
+[[policy.tool]]
+name = "host/claude-code/Write"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[externals.recorders.file-tracker]
+command = ["appa", "file-tracker", "record"]
+```
+
+A recorder is a `command` or a `url`, with the same `token_env` credentials as an
+annotator. Each delivery is one JSON envelope,
+`{"version":1,"kind":"recorder","name":…,"root":…,"records":[…]}`, and the recorder
+answers `{"version":1,"answer":{}}`. A record is one of:
+
+- `released`: `dispatch`, `tool`, `arguments`, the call's published `label`
+  (`{"trust":…,"audience":"public"|[[entries…]…]}`), and the annotation's `evidence`;
+- `outcome`: `dispatch` and `outcome` (`success`, `failure` or `indeterminate`);
+- `unreleased`: `trajectory`, `batch`, `tool`, `arguments` and `evidence` of a proposal
+  the batch did not release.
+
+The runtime never waits for a recorder, and a recorder cannot deny or delay a call.
+Delivery is at least once, in log order per family; a failed delivery stays for the next
+append, and a restarted runtime delivers each family from its start, so a recorder
+deduplicates by `dispatch`.
 
 ## Things to know
 

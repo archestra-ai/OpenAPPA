@@ -1,13 +1,14 @@
-//! Claude Code battery: a command naming a credential path, or one of the Databricks CLI's
-//! credential commands with its global flags anywhere before the verb, narrows the session
-//! to `self` by a static rule, and no classifier is asked. Every other shell command, and
-//! every Monitor call, is the Annotator's. PowerShell follows the same rules.
+//! The coding battery's shell rules, in a deployment that binds its canonical `shell` and
+//! `powershell` to Claude Code's Bash and PowerShell: a command naming a credential path, or
+//! one of the Databricks CLI's credential commands with its global flags anywhere before
+//! the verb, narrows the session to `self` by a static rule, and no classifier is asked.
+//! Every other command is the Annotator's. PowerShell follows the same rules.
 #![cfg(unix)]
 mod common;
 
-use appa_runtime::api::Runtime;
+use appa_runtime::api::{ConsultRecord, ConsultTranscriber, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{fake_claude, propose, raw, repo_root, session_runtime};
+use common::{fake_claude, including_coding_on_native_claude_code_tools, propose, raw, repo_root, session_runtime};
 use std::sync::Arc;
 
 fn bash(command: &str) -> ProposedCall {
@@ -26,21 +27,11 @@ fn shell(tool: &str, command: &str) -> ProposedCall {
     }
 }
 
-/// The shipped default and battery under a failing `claude`: a static credential
-/// rule narrows without consulting the Bash Annotator.
+/// The shipped default over the coding battery bound to Claude Code's native tools, under a
+/// failing `claude`: a static credential rule narrows without consulting the Bash
+/// Annotator, and a call that reaches the Annotator is refused.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    for battery in ["coding", "claude-code"] {
-        let target = dir.path().join("batteries").join(battery);
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::copy(
-            repo_root()
-                .join("marketplace/batteries")
-                .join(battery)
-                .join("appa.toml"),
-            target.join("appa.toml"),
-        )
-        .unwrap();
-    }
+    let include = including_coding_on_native_claude_code_tools(dir.path());
     let command = fake_claude(dir.path(), "exit 1");
     let path = dir.path().join("appa.toml");
     let root_policy =
@@ -48,7 +39,7 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
     std::fs::write(
         &path,
         format!(
-            "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{root_policy}\n[externals.claude_code]\ncommand = \"{command}\"\n",
+            "{include}{root_policy}\n[externals.claude_code]\ncommand = \"{command}\"\n",
             command = command.display(),
         ),
     )
@@ -234,24 +225,167 @@ async fn a_command_naming_a_dotenv_file_narrows_and_one_merely_containing_env_do
     }
 }
 
-#[tokio::test]
-async fn a_monitor_call_is_the_annotators_whether_it_runs_a_command_or_opens_a_socket() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
+#[derive(Default)]
+struct Consulted(std::sync::Mutex<Vec<String>>);
 
-    for arguments in [
-        serde_json::json!({ "command": "tail -f build.log", "description": "build", "timeout_ms": 60000 }),
-        serde_json::json!({ "ws": { "url": "wss://events.example/stream" }, "description": "events", "timeout_ms": 60000 }),
+impl ConsultTranscriber for Consulted {
+    fn record(&self, record: ConsultRecord) {
+        self.0.lock().unwrap().push(record.external_name);
+    }
+}
+
+impl Consulted {
+    fn taken(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+/// The runtime with the name of every external it consults kept in the returned recorder.
+async fn recorded(dir: &tempfile::TempDir) -> (Arc<Runtime>, Arc<Consulted>) {
+    let consulted = Arc::new(Consulted::default());
+    let runtime = Arc::new(runtime(dir).await.transcribing(consulted.clone()));
+    (runtime, consulted)
+}
+
+async fn assert_annotators(runtime: &Arc<Runtime>, consulted: &Consulted, call: ProposedCall, annotator: &str) {
+    let arguments = call.arguments.get().to_string();
+    let decision = propose(runtime, call).await;
+    assert!(
+        matches!(decision, HookDecision::Refuse { .. }),
+        "{arguments} is the Annotator's: {decision:?}"
+    );
+    assert_eq!(consulted.taken(), [annotator], "{arguments}");
+}
+
+/// A credential file name narrows where the command names it as a path; the name inside
+/// a word, a string literal or a single-quoted argument is the Annotator's.
+#[tokio::test]
+async fn a_command_naming_a_credential_file_as_a_path_narrows_and_a_literal_mention_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, consulted) = recorded(&dir).await;
+
+    for command in [
+        "cat ~/.npmrc",
+        "cat .netrc",
+        "cat ./.pypirc | grep password",
+        "npm whoami --userconfig=.npmrc",
+        "git config --global credential.helper store --file=.git-credentials",
+        r#"cat "$HOME/.claude/.credentials.json""#,
+        r#"jq .oauthAccount ".claude.json""#,
+        "ssh-keygen -y -f id_ed25519 > key.pub",
+        "ssh -i id_rsa deploy@host",
+        "cat .npmrc; echo done",
+        "cat ~/.vault-token",
     ] {
-        let monitor = ProposedCall {
-            tool: "host/claude-code/Monitor".to_string(),
-            arguments: raw(arguments.clone()),
-            cwd: None,
-        };
-        let decision = propose(&runtime, monitor).await;
+        let decision = propose(&runtime, bash(command)).await;
         assert!(
-            matches!(decision, HookDecision::Refuse { .. }),
-            "an unanswered Annotator fails closed for {arguments}: {decision:?}"
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
         );
     }
+
+    for command in [
+        r"Get-Content $HOME\.npmrc",
+        r"Get-Content .\.netrc | Select-String token",
+        r#"Get-Content "$env:USERPROFILE\.git-credentials""#,
+        "Get-Content ~/.pypirc",
+        "Get-Content .npmrc; Write-Output done",
+    ] {
+        let decision = propose(&runtime, powershell(command)).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
+        );
+    }
+    assert!(consulted.taken().is_empty(), "a static rule asks no Annotator");
+
+    for command in [
+        r#"python3 -c "print([f for f in fs if f.endswith('.npmrc')])""#,
+        "grep -rn npmrc_path src",
+        "cat id_rsa.pub",
+    ] {
+        assert_annotators(&runtime, &consulted, bash(command), "claude-code.bash-requirements").await;
+    }
+    assert_annotators(
+        &runtime,
+        &consulted,
+        powershell("Select-String -Pattern '.npmrc' build.ps1"),
+        "claude-code.bash-requirements",
+    )
+    .await;
+}
+
+/// A dotenv file with a mode suffix narrows; a committed template or an unknown suffix is
+/// the Annotator's.
+#[tokio::test]
+async fn a_dotenv_template_is_the_annotators_and_a_mode_file_narrows() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, consulted) = recorded(&dir).await;
+
+    for command in [
+        "cat .env.development",
+        "cat apps/web/.env.production.local",
+        "docker compose --env-file=.env.staging up",
+        r#"cat ".env.test""#,
+        "cat .env.example .env",
+    ] {
+        let decision = propose(&runtime, bash(command)).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
+        );
+    }
+    for command in [r"Get-Content apps\web\.env.development", "Get-Content .env.prod"] {
+        let decision = propose(&runtime, powershell(command)).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
+        );
+    }
+    assert!(consulted.taken().is_empty(), "a static rule asks no Annotator");
+
+    for command in [
+        "grep -n OPENAPPA .env.example",
+        "cat .env.sample",
+        "cp .env.template config/.env.dist",
+        "cat .env.foo",
+    ] {
+        assert_annotators(&runtime, &consulted, bash(command), "claude-code.bash-requirements").await;
+    }
+    assert_annotators(
+        &runtime,
+        &consulted,
+        powershell(r"Get-Content .\.env.example"),
+        "claude-code.bash-requirements",
+    )
+    .await;
+}
+
+/// A publishing compound that names a credential file as a path narrows before the
+/// repository Annotator is asked. Accepted residual: a name the path rules miss, such as
+/// one directly before `|`, reaches the repository Annotator with the rest of the command.
+#[tokio::test]
+async fn a_publishing_compound_narrows_on_a_credential_path_and_a_missed_spelling_is_the_repository_annotators() {
+    let dir = tempfile::tempdir().unwrap();
+    let (runtime, consulted) = recorded(&dir).await;
+
+    for command in [
+        "git push origin main && cat ~/.npmrc",
+        "git push origin main && cat .env.local",
+    ] {
+        let decision = propose(&runtime, bash(command)).await;
+        assert!(
+            matches!(decision, HookDecision::DenyCall { .. }),
+            "{command}: {decision:?}"
+        );
+    }
+    assert!(consulted.taken().is_empty(), "a static rule asks no Annotator");
+
+    assert_annotators(
+        &runtime,
+        &consulted,
+        bash("cat .npmrc|git push origin main"),
+        "claude-code.bash-repository-requirements",
+    )
+    .await;
 }

@@ -14,7 +14,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use appa_engine::fact::Fact;
-use appa_engine::value::{FileBasis, FileSource, Provenance};
+use appa_engine::value::{HeldMessage, Provenance};
 use appa_eventlog::embedded::{DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, ReadTake};
 use appa_eventlog::{Log, StoredLabel};
 use appa_runtime_api::{
@@ -258,8 +258,8 @@ impl Runtime {
             .inner
             .trust_chain(&self.inner.deployment(), &log)
             .map_err(peer_error)?;
-        let basis = message_basis(&loaded, &chain);
-        if matches!(prior_call(&log, recipient, &call_id, &basis), PriorCall::Foreign) {
+        let message = held_message(&loaded, &chain);
+        if matches!(prior_call(&log, recipient, &call_id, &message), PriorCall::Foreign) {
             return Err(refused("this call id is already a different dispatch"));
         }
         let claim = self
@@ -275,13 +275,16 @@ impl Runtime {
         };
         let generation = claim.generation;
         if !fresh(&claim.row) || claim.row.body.is_none() {
-            self.release_if_unopened(&actor.root, recipient, &call_id, id, &basis, generation)?;
+            self.release_if_unopened(&actor.root, recipient, &call_id, id, &message, generation)?;
             return Err(refused("this peer message has expired"));
         }
-        let outcome = match self.admit_read(actor, recipient, &call_id, &call, &claim, &basis).await {
+        let outcome = match self
+            .admit_read(actor, recipient, &call_id, &call, &claim, &message)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => {
-                self.release_if_unopened(&actor.root, recipient, &call_id, id, &basis, generation)
+                self.release_if_unopened(&actor.root, recipient, &call_id, id, &message, generation)
                     .ok();
                 return Err(error);
             }
@@ -290,7 +293,7 @@ impl Runtime {
             outcome.decision,
             HookDecision::DenyCall { .. } | HookDecision::Block { .. }
         ) {
-            self.release_if_unopened(&actor.root, recipient, &call_id, id, &basis, generation)?;
+            self.release_if_unopened(&actor.root, recipient, &call_id, id, &message, generation)?;
             return Ok(outcome);
         }
         self.store_decision(&actor.root, id, &call_id, generation, &outcome, &claim.row)?;
@@ -303,11 +306,11 @@ impl Runtime {
         recipient: &TrajectoryId,
         call_id: &str,
         id: &EmbeddedPeerId,
-        basis: &FileBasis,
+        message: &HeldMessage,
         generation: i64,
     ) -> Result<(), EmbeddedPeerError> {
         let log = self.inner.log(root).map_err(peer_error)?;
-        if matches!(prior_call(&log, recipient, call_id, basis), PriorCall::Absent) {
+        if matches!(prior_call(&log, recipient, call_id, message), PriorCall::Absent) {
             self.inner
                 .store
                 .release_embedded_read(root, id.as_str(), call_id, generation)
@@ -363,7 +366,7 @@ impl Runtime {
         call_id: &str,
         call: &ProposedCall,
         claim: &appa_eventlog::embedded::ReadClaim,
-        basis: &FileBasis,
+        message: &HeldMessage,
     ) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
         let hold = EmbeddedReadHold {
             root: actor.root.as_str().to_string(),
@@ -374,7 +377,7 @@ impl Runtime {
         EMBEDDED_READ_HOLD
             .scope(
                 hold,
-                self.admit_read_held(actor, recipient, call_id, call, &claim.row, basis),
+                self.admit_read_held(actor, recipient, call_id, call, &claim.row, message),
             )
             .await
     }
@@ -386,10 +389,10 @@ impl Runtime {
         call_id: &str,
         call: &ProposedCall,
         row: &EmbeddedRow,
-        basis: &FileBasis,
+        message: &HeldMessage,
     ) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
         let log = self.inner.log(&actor.root).map_err(peer_error)?;
-        match prior_call(&log, recipient, call_id, basis) {
+        match prior_call(&log, recipient, call_id, message) {
             PriorCall::Foreign => return Err(refused("this call id is already a different dispatch")),
             PriorCall::Admitted(body) => return governed_delivery(row, &body),
             PriorCall::Open | PriorCall::Absent => {}
@@ -400,13 +403,13 @@ impl Runtime {
                 &self.inner.log(&actor.root).map_err(peer_error)?,
                 recipient,
                 call_id,
-                basis
+                message
             ),
             PriorCall::Open
         );
         if !open {
             match session
-                .propose_with_basis(call.clone(), Some(call_id.to_string()), basis.clone())
+                .propose_with_held(call.clone(), Some(call_id.to_string()), message.clone())
                 .await
                 .map_err(peer_error)?
             {
@@ -451,7 +454,7 @@ impl Runtime {
             &self.inner.log(&actor.root).map_err(peer_error)?,
             recipient,
             call_id,
-            basis,
+            message,
         );
         let outcome = outcome_of(decided, proved)?;
         if let HookDecision::DeliverValue { value } = &outcome.decision
@@ -486,7 +489,7 @@ impl Runtime {
             .inner
             .trust_chain(&self.inner.deployment(), &log)
             .map_err(peer_error)?;
-        let basis = message_basis(&loaded, &chain);
+        let message = held_message(&loaded, &chain);
         let claim = self
             .inner
             .store
@@ -505,7 +508,7 @@ impl Runtime {
             .scope(hold, async {
                 let session = self.session(&actor.root, recipient).map_err(peer_error)?;
                 session
-                    .propose_with_basis(call, Some(call_id), basis)
+                    .propose_with_held(call, Some(call_id), message)
                     .await
                     .map_err(peer_error)?;
                 Ok(())
@@ -587,14 +590,14 @@ fn deliver(body: String) -> EmbeddedHookOutcome {
     }
 }
 
-/// The basis a read of `row` reads under: the message's digest, and its label under `chain`, the
-/// trust chain the reading family is judged under.
-pub(crate) fn message_basis(row: &EmbeddedRow, chain: &appa_engine::registry::TrustChain) -> FileBasis {
-    FileBasis::Read(FileSource {
-        version: row.id.clone(),
+/// The held message a read of `row` reads: the message's id and digest, and its label under
+/// `chain`, the trust chain the reading family is judged under.
+pub(crate) fn held_message(row: &EmbeddedRow, chain: &appa_engine::registry::TrustChain) -> HeldMessage {
+    HeldMessage {
+        id: row.id.clone(),
         digest: row.digest.clone(),
         label: row.label.under(chain),
-    })
+    }
 }
 
 enum PriorCall {
@@ -604,32 +607,32 @@ enum PriorCall {
     Admitted(String),
 }
 
-pub(crate) fn basis_of(
+pub(crate) fn held_of(
     log: &Log,
     trajectory: &TrajectoryId,
     dispatch: &appa_engine::value::DispatchId,
-) -> Option<FileBasis> {
-    let mut basis = None;
+) -> Option<HeldMessage> {
+    let mut message = None;
     let mut closed = false;
     for fact in log.facts() {
         match fact {
             Fact::DispatchOpened {
                 trajectory: opened,
                 dispatch: id,
-                file_basis,
+                held,
                 ..
             } if opened == trajectory && id == dispatch => {
-                basis = file_basis.clone();
+                message = held.clone();
                 closed = false;
             }
             Fact::DispatchClosed { dispatch: id, .. } if id == dispatch => closed = true,
             _ => {}
         }
     }
-    (!closed).then_some(basis).flatten()
+    (!closed).then_some(message).flatten()
 }
 
-fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, basis: &FileBasis) -> PriorCall {
+fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &HeldMessage) -> PriorCall {
     let Some(dispatch) = log
         .call_bindings()
         .find(|binding| binding.trajectory == recipient && binding.call_id == call_id)
@@ -644,10 +647,10 @@ fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, basis: &FileBa
             Fact::DispatchOpened {
                 trajectory,
                 dispatch: id,
-                file_basis,
+                held,
                 ..
             } if trajectory == recipient && id == &dispatch => {
-                if file_basis.as_ref() != Some(basis) {
+                if held.as_ref() != Some(message) {
                     return PriorCall::Foreign;
                 }
                 opened = true;

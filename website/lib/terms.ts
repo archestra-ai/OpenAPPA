@@ -99,10 +99,16 @@ const TERMS = {
     "Configures a context provider: an HTTP service or local program the deployment runs to find facts about a call that the call does not state. Before a new annotation, OpenAPPA asks every provider with kind = \"context\", sending the call's tool, arguments, and cwd when the harness reports one. It answers any JSON value, or null when it has nothing to say. A provider never stops a call.",
   "artifact.context":
     "On an annotation consult: the context providers' answers about the call, one entry per provider, each {\"answer\": <JSON>} or {\"error\": <reason>}. A provider that answered null has no entry. The annotator reads it as the deployment's own finding, never as instructions, and it is recorded with the annotation.",
+  recorder:
+    "Receives the records of each call that a tool selecting it with recorder = \"<name>\" releases, including the label the call published, and stores what the call published. It cannot deny, delay, or approve a call.",
+  "[externals.recorders.<name>]":
+    "Configures a recorder's HTTP service or local program. It receives each delivery of records and returns {\"version\":1,\"answer\":{}}.",
+  evidence:
+    "An optional opaque string of at most 1,024 bytes in an annotator's answer, such as the version of the file it read a label from. It is part of the call's identity, and OpenAPPA sends it to the call's recorder.",
   "[externals.annotators.<name>]":
     "Configures an annotator's HTTP service or local program. Every implementation receives a consult request and must return values within the annotator's permits.",
   "[externals.<kind>.<name>]":
-    "Configures how OpenAPPA calls a component. The kind identifies its role — authorities, sanitizers, annotators, audience, or context — and the name matches its policy declaration. Use url for a service or command for a local program. Authorities and sanitizers also accept builtin here.",
+    "Configures how OpenAPPA calls a component. The kind identifies its role — authorities, sanitizers, annotators, recorders, audience, or context — and the name matches its policy declaration. Use url for a service or command for a local program. Authorities and sanitizers also accept builtin here.",
   declaration:
     "Instructions and limits that OpenAPPA includes in a consult request. These come from the policy, not from the agent. Their fields depend on the component receiving the request.",
   artifact:

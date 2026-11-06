@@ -13,8 +13,8 @@ impl Engine {
             .dispatch_call(dispatch)
             .ok_or(TransitionError::UnknownDispatch)?
             .clone();
-        if matches!(report.outcome, ToolOutcome::FailureWithBody { .. }) && call.file_basis().is_none() {
-            return Err(TransitionError::FailureBodyOutsideFile);
+        if matches!(report.outcome, ToolOutcome::FailureWithBody { .. }) && call.held().is_none() {
+            return Err(TransitionError::FailureBodyOutsideHeld);
         }
         let withholds_output = views.withholds_output(dispatch);
         // What the trajectory does not get: the plan withheld the output at release, the
