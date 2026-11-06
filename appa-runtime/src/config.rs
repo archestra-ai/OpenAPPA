@@ -2361,10 +2361,12 @@ fn leave_out_unbound_included_sanitizers(
             .get("on")
             .and_then(toml::Value::as_array)
             .is_some_and(|on| on.iter().any(|stage| stage.as_str() == Some("tool_output")));
+        // An empty tag list is unscoped, as in the engine's `Scope::covers`.
         on_output.then(|| {
             declaration
                 .get("tags")
                 .and_then(toml::Value::as_array)
+                .filter(|tags| !tags.is_empty())
                 .map(|tags| tags.iter().filter_map(toml::Value::as_str).map(str::to_owned).collect())
         })
     };
@@ -3949,6 +3951,21 @@ mod tests {
         // `attest-schema` is the engine's: it takes no binding, so an included one stays, and
         // it never runs on a tool result, so a root one keeps no battery confinement.
         let attest = "\n[[policy.sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\n[policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        // An explicit `tags = []` is unscoped, as in the engine: bound, it reaches every
+        // result, so it keeps the confinement the left-out `tracker.redact` needed.
+        let unscoped = "\n[[policy.sanitizer]]\nname = \"tracker.all\"\non = [\"tool_output\"]\ntags = []\n[policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        assert_eq!(
+            composed_with(
+                unscoped,
+                "[externals.sanitizers.\"tracker.all\"]\nbuiltin = \"redact-email\"\n"
+            ),
+            (
+                vec!["tracker.all".to_string()],
+                vec!["mcp/tracker/list".to_string(), "mcp/tracker/read".to_string()]
+            ),
+            "a bound sanitizer with empty tags reaches every confined result"
+        );
+
         for (battery_tail, root_tail) in [(attest, ""), ("", attest)] {
             assert_eq!(
                 composed_with(battery_tail, root_tail),

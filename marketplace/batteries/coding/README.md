@@ -91,18 +91,19 @@ file-tracker instead.
   reaches. The root's `[policy.deployment] hint` can mark a source trusted
   or suspicious either way. A search result is a `suspicious` source. A
   search, through `web_search` or a Google search URL, requires no audience:
-  the query goes only to the search provider. Where a client's map confines the result
-  (Claude Code confines WebFetch), a fetch the Annotator labels `suspicious`
-  and every search offer `coding.strip-instructions` beside the trust
-  narrowing: the model removes every instruction from the page
-  and keeps its facts, code and links, and the result returns at the
-  session's own trust. The sanitizer is tagged `web`.
+  the query goes only to the search provider. Where the deployment confines
+  the result (the Claude Code default root confines WebFetch but not
+  WebSearch), a fetch the Annotator labels `suspicious` or a confined search
+  offers `coding.strip-instructions` beside the trust narrowing: the model
+  removes every instruction from the result and keeps its facts, code and
+  links, and the result returns at the session's own trust. The sanitizer is
+  tagged `web`.
 
 The model for both sanitizers is configured in the deployment, not in the
 battery. A deployment runs one by binding it under `[externals.sanitizers]`,
 for example to `builtin = "llm"` or, where the `claude` CLI is installed,
 `builtin = "claude-code"`; the Claude Code
-plugin's default config binds both. A sanitizer the root does not bind is
+plugin's default config binds only `coding.strip-instructions`. A sanitizer the root does not bind is
 not offered. APPA does not verify what the model removed: binding a
 sanitizer registers it as trusted. A root rule for a tool precedes the
 battery's, and a root rule without the battery's tag offers no sanitizer.
