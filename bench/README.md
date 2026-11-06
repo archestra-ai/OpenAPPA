@@ -11,6 +11,7 @@ where LLM spend goes, and where published results live.
 | [`corp/`](corp/README.md) | Corp benchmark: 20 workplace scenarios with planted attacks |
 | [`agentthreatbench/`](agentthreatbench/README.md) | Harness for the pinned Inspect AgentThreatBench suite |
 | [`taubench/`](taubench/README.md) | Harness for Tau 1.0.1 `banking_knowledge` |
+| [`sanitizer/`](sanitizer/README.md) | Model sanitizers asked through the production consult path, without an actor: utility, robustness, latency, withheld consults |
 | [`corp-systems/`](corp-systems/README.md) | Fake company systems and email tools that Corp runs against |
 | [`corp-agent/`](corp-agent/README.md) | The Rust APPA agent for Corp |
 | [`corp-agent-fides/`](corp-agent-fides/README.md) | The same Corp agent, defended by Microsoft's FIDES instead of APPA |

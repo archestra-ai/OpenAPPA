@@ -39,6 +39,10 @@ name = "annotate_cli"
 required-features = ["daemon"]
 
 [[test]]
+name = "sanitize_cli"
+required-features = ["daemon"]
+
+[[test]]
 name = "files_cli"
 required-features = ["daemon"]
 
