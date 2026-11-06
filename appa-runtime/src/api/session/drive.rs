@@ -139,6 +139,77 @@ impl Session {
 }
 
 impl Decided<'_> {
+    /// A single spawn binds whichever child starts next, so one waits at a time. A fan-out
+    /// spawn's children bind by the prompt it was released under, so it waits only on another
+    /// fan-out of the same prompt. Answers the prompt a released fan-out binds.
+    fn fan_out_gate(
+        &self,
+        facts: &[appa_engine::fact::Fact],
+        opens_dispatch: bool,
+        opening: Opening<'_>,
+    ) -> Result<Option<String>, EventError> {
+        let released = facts.iter().find_map(|fact| match fact {
+            appa_engine::fact::Fact::ForkPrepared { kind, .. } => Some(*kind),
+            _ => None,
+        });
+        match (opens_dispatch, released) {
+            (true, Some(appa_engine::transition::SpawnKind::Single))
+                if !self.engine().forks_in_flight(self.view).is_empty() =>
+            {
+                Err(EventError::SpawnOutstanding)
+            }
+            (true, Some(appa_engine::transition::SpawnKind::FanOut)) => match (opening.call_id, opening.prompt) {
+                (Some(_), Some(prompt)) if self.open_fan_out(prompt).is_some() => Err(EventError::FanOutOutstanding),
+                (Some(_), Some(prompt)) => Ok(Some(prompt.0.clone())),
+                _ => Err(EventError::FanOutUnkeyed),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// The host's record of this decision: the call id the dispatch it opens is bound to, or
+    /// the batch a denied proposal is answered from.
+    fn host_record(
+        &self,
+        facts: &[appa_engine::fact::Fact],
+        opening: Opening<'_>,
+        opens_dispatch: Option<appa_engine::value::DispatchId>,
+        fan_out_prompt: Option<String>,
+    ) -> Result<Option<appa_eventlog::HostObservation>, EventError> {
+        Ok(match (opening.call_id, opens_dispatch) {
+            (Some(call_id), Some(dispatch)) => {
+                if call_id.is_empty()
+                    || self
+                        .log
+                        .call_bindings()
+                        .any(|binding| *binding.trajectory == self.session.trajectory && binding.call_id == call_id)
+                {
+                    return Err(EventError::CallIdReused);
+                }
+                Some(appa_eventlog::HostObservation::CallBound {
+                    trajectory: self.session.trajectory.clone(),
+                    call_id: call_id.to_string(),
+                    dispatch,
+                    prompt: fan_out_prompt,
+                })
+            }
+            // A decided proposal batch that opens nothing denied the call: bind the host
+            // id to the decision's batch identity, so a repeat of this delivery is
+            // answered from the record rather than decided again with fresh offers.
+            (Some(call_id), None) if !call_id.is_empty() => facts.iter().find_map(|fact| match fact {
+                appa_engine::fact::Fact::ProposalBatchDecided { batch, released, .. } if released.is_empty() => {
+                    Some(appa_eventlog::HostObservation::CallDenied {
+                        trajectory: self.session.trajectory.clone(),
+                        call_id: call_id.to_string(),
+                        batch: batch.as_str().to_string(),
+                    })
+                }
+                _ => None,
+            }),
+            _ => None,
+        })
+    }
+
     pub(super) fn engine(&self) -> &crate::engine::RuntimeEngine {
         self.policy.engine()
     }
@@ -556,59 +627,8 @@ impl Session {
                     return Err(EventError::CallOutstanding);
                 }
             }
-            let released = facts.iter().find_map(|fact| match fact {
-                appa_engine::fact::Fact::ForkPrepared { kind, .. } => Some(*kind),
-                _ => None,
-            });
-            // A single spawn binds whichever child starts next, so one waits at a time. A
-            // fan-out spawn's children bind by the prompt it was released under, so it waits
-            // only on another fan-out of the same prompt.
-            let fan_out_prompt = match (opens_dispatch.is_some(), released) {
-                (true, Some(appa_engine::transition::SpawnKind::Single))
-                    if !policy.engine().forks_in_flight(&view).is_empty() =>
-                {
-                    return Err(EventError::SpawnOutstanding);
-                }
-                (true, Some(appa_engine::transition::SpawnKind::FanOut)) => match (opening.call_id, opening.prompt) {
-                    (Some(_), Some(prompt)) if context.open_fan_out(prompt).is_some() => {
-                        return Err(EventError::FanOutOutstanding);
-                    }
-                    (Some(_), Some(prompt)) => Some(prompt.0.clone()),
-                    _ => return Err(EventError::FanOutUnkeyed),
-                },
-                _ => None,
-            };
-            let host_record = match (opening.call_id, opens_dispatch) {
-                (Some(call_id), Some(dispatch)) => {
-                    if call_id.is_empty()
-                        || log
-                            .call_bindings()
-                            .any(|binding| *binding.trajectory == self.trajectory && binding.call_id == call_id)
-                    {
-                        return Err(EventError::CallIdReused);
-                    }
-                    Some(appa_eventlog::HostObservation::CallBound {
-                        trajectory: self.trajectory.clone(),
-                        call_id: call_id.to_string(),
-                        dispatch,
-                        prompt: fan_out_prompt,
-                    })
-                }
-                // A decided proposal batch that opens nothing denied the call: bind the host
-                // id to the decision's batch identity, so a repeat of this delivery is
-                // answered from the record rather than decided again with fresh offers.
-                (Some(call_id), None) if !call_id.is_empty() => facts.iter().find_map(|fact| match fact {
-                    appa_engine::fact::Fact::ProposalBatchDecided { batch, released, .. } if released.is_empty() => {
-                        Some(appa_eventlog::HostObservation::CallDenied {
-                            trajectory: self.trajectory.clone(),
-                            call_id: call_id.to_string(),
-                            batch: batch.as_str().to_string(),
-                        })
-                    }
-                    _ => None,
-                }),
-                _ => None,
-            };
+            let fan_out_prompt = context.fan_out_gate(facts, opens_dispatch.is_some(), opening)?;
+            let host_record = context.host_record(facts, opening, opens_dispatch, fan_out_prompt)?;
             let binds_read = facts.iter().any(|fact| {
                 matches!(
                     fact,
