@@ -112,27 +112,25 @@ impl Session {
                 }
                 let args: crate::api::files::ProcessArgs =
                     serde_json::from_str(call.arguments.get()).map_err(crate::api::files::refused)?;
-                ledger(self.inner.clone(), self.root.clone(), {
-                    let (actor, key, path, inputs) =
-                        (self.trajectory.0.clone(), key.clone(), path.clone(), args.input_paths);
-                    move |store| store.prepare_process(&actor, &key, &inputs, &path)
+                self.ledger({
+                    let (key, path, inputs) = (key.clone(), path.clone(), args.input_paths);
+                    move |store, actor| store.prepare_process(actor, &key, &inputs, &path)
                 })
                 .await?
             }
             appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
                 let args: crate::api::files::FileTransferArgs =
                     serde_json::from_str(call.arguments.get()).map_err(crate::api::files::refused)?;
-                ledger(self.inner.clone(), self.root.clone(), {
-                    let (actor, key, path, source) =
-                        (self.trajectory.0.clone(), key.clone(), path.clone(), args.source_path);
-                    move |store| store.prepare_transfer(&actor, &key, operation, &source, &path)
+                self.ledger({
+                    let (key, path, source) = (key.clone(), path.clone(), args.source_path);
+                    move |store, actor| store.prepare_transfer(actor, &key, operation, &source, &path)
                 })
                 .await?
             }
             _ => {
-                ledger(self.inner.clone(), self.root.clone(), {
-                    let (actor, key, path) = (self.trajectory.0.clone(), key.clone(), path.clone());
-                    move |store| store.prepare(&actor, &key, operation, &path)
+                self.ledger({
+                    let (key, path) = (key.clone(), path.clone());
+                    move |store, actor| store.prepare(actor, &key, operation, &path)
                 })
                 .await?
             }

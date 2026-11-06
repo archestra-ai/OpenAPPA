@@ -179,9 +179,9 @@ impl Session {
                 // Verify the physical version before admitting a successful result. A later
                 // trajectory append failure cannot erase this already-published file's Label
                 // from the authoritative workspace event stream.
-                ledger(self.inner.clone(), self.root.clone(), {
-                    let (actor, key) = (self.trajectory.0.clone(), key.clone());
-                    move |store| store.finish(&actor, &key, true)
+                self.ledger({
+                    let key = key.clone();
+                    move |store, actor| store.finish(actor, &key, true)
                 })
                 .await?;
             }
@@ -194,9 +194,9 @@ impl Session {
                     ));
                 }
                 ToolOutcome::Failure { .. } => {
-                    ledger(self.inner.clone(), self.root.clone(), {
-                        let (actor, key) = (self.trajectory.0.clone(), key.clone());
-                        move |store| store.finish(&actor, &key, false)
+                    self.ledger({
+                        let key = key.clone();
+                        move |store, actor| store.finish(actor, &key, false)
                     })
                     .await?;
                 }

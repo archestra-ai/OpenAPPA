@@ -1,28 +1,30 @@
 use super::*;
 
-/// Execute one workspace-event projection operation on the blocking pool. These operations can
-/// hash entire files and replay the full workspace stream. The executor also serves the harness's
-/// hooks and MCP requests. `bind`, `cancel` and `abandon` stay inline when they do not read files.
-pub(super) async fn ledger<T: Send + 'static>(
-    inner: std::sync::Arc<crate::api::Inner>,
-    root: crate::api::TrajectoryId,
-    work: impl FnOnce(&appa_eventlog::files::FileStore) -> Result<T, appa_eventlog::files::FileStoreError> + Send + 'static,
-) -> Result<T, EventError> {
-    let joined = tokio::task::spawn_blocking(move || {
-        let files = inner
-            .shared
-            .files
-            .as_ref()
-            .ok_or_else(|| appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into()))?;
-        let store = files.store(&inner.store, &root)?;
-        work(&store)
-    })
-    .await
-    .map_err(|error| crate::api::files::refused(format!("the file ledger task failed: {error}")))?;
-    joined.map_err(crate::api::files::refused)
-}
-
 impl Session {
+    /// Execute one workspace-event projection operation on the blocking pool, acting as this
+    /// trajectory. These operations can hash entire files and replay the full workspace stream.
+    /// The executor also serves the harness's hooks and MCP requests. `bind`, `cancel` and
+    /// `abandon` stay inline when they do not read files.
+    pub(super) async fn ledger<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&appa_eventlog::files::FileStore, &str) -> Result<T, appa_eventlog::files::FileStoreError>
+        + Send
+        + 'static,
+    ) -> Result<T, EventError> {
+        let (inner, root, actor) = (self.inner.clone(), self.root.clone(), self.trajectory.0.clone());
+        let joined = tokio::task::spawn_blocking(move || {
+            let files =
+                inner.shared.files.as_ref().ok_or_else(|| {
+                    appa_eventlog::files::FileStoreError::Corrupt("file tools are not enabled".into())
+                })?;
+            let store = files.store(&inner.store, &root)?;
+            work(&store, &actor)
+        })
+        .await
+        .map_err(|error| crate::api::files::refused(format!("the file ledger task failed: {error}")))?;
+        joined.map_err(crate::api::files::refused)
+    }
+
     /// Repair the ledger reservation of a released file call after its writer has stopped.
     ///
     /// The durable write request fixes the Label of any attributable publication before the
@@ -43,11 +45,7 @@ impl Session {
                 return;
             }
         };
-        let repaired = ledger(self.inner.clone(), self.root.clone(), {
-            let (actor, key) = (self.trajectory.0.clone(), key);
-            move |store| store.repair(&actor, &key)
-        })
-        .await;
+        let repaired = self.ledger(move |store, actor| store.repair(actor, &key)).await;
         match repaired {
             Ok(appa_eventlog::files::RepairOutcome::Absent) => {}
             Ok(appa_eventlog::files::RepairOutcome::Released) => tracing::info!(
@@ -91,12 +89,13 @@ impl Session {
             return Err(EventError::OutcomeMismatch);
         }
         let key = crate::api::files::key(&open.id)?;
-        let pin = ledger(self.inner.clone(), self.root.clone(), {
-            let (actor, key) = (self.trajectory.0.clone(), key.clone());
-            move |store| store.pin_for(&actor, &key)
-        })
-        .await?
-        .ok_or_else(|| crate::api::files::refused("the released call holds no file reservation"))?;
+        let pin = self
+            .ledger({
+                let key = key.clone();
+                move |store, actor| store.pin_for(actor, &key)
+            })
+            .await?
+            .ok_or_else(|| crate::api::files::refused("the released call holds no file reservation"))?;
         let result = {
             let inner = self.inner.clone();
             let (root, call, pin) = (self.root.clone(), call.clone(), pin.clone());
