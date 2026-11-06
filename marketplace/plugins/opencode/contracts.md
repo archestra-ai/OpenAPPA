@@ -1455,6 +1455,8 @@ A deployment in which any component uses `builtin = "llm"` opens only when the s
 
 An `llm` request that fails with a connection error, status 429, or a 5xx status is retried 500 ms later, at most three attempts in total. A retry starts only when `timeout_ms` leaves time for it. Other failures are not retried. Each attempt takes a free slot, and the wait before a retry holds none.
 
+An `llm` request sets no `temperature` or other sampling parameter. The model uses its default values, as it does for `claude-code`.
+
 `openai` uses the Chat Completions API, including when `url` points to a compatible service. `ollama` uses `http://localhost:11434` unless `url` specifies another endpoint, and requires no token.
 
 ### Jev
