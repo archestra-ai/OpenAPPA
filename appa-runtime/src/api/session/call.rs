@@ -16,6 +16,16 @@ pub(super) const FAN_OUT_AHEAD: &str = "[appa] A return declared ahead covers a 
 /// Follows a notice on a block that offers plans.
 pub(super) const APPLY_BELOW: &str = " Apply a plan below.";
 
+/// One proposed tool call and what came with it: the host's call id, the spawn it starts, the
+/// prompt a fan-out spawn is keyed by, and the file basis a tracked file call was pinned to.
+struct Proposal {
+    call: ProposedCall,
+    call_id: Option<String>,
+    spawn: Option<SpawnKind>,
+    prompt: Option<PromptKey>,
+    file_basis: Option<appa_engine::value::FileBasis>,
+}
+
 impl Session {
     #[tracing::instrument(target = "appa_telemetry", name = "appa.policy.check", skip_all, fields(
         appa.trajectory.root = crate::telemetry::name(&self.root.0),
@@ -36,37 +46,45 @@ impl Session {
     ) -> Result<ToolCallDecision, EventError> {
         let started = std::time::Instant::now();
         let tool = call.tool.clone();
-        let result = self.check_tool_call(call, call_id, spawn, prompt).await;
+        let result = self
+            .check_tool_call(Proposal {
+                call,
+                call_id,
+                spawn,
+                prompt,
+                file_basis: None,
+            })
+            .await;
         crate::telemetry::policy(&result, &tool, started.elapsed().as_secs_f64());
         result
     }
 
-    pub(super) async fn check_tool_call(
-        &self,
-        call: ProposedCall,
-        call_id: Option<String>,
-        spawn: Option<SpawnKind>,
-        prompt: Option<PromptKey>,
-    ) -> Result<ToolCallDecision, EventError> {
-        if let Some(id) = crate::api::peer::held_read(&call) {
+    async fn check_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
+        let call = &proposal.call;
+        if let Some(id) = crate::api::peer::held_read(call) {
             let log = self.inner.log(&self.root)?;
             let chain = self.inner.trust_chain(&self.deployment(), &log)?;
             let basis = crate::api::peer::held_basis(&self.inner.store, &self.root, &id, &chain)?;
-            return self.propose_tool_call(call, call_id, spawn, prompt, Some(basis)).await;
+            return self
+                .propose_tool_call(Proposal {
+                    file_basis: Some(basis),
+                    ..proposal
+                })
+                .await;
         }
         let Some(files) = &self.inner.shared.files else {
-            return self.propose_tool_call(call, call_id, spawn, prompt, None).await;
+            return self.propose_tool_call(proposal).await;
         };
-        if !crate::api::files::owns(&call) {
+        if !crate::api::files::owns(call) {
             let bound = files
                 .root_is_bound(&self.inner.store, &self.root)
                 .map_err(crate::api::files::refused)?;
-            if bound && crate::api::files::bypasses_tracking(&call) {
+            if bound && crate::api::files::bypasses_tracking(call) {
                 return Err(crate::api::files::refused(
                     "the bound workspace refuses native filesystem and shell tools",
                 ));
             }
-            return self.propose_tool_call(call, call_id, spawn, prompt, None).await;
+            return self.propose_tool_call(proposal).await;
         }
         let ledger_policy = match call.cwd.as_deref() {
             Some(cwd) => files.bind(&self.inner.store, &self.root, cwd),
@@ -74,7 +92,7 @@ impl Session {
         }
         .and_then(|store| store.policy())
         .map_err(crate::api::files::refused)?;
-        let (operation, path) = crate::api::files::operation(&call)?;
+        let (operation, path) = crate::api::files::operation(call)?;
         let log = self.inner.log(&self.root)?;
         let deployment = self.deployment();
         // A family shares the ledger with every family of its deployment while the ledger opened
@@ -103,7 +121,7 @@ impl Session {
         }
         let policy = self.inner.resolve_policy(&deployment, &log)?;
         let view = policy.rebuild_view(&log)?;
-        let expected = policy.engine().file_dispatch(&view, &self.trajectory, &call)?;
+        let expected = policy.engine().file_dispatch(&view, &self.trajectory, call)?;
         let key = crate::api::files::key(&expected)?;
         let pin = match operation {
             appa_eventlog::files::FileOperation::Process => {
@@ -161,8 +179,12 @@ impl Session {
                 "execution-control files are not writable in file-tracking mode",
             ));
         }
-        let basis = pin.file_basis();
-        let decision = self.propose_tool_call(call, call_id, spawn, prompt, Some(basis)).await;
+        let decision = self
+            .propose_tool_call(Proposal {
+                file_basis: Some(pin.file_basis()),
+                ..proposal
+            })
+            .await;
         match &decision {
             Ok(ToolCallDecision::Allow { dispatch, .. }) => {
                 if dispatch != &expected {
@@ -194,7 +216,14 @@ impl Session {
         call_id: Option<String>,
         basis: appa_engine::value::FileBasis,
     ) -> Result<ToolCallDecision, EventError> {
-        self.propose_tool_call(call, call_id, None, None, Some(basis)).await
+        self.propose_tool_call(Proposal {
+            call,
+            call_id,
+            spawn: None,
+            prompt: None,
+            file_basis: Some(basis),
+        })
+        .await
     }
 
     /// Check a return declaration made ahead of the spawn at this trajectory's label, and answer
@@ -216,17 +245,9 @@ impl Session {
     /// offer, one that asks no authority, and is proposed again, so it meets only what else
     /// blocks it. A declaration held at another label has lapsed; one no offer fits, or one a
     /// fan-out spawn meets, is not applied. The block says which.
-    pub(super) async fn propose_tool_call(
-        &self,
-        call: ProposedCall,
-        call_id: Option<String>,
-        spawn: Option<SpawnKind>,
-        prompt: Option<PromptKey>,
-        file_basis: Option<appa_engine::value::FileBasis>,
-    ) -> Result<ToolCallDecision, EventError> {
-        let decision = self
-            .propose_once(call.clone(), call_id.clone(), spawn, prompt.clone(), file_basis.clone())
-            .await?;
+    async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
+        let decision = self.propose_once(&proposal).await?;
+        let spawn = proposal.spawn;
         let Some(held) = spawn.and_then(|_| self.inner.take_held_return(&self.root, &self.trajectory)) else {
             return Ok(decision);
         };
@@ -276,7 +297,7 @@ impl Session {
         };
         // A declaration that cannot be applied leaves the spawn the block it already met.
         match self.on_remedy(offer, held.arguments, None, None).await {
-            Ok(RemedyDecision::Authorized { .. }) => self.propose_once(call, call_id, spawn, prompt, file_basis).await,
+            Ok(RemedyDecision::Authorized { .. }) => self.propose_once(&proposal).await,
             Ok(_) => Ok(noted(UNFIT_AHEAD, apply)),
             Err(error) => {
                 tracing::debug!(trajectory = %self.trajectory.0, %error, "the declaration made ahead was not applied");
@@ -285,14 +306,15 @@ impl Session {
         }
     }
 
-    pub(super) async fn propose_once(
-        &self,
-        call: ProposedCall,
-        call_id: Option<String>,
-        spawn: Option<SpawnKind>,
-        prompt: Option<PromptKey>,
-        file_basis: Option<appa_engine::value::FileBasis>,
-    ) -> Result<ToolCallDecision, EventError> {
+    async fn propose_once(&self, proposal: &Proposal) -> Result<ToolCallDecision, EventError> {
+        let Proposal {
+            call,
+            call_id,
+            spawn,
+            prompt,
+            file_basis,
+        } = proposal;
+        let spawn = *spawn;
         self.inner.note_working_directory(&self.root, call.cwd.as_deref());
         if spawn.is_some()
             && self.inner.shared.naming.spawn_coverage() == crate::api::SpawnCoverage::Declared
@@ -306,7 +328,7 @@ impl Session {
         let decision = self
             .drive_with_evidence(
                 |context, mut evidence| {
-                    if let Some(basis) = &file_basis {
+                    if let Some(basis) = file_basis {
                         evidence.push(ExternalEvidence::File { basis: basis.clone() });
                     }
                     Ok(EngineEvent::ModelResponse {
@@ -314,7 +336,7 @@ impl Session {
                         evidence,
                         entropy: fresh_entropy(),
                         spawn,
-                        replay: context.replay_batch(&call, call_id.as_deref())?,
+                        replay: context.replay_batch(call, call_id.as_deref())?,
                     })
                 },
                 None,
