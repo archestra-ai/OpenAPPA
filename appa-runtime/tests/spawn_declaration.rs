@@ -340,6 +340,82 @@ async fn a_declaration_ahead_that_no_offer_fits_is_dropped_and_the_block_says_so
     );
 }
 
+fn lifecycle(events: &[serde_json::Value], name: &str) -> serde_json::Value {
+    events
+        .iter()
+        .find(|event| event["hook_event_name"] == name)
+        .unwrap_or_else(|| panic!("the fixture carries a {name}"))
+        .clone()
+}
+
+/// The block also offers the floor at the lowest trust with this session's audience. Declared
+/// ahead as spelled, it lets a subagent accept a read that lowers its trust and still return;
+/// the return lowers this session's trust to that floor and leaves its audience.
+#[tokio::test]
+async fn a_lower_trust_floor_declared_ahead_lets_a_subagent_whose_trust_drops_return() {
+    let runtime = deployment("delta = { trust = \"suspicious\" }");
+    let events = events();
+    let spawn = hook(&events, "PreToolUse", "Agent", false);
+    let HookDecision::DenyCall { feedback, .. } = hooks::handle(&runtime, parsed(&spawn)).await else {
+        panic!("an undeclared spawn is blocked");
+    };
+    assert!(
+        feedback.contains("execute_remedy_plan(label: {trust: \"suspicious\", audience: [\"public\"]})"),
+        "the block names the lower-trust floor as a ready call: {feedback}"
+    );
+
+    control_hook(
+        &runtime,
+        &spawn,
+        serde_json::json!({ "trust": "suspicious", "audience": ["public"] }),
+    )
+    .await;
+    let declared = runtime
+        .execute_embedded_remedy(
+            &actor_of(&spawn),
+            ahead(LabelArgs {
+                trust: Some("suspicious".to_string()),
+                audience: Some(vec!["public".to_string()]),
+            }),
+        )
+        .await;
+    assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
+    assert!(matches!(
+        hooks::handle(&runtime, parsed(&spawn)).await,
+        HookDecision::AllowCall { spawn: Some(_) }
+    ));
+
+    let (status, answer) = claude_hook(&runtime, &lifecycle(&events, "SubagentStart")).await;
+    assert_eq!(status, 200, "{answer}");
+    let read = hook(&events, "PreToolUse", "Bash", true);
+    let (_, answer) = claude_hook(&runtime, &read).await;
+    let reason = answer["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .expect("the read that lowers the subagent's trust is blocked with its offers");
+    let accepted = runtime
+        .execute_remedy(
+            &actor_of(&read),
+            offers(reason).pop().expect("the floor admits the narrowing"),
+        )
+        .await;
+    assert!(matches!(accepted, RemedyOutcome::Authorized { .. }), "{accepted:?}");
+    let (_, answer) = claude_hook(&runtime, &read).await;
+    assert_ne!(answer["hookSpecificOutput"]["permissionDecision"], "deny", "{answer}");
+    claude_hook(&runtime, &hook(&events, "PostToolUse", "Bash", true)).await;
+
+    let (status, answer) = claude_hook(&runtime, &lifecycle(&events, "SubagentStop")).await;
+    assert_eq!(
+        (status, answer),
+        (200, serde_json::json!({})),
+        "the return crosses at the stop"
+    );
+    let parent = runtime.status(&actor_of(&spawn).root).expect("the root answers");
+    assert_eq!(
+        (parent.trust.as_str(), parent.audience.as_str()),
+        ("suspicious", "public")
+    );
+}
+
 /// `claude -p` running a `Workflow` script that starts subagents: a fan-out spawn.
 fn workflow_events() -> Vec<serde_json::Value> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hooks-workflow-pipeline.jsonl");
