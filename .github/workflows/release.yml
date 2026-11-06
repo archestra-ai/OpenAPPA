@@ -129,8 +129,7 @@ jobs:
           owner: archestra-ai
           repositories: OpenAPPA
           permission-contents: write
-          permission-issues: write
-          permission-pull-requests: write
+          permission-pull-requests: write # Includes PR labels and comments.
 
       - name: Create or update next release PR
         id: release-pr

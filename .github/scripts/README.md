@@ -6,8 +6,9 @@
 same organization-owned **Archestra CI** App used by Archestra's Release Please
 workflow. Its installation already includes `archestra-ai/OpenAPPA`.
 
-The `release-pr` job requests a token for **OpenAPPA only**, with Contents,
-Issues, and Pull requests write permissions. Both Release Please and the
+The `release-pr` job requests a token for **OpenAPPA only**, with Contents and
+Pull requests write permissions. Pull requests write covers release PR labels
+and comments. Both Release Please and the
 lockfile/marketplace synchronization push use that token. App-authenticated PR
 events start CI without the workflow approval required for PR events generated
 with `GITHUB_TOKEN`. The job's `GITHUB_TOKEN` has Contents read access, checkout
