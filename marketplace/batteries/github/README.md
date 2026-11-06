@@ -270,7 +270,7 @@ first. Nothing in this file needs editing.
 
 ## Sanitizers
 
-When the deployment binds a sanitizer below, the battery confines the results of the 27 reads that return text other people wrote; the target policies tag the same reads. A read that narrows the session then offers, beside the plain narrowing, each sanitizer below that the deployment binds, and the agent chooses. A chosen sanitizer runs a model on the confined result with the sanitizer's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+When the deployment binds a sanitizer below, the battery confines the results of 26 reads that return text other people wrote and of `sub_issue_write`, which returns the parent issue; the target policies tag the same reads. A read that narrows the session then offers, beside the plain narrowing, each sanitizer below that the deployment binds, and the agent chooses. A chosen sanitizer runs a model on the confined result with the sanitizer's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
 
 | Sanitizer | `permits` | Effect |
 |---|---|---|

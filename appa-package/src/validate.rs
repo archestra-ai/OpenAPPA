@@ -121,6 +121,8 @@ pub enum PackageError {
     ToolWithoutBareVariant { policy: PathBuf, tool: String },
     #[error("{policy} is a targeted battery's base, which loads alone, yet binds `{external}` without declaring it")]
     BaseBindingUndeclared { policy: PathBuf, external: NamedExternal },
+    #[error("{policy} binds `{external}`, whose declaration names its builtin and so takes no binding")]
+    BindsBuiltinDeclaration { policy: PathBuf, external: NamedExternal },
     #[error("{policy} declares `{variant}` after the bare `{tool}`, which matches first")]
     UnreachableVariant {
         policy: PathBuf,
@@ -577,6 +579,27 @@ fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(
         return Err(PackageError::BaseBindingUndeclared {
             policy: policy.to_path_buf(),
             external: external.clone(),
+        });
+    }
+    // The runtime refuses a binding beside a declaration that names its builtin
+    // (`OpenError::BoundBuiltin`).
+    let bound_builtin = DeclarationKind::ALL.into_iter().find_map(|kind| {
+        declarations(base, kind.field())
+            .filter(|declaration| declaration.get("builtin").is_some())
+            .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
+            .map(|name| {
+                NamedDeclaration {
+                    kind,
+                    name: name.to_owned(),
+                }
+                .binding()
+            })
+            .find(|binding| bound.contains(binding))
+    });
+    if let Some(external) = bound_builtin {
+        return Err(PackageError::BindsBuiltinDeclaration {
+            policy: policy.to_path_buf(),
+            external,
         });
     }
     let unbound = DeclarationKind::ALL
@@ -2387,6 +2410,27 @@ mod tests {
         assert!(matches!(
             validate_package(directory.path()),
             Err(PackageError::BaseBindingUndeclared { external, .. }) if external == expected
+        ));
+    }
+
+    /// A declaration that names its builtin takes no binding: the runtime refuses the pair
+    /// at open, so a targeted base carrying both does not validate either.
+    #[test]
+    fn a_targeted_base_does_not_bind_a_declaration_that_names_its_builtin() {
+        let base = format!(
+            "{TARGETED_BASE}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\nbuiltin = \"claude-code\"\n\
+             [policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n\
+             [externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n"
+        );
+        let directory = targeted(&base, MULTI_USER_POLICY);
+        fs::write(directory.path().join("single-user.toml"), SINGLE_USER_POLICY).unwrap();
+        let expected = NamedExternal {
+            section: "sanitizers".to_owned(),
+            name: "mask".to_owned(),
+        };
+        assert!(matches!(
+            validate_package(directory.path()),
+            Err(PackageError::BindsBuiltinDeclaration { external, .. }) if external == expected
         ));
     }
 

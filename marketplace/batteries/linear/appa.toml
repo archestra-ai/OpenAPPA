@@ -35,25 +35,21 @@ requires = { audience = { contains = ["public"] }, attention = ["linear-review"]
 name = "mcp/linear/get_agent_skill"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_attachment"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_diff"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_diff_threads"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_document"
@@ -69,73 +65,62 @@ requires = { audience = { contains = ["internal"] } }
 name = "mcp/linear/get_issue_status"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_milestone"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_notifications"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_project"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
+tags = ["linear-records"]
 
 [[policy.tool]]
 name = "mcp/linear/get_release"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_release_note"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_status_updates"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_team"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_template"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_user"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/get_workspace"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_agent_skills"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_comments(issueId:*)"
@@ -146,7 +131,7 @@ requires = { audience = { contains = ["internal"] } }
 name = "mcp/linear/list_comments"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
+tags = ["linear-records"]
 
 [[policy.tool]]
 name = "mcp/linear/list_cycles"
@@ -157,7 +142,6 @@ requires = { audience = { contains = ["internal"] } }
 name = "mcp/linear/list_diffs"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_documents(teamId:*)"
@@ -168,19 +152,17 @@ requires = { audience = { contains = ["internal"] } }
 name = "mcp/linear/list_documents"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
+tags = ["linear-records"]
 
 [[policy.tool]]
 name = "mcp/linear/list_issue_labels"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_issue_statuses"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_issues(team:*)"
@@ -191,61 +173,53 @@ requires = { audience = { contains = ["internal"] } }
 name = "mcp/linear/list_issues"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
+tags = ["linear-records"]
 
 [[policy.tool]]
 name = "mcp/linear/list_milestones"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_project_labels"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_projects"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
+tags = ["linear-records"]
 
 [[policy.tool]]
 name = "mcp/linear/list_release_notes"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_release_pipelines"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_releases"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_teams"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_templates"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/list_users"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/search_documentation"
@@ -260,7 +234,6 @@ name = "mcp/linear/mark_notification"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_comment(issueId:*)"
@@ -273,14 +246,12 @@ name = "mcp/linear/save_comment"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_document"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_issue"
@@ -293,7 +264,6 @@ name = "mcp/linear/save_milestone"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
-tags = ["linear"]
 
 # Administrative, sharing and destructive writes: explicit review.
 
@@ -314,45 +284,38 @@ name = "mcp/linear/create_issue_label"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/delete_attachment"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/delete_comment"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/delete_diff_comment"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/delete_status_update"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/merge_diff"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
-tags = ["linear"]
 # The signed upload URL is short-lived and named nowhere else; `internal`
 # keeps the prepared upload attachable to any issue the workspace reads.
 name = "mcp/linear/prepare_attachment_upload"
@@ -365,105 +328,90 @@ name = "mcp/linear/resolve_diff_thread"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/restore_issue_label"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/restore_project_label"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/retire_issue_label"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/retire_project_label"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_diff_comment"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_issue_label"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_project"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_project_label"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_release"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_release_note"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/save_status_update"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/share_issue"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/submit_diff_review"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 [[policy.tool]]
 name = "mcp/linear/unshare_issue"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
-tags = ["linear"]
 
 # --- sanitizers ---
 
@@ -494,10 +442,12 @@ trust = { from = "suspicious", to = "trusted" }
 # unchanged instead of narrowing it to `internal`. Only `internal` data
 # qualifies; a result restricted to fewer readers stays restricted. APPA does
 # not verify what the model removed.
+# It runs only on the issue, comment, document and project reads tagged
+# `linear-records`; users, attachments, notifications and writes never get it.
 [[policy.sanitizer]]
 name = "linear.redact-for-public"
 on = ["tool_output"]
-tags = ["linear"]
+tags = ["linear-records"]
 hint = "This Linear content goes to readers outside the organization. Keep the technical substance: the problem, steps to reproduce, error text, status and decisions. Remove names, emails and other personal data of customers and colleagues, customer and partner names, deal and contract details, internal URLs and hostnames, credentials, and unreleased plans or dates. Write [redacted] in place of each removal. Add nothing."
 
 [policy.sanitizer.permits]
@@ -510,62 +460,10 @@ audience = { from = ["internal"], to = ["public"] }
 [policy.deployment]
 confined_results = [
   "mcp/linear/extract_images",
-  "mcp/linear/get_agent_skill",
-  "mcp/linear/get_attachment",
-  "mcp/linear/get_diff",
-  "mcp/linear/get_diff_threads",
-  "mcp/linear/get_issue_status",
-  "mcp/linear/get_milestone",
-  "mcp/linear/get_notifications",
-  "mcp/linear/get_project",
-  "mcp/linear/get_release",
-  "mcp/linear/get_release_note",
-  "mcp/linear/get_status_updates",
-  "mcp/linear/get_team",
-  "mcp/linear/get_template",
-  "mcp/linear/get_user",
-  "mcp/linear/get_workspace",
-  "mcp/linear/list_agent_skills",
-  "mcp/linear/list_comments",
-  "mcp/linear/list_diffs",
-  "mcp/linear/list_documents",
-  "mcp/linear/list_issue_labels",
-  "mcp/linear/list_issue_statuses",
-  "mcp/linear/list_issues",
-  "mcp/linear/list_milestones",
-  "mcp/linear/list_project_labels",
-  "mcp/linear/list_projects",
-  "mcp/linear/list_release_notes",
-  "mcp/linear/list_release_pipelines",
-  "mcp/linear/list_releases",
-  "mcp/linear/list_teams",
-  "mcp/linear/list_templates",
-  "mcp/linear/list_users",
   "mcp/linear/search_documentation",
-  "mcp/linear/mark_notification",
-  "mcp/linear/save_comment",
-  "mcp/linear/save_document",
-  "mcp/linear/save_milestone",
-  "mcp/linear/create_issue_label",
-  "mcp/linear/delete_attachment",
-  "mcp/linear/delete_comment",
-  "mcp/linear/delete_diff_comment",
-  "mcp/linear/delete_status_update",
-  "mcp/linear/merge_diff",
-  "mcp/linear/prepare_attachment_upload",
-  "mcp/linear/resolve_diff_thread",
-  "mcp/linear/restore_issue_label",
-  "mcp/linear/restore_project_label",
-  "mcp/linear/retire_issue_label",
-  "mcp/linear/retire_project_label",
-  "mcp/linear/save_diff_comment",
-  "mcp/linear/save_issue_label",
-  "mcp/linear/save_project",
-  "mcp/linear/save_project_label",
-  "mcp/linear/save_release",
-  "mcp/linear/save_release_note",
-  "mcp/linear/save_status_update",
-  "mcp/linear/share_issue",
-  "mcp/linear/submit_diff_review",
-  "mcp/linear/unshare_issue",
+  "mcp/linear/list_issues",
+  "mcp/linear/list_comments",
+  "mcp/linear/list_documents",
+  "mcp/linear/get_project",
+  "mcp/linear/list_projects",
 ]

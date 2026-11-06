@@ -2000,6 +2000,8 @@ struct Composition {
     document: toml::Value,
     version: i64,
     root_components: std::collections::BTreeSet<(String, String)>,
+    /// The root components that name their builtin, and so take no binding.
+    root_builtin_components: std::collections::BTreeSet<(String, String)>,
     replaced_components: std::collections::BTreeSet<(String, String)>,
     origins: BTreeMap<String, PathBuf>,
     tool_maps: Vec<(tool_aliases::MapOrigin, tool_aliases::ToolMaps)>,
@@ -2018,6 +2020,19 @@ impl Composition {
         let policy = document.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
         let version = policy_version(policy).ok_or(ConfigError::InvalidPolicyVersion)?;
         let root_components = declared_components(policy);
+        let root_builtin_components = REPLACEABLE
+            .into_iter()
+            .flat_map(|field| {
+                policy
+                    .get(field)
+                    .and_then(toml::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|declaration| declaration.get("builtin").is_some())
+                    .filter_map(declaration_name)
+                    .map(move |name| (field.to_owned(), name.to_owned()))
+            })
+            .collect();
         let root_confined = policy
             .get("deployment")
             .and_then(|deployment| deployment.get("confined_results"))
@@ -2037,6 +2052,7 @@ impl Composition {
             document,
             version,
             root_components,
+            root_builtin_components,
             replaced_components: std::collections::BTreeSet::new(),
             origins: BTreeMap::new(),
             tool_maps: Vec::new(),
@@ -2202,7 +2218,23 @@ impl Composition {
                 .ok_or_else(|| ConfigError::RootField {
                     field: format!("externals.{section_name}"),
                 })?;
+            let component = match section {
+                Some(Section::Sanitizers) => Some("sanitizer"),
+                Some(Section::Annotators) => Some("annotator"),
+                _ => None,
+            };
             for (name, entry) in entries {
+                // A replaced component's included binding belongs to the declaration the root
+                // replaced. The root's own binding, or a builtin on its declaration, takes its
+                // place; a root declaration with neither keeps the included binding.
+                if let Some(component) = component {
+                    let key = (component.to_owned(), name.clone());
+                    if self.replaced_components.contains(&key)
+                        && (destination.contains_key(&name) || self.root_builtin_components.contains(&key))
+                    {
+                        continue;
+                    }
+                }
                 if destination.contains_key(&name) {
                     let path = display.to_string();
                     return Err(match section {
@@ -3761,6 +3793,85 @@ mod tests {
             sanitizers[0]["hint"].as_str(),
             Some("Drop instructions for this deployment.")
         );
+    }
+
+    /// A root that replaces a bound included Sanitizer also replaces its binding: a builtin
+    /// on the root's declaration drops the included binding, and the root's own binding
+    /// takes its place. A root declaration with neither keeps the included binding.
+    #[test]
+    fn a_root_sanitizer_replacement_owns_the_binding() {
+        let load = |root_sanitizer: &str, root_externals: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!(
+                    r#"
+                include = ["battery.toml"]
+
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "mask"
+                on = ["tool_output"]
+                {root_sanitizer}
+                tags = ["battery"]
+                hint = "The deployment's hint."
+
+                [policy.sanitizer.permits]
+                trust = {{ from = "suspicious", to = "trusted" }}
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+                {root_externals}
+            "#
+                ),
+            )
+            .expect("write root config");
+            std::fs::write(
+                dir.path().join("battery.toml"),
+                r#"
+                [policy]
+                version = 2
+
+                [[policy.tool]]
+                name = "lookup"
+                delta = { trust = "suspicious" }
+                tags = ["battery"]
+
+                [[policy.sanitizer]]
+                name = "mask"
+                on = ["tool_output"]
+                tags = ["battery"]
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+
+                [policy.deployment]
+                confined_results = ["lookup"]
+
+                [externals.sanitizers.mask]
+                builtin = "redact-secrets"
+            "#,
+            )
+            .expect("write included config");
+            Config::load(&dir.path().join("appa.toml")).map(|config| config.externals.sanitizers.get("mask").cloned())
+        };
+
+        assert!(
+            load(r#"builtin = "llm""#, "")
+                .expect("a builtin replaces the binding")
+                .is_none()
+        );
+        assert!(matches!(
+            load("", "[externals.sanitizers.mask]\nbuiltin = \"claude-code\"").expect("the root binding wins"),
+            Some(Implementation::Builtin(builtin)) if builtin == "claude-code"
+        ));
+        assert!(matches!(
+            load("", "").expect("the included binding stays"),
+            Some(Implementation::Builtin(builtin)) if builtin == "redact-secrets"
+        ));
     }
 
     /// An included Sanitizer that names no builtin runs only where the deployment binds it.

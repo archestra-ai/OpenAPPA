@@ -37,19 +37,19 @@ version = 2
 name = "mcp/cloudflare/query_worker_observability"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["cloudflare"]
+tags = ["cloudflare", "cloudflare-records"]
 
 [[policy.tool]]
 name = "mcp/cloudflare/observability_keys"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["cloudflare"]
+tags = ["cloudflare", "cloudflare-records"]
 
 [[policy.tool]]
 name = "mcp/cloudflare/observability_values"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["cloudflare"]
+tags = ["cloudflare", "cloudflare-records"]
 
 # --- the Workers themselves ---
 
@@ -113,10 +113,12 @@ trust = { from = "suspicious", to = "trusted" }
 # narrowing it to `internal`. Only `internal` data qualifies; a result
 # restricted to fewer readers stays restricted. APPA does not verify what the
 # model removed.
+# It runs only on the log and telemetry reads tagged `cloudflare-records`;
+# Worker code and settings never get it.
 [[policy.sanitizer]]
 name = "cloudflare.redact-for-public"
 on = ["tool_output"]
-tags = ["cloudflare"]
+tags = ["cloudflare-records"]
 hint = "These Workers logs and telemetry go to readers outside the organization. Keep the error messages, status codes, timings and the shape of each failure. Remove account, zone and Worker identifiers, the account's own hostnames and request paths, IP addresses, headers, cookies, request and response bodies, user identifiers, credentials, and source code. Add nothing."
 
 [policy.sanitizer.permits]

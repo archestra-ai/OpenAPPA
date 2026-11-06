@@ -50,6 +50,10 @@ pub enum ConfigError {
     )]
     UnknownSanitizerBuiltin { name: String, builtin: String },
     #[error(
+        "sanitizer attest-schema names builtin {builtin:?}; the engine applies attest-schema itself, so it takes no model builtin"
+    )]
+    ReservedSanitizerBuiltin { builtin: String },
+    #[error(
         "annotator {annotator} input {input} reads {spelling:?}, which is not an input source: an input reads `$tool_call`, `$tool_call.name`, `$tool_call.description`, `$tool_call.arguments`, or `$tool_call.arguments.<name>`"
     )]
     UnknownCallSource {

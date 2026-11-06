@@ -37,7 +37,7 @@ version = 2
 name = "mcp/pagerduty/browse_incidents"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["pagerduty"]
+tags = ["pagerduty", "pagerduty-records"]
 
 [[policy.tool]]
 name = "mcp/pagerduty/browse_services"
@@ -97,7 +97,7 @@ tags = ["pagerduty"]
 name = "mcp/pagerduty/browse_activity"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["pagerduty"]
+tags = ["pagerduty", "pagerduty-records"]
 
 # --- the operational write path: a person reviews the change ---
 
@@ -181,10 +181,12 @@ trust = { from = "suspicious", to = "trusted" }
 # unchanged instead of narrowing it to `internal`. Only `internal` data
 # qualifies; a result restricted to fewer readers stays restricted. APPA does
 # not verify what the model removed.
+# It runs only on the incident and activity reads tagged
+# `pagerduty-records`; users, schedules, settings and writes never get it.
 [[policy.sanitizer]]
 name = "pagerduty.redact-for-public"
 on = ["tool_output"]
-tags = ["pagerduty"]
+tags = ["pagerduty-records"]
 hint = "This PagerDuty data goes to readers outside the organization. Keep what failed, the symptoms, the timeline and the resolution. Remove the names, emails and phone numbers of responders and customers, customer names, internal service, host and team names, internal URLs and IP addresses, credentials, and alert payload details. Write [redacted] in place of each removal. Add nothing."
 
 [policy.sanitizer.permits]

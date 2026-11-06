@@ -53,7 +53,7 @@ tags = ["sentry"]
 name = "mcp/sentry/search_events"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["sentry"]
+tags = ["sentry", "sentry-records"]
 
 [[policy.tool]]
 name = "mcp/sentry/analyze_issue_with_seer"
@@ -66,7 +66,7 @@ tags = ["sentry"]
 name = "mcp/sentry/search_issues"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["sentry"]
+tags = ["sentry", "sentry-records"]
 
 [[policy.tool]]
 name = "mcp/sentry/get_sentry_resource"
@@ -184,13 +184,13 @@ tags = ["sentry"]
 name = "mcp/sentry/execute_sentry_tool(name:get_issue_details)"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["sentry"]
+tags = ["sentry", "sentry-records"]
 
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:get_event_stacktrace)"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["sentry"]
+tags = ["sentry", "sentry-records"]
 
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:get_issue_activity)"
@@ -244,19 +244,19 @@ tags = ["sentry"]
 name = "mcp/sentry/execute_sentry_tool(name:search_events)"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["sentry"]
+tags = ["sentry", "sentry-records"]
 
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:search_issues)"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["sentry"]
+tags = ["sentry", "sentry-records"]
 
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:search_issue_events)"
 delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
-tags = ["sentry"]
+tags = ["sentry", "sentry-records"]
 
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:find_dsns)"
@@ -462,10 +462,12 @@ trust = { from = "suspicious", to = "trusted" }
 # and the result leaves the session's audience unchanged instead of narrowing
 # it to `internal`. Only `internal` data qualifies; a result restricted to
 # fewer readers stays restricted. APPA does not verify what the model removed.
+# It runs only on the issue and event reads tagged `sentry-records`; DSNs,
+# attachments, writes and an unknown catalog name never get it.
 [[policy.sanitizer]]
 name = "sentry.redact-for-public"
 on = ["tool_output"]
-tags = ["sentry"]
+tags = ["sentry-records"]
 hint = "This Sentry data goes to readers outside the organization. Keep the error type and message, the stack frames of open-source code, and the counts and times. Remove user identifiers, emails, IP addresses, request URLs, headers, cookies and bodies, breadcrumbs and user reports, the organization's project and host names, frames of its private code, and credentials. Write [redacted] in place of each removal. Add nothing."
 
 [policy.sanitizer.permits]

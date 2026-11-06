@@ -313,6 +313,11 @@ impl RawSanitizer {
     /// The registered sanitizer, and the model builtin its declaration names, if any.
     pub(crate) fn convert(self, chain: &TrustChain) -> Result<(Sanitizer, Option<AnnotatorBuiltin>), ConfigError> {
         refuse_inline_binding("sanitizer", &self.name, self.implementation.as_ref())?;
+        if self.name == SanitizerName::ATTEST_SCHEMA
+            && let Some(builtin) = self.builtin
+        {
+            return Err(ConfigError::ReservedSanitizerBuiltin { builtin });
+        }
         let builtin = self
             .builtin
             .map(|builtin| {
