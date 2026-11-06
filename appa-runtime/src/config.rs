@@ -770,6 +770,8 @@ pub enum ConfigError {
     TraversingInclude { path: String },
     #[error("the root config includes {path:?} more than once")]
     DuplicateInclude { path: String },
+    #[error("include path {path:?} is not a valid glob: {reason}")]
+    GlobInclude { path: String, reason: String },
     #[error("{BATTERY_TARGET_VARIABLE} is {value:?}, which is neither single-user nor multi-user")]
     InvalidBatteryTarget { value: String },
     #[error("{SESSION_PRINCIPAL_VARIABLE} is {value:?}, which is neither none nor wire")]
@@ -1300,10 +1302,27 @@ impl Config {
         composition.origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         let mut included_batteries = std::collections::BTreeSet::new();
+        // A file an entry names on its own is composed at that entry; a glob passes over it.
+        let named = named_include_files(&root.include, &source_dir, battery_dirs);
         for authored in &root.include {
             let include = Path::new(authored);
             if include.is_absolute() {
                 return Err(ConfigError::AbsoluteInclude { path: authored.clone() });
+            }
+            if let Some(glob) = IncludeGlob::parse(authored)? {
+                for (entry, policy_path) in glob.files(&source_dir)? {
+                    if named.contains(&policy_path) {
+                        continue;
+                    }
+                    if !seen.insert(policy_path.clone()) {
+                        return Err(ConfigError::DuplicateInclude { path: authored.clone() });
+                    }
+                    let included_text =
+                        std::fs::read_to_string(&policy_path).map_err(|source| unreadable(&policy_path, source))?;
+                    let included = parse_toml(&policy_path, &included_text)?;
+                    composition.include(included, &policy_path, tool_aliases::MapOrigin::Battery(entry))?;
+                }
+                continue;
             }
             let include_path = crate::batteries::resolve_include(authored, &source_dir, battery_dirs);
             let include_path =
@@ -1747,11 +1766,123 @@ fn take_include(document: &mut toml::Value) -> Result<Vec<String>, ConfigError> 
     let mut seen = std::collections::BTreeSet::new();
     for entry in &entries {
         refuse_include_entry(entry)?;
+        // The host answers each entry with one battery; a glob names files beside a root
+        // config file, which a hosted document does not have.
+        if IncludeGlob::parse(entry)?.is_some() {
+            return Err(ConfigError::GlobInclude {
+                path: entry.clone(),
+                reason: "a hosted policy has no files beside it to match".into(),
+            });
+        }
         if !seen.insert(entry) {
             return Err(ConfigError::DuplicateInclude { path: entry.clone() });
         }
     }
     Ok(entries)
+}
+
+/// An include entry that names every policy file in one folder beside the root config,
+/// such as `mcp/*.toml`. `*` matches any run of characters in a file name; only the last
+/// segment may hold it, and the pattern ends in `.toml`. The matches compose in file-name
+/// order, at the entry's place in `include`, each as if the entry named it alone. A hidden
+/// file never matches, and a folder that does not exist matches nothing.
+struct IncludeGlob<'a> {
+    folder: &'a str,
+    pattern: &'a str,
+}
+
+impl<'a> IncludeGlob<'a> {
+    /// The entry as a glob, or `None` when it names one file.
+    fn parse(authored: &'a str) -> Result<Option<Self>, ConfigError> {
+        if !authored.contains('*') {
+            return Ok(None);
+        }
+        let (folder, pattern) = authored.rsplit_once('/').unwrap_or(("", authored));
+        let invalid = |reason: &str| ConfigError::GlobInclude {
+            path: authored.to_string(),
+            reason: reason.to_string(),
+        };
+        if folder.contains('*') {
+            return Err(invalid("only the file name may hold `*`"));
+        }
+        if !pattern.ends_with(".toml") {
+            return Err(invalid("the file name must end in `.toml`"));
+        }
+        Ok(Some(Self { folder, pattern }))
+    }
+
+    /// Each matching file in name order, with the entry that would name it alone.
+    fn files(&self, source_dir: &Path) -> Result<Vec<(String, PathBuf)>, ConfigError> {
+        let dir = source_dir.join(self.folder);
+        let listing = match std::fs::read_dir(&dir) {
+            Ok(listing) => listing,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(unreadable(&dir, source)),
+        };
+        let mut names = Vec::new();
+        for item in listing {
+            let item = item.map_err(|source| unreadable(&dir, source))?;
+            // A name that is not UTF-8 cannot match a pattern written in TOML.
+            let Ok(name) = item.file_name().into_string() else {
+                continue;
+            };
+            if !name.starts_with('.') && file_name_matches(self.pattern, &name) && item.path().is_file() {
+                names.push(name);
+            }
+        }
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| {
+                let path = dir.join(&name);
+                let path = std::fs::canonicalize(&path).map_err(|source| unreadable(&path, source))?;
+                let entry = if self.folder.is_empty() {
+                    name
+                } else {
+                    format!("{}/{name}", self.folder)
+                };
+                Ok((entry, path))
+            })
+            .collect()
+    }
+}
+
+/// Whether `name` matches `pattern`, where `*` matches any run of characters, including
+/// none, and every other character matches itself.
+fn file_name_matches(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        // No `*`: the whole name is the first part.
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
+/// The files the root's single-file entries name, so a glob does not compose them twice.
+/// An entry that cannot be read is reported where the loop reaches it.
+fn named_include_files(
+    include: &[String],
+    source_dir: &Path,
+    battery_dirs: &[PathBuf],
+) -> std::collections::BTreeSet<PathBuf> {
+    include
+        .iter()
+        .filter(|authored| !authored.contains('*'))
+        .filter_map(|authored| {
+            std::fs::canonicalize(crate::batteries::resolve_include(authored, source_dir, battery_dirs)).ok()
+        })
+        .collect()
 }
 
 /// One include entry, as authored: a spelling this runtime resolves beside the root
@@ -4506,6 +4637,106 @@ mod tests {
         assert!(stored.contains(VAR), "the variable name is persisted");
         assert!(!stored.contains("sekret"), "the secret never reaches the stored bytes");
         assert_eq!(from_file.policy_file().bytes(), config.policy_file().bytes());
+    }
+
+    /// One rule file for one tool, as an included file holds it.
+    fn rule_file(tool: &str) -> String {
+        format!("[policy]\nversion = 2\n[[policy.tool]]\nname = \"{tool}\"\ndelta = {{}}\n")
+    }
+
+    #[test]
+    fn a_glob_includes_each_matching_file_beside_the_root_in_name_order() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        std::fs::write(
+            &root,
+            "include = [\"mcp/helpdesk.toml\", \"mcp/*.toml\"]\n[policy]\nversion = 2\n[[policy.tool]]\nname = \"root__read\"\ndelta = {}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write root config");
+        let folder = dir.path().join("mcp");
+        std::fs::create_dir_all(folder.join("drafts.toml")).expect("create folders");
+        for (file, tool) in [
+            ("payments_api.toml", "payments_api__refund"),
+            ("helpdesk.toml", "helpdesk__read"),
+            ("crm.toml", "crm__read"),
+            (".hidden.toml", "hidden__read"),
+            ("notes.md", "notes__read"),
+        ] {
+            std::fs::write(folder.join(file), rule_file(tool)).expect("write included config");
+        }
+        std::fs::write(folder.join("drafts.toml").join("draft.toml"), rule_file("draft__read"))
+            .expect("write nested config");
+
+        let config = Config::load(&root).expect("the glob composes");
+        // The file named on its own composes there, the glob's other matches follow in name
+        // order; a hidden file, another extension and a nested folder never match.
+        assert_eq!(
+            tool_names(&config),
+            ["root__read", "helpdesk__read", "crm__read", "payments_api__refund"]
+        );
+    }
+
+    #[test]
+    fn a_glob_matches_files_in_one_folder_or_none() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        let write_root = |include: &str| {
+            std::fs::write(
+                &root,
+                format!(
+                    "include = [{include}]\n[policy]\nversion = 2\n[[policy.tool]]\nname = \"root__read\"\ndelta = {{}}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
+                ),
+            )
+            .expect("write root config");
+        };
+
+        // A folder that does not exist yet holds no file to include.
+        write_root("\"mcp/*.toml\"");
+        assert_eq!(
+            tool_names(&Config::load(&root).expect("no match composes")),
+            ["root__read"]
+        );
+
+        write_root("\"*/rules.toml\"");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::GlobInclude { path, .. }) if path == "*/rules.toml"
+        ));
+        write_root("\"mcp/*\"");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::GlobInclude { path, .. }) if path == "mcp/*"
+        ));
+
+        std::fs::create_dir_all(dir.path().join("mcp")).expect("create folder");
+        std::fs::write(dir.path().join("mcp/crm.toml"), rule_file("crm__read")).expect("write included config");
+        write_root("\"mcp/*.toml\", \"mcp/c*.toml\"");
+        assert!(matches!(Config::load(&root), Err(ConfigError::DuplicateInclude { .. })));
+
+        assert!(super::file_name_matches("*.toml", "crm.toml"));
+        assert!(super::file_name_matches(
+            "team-*-rules.toml",
+            "team-payments-rules.toml"
+        ));
+        assert!(!super::file_name_matches("team-*-rules.toml", "team-rules.toml"));
+        assert!(super::file_name_matches("a*a.toml", "aa.toml"));
+        assert!(!super::file_name_matches("*.toml", "crm.toml.bak"));
+    }
+
+    #[test]
+    fn a_hosted_document_refuses_a_glob() {
+        let unasked = |_: &str| -> Result<HostedBattery<'static>, IncludeResolution> {
+            panic!("a refused document is never resolved")
+        };
+        assert!(matches!(
+            Config::hosted_included(
+                "include = [\"mcp/*.toml\"]\n[policy]\nversion = 2\n",
+                HOST_DEFAULTS,
+                unasked,
+                host_secrets,
+            ),
+            Err(ConfigError::GlobInclude { path, .. }) if path == "mcp/*.toml"
+        ));
     }
 
     #[test]
