@@ -149,6 +149,7 @@ mod served {
         assert!(input.contains("[redacted-secret]"), "{input}");
         assert!(!input.contains("AKIAIOSFODNN7EXAMPLE"), "{input}");
         assert_eq!(body["schema"]["type"], "object");
+        assert_eq!(body["kind"], "annotation");
     }
 
     /// An endpoint that keeps failing is no answer: the hook refuses and the trajectory
@@ -301,6 +302,7 @@ confined_results = ["mcp/tracker/read"]
         assert_eq!(requests.len(), 1, "one consult, to the host");
         let (bearer, body) = &requests[0];
         assert_eq!(bearer.as_deref(), Some("Bearer host-token"));
+        assert_eq!(body["kind"], "sanitizer");
         assert!(body["system"].as_str().unwrap().contains("Remove every customer name."));
         assert!(
             body["input"].as_str().unwrap().contains("Globex Ltd"),

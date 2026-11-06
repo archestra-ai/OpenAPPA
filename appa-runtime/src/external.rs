@@ -693,7 +693,9 @@ impl ExternalServices {
             (PromptModel::ClaudeCode(claude), ..) => claude.consult(&prompt, &consult.name, seen).await,
             (PromptModel::Llm(llm), ..) => llm.consult(&prompt, &consult.name, seen).await,
             #[cfg(feature = "archestra")]
-            (PromptModel::Archestra(archestra), ..) => archestra.consult(&prompt, &consult.name, seen).await,
+            (PromptModel::Archestra(archestra), ..) => {
+                archestra.consult(consult.kind(), &prompt, &consult.name, seen).await
+            }
         }
     }
 
