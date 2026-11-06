@@ -239,7 +239,8 @@ const SYSTEM: &[&str] = &[
 const SYSTEM_CONFIGURATION: &[&str] = &["/etc", "/run", "/private/etc"];
 
 /// Every regular file under [`SYSTEM_CONFIGURATION`] that a path rule labels: the system
-/// stays readable, its credentials do not. Symbolic links are left to their targets.
+/// stays readable, its credentials do not, at any depth. Symbolic links are not followed, so
+/// the walk ends; a linked file is left to its target.
 fn labeled_system_files(config: &Config) -> Vec<PathBuf> {
     let labeled: Vec<_> = config
         .paths
@@ -247,14 +248,14 @@ fn labeled_system_files(config: &Config) -> Vec<PathBuf> {
         .filter(|rule| rule.trust.is_some() || rule.audience.is_some())
         .collect();
     let mut found = Vec::new();
-    let mut pending: Vec<(PathBuf, usize)> = SYSTEM_CONFIGURATION.iter().map(|dir| (PathBuf::from(dir), 0)).collect();
-    while let Some((dir, depth)) = pending.pop() {
+    let mut pending: Vec<PathBuf> = SYSTEM_CONFIGURATION.iter().map(PathBuf::from).collect();
+    while let Some(dir) = pending.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.filter_map(Result::ok) {
             let Ok(kind) = entry.file_type() else { continue };
             let path = entry.path();
-            if kind.is_dir() && depth < 8 {
-                pending.push((path, depth + 1));
+            if kind.is_dir() {
+                pending.push(path);
             } else if kind.is_file() && labeled.iter().any(|rule| rule.matches(&path)) {
                 found.push(path);
             }

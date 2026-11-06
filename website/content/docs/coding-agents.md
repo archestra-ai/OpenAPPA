@@ -78,6 +78,7 @@ The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Cod
 
 - A shell command can send its input files to any host it declares. Network destinations carry no policy yet.
 - Credential variables are withheld by name. A variable whose name does not say it holds a credential reaches the command.
+- The system directories other than `/etc` and `/run`, such as `/usr` and `/lib`, are assumed to hold no credentials. A labeled file there is readable by a command that does not declare it.
 - A file that changes outside a mediated call keeps its recorded label. A process outside the sandbox can still copy a file without its label.
 - A read waits while a write of the same file has not yet reached the recorder. If the write does not settle within the wait, the read fails and the agent can propose it again.
 - The stored audience must be one clause of audiences the policy declares. A file that two unrelated restricted audiences wrote fails its next annotation.
