@@ -740,6 +740,30 @@ fn a_targeted_battery_target_policy_is_not_included_directly() {
     }
 }
 
+/// A glob loads each file it matches as an entry naming that file would, so a glob over a
+/// targeted battery's folder is refused instead of loading every target policy at once.
+#[test]
+fn a_glob_over_a_targeted_battery_does_not_load_its_target_policies() {
+    use appa_package::BatteryTarget;
+    use appa_runtime::config::ConfigError;
+
+    let package = targeted_probe(&probe_audience("probe-org"));
+    // The manifest sorts first among the folder's files; the narrower glob reaches the
+    // target policies themselves.
+    for (glob, refused) in [("*.toml", "appa-package.toml"), ("*-user.toml", "multi-user.toml")] {
+        let (_deployment, root) = deployment_including(package.path(), &[glob]);
+        for target in BatteryTarget::ALL {
+            assert!(
+                matches!(
+                    Config::load_for_target(&root, &[], target),
+                    Err(ConfigError::TargetPolicyIncluded { path }) if path.ends_with(refused)
+                ),
+                "{glob} under {target}"
+            );
+        }
+    }
+}
+
 /// An include of a battery's base composes the deployment target's policy with it: each
 /// target binds its own external, a battery without targets loads its base under
 /// either, and a manifest that declares only some targets is refused.
