@@ -19,7 +19,7 @@ canonical tool does:
 | `tool/coding/search_files` | `host/claude-code/Grep` | |
 | `tool/coding/write_file` | `host/claude-code/Write` | |
 | `tool/coding/edit_file` | `host/claude-code/Edit` | |
-| `tool/coding/fetch_url` | `host/claude-code/WebFetch` | confined |
+| `tool/coding/fetch_url` | `host/claude-code/WebFetch` | confined by the installed default root |
 | `tool/coding/web_search` | `host/claude-code/WebSearch` | |
 
 The `coding` battery's README describes those rules.
@@ -63,10 +63,14 @@ particular Bash command or Read path needs stricter, looser, or fully blocked
 behavior. A root Bash rule also precedes the `coding` battery's credential
 rules, so a command it matches is not narrowed for a credential path it names.
 
-The map's `confined = true` confines Bash, PowerShell and WebFetch results,
-so the `coding` battery's sanitizers, and any a root declares, can run on
-them; a root needs no deployment setting for it. WebSearch stays unconfined:
-Claude Code's replacement of its result is not verified live.
+The map's `confined = true` confines Bash and PowerShell results, so the
+`coding` battery's sanitizers, and any a root declares, can run on them; a
+root needs no deployment setting for it. WebFetch is not confined by the map.
+A root that binds `coding.strip-instructions` confines it itself with
+`confined_results = ["host/claude-code/WebFetch"]` under
+`[policy.deployment]`; the installed default root already does. WebSearch
+stays unconfined: Claude Code's replacement of its result is not verified
+live.
 `appa battery remove claude-code` takes the map, and with it the confinement,
 out.
 

@@ -13,7 +13,7 @@ use std::time::Duration;
 use appa_engine::audience::{DeclaredTemplate, SelectorTemplate, SourceRegistration, well_formed_reader};
 use appa_engine::authority::{ContextHint, HintTooLong};
 use appa_engine::label::{ChainAudience, ReaderId};
-use appa_engine::names::{ContextProviderName, ProviderName};
+use appa_engine::names::{ContextProviderName, ProviderName, SanitizerName};
 use appa_package::BatteryTarget;
 use appa_policy::AnnotatorBuiltin;
 use appa_runtime_api::PrincipalSource;
@@ -2163,6 +2163,8 @@ impl Composition {
                         .iter()
                         .filter(|declaration| declaration.get("builtin").is_none())
                         .filter_map(declaration_name)
+                        // The engine applies `attest-schema` itself; it takes no binding.
+                        .filter(|name| *name != SanitizerName::ATTEST_SCHEMA)
                         .map(str::to_owned),
                 );
             }
@@ -2395,7 +2397,13 @@ fn leave_out_unbound_included_sanitizers(
             }
             kept
         });
-        kept_scopes.extend(sanitizers.iter().filter_map(scope));
+        // `attest-schema` runs only on a child's return, never on a confined tool result.
+        kept_scopes.extend(
+            sanitizers
+                .iter()
+                .filter(|declaration| declaration_name(declaration) != Some(SanitizerName::ATTEST_SCHEMA))
+                .filter_map(scope),
+        );
     }
     let reaches = |scopes: &[Option<Vec<String>>], tool: &str| {
         let tags = included_confined.get(tool);
@@ -3906,9 +3914,9 @@ mod tests {
             [policy.deployment]
             confined_results = ["mcp/tracker/read", "mcp/tracker/list"]
         "#;
-        let composed = |root_tail: &str| {
+        let composed_with = |battery_tail: &str, root_tail: &str| {
             let dir = tempfile::tempdir().expect("temp directory");
-            std::fs::write(dir.path().join("battery.toml"), battery).expect("write battery");
+            std::fs::write(dir.path().join("battery.toml"), format!("{battery}{battery_tail}")).expect("write battery");
             std::fs::write(
                 dir.path().join("appa.toml"),
                 format!(
@@ -3933,6 +3941,7 @@ mod tests {
                 .collect();
             (sanitizers, confined)
         };
+        let composed = |root_tail: &str| composed_with("", root_tail);
 
         assert_eq!(
             composed(""),
@@ -3947,6 +3956,18 @@ mod tests {
             ),
             "bound: the sanitizer runs and keeps the confinement its tag reaches"
         );
+
+        // `attest-schema` is the engine's: it takes no binding, so an included one stays, and
+        // it never runs on a tool result, so a root one keeps no battery confinement.
+        let attest = "\n[[policy.sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\n[policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        for (battery_tail, root_tail) in [(attest, ""), ("", attest)] {
+            assert_eq!(
+                composed_with(battery_tail, root_tail),
+                (vec!["attest-schema".to_string()], vec!["mcp/tracker/list".to_string()]),
+                "attest-schema declared by the {}",
+                if battery_tail.is_empty() { "root" } else { "battery" }
+            );
+        }
     }
 
     /// A command's working directory is its declaring file's, in every section, and the

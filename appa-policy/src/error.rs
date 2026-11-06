@@ -45,8 +45,17 @@ pub enum ConfigError {
         "annotator {name} names unknown builtin {builtin:?}; the stock annotator builtins are \"claude-code\" and \"llm\""
     )]
     UnknownAnnotatorBuiltin { name: String, builtin: String },
-    #[error(
-        "sanitizer {name} names unknown builtin {builtin:?}; the model sanitizer builtins are \"claude-code\" and \"llm\""
+    #[cfg_attr(
+        not(feature = "archestra"),
+        error(
+            "sanitizer {name} names unknown builtin {builtin:?}; the model sanitizer builtins are \"claude-code\" and \"llm\""
+        )
+    )]
+    #[cfg_attr(
+        feature = "archestra",
+        error(
+            "sanitizer {name} names unknown builtin {builtin:?}; the model sanitizer builtins are \"claude-code\", \"llm\" and \"archestra\""
+        )
     )]
     UnknownSanitizerBuiltin { name: String, builtin: String },
     #[error(
