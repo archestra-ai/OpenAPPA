@@ -7,32 +7,15 @@ use crate::contract::PinnedAnnotation;
 use crate::label::Label;
 use crate::params::CanonicalArguments;
 
-/// Host-pinned identity and label of file content. These values come from the trusted
-/// harness, never from model-provided arguments.
+/// A peer message the runtime holds, pinned on the call that reads it: the held id, the body's
+/// digest, and the label the message is held at. The trusted runtime supplies it from its own
+/// store, never from model arguments. The engine knows no other host-pinned content: what an
+/// external store holds reaches a call through its Annotator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FileSource {
-    pub version: String,
+pub struct HeldMessage {
+    pub id: String,
     pub digest: String,
     pub label: Label,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FileBasis {
-    Read(FileSource),
-    Replace(Option<FileSource>),
-    Edit(FileSource),
-    Copy {
-        source: FileSource,
-        replaced: Option<FileSource>,
-    },
-    Move {
-        source: FileSource,
-        replaced: Option<FileSource>,
-    },
-    Process {
-        inputs: Vec<FileSource>,
-        replaced: Option<FileSource>,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -132,9 +115,9 @@ impl CanonicalDigest {
                 hasher.update([3u8]);
                 hasher.update(canonical_json(pinned));
             }
-            if let Some(basis) = &call.file_basis {
+            if let Some(held) = &call.held {
                 hasher.update([4u8]);
-                hasher.update(canonical_json(basis));
+                hasher.update(canonical_json(held));
             }
         }
         CanonicalDigest(hasher.finalize().into())
@@ -469,7 +452,7 @@ pub struct ResolvedCall {
     arguments: CanonicalArguments,
     annotation: Option<PinnedAnnotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    file_basis: Option<FileBasis>,
+    held: Option<HeldMessage>,
 }
 
 impl<'de> Deserialize<'de> for ResolvedCall {
@@ -480,13 +463,13 @@ impl<'de> Deserialize<'de> for ResolvedCall {
             arguments: CanonicalArguments,
             annotation: Option<PinnedAnnotation>,
             #[serde(default)]
-            file_basis: Option<FileBasis>,
+            held: Option<HeldMessage>,
         }
 
         let wire = WireCall::deserialize(deserializer)?;
         Ok(ResolvedCall::new(wire.tool, wire.arguments)
             .with_annotation(wire.annotation)
-            .with_file_basis(wire.file_basis))
+            .with_held(wire.held))
     }
 }
 
@@ -496,7 +479,7 @@ impl ResolvedCall {
             tool,
             arguments,
             annotation: None,
-            file_basis: None,
+            held: None,
         }
     }
 
@@ -524,74 +507,28 @@ impl ResolvedCall {
         self.annotation.as_ref()
     }
 
-    pub fn file_basis(&self) -> Option<&FileBasis> {
-        self.file_basis.as_ref()
+    /// The held peer message this call reads, where the runtime pinned one.
+    pub fn held(&self) -> Option<&HeldMessage> {
+        self.held.as_ref()
     }
 
-    pub(crate) fn with_file_basis(mut self, basis: Option<FileBasis>) -> Self {
-        self.file_basis = basis;
+    pub(crate) fn with_held(mut self, held: Option<HeldMessage>) -> Self {
+        self.held = held;
         self
     }
 
     /// Label of the value returned by this call.
-    pub fn output_label(&self, contract: &crate::contract::ToolAnnotation, receiving: &Label) -> Label {
-        self.output_label_from(&contract.output_label(), receiving)
+    pub fn output_label(&self, contract: &crate::contract::ToolAnnotation) -> Label {
+        self.output_label_from(&contract.output_label())
     }
 
     /// [`ResolvedCall::output_label`] from a declared output label already resolved: the one an
     /// outcome reads, which meets the terms that released the call with the judging policy's.
-    pub(crate) fn output_label_from(&self, declared: &Label, receiving: &Label) -> Label {
-        let declared = declared.clone();
-        match &self.file_basis {
-            None => declared,
-            Some(FileBasis::Read(source)) => source.label.combine(&declared),
-            Some(FileBasis::Replace(predecessor)) => predecessor.as_ref().map_or_else(
-                || receiving.combine(&declared),
-                |source| receiving.combine(&source.label).combine(&declared),
-            ),
-            Some(FileBasis::Edit(source)) => receiving.combine(&source.label).combine(&declared),
-            Some(FileBasis::Copy { .. } | FileBasis::Move { .. }) => receiving.combine(&declared),
-            Some(FileBasis::Process { inputs, .. }) => inputs
-                .iter()
-                .fold(receiving.combine(&declared), |label, input| label.combine(&input.label)),
-        }
-    }
-
-    /// Label to publish on file content produced by this call.
-    pub fn file_output_label(&self, contract: &crate::contract::ToolAnnotation, receiving: &Label) -> Option<Label> {
-        self.file_output_label_from(&contract.output_label(), receiving)
-    }
-
-    /// [`ResolvedCall::file_output_label`] from a declared output label already resolved.
-    pub(crate) fn file_output_label_from(&self, declared: &Label, receiving: &Label) -> Option<Label> {
-        let declared = declared.clone();
-        match &self.file_basis {
-            None | Some(FileBasis::Read(_)) => None,
-            Some(FileBasis::Replace(_)) => Some(receiving.combine(&declared)),
-            Some(FileBasis::Edit(source)) => Some(receiving.combine(&source.label).combine(&declared)),
-            Some(FileBasis::Copy { source, .. } | FileBasis::Move { source, .. }) => {
-                Some(receiving.combine(&source.label).combine(&declared))
-            }
-            Some(FileBasis::Process { inputs, .. }) => Some(
-                inputs
-                    .iter()
-                    .fold(receiving.combine(&declared), |label, input| label.combine(&input.label)),
-            ),
-        }
-    }
-
-    /// Label of the file content the host sends with this call beyond the agent's arguments.
-    /// A replacement overwrites its predecessor without sending it; an edit keeps the
-    /// predecessor's bytes in the file it writes.
-    pub fn forwarded_file_label(&self) -> Label {
-        match &self.file_basis {
-            None | Some(FileBasis::Read(_) | FileBasis::Replace(_)) => Label::top(),
-            Some(FileBasis::Edit(source) | FileBasis::Copy { source, .. } | FileBasis::Move { source, .. }) => {
-                source.label.clone()
-            }
-            Some(FileBasis::Process { inputs, .. }) => inputs
-                .iter()
-                .fold(Label::top(), |label, input| label.combine(&input.label)),
+    /// A read of a held message returns that message, so its result carries the message's label.
+    pub(crate) fn output_label_from(&self, declared: &Label) -> Label {
+        match &self.held {
+            None => declared.clone(),
+            Some(held) => held.label.combine(declared),
         }
     }
 
@@ -603,10 +540,10 @@ impl ResolvedCall {
         CanonicalDigest::of_call(&self.tool, &self.arguments)
     }
 
-    /// Is this the call another proposal renders, up to the host-pinned file basis? The callee,
-    /// its canonical arguments and its annotation are the call; the
-    /// basis is evidence the host pins for one proposal, and a record of a call carries none.
-    /// A staged derivation is matched this way so a file-mediated call can take one at all.
+    /// Is this the call another proposal renders, up to the held message the host pins? The
+    /// callee, its canonical arguments and its annotation are the call; the held message is
+    /// evidence the host pins for one proposal, and a record of a call carries none. A staged
+    /// derivation is matched this way so a held read can take one at all.
     pub(crate) fn renders(&self, other: &ResolvedCall) -> bool {
         self.tool == other.tool && self.arguments == other.arguments && self.annotation == other.annotation
     }
@@ -615,8 +552,8 @@ impl ResolvedCall {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::contract::{Delta, DeltaAudience, PinnedAnnotation, ProducedAnnotation, Requires, ToolAnnotation};
-    use crate::label::{Audience, DeclaredAudience, ReaderId, Trust};
+    use crate::contract::{AnnotationEvidence, Delta, PinnedAnnotation, ProducedAnnotation, Requires};
+    use crate::label::{Audience, ReaderId, Trust};
     use crate::params::ToolParameters;
     use serde_json::json;
 
@@ -633,6 +570,7 @@ mod tests {
             crate::names::AnnotatorName::new(annotator),
             bound_to.digest(),
             ProducedAnnotation {
+                evidence: None,
                 delta: Delta {
                     trust: Some(crate::label::Trust::new(0)),
                     audience: None,
@@ -644,123 +582,25 @@ mod tests {
         )
     }
 
-    fn file_contract() -> ToolAnnotation {
-        ToolAnnotation {
-            description: None,
-            name: ToolName::new("file"),
-            tags: vec![],
-            delta: Delta {
-                trust: Some(Trust::new(1)),
-                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([
-                    ReaderId::new("insider"),
-                    ReaderId::new("finance"),
-                ]))),
-            },
-            parameters: ToolParameters::open(),
-            forwards: Delta::NONE,
-            emits: Default::default(),
-            requires: Requires::default(),
-        }
-    }
-
-    fn source() -> FileSource {
-        FileSource {
-            version: "v1".into(),
-            digest: "old".into(),
+    #[test]
+    fn a_held_read_returns_the_held_label_met_with_the_delta() {
+        let held = HeldMessage {
+            id: "h1".into(),
+            digest: "d1".into(),
             label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("insider")])),
-        }
-    }
-
-    #[test]
-    fn file_basis_distinguishes_read_replace_and_edit_labels() {
-        let contract = file_contract();
-        let receiving = Label::new(Trust::new(1), Audience::public());
-        let read = call("file", json!({})).with_file_basis(Some(FileBasis::Read(source())));
-        let replace = call("file", json!({})).with_file_basis(Some(FileBasis::Replace(Some(source()))));
-        let edit = call("file", json!({})).with_file_basis(Some(FileBasis::Edit(source())));
-        let declared = contract.output_label();
-        let inherited = source().label.combine(&declared);
-
-        assert_eq!(read.output_label(&contract, &receiving), inherited);
-        assert_eq!(read.file_output_label(&contract, &receiving), None);
-        assert_eq!(replace.file_output_label(&contract, &receiving), Some(declared.clone()));
-        assert_eq!(replace.output_label(&contract, &receiving), inherited);
-        assert_eq!(edit.file_output_label(&contract, &receiving), Some(inherited.clone()));
-        assert_eq!(edit.output_label(&contract, &receiving), inherited);
-        assert_ne!(
-            replace.file_output_label(&contract, &receiving),
-            Some(replace.output_label(&contract, &receiving))
-        );
-    }
-
-    #[test]
-    fn copy_and_move_keep_source_only_in_file_content_label() {
-        let contract = file_contract();
-        let receiving = Label::new(Trust::new(1), Audience::public());
-        let replaced = FileSource {
-            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("destination")])),
-            ..source()
         };
-        let expected_ack = receiving.combine(&contract.output_label());
-        let expected_file = receiving.combine(&source().label).combine(&expected_ack);
-
-        for basis in [
-            FileBasis::Copy {
-                source: source(),
-                replaced: Some(replaced.clone()),
-            },
-            FileBasis::Move {
-                source: source(),
-                replaced: Some(replaced.clone()),
-            },
-        ] {
-            let operation = call("file", json!({})).with_file_basis(Some(basis));
-            assert_eq!(operation.output_label(&contract, &receiving), expected_ack);
-            assert_eq!(
-                operation.file_output_label(&contract, &receiving),
-                Some(expected_file.clone())
-            );
-            assert_ne!(
-                operation.file_output_label(&contract, &receiving),
-                Some(expected_file.combine(&replaced.label))
-            );
-            assert_eq!(operation.forwarded_file_label(), source().label);
-        }
-    }
-
-    #[test]
-    fn process_result_and_file_inherit_every_input_but_not_replaced_destination() {
-        let contract = file_contract();
-        let receiving = Label::new(Trust::new(1), Audience::public());
-        let first = FileSource {
-            label: Label::new(Trust::new(0), Audience::public()),
-            ..source()
-        };
-        let second = FileSource {
-            version: "v2".into(),
-            digest: "second".into(),
-            label: Label::new(Trust::new(1), Audience::restricted([ReaderId::new("insider")])),
-        };
-        let replaced = FileSource {
-            label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("destination")])),
-            ..source()
-        };
-        let expected = Label::new(Trust::new(0), Audience::restricted([ReaderId::new("insider")]));
-        let operation = call("file", json!({})).with_file_basis(Some(FileBasis::Process {
-            inputs: vec![first, second],
-            replaced: Some(replaced.clone()),
-        }));
-
-        assert_eq!(operation.output_label(&contract, &receiving), expected);
+        let read = call("read_peer_message", json!({ "id": "h1" })).with_held(Some(held.clone()));
+        let declared = Label::new(Trust::new(1), Audience::public());
+        assert_eq!(read.output_label_from(&declared), held.label.combine(&declared));
         assert_eq!(
-            operation.file_output_label(&contract, &receiving),
-            Some(expected.clone())
+            call("read_peer_message", json!({})).output_label_from(&declared),
+            declared
         );
         assert_ne!(
-            expected,
-            operation.output_label(&contract, &receiving).combine(&replaced.label)
+            CanonicalDigest::of_batch([&read], None),
+            CanonicalDigest::of_batch([&call("read_peer_message", json!({ "id": "h1" }))], None),
+            "the held message is part of the batch identity"
         );
-        assert_eq!(operation.forwarded_file_label(), expected);
     }
 
     #[test]
@@ -777,6 +617,25 @@ mod tests {
             CanonicalDigest::of_batch([&annotated("a")], None),
             CanonicalDigest::of_batch([&annotated("a")], None)
         );
+        // The same read judged over two versions of a file is two batches.
+        let read = call("Read", json!({ "file_path": "/w/notes.md" }));
+        let over = |version: &str| {
+            let produced = ProducedAnnotation {
+                evidence: Some(AnnotationEvidence::new(version).expect("short evidence")),
+                ..pinned(&read, "file-tracker").produced().clone()
+            };
+            let pin = PinnedAnnotation::new(
+                crate::names::AnnotatorName::new("file-tracker"),
+                read.digest(),
+                produced,
+            );
+            read.clone().with_annotation(Some(pin))
+        };
+        assert_ne!(
+            CanonicalDigest::of_batch([&over("sha256:aa")], None),
+            CanonicalDigest::of_batch([&over("sha256:bb")], None)
+        );
+        assert_eq!(over("sha256:aa").digest(), over("sha256:bb").digest());
     }
 
     #[test]

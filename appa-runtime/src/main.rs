@@ -22,7 +22,7 @@ use clap::Parser;
 use sha2::{Digest, Sha256};
 
 use crate::api::{Reloaded, Runtime};
-use crate::config::{Config, InitialFileAudience};
+use crate::config::Config;
 use crate::{hooks, mcp};
 
 #[derive(Parser)]
@@ -36,10 +36,6 @@ struct Args {
 
     #[arg(long, env = "APPA_DB", default_value = "appa.db")]
     db: PathBuf,
-
-    /// Host-installed agentsh backend directory for isolated declared-input processing.
-    #[arg(long, env = "APPA_FILE_PROCESS_BACKEND")]
-    file_process_backend: Option<PathBuf>,
 
     #[arg(long, env = "APPA_MODULES_DIR")]
     modules_dir: Option<PathBuf>,
@@ -239,14 +235,6 @@ async fn hook(
     let (status, body) = hooks::answer(&state.runtime, &state.adapter, state.principal_source, &body).await;
     let status = axum::http::StatusCode::from_u16(status).expect("hook answers carry valid status codes");
     (status, axum::Json(body))
-}
-
-async fn file_tools(State(state): State<AppState>) -> Result<axum::Json<crate::api::files::Deployment>, StatusCode> {
-    state
-        .runtime
-        .file_deployment(state.config)
-        .map(axum::Json)
-        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn validate_tools(
@@ -525,7 +513,6 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let file_tracking = config.file_tracking.clone();
     // A served deployment answers one host, and the adapter is that host: it identifies the
     // canonical identity the policy must name, its inverse spells a recorded name back for
     // the model, and its rule settles which contracts release a spawn.
@@ -541,45 +528,6 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
             eprintln!("appa runtime: {error}");
             return ExitCode::FAILURE;
         }
-    };
-    let runtime = if let Some(file_tracking) = file_tracking {
-        let configure = || -> Result<Runtime, String> {
-            use appa_engine::label::{ChainAudience, Clause, DeclaredAudience};
-            let audience = match file_tracking.initial_audience {
-                InitialFileAudience::Public => DeclaredAudience::Public,
-                InitialFileAudience::Internal => {
-                    DeclaredAudience::Union(Clause::new([ChainAudience::Internal], [], []).map_err(|e| e.to_string())?)
-                }
-                InitialFileAudience::Self_ => {
-                    DeclaredAudience::Union(Clause::new([ChainAudience::Self_], [], []).map_err(|e| e.to_string())?)
-                }
-            };
-            let initial = runtime
-                .file_initial_label(&file_tracking.initial_trust, audience)
-                .map_err(|error| error.to_string())?;
-            let runtime = runtime
-                .with_file_tracking(initial, config_path.clone())
-                .map_err(|error| error.to_string())?;
-            match args.file_process_backend {
-                Some(backend) => runtime
-                    .with_file_process_backend(backend)
-                    .map_err(|error| error.to_string()),
-                None => Ok(runtime),
-            }
-        };
-        match configure() {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("appa runtime: {error}");
-                return ExitCode::FAILURE;
-            }
-        }
-    } else {
-        if args.file_process_backend.is_some() {
-            eprintln!("appa runtime: --file-process-backend requires [file_tracking] in the configuration");
-            return ExitCode::FAILURE;
-        }
-        runtime
     };
     let runtime = Arc::new(runtime);
     // Every audience source the policy references answers once before the runtime serves:
@@ -603,7 +551,6 @@ async fn serve_inner(args: Args, telemetry_enabled: bool) -> ExitCode {
     let management = axum::Router::new()
         .route("/binary-fingerprint", get(binary_fingerprint))
         .route("/policy-key", get(policy_key))
-        .route("/file-tools", get(file_tools))
         .route("/status", get(status))
         .route("/report", post(report))
         .route("/reload", post(reload))

@@ -293,17 +293,17 @@ impl Engine {
     }
 
     fn resolve_proposals(&self, batch: &ProposalBatch) -> Result<Vec<ResolvedCall>, (usize, EngineError)> {
-        let mut file_bases = vec![None; batch.proposals.len()];
+        let mut held_messages = vec![None; batch.proposals.len()];
         for evidence in &batch.evidence {
-            if let Evidence::File { position, basis } = evidence {
-                let Some(slot) = file_bases.get_mut(*position) else {
+            if let Evidence::Held { position, message } = evidence {
+                let Some(slot) = held_messages.get_mut(*position) else {
                     return Err((
                         *position,
-                        EngineError::InvalidFileEvidence("position is outside the proposal batch".into()),
+                        EngineError::InvalidHeldEvidence("position is outside the proposal batch".into()),
                     ));
                 };
-                if slot.replace(basis.clone()).is_some() {
-                    return Err((*position, EngineError::InvalidFileEvidence("duplicate position".into())));
+                if slot.replace(message.clone()).is_some() {
+                    return Err((*position, EngineError::InvalidHeldEvidence("duplicate position".into())));
                 }
             }
         }
@@ -315,7 +315,7 @@ impl Engine {
                 self.resolve_call(proposed.tool.clone(), &proposed.arguments)
                     .map(|call| {
                         call.with_annotation(proposed.annotation.clone())
-                            .with_file_basis(file_bases[position].clone())
+                            .with_held(held_messages[position].clone())
                     })
                     .map_err(|error| (position, error))
             })

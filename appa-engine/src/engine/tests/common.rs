@@ -37,6 +37,7 @@ pub(super) fn pinned_for(
         crate::names::AnnotatorName::new(annotator),
         bound_to.digest(),
         crate::contract::ProducedAnnotation {
+            evidence: None,
             delta: produced.delta,
             forwards: produced.forwards,
             emits: produced.emits,
@@ -91,6 +92,7 @@ pub(super) fn annotator_with_readers(name: &str, readers: &[&str]) -> crate::reg
 
 pub(super) fn test_config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
     RegistryConfig {
+        recorders: Default::default(),
         annotators: vec![],
         trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
         tools: declared(tools),
@@ -522,6 +524,7 @@ pub(super) fn substituting_engine(trust: Trust) -> Engine {
     let post = post_tool;
     open_engine_at(
         RegistryConfig {
+            recorders: Default::default(),
             tools: {
                 let mut tools = declared(vec![
                     post("post", vec![crate::names::TagName::new("outbound")]),
@@ -731,6 +734,7 @@ pub(super) fn two_officer_engine() -> Engine {
         hint: None,
     };
     let cfg = RegistryConfig {
+        recorders: Default::default(),
         authorities: vec![officer("officer-a"), officer("officer-b")],
         ..test_config(vec![ToolAnnotation {
             requires: Requires {
@@ -1080,6 +1084,7 @@ pub(super) fn corp_reader(local: &str) -> ReaderId {
 
 pub(super) fn returning_registry(sanitizers: Vec<crate::authority::Sanitizer>) -> RegistryConfig {
     RegistryConfig {
+        recorders: Default::default(),
         sanitizers,
         ..test_config(vec![
             plain_tool("spawn"),
@@ -1212,6 +1217,7 @@ pub(super) fn staged_engine() -> Engine {
         hint: None,
     };
     open_engine(RegistryConfig {
+        recorders: Default::default(),
         trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
         sanitizers: vec![
             sanitizer("redactor", Trust::new(0), Trust::new(1)),

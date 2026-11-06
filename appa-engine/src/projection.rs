@@ -157,6 +157,9 @@ pub struct Projection {
     occurrences: OrdMap<(TrajectoryId, CanonicalDigest), u32>,
     dispatch_calls: OrdMap<DispatchId, ResolvedCall>,
     receiving_bounds: OrdMap<DispatchId, Label>,
+    /// The label each dispatch that took a staged derivation sent: the derivation's
+    /// substituted label, pinned as the dispatch took it.
+    sent_labels: OrdMap<DispatchId, Label>,
     /// The terms each dispatch's release pinned, with the effects it reserved.
     release_terms: OrdMap<DispatchId, (crate::fact::ReleaseTerms, EffectSet)>,
     dispatch_evidence: OrdMap<DispatchId, AudienceEvidence>,
@@ -210,11 +213,11 @@ pub(crate) fn opened_call(
     tool: &ToolName,
     arguments: &crate::params::CanonicalArguments,
     annotation: &Option<PinnedAnnotation>,
-    file_basis: &Option<crate::value::FileBasis>,
+    held: &Option<crate::value::HeldMessage>,
 ) -> ResolvedCall {
     ResolvedCall::new(tool.clone(), arguments.clone())
         .with_annotation(annotation.clone())
-        .with_file_basis(file_basis.clone())
+        .with_held(held.clone())
 }
 
 /// The proposal a call subject names in the batches a trajectory decided: the batch it names,
@@ -292,6 +295,7 @@ impl Projection {
             occurrences: Default::default(),
             dispatch_calls: Default::default(),
             receiving_bounds: Default::default(),
+            sent_labels: Default::default(),
             release_terms: Default::default(),
             dispatch_evidence: Default::default(),
             subject_dispatches: Default::default(),
@@ -350,6 +354,7 @@ impl Projection {
             value.label.cross_value(crossing);
         }
         each_mut(&mut self.receiving_bounds, |bound| bound.cross_value(crossing));
+        each_mut(&mut self.sent_labels, |label| label.cross_value(crossing));
         each_mut(&mut self.release_terms, |(terms, _)| {
             // Audience atoms stay symbolic across revisions; only trust ranks need crossing.
             if let Some(trust) = &mut terms.delta.trust {
@@ -419,6 +424,7 @@ impl Projection {
             occurrences,
             dispatch_calls,
             receiving_bounds,
+            sent_labels,
             release_terms,
             dispatch_evidence,
             subject_dispatches,
@@ -518,7 +524,16 @@ impl Projection {
             }
             // Both only advance their subject, which the prepended `BasisAdvanced` applies:
             // the record they spend falls out of "current" by that alone.
-            Fact::CandidateAccepted { .. } | Fact::CandidateConsumed { .. } => {}
+            Fact::CandidateAccepted { .. } => {}
+            Fact::CandidateConsumed { subject, dispatch, .. } => {
+                if let Some(RecordedCandidate {
+                    derived: DerivedCandidate::Call { label, .. },
+                    ..
+                }) = candidates.get(subject)
+                {
+                    sent_labels.insert(dispatch.clone(), label.clone());
+                }
+            }
             Fact::CallApproved {
                 trajectory,
                 offer,
@@ -609,14 +624,14 @@ impl Projection {
                 receiving,
                 proposed_effects,
                 annotation,
-                file_basis,
+                held,
                 subject,
                 evidence,
                 terms,
                 proposed_label: _,
             } => {
                 release_terms.insert(dispatch.clone(), (terms.clone(), proposed_effects.clone()));
-                dispatch_calls.insert(dispatch.clone(), opened_call(tool, arguments, annotation, file_basis));
+                dispatch_calls.insert(dispatch.clone(), opened_call(tool, arguments, annotation, held));
                 receiving_bounds.insert(dispatch.clone(), receiving.clone());
                 dispatch_evidence.insert(dispatch.clone(), evidence.clone());
                 subject_dispatches.insert(subject.clone(), dispatch.clone());
@@ -1566,6 +1581,15 @@ impl Views<'_> {
         self.projection.subject_dispatches.get(subject)
     }
 
+    /// The label this dispatch's arguments carried as it was released: the substituted label of
+    /// the staged derivation it took, or else its receiving bound.
+    pub(crate) fn sent_label(&self, dispatch: &DispatchId) -> Option<&Label> {
+        self.projection
+            .sent_labels
+            .get(dispatch)
+            .or_else(|| self.receiving_bound(dispatch))
+    }
+
     /// The authorities denied for this rendered call in this trajectory's scope:
     /// recorded here, or inherited from an ancestor at fork time. Plan enumeration is the one
     /// sanctioned consumer (the denial-exclusion consultation), so this stays crate-only.
@@ -1632,6 +1656,7 @@ mod tests {
             crate::names::AnnotatorName::new("classifier"),
             call.digest(),
             crate::contract::ProducedAnnotation {
+                evidence: None,
                 delta: crate::contract::Delta::NONE,
                 forwards: crate::contract::Delta::NONE,
                 emits: EffectSet::default(),
@@ -1781,7 +1806,7 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                file_basis: None,
+                held: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
                 terms: crate::fact::ReleaseTerms::none(),
@@ -1812,7 +1837,7 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                file_basis: None,
+                held: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
                 terms: crate::fact::ReleaseTerms::none(),
@@ -1842,7 +1867,7 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([egress.clone()]).unwrap(),
                 annotation: None,
-                file_basis: None,
+                held: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
                 terms: crate::fact::ReleaseTerms::none(),
@@ -1951,7 +1976,7 @@ mod tests {
                 receiving: Label::top(),
                 proposed_effects: EffectSet::new([]).unwrap(),
                 annotation: None,
-                file_basis: None,
+                held: None,
                 subject: crate::basis::fixture_subject(&traj("a")),
                 evidence: crate::audience::AudienceEvidence::default(),
                 terms: crate::fact::ReleaseTerms::none(),

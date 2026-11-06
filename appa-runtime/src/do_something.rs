@@ -122,6 +122,7 @@ pub(crate) fn pin(registry: &Registry, call: &ResolvedCall) -> Result<PinnedAnno
         return Err(format!("{NAME}: the policy declares no effect {}", kind.as_str()));
     }
     let produced = ProducedAnnotation {
+        evidence: None,
         delta: Delta::NONE,
         forwards: Delta::NONE,
         emits: EffectSet::default(),

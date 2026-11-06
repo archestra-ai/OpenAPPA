@@ -487,6 +487,44 @@ pub struct ProducedAnnotation {
     pub forwards: Delta,
     pub emits: EffectSet,
     pub requires: Requires,
+    /// What the Annotator judged, in its own opaque words: the version of the object it read a
+    /// label from, for instance. Pinned and hashed with the rest of the answer, so the same
+    /// call judged over two versions of an object is two proposal batches; and carried to the
+    /// recorder with the call's records, so the recorder can tell which version a release is
+    /// for. The engine never reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<AnnotationEvidence>,
+}
+
+/// An Annotator's opaque evidence: at most [`AnnotationEvidence::MAX_BYTES`] bytes of text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AnnotationEvidence(String);
+
+/// Evidence longer than [`AnnotationEvidence::MAX_BYTES`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("annotation evidence is at most {} bytes", AnnotationEvidence::MAX_BYTES)]
+pub struct EvidenceTooLong;
+
+impl AnnotationEvidence {
+    pub const MAX_BYTES: usize = 1024;
+
+    pub fn new(text: impl Into<String>) -> Result<AnnotationEvidence, EvidenceTooLong> {
+        let text = text.into();
+        match text.len() <= Self::MAX_BYTES {
+            true => Ok(AnnotationEvidence(text)),
+            false => Err(EvidenceTooLong),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for AnnotationEvidence {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        AnnotationEvidence::new(String::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
 }
 
 /// An Annotator's produced answer pinned to the exact call it judged: the annotator that
@@ -834,6 +872,7 @@ mod tests {
             annotator: AnnotatorName::new("bash-classifier"),
         };
         let produced = ProducedAnnotation {
+            evidence: None,
             delta: Delta {
                 trust: Some(Trust::new(1)),
                 audience: None,
@@ -876,6 +915,7 @@ mod tests {
             AnnotatorName::new("bash-classifier"),
             digest,
             ProducedAnnotation {
+                evidence: None,
                 delta: Delta {
                     trust: Some(Trust::new(1)),
                     audience: Some(DeltaAudience::Static(DeclaredAudience::Public)),
@@ -906,6 +946,7 @@ mod tests {
             &crate::params::test_arguments(&serde_json::json!({ "command": "gh pr view 1" })),
         );
         let produced = ProducedAnnotation {
+            evidence: None,
             delta: Delta::NONE,
             forwards: Delta::NONE,
             emits: EffectSet::default(),

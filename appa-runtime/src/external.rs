@@ -27,7 +27,7 @@ use crate::model::archestra::ArchestraBackend;
 use crate::model::claude_code::ClaudeCodeBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
-use crate::recorder::ConsultBackend;
+use crate::transcriber::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
 use appa_runtime_api::Ruling;
@@ -101,7 +101,7 @@ const DIAGNOSTICS_HEADER: &str = "x-appa-diagnostics";
 pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 8192;
 
 /// What an external wrote about itself beside its answer: a `url` external's
-/// diagnostics header, or the tail of a command's stderr. Kept for a consult recorder;
+/// diagnostics header, or the tail of a command's stderr. Kept for a consult transcriber;
 /// the runtime reads its last line only as the `detail` of a refusal.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Diagnostics {
@@ -247,12 +247,18 @@ pub struct ExternalServices {
     timeout: Duration,
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
+    /// The bound recorders: delivered to, never consulted.
+    recorders: BTreeMap<String, Transport>,
     gates: ConsultGates,
 }
 
 /// How many `command` consults may run at once across a runtime: every trajectory's
 /// pending consults fan out together, and each is a process.
 const COMMAND_CONSULT_PERMITS: usize = 8;
+
+/// How many `command` recorder deliveries may run at once across a runtime. Their own gate:
+/// a recorder that hangs never holds a permit a consult waits on.
+const COMMAND_RECORDER_PERMITS: usize = 2;
 
 /// Settle a batch of consults, every sibling included, as many at a time as the
 /// command gate admits. A consult's deadline covers its wait for a permit, so a wider
@@ -274,6 +280,7 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     command: Arc<tokio::sync::Semaphore>,
+    recorder: Arc<tokio::sync::Semaphore>,
     /// Each model builtin's gate with the `max_concurrent` it was sized by. Only the serving
     /// deployment sizes them; a consult takes its permits from the gate current when it
     /// starts, so a resize reaches every deployment's later consults.
@@ -310,6 +317,7 @@ impl ConsultGates {
         };
         ConsultGates {
             command: Arc::new(tokio::sync::Semaphore::new(command)),
+            recorder: Arc::new(tokio::sync::Semaphore::new(COMMAND_RECORDER_PERMITS)),
             models: Arc::new(Mutex::new(AnnotatorBuiltin::ALL.map(gate))),
             jev: Arc::default(),
         }
@@ -430,6 +438,7 @@ impl ExternalServices {
                 .collect()
         };
         backends.insert(ConsultKind::Context, bound(config.context));
+        let recorders = config.recorders;
         let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
             let backend = match builtin {
@@ -469,6 +478,7 @@ impl ExternalServices {
             timeout: config.timeout,
             max_body_bytes: config.max_body_bytes,
             backends,
+            recorders,
             gates,
         })
     }
@@ -517,7 +527,7 @@ impl ExternalServices {
         self.dispatch(consult, None, None, None, Recall::Afresh).await
     }
 
-    /// [`ExternalServices::consult`] for a consult recorder: the outcome, and what the
+    /// [`ExternalServices::consult`] for a consult transcriber: the outcome, and what the
     /// transport saw of it where the backend is one a record names. Only here does a
     /// `url` consult read a non-success body or a `command` consult wait for its stderr.
     pub(crate) async fn consult_transcribed(
@@ -647,6 +657,21 @@ impl ExternalServices {
         let deadline = tokio::time::Instant::now() + self.timeout;
         let permit = acquire_within(&self.gates.command, deadline, "command", &consult.name).await?;
         let transcript = seen.as_deref().map(|seen| Transcript::of(seen.backend));
+        let credentials = self.command_credentials(command)?;
+        let CommandRun { output, transcript } =
+            run_command(command, input, deadline, self.max_body_bytes, transcript, credentials).await;
+        drop(permit);
+        if let (Some(seen), Some(transcript)) = (seen, transcript) {
+            *seen = transcript;
+        }
+        read_answer(&output?)
+    }
+
+    /// The credentials a `command` binding's `token_env` names, resolved for its process.
+    fn command_credentials(
+        &self,
+        command: &ResolverCommand,
+    ) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>, NoAnswerReason> {
         let mut credentials = Vec::new();
         for var in &command.token_env {
             if let Some(value) = crate::credentials::resolve(self.credential_store.as_ref(), var)
@@ -655,13 +680,7 @@ impl ExternalServices {
                 credentials.push((std::ffi::OsString::from(var), value));
             }
         }
-        let CommandRun { output, transcript } =
-            run_command(command, input, deadline, self.max_body_bytes, transcript, credentials).await;
-        drop(permit);
-        if let (Some(seen), Some(transcript)) = (seen, transcript) {
-            *seen = transcript;
-        }
-        read_answer(&output?)
+        Ok(credentials)
     }
 
     async fn consult_model(
@@ -728,10 +747,35 @@ impl ExternalServices {
         }
     }
 
+    /// Deliver one batch of dispatch records to a bound recorder over its transport, in the
+    /// consult envelope's carriage: a `url` recorder is posted the delivery, a `command`
+    /// recorder reads it on stdin, and either answers `{"version": 1, "answer": {}}` once it
+    /// has kept the records. Any other reply is a failed delivery, retried with the next.
+    pub(crate) async fn deliver(&self, recorder: &str, delivery: &serde_json::Value) -> Result<(), NoAnswerReason> {
+        let answer = match self.recorders.get(recorder) {
+            None => return Err(NoAnswerReason::Unregistered),
+            Some(Transport::Url(endpoint)) => read_answer(&self.post(endpoint, delivery, None).await?),
+            Some(Transport::Command(command)) => {
+                let input = serde_json::to_vec(delivery).map_err(|_| NoAnswerReason::Malformed)?;
+                let deadline = tokio::time::Instant::now() + self.timeout;
+                let credentials = self.command_credentials(command)?;
+                let permit = acquire_within(&self.gates.recorder, deadline, "recorder", recorder).await?;
+                let CommandRun { output, .. } =
+                    run_command(command, input, deadline, self.max_body_bytes, None, credentials).await;
+                drop(permit);
+                read_answer(&output?)
+            }
+        }?;
+        match answer.as_object() {
+            Some(_) => Ok(()),
+            None => Err(NoAnswerReason::MalformedAnswer("recorder answer".into())),
+        }
+    }
+
     async fn post(
         &self,
         endpoint: &Endpoint,
-        consult: &Consult,
+        consult: &(impl serde::Serialize + ?Sized),
         mut seen: Option<&mut Transcript>,
     ) -> Result<Vec<u8>, NoAnswerReason> {
         let http = match endpoint.host() {
@@ -839,7 +883,7 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Annotators | Section::Audience | Section::Context => None,
+        Section::Annotators | Section::Audience | Section::Context | Section::Recorders => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
@@ -988,6 +1032,7 @@ mod tests {
             audience,
             context: BTreeMap::new(),
             context_hints: BTreeMap::new(),
+            recorders: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
             jev: None,
@@ -2807,7 +2852,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             }),
             "a body cut short says nothing about the refusal"
         );
-        assert_eq!(recorded, plain, "recording changes no outcome");
+        assert_eq!(recorded, plain, "transcribing changes no outcome");
         assert!(
             elapsed < RECORD_READ_GRACE + Duration::from_millis(900),
             "the stalled body stretched the consult to {elapsed:?}"

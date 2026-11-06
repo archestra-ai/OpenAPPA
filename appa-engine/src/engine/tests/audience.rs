@@ -12,6 +12,7 @@ fn audience_engine(authorities: Vec<crate::authority::Authority>, starting: Labe
     };
     open_engine_at(
         RegistryConfig {
+            recorders: Default::default(),
             authorities,
             audience: slack_groups(&["team", "wide", "nobody"]),
             ..test_config(vec![send])
@@ -56,6 +57,7 @@ fn masking_config(from: DeclaredAudience, groups: &[&str]) -> RegistryConfig {
         ))),
     };
     RegistryConfig {
+        recorders: Default::default(),
         sanitizers: vec![crate::authority::Sanitizer {
             name: crate::names::SanitizerName::new("mask"),
             on: crate::authority::SanitizerPoints {
@@ -864,6 +866,7 @@ mod symbolic_audiences {
 
     fn config(tools: Vec<ToolAnnotation>, authorities: Vec<crate::authority::Authority>) -> RegistryConfig {
         RegistryConfig {
+            recorders: Default::default(),
             authorities,
             audience: slack_groups(&["team", "board", "officers"]),
             ..test_config(tools)
@@ -1472,6 +1475,7 @@ mod symbolic_audiences {
 
     fn returning_with_sources(sanitizers: Vec<crate::authority::Sanitizer>) -> RegistryConfig {
         RegistryConfig {
+            recorders: Default::default(),
             audience: slack_groups(&["team"]),
             ..returning_registry(sanitizers)
         }
@@ -1753,7 +1757,7 @@ fn a_delta_placeholder_labels_the_result_with_the_collection_the_call_spells() {
                 receiving,
                 proposed_effects,
                 annotation,
-                file_basis,
+                held,
                 subject,
                 evidence,
                 terms,
@@ -1766,7 +1770,7 @@ fn a_delta_placeholder_labels_the_result_with_the_collection_the_call_spells() {
                 receiving,
                 proposed_effects,
                 annotation,
-                file_basis,
+                held,
                 subject,
                 evidence,
                 terms,

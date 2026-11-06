@@ -5,6 +5,7 @@ members = [
     "appa-agent-python",
     "appa-builtin",
     "appa-engine",
+    "appa-file-tracker",
     "appa-package",
     "appa-eventlog",
     "appa-policy",

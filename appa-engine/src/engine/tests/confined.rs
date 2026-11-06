@@ -27,6 +27,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_dropped_is_withheld() {
     );
     let at = |sanitizers: Vec<crate::authority::Sanitizer>, revision: u64| {
         open_engine(RegistryConfig {
+            recorders: Default::default(),
             annotators: vec![],
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: declared(vec![fetch.clone()]),
@@ -119,6 +120,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         ..plain_tool("fetch")
     };
     let e = open_engine(RegistryConfig {
+        recorders: Default::default(),
         sanitizers: vec![redactor],
         ..test_config(vec![fetch])
     });
@@ -292,6 +294,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
 /// provider-run result that narrows the audience. The trajectory starts trusted and public.
 fn file_redacting_engine() -> Engine {
     let cfg = RegistryConfig {
+        recorders: Default::default(),
         sanitizers: vec![crate::authority::Sanitizer {
             name: crate::names::SanitizerName::new("redactor"),
             on: crate::authority::SanitizerPoints {
@@ -333,9 +336,9 @@ fn file_redacting_engine() -> Engine {
     .unwrap()
 }
 
-fn insider_file() -> crate::value::FileSource {
-    crate::value::FileSource {
-        version: "v1".into(),
+fn insider_file() -> crate::value::HeldMessage {
+    crate::value::HeldMessage {
+        id: "v1".into(),
         digest: "content".into(),
         label: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
     }
@@ -343,7 +346,7 @@ fn insider_file() -> crate::value::FileSource {
 
 /// `fetch` over `basis` blocks, the agent binds `redactor` to its result, and the approved
 /// call releases: the log, and the released dispatch.
-fn released_file_fetch(e: &Engine, basis: &crate::value::FileBasis) -> (Vec<Fact>, DispatchId) {
+fn released_file_fetch(e: &Engine, basis: &crate::value::HeldMessage) -> (Vec<Fact>, DispatchId) {
     let fetch = call("fetch", json!({}));
     let proposed = |log: &[Fact], id: &str| {
         appended_facts(
@@ -356,9 +359,9 @@ fn released_file_fetch(e: &Engine, basis: &crate::value::FileBasis) -> (Vec<Fact
                     proposals: vec![raw(&fetch)],
                     spawn: None,
                     offer_nonce: nonce(),
-                    evidence: vec![Evidence::File {
+                    evidence: vec![Evidence::Held {
                         position: 0,
-                        basis: basis.clone(),
+                        message: basis.clone(),
                     }],
                     audience: crate::audience::AudienceEvidence::default(),
                 }),
@@ -440,7 +443,7 @@ fn derived_result_label(facts: &[Fact]) -> Label {
 fn a_sanitized_file_read_keeps_the_files_audience() {
     let e = file_redacting_engine();
     let insider = Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")]));
-    let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
+    let (log, dispatch) = released_file_fetch(&e, &insider_file());
     assert!(log.iter().any(|fact| matches!(
         fact,
         Fact::OutputSanitizerBound { contribution, .. } if contribution == &insider
@@ -470,45 +473,13 @@ fn a_sanitized_file_read_keeps_the_files_audience() {
     assert_eq!(e.validate_replay(&log), Ok(()));
 }
 
-/// An edit's result label reads the label its dispatch received. An admission between the
-/// release and the result moves the trajectory, not that bound, so the live derivation and
-/// its replay both read the bound.
-#[test]
-fn a_sanitized_file_edit_derives_from_the_bound_its_dispatch_received() {
-    let e = file_redacting_engine();
-    let (mut log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Edit(insider_file()));
-    log.extend(appended_facts(
-        e.handle(
-            &viewing(&e, &log),
-            batch("b3", vec![exposed("taint", "news")], Vec::new()),
-        )
-        .expect("the provider-run result admits"),
-    ));
-    assert_eq!(
-        viewing(&e, &log)
-            .views(&traj())
-            .expect("the trajectory is opened")
-            .current_label()
-            .audience,
-        Audience::restricted([ReaderId::new("reviewer")])
-    );
-
-    let (log, derived) = redacted_result(&e, log, &dispatch);
-    let facts = appended_facts(derived);
-    assert_eq!(
-        derived_result_label(&facts),
-        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")]))
-    );
-    assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
-}
-
 /// A log that bound a file read's sanitizer, or derived its first hop, from the tool's
 /// declared output alone dropped the file's audience; replay refuses both records.
 #[test]
 fn a_file_derivation_recorded_without_the_files_label_is_refused() {
     let e = file_redacting_engine();
     let declared_only = Label::new(TRUSTED, Audience::public());
-    let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
+    let (log, dispatch) = released_file_fetch(&e, &insider_file());
     let mut forged = log.clone();
     for fact in forged.iter_mut() {
         if let Fact::OutputSanitizerBound { contribution, .. } = fact {
@@ -963,7 +934,7 @@ fn stray_evidence(offer: crate::value::OfferId) -> crate::execute::AuthorityEvid
 #[test]
 fn a_failure_body_under_a_bound_sanitizer_closes_withheld() {
     let e = file_redacting_engine();
-    let (log, dispatch) = released_file_fetch(&e, &crate::value::FileBasis::Read(insider_file()));
+    let (log, dispatch) = released_file_fetch(&e, &insider_file());
     let body = ValueBody::new("ENOENT");
     let report = || {
         EngineEvent::Outcome(ToolReport {

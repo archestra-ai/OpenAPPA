@@ -46,7 +46,12 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
     #[cfg(unix)]
     let signals = Signals::install();
     let mut command = Command::new("claude");
-    command.arg("--settings").arg(settings);
+    let shell = match bound(&crate::init::paths::installed_config_path()) {
+        true => shell(settings, data_dir, &token),
+        false => Shell::Untracked,
+    };
+    command.args(shell.arguments(settings));
+    command.envs(shell.environment());
     if let Some(messaging) = &messaging {
         command
             .arg(MESSAGING_FLAG)
@@ -90,8 +95,194 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
     let mut stdout = std::io::stdout();
     print_resume(&session, stdout.is_terminal(), &mut stdout);
     cleanup(&session);
+    shell.clean();
     close(messaging.as_ref());
     terminate_as(status)
+}
+
+/// The tools a file-tracking session never offers: they run commands, or read or write file
+/// content, out of the file-tracker's sight. The policy blocks them at the hook as well.
+const UNMEDIATED_TOOLS: &str = "PowerShell,Monitor,Grep,NotebookEdit";
+
+/// The Claude Code releases whose internals the preload has been checked against. A release
+/// outside this list runs SafeBash, even when the self-test would pass.
+const NATIVE_BASH_RELEASES: &[&str] = &["2.1.266"];
+
+/// How long the preload's self-test may take before the session falls back to SafeBash.
+const SELF_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How a session runs shell commands.
+#[derive(Debug, PartialEq, Eq)]
+enum Shell {
+    /// The deployment's policy binds no file-tracker: Claude Code runs as configured.
+    Untracked,
+    /// Claude Code's own Bash, confined per call in its built-in sandbox by the preload, with
+    /// `settings` the launch's settings plus the sandbox the preload needs.
+    Native { preload: PathBuf, settings: PathBuf },
+    /// Bash disabled and SafeBash served by the file-tracker in its place, in `srt`.
+    SafeBash,
+}
+
+impl Shell {
+    /// Claude Code's arguments. Each flag carries its value after `=`, so no list can take in
+    /// the person's own arguments.
+    fn arguments(&self, settings: &Path) -> Vec<OsString> {
+        match self {
+            Shell::Untracked => vec!["--settings".into(), settings.into()],
+            Shell::Native { settings, .. } => vec![
+                "--settings".into(),
+                settings.into(),
+                format!("--disallowedTools={UNMEDIATED_TOOLS}").into(),
+            ],
+            Shell::SafeBash => vec![
+                "--settings".into(),
+                settings.into(),
+                format!("--disallowedTools=Bash,{UNMEDIATED_TOOLS}").into(),
+                format!(
+                    "--mcp-config={}",
+                    serde_json::json!({ "mcpServers": { "file-tracker": { "command": executable(), "args": ["file-tracker", "mcp"] } } })
+                )
+                .into(),
+            ],
+        }
+    }
+
+    fn environment(&self) -> Vec<(&'static str, OsString)> {
+        match self {
+            Shell::Native { preload, .. } => vec![
+                ("BUN_OPTIONS", format!("--preload {}", preload.display()).into()),
+                ("APPA_FILE_TRACKER", executable().into()),
+            ],
+            Shell::Untracked | Shell::SafeBash => Vec::new(),
+        }
+    }
+
+    fn clean(&self) {
+        if let Shell::Native { settings, .. } = self {
+            let _ = fs::remove_file(settings);
+        }
+    }
+}
+
+/// Whether the deployment's policy binds the `file-tracker` recorder. A config that does not
+/// read binds nothing: the runtime loads the same file and refuses what it cannot read.
+fn bound(config: &Path) -> bool {
+    fs::read_to_string(config)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|table| {
+            table
+                .get("externals")
+                .and_then(|externals| externals.get("recorders"))
+                .and_then(|recorders| recorders.get("file-tracker"))
+                .is_some()
+        })
+}
+
+/// This launcher is the `appa` executable, which serves the file-tracker too.
+fn executable() -> String {
+    std::env::current_exe().map_or_else(|_| "appa".into(), |path| path.display().to_string())
+}
+
+/// Native Bash when this Claude Code release is one the preload was checked against and the
+/// preload's self-test passes on it; SafeBash otherwise, saying why.
+fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Shell {
+    match native(settings, data_dir, token) {
+        Ok(shell) => shell,
+        Err(reason) => {
+            eprintln!("clappa: shell commands run as SafeBash: {reason}");
+            Shell::SafeBash
+        }
+    }
+}
+
+fn native(settings: &Path, data_dir: &Path, token: &Uuid) -> Result<Shell, String> {
+    let version = crate::child_process::output(Command::new("claude").arg("--version"))
+        .map_err(|error| format!("cannot run claude --version: {error}"))?;
+    let release = String::from_utf8_lossy(&version.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if !NATIVE_BASH_RELEASES.contains(&release.as_str()) {
+        return Err(format!(
+            "Claude Code {release} is not a release the Bash preload was checked against ({})",
+            NATIVE_BASH_RELEASES.join(", ")
+        ));
+    }
+    let preload = data_dir.join("claude-bash.js");
+    let staged = data_dir.join(format!("claude-bash.js.{token}"));
+    fs::write(&staged, appa_file_tracker::CLAUDE_BASH_PRELOAD)
+        .and_then(|()| fs::rename(&staged, &preload))
+        .map_err(|error| format!("cannot write {}: {error}", preload.display()))?;
+    self_test(&preload)?;
+    let mut merged: serde_json::Map<String, Value> = fs::read_to_string(settings)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    merged.insert("sandbox".into(), sandbox_settings());
+    let launch_settings = data_dir.join("launches").join(format!("{token}.settings.json"));
+    fs::write(&launch_settings, Value::Object(merged).to_string())
+        .map_err(|error| format!("cannot write {}: {error}", launch_settings.display()))?;
+    Ok(Shell::Native {
+        preload,
+        settings: launch_settings,
+    })
+}
+
+/// The sandbox the preload confines each Bash call in. A command that cannot run in it is
+/// refused, never run outside it; a host outside its call's list is refused, never asked
+/// about.
+fn sandbox_settings() -> Value {
+    serde_json::json!({
+        "enabled": true,
+        "failIfUnavailable": true,
+        "autoAllowBashIfSandboxed": true,
+        "allowUnsandboxedCommands": false,
+        "network": { "strictAllowlist": true },
+    })
+}
+
+/// Run the preload's self-test in a Claude Code process that exits before it starts a
+/// session, with settings of its own that only enable the sandbox.
+fn self_test(preload: &Path) -> Result<(), String> {
+    let home = tempfile::tempdir().map_err(|error| error.to_string())?;
+    fs::write(
+        home.path().join("settings.json"),
+        serde_json::json!({ "sandbox": sandbox_settings() }).to_string(),
+    )
+    .map_err(|error| error.to_string())?;
+    let mut test = Command::new("claude");
+    test.arg("--version")
+        .env("CLAUDE_CONFIG_DIR", home.path())
+        .env("BUN_OPTIONS", format!("--preload {}", preload.display()))
+        .env("APPA_FILE_TRACKER", executable())
+        .env("APPA_CLAUDE_BASH_SELFTEST", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let mut child =
+        crate::child_process::spawn(&mut test).map_err(|error| format!("cannot run the self-test: {error}"))?;
+    let deadline = std::time::Instant::now() + SELF_TEST_TIMEOUT;
+    while child.try_wait().map_err(|error| error.to_string())?.is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("the Bash preload's self-test timed out".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().map_err(|error| error.to_string())?;
+    let report = String::from_utf8_lossy(&output.stdout);
+    let line = report.lines().find(|line| line.starts_with("appa-claude-bash: "));
+    match (output.status.success(), line) {
+        (true, Some("appa-claude-bash: ok")) => Ok(()),
+        (_, Some(line)) => Err(format!(
+            "the Bash preload's self-test failed: {}",
+            &line["appa-claude-bash: ".len()..]
+        )),
+        (_, None) => Err("the Bash preload's self-test did not run".into()),
+    }
 }
 
 /// The session a launch forks, as Claude Code's own arguments name it.
@@ -379,6 +570,44 @@ impl Drop for Signals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shipped Claude Code policy launches Claude Code without its unmediated tools and
+    /// with SafeBash; a policy that binds no file-tracker launches it unchanged.
+    #[test]
+    fn only_a_policy_binding_the_file_tracker_disables_the_unmediated_tools() {
+        let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/claude-code");
+        assert!(bound(&plugin.join("default.appa.toml")));
+        let untracked = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(untracked.path(), "[policy]\nversion = 2\n").unwrap();
+        assert!(!bound(untracked.path()));
+
+        let settings = Path::new("hooks.json");
+        let fallback = Shell::SafeBash.arguments(settings);
+        assert_eq!(
+            fallback[2],
+            "--disallowedTools=Bash,PowerShell,Monitor,Grep,NotebookEdit"
+        );
+        let servers: Value =
+            serde_json::from_str(fallback[3].to_str().unwrap().strip_prefix("--mcp-config=").unwrap()).unwrap();
+        assert_eq!(
+            servers["mcpServers"]["file-tracker"]["args"],
+            serde_json::json!(["file-tracker", "mcp"])
+        );
+        let native = Shell::Native {
+            preload: "claude-bash.js".into(),
+            settings: "launch.json".into(),
+        };
+        assert_eq!(
+            native.arguments(settings),
+            [
+                "--settings",
+                "launch.json",
+                "--disallowedTools=PowerShell,Monitor,Grep,NotebookEdit"
+            ]
+            .map(OsString::from)
+        );
+        assert!(Shell::Untracked.environment().is_empty());
+    }
 
     /// A signal that lands between spawning Claude Code and storing its pid reaches it once the
     /// pid is stored: the launcher never waits on a child that missed its termination.

@@ -166,6 +166,18 @@ builtin = "hitl"
 [externals.sanitizers.redact-for-public]
 builtin = "claude-code"
 
+# The Claude Code battery routes Read, Write, Edit, Bash and SafeBash through
+# the file-tracker, which the `appa` executable serves. While it is bound,
+# `clappa` confines each Bash call in Claude Code's own sandbox, or, where the
+# preload's self-test fails, disables Bash and registers SafeBash, which runs
+# in Anthropic's sandbox runtime, `srt`. It disables PowerShell, Monitor, Grep
+# and NotebookEdit either way.
+[externals.annotators.file-tracker]
+command = ["appa", "file-tracker", "annotate"]
+
+[externals.recorders.file-tracker]
+command = ["appa", "file-tracker", "record"]
+
 # Who `self` and `internal` are, read from a directory when a decision needs
 # actual membership: a rule naming an individual recipient
 # (`requires = { audience = { contains = ["$to"] } }`) checked against a
