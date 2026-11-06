@@ -180,11 +180,67 @@ fn a_bash_call_is_confined_to_what_it_declares() {
             "{hidden} is hidden"
         );
     }
+    for root_entry in ["/opt", "/srv", "/mnt", "/media", "/home", "/root"] {
+        let path = std::path::Path::new(root_entry);
+        if path.symlink_metadata().is_ok_and(|metadata| metadata.is_dir()) {
+            assert!(
+                paths("denyRead")
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|hidden| hidden == root_entry),
+                "{root_entry}, outside the system, is hidden"
+            );
+        }
+    }
+    assert!(
+        !paths("denyRead")
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hidden| hidden == "/usr" || hidden == "/etc"),
+        "the system stays readable"
+    );
     assert_eq!(paths("allowRead"), serde_json::json!([input]));
     assert_eq!(paths("allowWrite"), serde_json::json!([output]));
     assert_eq!(answer["network"]["allowedDomains"], serde_json::json!(["example.com"]));
-    assert_eq!(std::fs::read_to_string(&output).unwrap(), "", "the output is emptied");
+    assert_eq!(
+        std::fs::read_to_string(&output).unwrap(),
+        "stale\n",
+        "an output keeps its content until the command starts"
+    );
+    let prelude = answer["prelude"].as_str().unwrap();
+    assert!(
+        prelude.contains(&format!(": >| '{}'", output.display())),
+        "the command empties its output first: {prelude}"
+    );
 
     let (ok, _) = confine(serde_json::json!({ "command": "cat in.txt" }));
     assert!(!ok, "a call that declares no lists has no confinement");
+}
+
+/// A command that cannot start leaves every declared output exactly as it was: the outputs are
+/// emptied inside the sandbox, never by a call that did not run.
+#[test]
+fn a_command_that_cannot_start_leaves_its_outputs_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let config = root.join("file-tracker.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "store = {:?}\n[sandbox]\ncommand = [{:?}]\ntimeout_secs = 5\n",
+            root.join("store.json").display().to_string(),
+            root.join("no-such-sandbox").display().to_string(),
+        ),
+    )
+    .unwrap();
+    let output = root.join("report.md");
+    std::fs::write(&output, "weeks of work\n").unwrap();
+    let (text, failed) = safebash(
+        &config,
+        serde_json::json!({ "command": "echo new > report.md", "input_files": [], "output_files": [output], "network_hosts": [] }),
+    );
+    assert!(failed && text.contains("cannot start"), "{text}");
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "weeks of work\n");
 }

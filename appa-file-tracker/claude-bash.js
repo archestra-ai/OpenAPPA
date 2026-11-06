@@ -205,7 +205,9 @@ sandbox.wrapWithSandbox = async function (command, shell, custom, signal, option
     filesystem.allowWrite.push(cwdFile);
   }
   const perCall = { ...(custom ?? {}), filesystem, network: { ...(custom?.network ?? {}), ...current.confined.network } };
-  const wrapped = await wrap.call(this, command, shell, perCall, signal, { ...(options ?? {}), commandId: current.nonce });
+  // The outputs are emptied inside the sandbox, once the command starts.
+  const confinedCommand = (current.confined.prelude ?? "") + command;
+  const wrapped = await wrap.call(this, confinedCommand, shell, perCall, signal, { ...(options ?? {}), commandId: current.nonce });
   hookNetwork();
   return wrapped;
 };

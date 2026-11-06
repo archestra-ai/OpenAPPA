@@ -25,7 +25,8 @@ use crate::store::Locked;
 const STREAM_LIMIT: usize = 64 * 1024;
 
 pub const DESCRIPTION: &str = "Runs one shell command in a sandbox. The command can read only the files listed in \
-    input_files (plus system directories such as /usr and /etc), write only the files listed in output_files, and \
+    input_files (plus system directories such as /usr and /etc; other directories such as /opt, /srv and /home are \
+    hidden), write only the files listed in output_files, and \
     connect only to the hosts listed in network_hosts. Use absolute paths. Each output file is emptied before the \
     command runs. Declare every file the command reads or writes: any other file in your workspace, home or /tmp is \
     hidden from it, so ls and find there show only what the call declares. To find files, use the Glob tool, then \
@@ -72,7 +73,7 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
         .arg("--settings")
         .arg(&file)
         .arg("-c")
-        .arg(command)
+        .arg(format!("{}{command}", emptying(&named)))
         .env("TMPDIR", &scratch);
     let finished = supervise(sandbox, config.sandbox.timeout_secs);
     let _ = std::fs::remove_file(&file);
@@ -82,8 +83,9 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
 
 /// The confinement of one Claude Code `Bash` call, for `clappa`'s preload to hand to Claude
 /// Code's built-in sandbox: the same filesystem and network settings SafeBash gives `srt`,
-/// with the call's outputs emptied as SafeBash empties them. A call that does not name all
-/// three lists, or names an input that is not a regular file, is refused.
+/// and in `prelude` the line the preload runs ahead of the command to empty its outputs, as
+/// SafeBash does. A call that does not name all three lists, or names an input that is not a
+/// regular file, is refused.
 pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let role = ToolRole {
         name: "Bash".to_string(),
@@ -92,11 +94,14 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     };
     let named = named(&role, arguments)?;
     prepare(&named)?;
-    settings(config, &named, None)
+    let mut settings = settings(config, &named, None)?;
+    settings["prelude"] = json!(emptying(&named));
+    Ok(settings)
 }
 
-/// Check what a call names and empty its outputs: every input an existing regular file, every
-/// output a regular file or absent.
+/// Check what a call names and create its absent outputs, so the sandbox can open each for
+/// writing: every input an existing regular file, every output a regular file or absent. An
+/// existing output keeps its content until the command starts — [`emptying`].
 fn prepare(named: &Named) -> Result<(), String> {
     for input in &named.reads {
         if !std::fs::metadata(input).is_ok_and(|metadata| metadata.is_file()) {
@@ -113,9 +118,29 @@ fn prepare(named: &Named) -> Result<(), String> {
         if std::fs::metadata(output).is_ok_and(|metadata| !metadata.is_file()) {
             return Err(format!("output {} is not a regular file", output.display()));
         }
-        std::fs::File::create(output).map_err(|error| format!("{}: {error}", output.display()))?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(output)
+            .map_err(|error| format!("{}: {error}", output.display()))?;
     }
     Ok(())
+}
+
+/// The shell line that empties a call's outputs, run inside the sandbox ahead of the command:
+/// an output is emptied only once the command has started, never by a call that was refused
+/// or could not start. The command's output then derives from its declared inputs alone.
+fn emptying(named: &Named) -> String {
+    if named.writes.is_empty() {
+        return String::new();
+    }
+    let quoted = |path: &PathBuf| format!("'{}'", path.display().to_string().replace('\'', "'\\''"));
+    let empties: Vec<String> = named
+        .writes
+        .iter()
+        .map(|path| format!(": >| {}", quoted(path)))
+        .collect();
+    format!("{{ {}; }} || exit 126\n", empties.join(" && "))
 }
 
 /// How a sandboxed command ended.
@@ -172,13 +197,51 @@ fn supervise(mut command: Command, timeout_secs: u64) -> Result<Finished, String
     })
 }
 
-/// The sandbox settings for one call. Reads are hidden wherever the user's files live — home,
-/// the working directory, the temporary directories, and every file the store has recorded —
-/// and reopened for the inputs alone; writes are allowed to the outputs alone; the proxy
-/// admits the declared hosts alone. `scratch`, when given, is `srt`'s own temporary
-/// directory, readable so the command reaches the proxy.
+/// The top-level directories a command reads as the system: its programs, libraries and
+/// configuration. Every other top-level entry is hidden.
+const SYSTEM: &[&str] = &[
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/etc",
+    "/dev",
+    "/proc",
+    "/sys",
+    "/run",
+    "/nix",
+    "/snap",
+    "/System",
+    "/Library",
+    "/Applications",
+    "/private",
+];
+
+/// Every top-level entry of `/` that is not [`SYSTEM`]. A symbolic link is left to its
+/// target, which is a top-level entry of its own or under one.
+fn outside_the_system(root: impl IntoIterator<Item = (PathBuf, bool)>) -> Vec<PathBuf> {
+    root.into_iter()
+        .filter(|(path, link)| !link && !SYSTEM.iter().any(|system| Path::new(system) == path))
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// The sandbox settings for one call. Reads are hidden everywhere but the system — every
+/// other top-level directory, and within the system's reach home, the working directory, the
+/// temporary directories and every file the store has recorded — and reopened for the inputs
+/// and `[sandbox] readable` alone; writes are allowed to the outputs alone; the proxy admits
+/// the declared hosts alone. `scratch`, when given, is `srt`'s own temporary directory,
+/// readable so the command reaches the proxy.
 fn settings(config: &Config, named: &Named, scratch: Option<&Path>) -> Result<Value, String> {
-    let mut hidden: Vec<PathBuf> = ["/tmp", "/var/tmp"].iter().map(PathBuf::from).collect();
+    let entries = std::fs::read_dir("/").map_err(|error| format!("/: {error}"))?;
+    let mut hidden = outside_the_system(entries.filter_map(Result::ok).map(|entry| {
+        let link = entry.file_type().is_ok_and(|kind| kind.is_symlink());
+        (entry.path(), link)
+    }));
+    hidden.extend(["/tmp", "/var/tmp"].iter().map(PathBuf::from));
     hidden.extend(std::env::var_os("HOME").map(PathBuf::from));
     hidden.extend(std::env::current_dir().ok());
     hidden.extend(config.store.parent().map(Path::to_path_buf));
@@ -223,15 +286,23 @@ fn tempfile_in_temp(settings: &Value) -> Result<PathBuf, String> {
 
 fn drain(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stream.read_to_end(&mut bytes);
-        let mut text = String::from_utf8_lossy(&bytes).into_owned();
-        if text.len() > STREAM_LIMIT {
-            let mut cut = STREAM_LIMIT;
-            while !text.is_char_boundary(cut) {
-                cut -= 1;
+        // Keep one byte past the limit, to know the stream ran over it, and read the rest
+        // into a fixed buffer that is dropped, so the command never blocks on a full pipe.
+        let mut kept = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    let room = (STREAM_LIMIT + 1).saturating_sub(kept.len());
+                    kept.extend_from_slice(&chunk[..read.min(room)]);
+                }
             }
-            text.truncate(cut);
+        }
+        let over = kept.len() > STREAM_LIMIT;
+        kept.truncate(STREAM_LIMIT);
+        let mut text = String::from_utf8_lossy(&kept).into_owned();
+        if over {
             text.push_str("\n[truncated]");
         }
         text
@@ -286,4 +357,19 @@ pub fn serve(config: &Config) -> Result<(), String> {
             .map_err(|error| error.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_top_level_entry_but_the_system_is_hidden() {
+        let listing = ["/usr", "/etc", "/opt", "/srv", "/home", "/data", "/bin", "/var"]
+            .map(|path| (PathBuf::from(path), path == "/bin"));
+        assert_eq!(
+            outside_the_system(listing),
+            ["/opt", "/srv", "/home", "/data", "/var"].map(PathBuf::from).to_vec()
+        );
+    }
 }

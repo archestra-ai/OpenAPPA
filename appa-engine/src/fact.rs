@@ -325,8 +325,8 @@ impl CloseOutcome {
     }
 }
 
-/// What released a call, pinned on its `DispatchOpened`: the call's resolved delta and tags under
-/// the policy revision that released it. The outcome reads them with the record's
+/// What released a call, pinned on its `DispatchOpened`: the call's resolved delta, forwards and
+/// tags under the policy revision that released it. The outcome reads them with the record's
 /// `proposed_effects`, so a result arriving after a later revision was published is labelled by
 /// the terms that released the call met with what the judging revision declares for it, and
 /// commits the effects the release reserved.
@@ -334,6 +334,10 @@ impl CloseOutcome {
 pub struct ReleaseTerms {
     /// The call's delta, its placeholders bound to the call's arguments.
     pub delta: crate::contract::Delta,
+    /// What the call sends beyond its arguments, as the releasing revision declared it: the
+    /// label it publishes keeps it after a reload changes the declaration.
+    #[serde(default, skip_serializing_if = "crate::contract::Delta::is_none")]
+    pub forwards: crate::contract::Delta,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<TagName>,
 }
@@ -343,6 +347,7 @@ impl ReleaseTerms {
     pub(crate) fn of(contract: &crate::contract::ToolAnnotation) -> ReleaseTerms {
         ReleaseTerms {
             delta: contract.delta.clone(),
+            forwards: contract.forwards.clone(),
             tags: contract.tags.clone(),
         }
     }
@@ -354,6 +359,7 @@ impl ReleaseTerms {
     pub(crate) fn none() -> ReleaseTerms {
         ReleaseTerms {
             delta: crate::contract::Delta::NONE,
+            forwards: crate::contract::Delta::NONE,
             tags: Vec::new(),
         }
     }

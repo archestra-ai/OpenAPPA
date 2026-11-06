@@ -119,6 +119,7 @@ pub(crate) fn outcome_contract<'a>(
             requires: crate::contract::Requires::default(),
         });
     contract.delta = terms.delta.clone();
+    contract.forwards = terms.forwards.clone();
     contract.tags = terms.tags.clone();
     contract.emits = emits.clone();
     Some(OutcomeContract {

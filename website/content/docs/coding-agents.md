@@ -47,7 +47,7 @@ The plugin's built-in path rules give credential paths such as `.env*` and `~/.s
 
 ### SafeBash
 
-A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and system directories, write only its output files, and connect only to its hosts. Every other file in the home directory, the working directory, or a temporary directory is hidden from it, and a write to an undeclared path does not reach the disk. Each output file is emptied before the command runs.
+A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and the system directories (`/usr`, `/etc`, `/lib` and similar), write only its output files, and connect only to its hosts. Every other top-level directory, such as `/home`, `/opt` or `/srv`, is hidden from it, and so are the working directory and the temporary directories. A write to an undeclared path does not reach the disk. Each output file is emptied when the command starts, so a command that is refused or cannot start leaves its outputs unchanged.
 
 APPA builds no sandbox of its own. It confines each command in the best sandbox the harness has:
 

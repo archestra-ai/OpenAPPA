@@ -564,7 +564,8 @@ impl Engine {
     /// substituted label, for a call an input sanitizer rewrote, because that is what the call
     /// sent. `forwards` labels the content the call sends beyond its arguments, and `delta` the
     /// content it brings back, which a call can write where the trajectory never sees it. Derived
-    /// from the dispatch's own record, so it is the same on every replay of the log.
+    /// from the dispatch's own record — both as the releasing revision pinned them — so it is the
+    /// same on every replay of the log and after any reload.
     pub fn published_label(
         &self,
         view: &EngineView,

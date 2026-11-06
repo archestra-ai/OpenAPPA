@@ -75,6 +75,18 @@ pub fn record(config: &Config, delivery: &Value) -> Result<Value, String> {
                 store.settle(reservation, record["outcome"] == "success");
             }
             Some("unreleased") => {
+                let key = format!(
+                    "{}\t{}\t{}\t{}",
+                    record["trajectory"]
+                        .as_str()
+                        .ok_or("an unreleased record names its trajectory")?,
+                    record["batch"].as_str().ok_or("an unreleased record names its batch")?,
+                    record["tool"],
+                    record["arguments"],
+                );
+                if !store.given_back.insert(key) {
+                    continue;
+                }
                 if let Some(at) = store.reservations.iter().position(unbound) {
                     store.reservations.remove(at);
                 }
@@ -84,4 +96,57 @@ pub fn record(config: &Config, delivery: &Value) -> Result<Value, String> {
     }
     locked.save()?;
     Ok(json!({ "version": 1, "answer": {} }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+
+    /// A refusal the runtime delivers again — as every delivery after a restart is — gives
+    /// back nothing a second time: the identical proposal that came after it keeps its
+    /// reservation.
+    #[test]
+    fn a_replayed_refusal_keeps_the_reservation_of_a_later_identical_proposal() {
+        let dir = std::env::temp_dir().join(format!("appa-ft-replay-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("file-tracker.toml");
+        std::fs::write(
+            &config_path,
+            format!("store = {:?}\n", dir.join("store.json").display().to_string()),
+        )
+        .unwrap();
+        let config = Config::load(Some(&config_path)).unwrap();
+        let arguments = json!({ "file_path": dir.join("notes.txt").display().to_string(), "content": "x" });
+        let reserve = || {
+            let mut locked = Locked::open(&config.store).unwrap();
+            locked.store.reservations.push(Reservation {
+                tool: "host/claude-code/Write".to_string(),
+                arguments: arguments.clone(),
+                evidence: "e".to_string(),
+                writes: Default::default(),
+                created: now(),
+                dispatch: None,
+                published: None,
+            });
+            locked.save().unwrap();
+        };
+        let refusal = json!({ "kind": "recorder", "records": [{
+            "record": "unreleased", "trajectory": "t1", "batch": "b1",
+            "tool": "host/claude-code/Write", "arguments": arguments, "evidence": "e",
+        }]});
+        let held = || -> Store { Locked::open(&config.store).unwrap().store };
+
+        reserve();
+        record(&config, &refusal).unwrap();
+        assert!(held().reservations.is_empty(), "the refusal gives its reservation back");
+        reserve();
+        record(&config, &refusal).unwrap();
+        let reservations = held().reservations.len();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            reservations, 1,
+            "the replayed refusal leaves the later reservation held"
+        );
+    }
 }

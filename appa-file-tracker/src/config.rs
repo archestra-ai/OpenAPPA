@@ -86,7 +86,8 @@ pub enum Role {
 pub struct Sandbox {
     /// The sandbox runtime and its arguments; SafeBash appends `--settings <file> -c <command>`.
     pub command: Vec<String>,
-    /// Paths a command may read besides its inputs: toolchains under the home directory.
+    /// Paths a command may read besides its inputs and the system: toolchains under the home
+    /// directory or in another hidden top-level directory, such as `/opt`.
     #[serde(default)]
     pub readable: Vec<PathBuf>,
     /// Seconds a command may run.

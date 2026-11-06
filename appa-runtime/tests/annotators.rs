@@ -2231,3 +2231,148 @@ async fn a_released_call_reaches_its_recorder_with_the_label_it_published_and_th
     assert_eq!(outcome["dispatch"], released["dispatch"]);
     assert_eq!(outcome["outcome"], "success");
 }
+
+/// What a recording endpoint received, by the path it was posted to, and how many more
+/// deliveries that carry an outcome it refuses.
+#[derive(Clone, Default)]
+struct Recordings {
+    received: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    refuse_outcomes: Arc<Mutex<usize>>,
+}
+
+impl Recordings {
+    /// Every record posted to `path`, once some record satisfies `done` or ten seconds pass.
+    async fn records(&self, path: &str, done: impl Fn(&serde_json::Value) -> bool) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let records: Vec<serde_json::Value> = self
+                .received
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(posted, _)| posted == path)
+                .flat_map(|(_, delivery)| delivery["records"].as_array().cloned().unwrap_or_default())
+                .collect();
+            if records.iter().any(&done) || Instant::now() > deadline {
+                return records;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+async fn serve_recordings() -> (String, Recordings) {
+    use axum::extract::Path;
+    use axum::http::StatusCode;
+    let recordings = Recordings::default();
+    let url = serve(
+        Router::new()
+            .route(
+                "/{path}",
+                post(
+                    |Path(path): Path<String>, State(recordings): State<Recordings>, body: String| async move {
+                        let delivery: serde_json::Value = serde_json::from_str(&body).expect("a delivery is JSON");
+                        let has_outcome = delivery["records"]
+                            .as_array()
+                            .is_some_and(|records| records.iter().any(|record| record["record"] == "outcome"));
+                        let mut refusals = recordings.refuse_outcomes.lock().unwrap();
+                        if has_outcome && *refusals > 0 {
+                            *refusals -= 1;
+                            return (StatusCode::SERVICE_UNAVAILABLE, String::new());
+                        }
+                        recordings.received.lock().unwrap().push((path, delivery));
+                        (StatusCode::OK, r#"{"version":1,"answer":{}}"#.to_string())
+                    },
+                ),
+            )
+            .with_state(recordings.clone()),
+    )
+    .await;
+    (url, recordings)
+}
+
+fn recorded_policy(annotator: &str, recorder: &str) -> String {
+    http_policy(annotator).replace(
+        "annotator = \"classifier\"\n",
+        "annotator = \"classifier\"\nrecorder = \"tracker\"\n",
+    ) + &format!("\n[externals.recorders.tracker]\nurl = \"{recorder}\"\n")
+}
+
+/// Releases and runs one fetch of `url`, accepting the narrowing the annotator's answer asks.
+async fn released_and_ran(runtime: &Arc<Runtime>, url: &str) {
+    let offered = propose(runtime, fetch(url)).await;
+    if matches!(offered, HookDecision::DenyCall { .. }) {
+        assert!(matches!(
+            runtime.execute_remedy(&actor(), offer_of(&offered)).await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        assert_eq!(
+            propose(runtime, fetch(url)).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+    }
+    ran(runtime, fetch(url)).await;
+}
+
+/// The last record a session appends reaches a recorder that refused it at first, though the
+/// family appends nothing after it: delivery retries on its own.
+#[tokio::test]
+async fn a_recorder_that_refuses_a_family_s_last_outcome_receives_it_on_a_retry() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
+    let (recorder, recordings) = serve_recordings().await;
+    *recordings.refuse_outcomes.lock().unwrap() = 2;
+    let runtime = open_runtime(&dir, &recorded_policy(&url, &format!("{recorder}/a"))).await;
+
+    released_and_ran(&runtime, "https://a.example").await;
+
+    let records = recordings.records("a", |record| record["record"] == "outcome").await;
+    assert!(
+        records.iter().any(|record| record["record"] == "outcome"),
+        "the outcome is delivered on a retry: {records:?}"
+    );
+    assert_eq!(
+        *recordings.refuse_outcomes.lock().unwrap(),
+        0,
+        "both refusals were taken"
+    );
+}
+
+/// A recorder rebound under the same name to another endpoint reads the family from its
+/// start: what the old endpoint already received is not withheld from the new one.
+#[tokio::test]
+async fn a_recorder_rebound_under_its_name_receives_the_family_from_its_start() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
+    let (recorder, recordings) = serve_recordings().await;
+    let runtime = open_runtime(&dir, &recorded_policy(&url, &format!("{recorder}/a"))).await;
+
+    released_and_ran(&runtime, "https://a.example").await;
+    let first = recordings.records("a", |record| record["record"] == "outcome").await;
+    let first = first
+        .iter()
+        .find(|record| record["record"] == "released")
+        .expect("the old endpoint receives the release")["dispatch"]
+        .clone();
+
+    let config_path = dir.path().join("appa.toml");
+    std::fs::write(&config_path, recorded_policy(&url, &format!("{recorder}/b"))).expect("the rebinding writes");
+    runtime
+        .reload(Config::load(&config_path).expect("the rebinding loads"))
+        .expect("the rebinding opens");
+    released_and_ran(&runtime, "https://b.example").await;
+
+    let records = recordings
+        .records("b", |record| {
+            record["record"] == "released" && record["dispatch"] == first
+        })
+        .await;
+    assert!(
+        records
+            .iter()
+            .any(|record| record["record"] == "released" && record["dispatch"] == first),
+        "the new endpoint receives the release the old one already had: {records:?}"
+    );
+}

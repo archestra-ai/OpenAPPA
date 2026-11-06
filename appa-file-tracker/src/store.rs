@@ -27,6 +27,10 @@ pub struct Store {
     /// that restarts delivers each family from its start, so a settled dispatch is skipped.
     #[serde(default)]
     pub settled: BTreeSet<String>,
+    /// Every unreleased proposal already given back, by its trajectory, batch and call: a
+    /// replayed refusal never takes the reservation of a later, identical proposal.
+    #[serde(default)]
+    pub given_back: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

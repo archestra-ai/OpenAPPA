@@ -92,9 +92,10 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
             .iter()
             .filter(|rule| named.writes.iter().any(|path| rule.matches(path)))
     };
-    let write_trust = rules().fold(None, |floor, rule| {
-        store.ranks.higher(floor, rule.write_trust.as_deref())
-    });
+    let mut write_trust = None;
+    for rank in rules().filter_map(|rule| rule.write_trust.as_deref()) {
+        write_trust = store.ranks.higher(write_trust, Some(required_rank(rank, &mandate)?));
+    }
     let mut attention: Vec<&str> = rules()
         .flat_map(|rule| rule.write_attention.iter().map(String::as_str))
         .collect();
@@ -104,7 +105,7 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
     let evidence = evidence(role.role, &named);
     let mut requires = json!({ "history": [], "attention": attention });
     if let Some(trust) = write_trust {
-        requires["trust"] = json!(answered_rank(trust, &mandate)?);
+        requires["trust"] = json!(trust);
     }
     let answer = json!({
         "version": 1,
@@ -191,6 +192,20 @@ fn answered(label: &Label, mandate: &Mandate) -> Result<Value, String> {
     Ok(answer)
 }
 
+/// A required trust floor. A rank the mandate does not hold answers as its highest: a floor
+/// fails closed where a label fails open.
+fn required_rank<'a>(rank: &'a str, mandate: &'a Mandate) -> Result<&'a str, String> {
+    match mandate.ranks.0.iter().any(|known| known == rank) {
+        true => Ok(rank),
+        false => mandate
+            .ranks
+            .0
+            .last()
+            .map(String::as_str)
+            .ok_or_else(|| "the consult declares no trust rank".to_string()),
+    }
+}
+
 fn answered_rank<'a>(rank: &'a str, mandate: &'a Mandate) -> Result<&'a str, String> {
     match mandate.ranks.0.iter().any(|known| known == rank) {
         true => Ok(rank),
@@ -198,5 +213,40 @@ fn answered_rank<'a>(rank: &'a str, mandate: &'a Mandate) -> Result<&'a str, Str
             .ranks
             .lowest()
             .ok_or_else(|| "the consult declares no trust rank".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A write floor names a rank this policy's chain lacks — the built-in `.env` rule says
+    /// `trusted` — beside one it holds. The answer requires the chain's highest rank, whatever
+    /// order the rules match in, never the lowest.
+    #[test]
+    fn a_write_floor_the_chain_does_not_name_requires_its_highest_rank() {
+        let dir = std::env::temp_dir().join(format!("appa-ft-floor-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("file-tracker.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "store = {:?}\n[[path]]\npattern = \"*/.env*\"\nwrite_trust = \"low\"\n",
+                dir.join("store.json").display().to_string()
+            ),
+        )
+        .unwrap();
+        let config = Config::load(Some(&config_path)).unwrap();
+        let request = json!({
+            "kind": "annotation",
+            "artifact": { "args": {
+                "name": "host/claude-code/Write",
+                "arguments": { "file_path": dir.join(".env").display().to_string(), "content": "" },
+            }},
+            "declaration": { "trust_ranks": ["low", "high"], "audiences": ["self"] },
+        });
+        let answer = annotate(&config, &request).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(answer["answer"]["requires"]["trust"], "high");
     }
 }

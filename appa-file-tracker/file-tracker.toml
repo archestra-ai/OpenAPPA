@@ -319,6 +319,9 @@ role = "run"
 # on Linux — with a network proxy that admits only the declared hosts. Each
 # call starts its own `srt` with that call's files and hosts. Where `clappa`
 # confines Claude Code's own Bash per call, Claude Code's sandbox runs it.
+# A command reads the system directories (/usr, /etc, /lib, ...); every other
+# top-level directory is hidden. `readable` reopens toolchains a command needs,
+# such as ["/opt/homebrew", "/home/me/.cargo"].
 [sandbox]
 command = ["srt"]
 readable = []

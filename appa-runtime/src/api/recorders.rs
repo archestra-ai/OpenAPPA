@@ -3,10 +3,11 @@
 //!
 //! A recorder is never consulted. The runtime never waits for one, and a recorder can neither
 //! deny nor delay a call: delivery runs on its own task after the append, and a failed
-//! delivery leaves the records for the next one. Each recorder reads each family in log
-//! order, at least once, from a cursor this process keeps per family and recorder. A runtime
-//! that restarts begins every cursor at the start of the log, so a recorder deduplicates by
-//! dispatch key.
+//! delivery is retried on that task, with backoff, a bounded number of times, and is otherwise
+//! left for the family's next append. Each recorder reads each family in log order, at least
+//! once, from a cursor this process keeps per family and binding: a recorder rebound to
+//! another endpoint or command reads the family from its start. A runtime that restarts
+//! begins every cursor at the start of the log, so a recorder deduplicates by dispatch key.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -18,17 +19,35 @@ use super::Inner;
 /// How far one recorder has read one family: the count of facts it has been delivered.
 type Cursor = Arc<tokio::sync::Mutex<usize>>;
 
-/// Every recorder's cursor into every family.
+/// The waits before each delivery attempt: the first at once, the last about two minutes later.
+const ATTEMPTS: [std::time::Duration; 8] = {
+    use std::time::Duration;
+    [
+        Duration::ZERO,
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(4),
+        Duration::from_secs(8),
+        Duration::from_secs(16),
+        Duration::from_secs(32),
+        Duration::from_secs(64),
+    ]
+};
+
+/// Every recorder binding's cursor into every family. A binding is its name and how it is
+/// reached — the transport's description, which names its endpoint or argv and never a
+/// credential's value.
 #[derive(Default)]
-pub(super) struct Cursors(Mutex<HashMap<(TrajectoryId, String), Cursor>>);
+pub(super) struct Cursors(Mutex<HashMap<(TrajectoryId, String, String), Cursor>>);
 
 impl Cursors {
-    fn of(&self, root: &TrajectoryId, recorder: &str) -> Cursor {
+    fn of(&self, root: &TrajectoryId, recorder: &str, transport: &crate::config::Transport) -> Cursor {
         let mut cursors = self
             .0
             .lock()
             .expect("the recorder cursors mutex is never poisoned: no panic runs while it is held");
-        Arc::clone(cursors.entry((root.clone(), recorder.to_string())).or_default())
+        let key = (root.clone(), recorder.to_string(), format!("{transport:?}"));
+        Arc::clone(cursors.entry(key).or_default())
     }
 }
 
@@ -44,21 +63,33 @@ impl Inner {
             return;
         };
         let (inner, root) = (Arc::clone(self), root.clone());
-        handle.spawn(async move { inner.deliver_family(&root).await });
+        handle.spawn(async move {
+            for wait in ATTEMPTS {
+                tokio::time::sleep(wait).await;
+                if inner.deliver_family(&root).await {
+                    return;
+                }
+            }
+            tracing::warn!(root = %root.0, "recorder delivery gave up; the family's next append retries it");
+        });
     }
 
-    async fn deliver_family(&self, root: &TrajectoryId) {
+    /// Deliver what each recorder has not read of `root`; whether every delivery succeeded.
+    async fn deliver_family(&self, root: &TrajectoryId) -> bool {
         let deployment = self.deployment();
-        for recorder in deployment.config.externals.recorders.keys() {
-            let cursor = self.shared.recorder_cursors.of(root, recorder);
+        let mut delivered_all = true;
+        for (recorder, transport) in &deployment.config.externals.recorders {
+            let cursor = self.shared.recorder_cursors.of(root, recorder, transport);
             let mut delivered = cursor.lock().await;
             // Read under the cursor's lock, so two deliveries to one recorder never interleave
             // and each reads the log as far as it has grown.
-            let Ok(log) = self.log(root) else { return };
+            let Ok(log) = self.log(root) else { return false };
             let Ok(policy) = self.resolve_policy(&deployment, &log) else {
-                return;
+                return false;
             };
-            let Ok(view) = policy.rebuild_view(&log) else { return };
+            let Ok(view) = policy.rebuild_view(&log) else {
+                return false;
+            };
             let facts = log.facts();
             let mut records = policy
                 .engine()
@@ -76,13 +107,17 @@ impl Inner {
             });
             match deployment.externals.deliver(recorder, &delivery).await {
                 Ok(()) => *delivered = facts.len(),
-                Err(reason) => tracing::warn!(
-                    recorder,
-                    root = %root.0,
-                    reason = reason.diagnostic(),
-                    "a recorder delivery failed; the records stay for the next delivery"
-                ),
+                Err(reason) => {
+                    delivered_all = false;
+                    tracing::warn!(
+                        recorder,
+                        root = %root.0,
+                        reason = reason.diagnostic(),
+                        "a recorder delivery failed; the records stay for the next attempt"
+                    );
+                }
             }
         }
+        delivered_all
     }
 }
