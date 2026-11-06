@@ -67,7 +67,7 @@ Claude can read the meeting, but that read narrows who may receive the resulting
 
 The refusal names the policy conflict and provides available remedies (such as routing through a configured sanitizer or requesting authorized human review).
 
-In a `clappa` session, the sanitizers of every installed battery are active by default. The default config binds each one to the local `claude` CLI. A read that would lower the session's trust, or narrow its audience, then also offers the sanitizer's rewrite of the result, so the session can keep its label. To turn off a sanitizer, delete its `[externals.sanitizers."<name>"]` binding from the config that `appa plugin install claude-code` wrote.
+In a `clappa` session, the sanitizers of every installed battery are active by default. The default config binds each one to the local `claude` CLI, except `coding.strip-secrets`: the file-tracker labels credential reads, and no shell result is confined for it. A read that would lower the session's trust, or narrow its audience, then also offers the sanitizer's rewrite of the result, so the session can keep its label. To turn off a sanitizer, delete its `[externals.sanitizers."<name>"]` binding from the config that `appa plugin install claude-code` wrote.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](/images/claude-code-blocked-flow.png)
 
@@ -78,7 +78,8 @@ In a `clappa` session, the sanitizers of every installed battery are active by d
 OpenAPPA intercepts Claude Code events through native lifecycle hooks:
 
 - **Lifecycle interception:** The integration hooks into Claude Code's native lifecycle events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and subagent events).
-- **Unified tool coverage:** Intercepts both built-in commands (`Bash`, `Read`, `Edit`, `Write`) and all external MCP tools transparently.
+- **Unified tool coverage:** Intercepts both built-in tools (`Read`, `Edit`, `Write`, `WebFetch`) and all external MCP tools transparently.
+- **Files keep their labels:** `Read`, `Write`, and `Edit` go through the [file-tracker](/coding-agents#files-that-keep-their-labels), so a file carries the label of the session that wrote it into later sessions. On a Claude Code release `clappa` has tested, it confines Claude Code's own `Bash` in Claude Code's built-in sandbox, one call at a time. On any other release, or when its startup self-test fails, `clappa` replaces `Bash` with [SafeBash](/coding-agents#safebash), which needs `srt`. Both confine each command to the files and hosts it declares ([per harness](/coding-agents#per-harness)).
 - **Pre-execution evaluation:** Before any tool runs, `PreToolUse` passes the call to the local APPA runtime, evaluating the flow against the session's accumulated labels (`audience × trust`).
 - **Fail-closed with remedies:** Allowed actions execute immediately. Disallowed flows are blocked before execution; OpenAPPA returns the policy conflict along with actionable remedies (such as sanitizer filters or operator approval). Unanswered hooks fail closed.
 - **Auto mode on top:** In [auto mode](/openappa-vs-auto-mode#running-both), OpenAPPA does not approve a call it allows. Claude Code's classifier still reviews that call and can deny it. A call OpenAPPA blocks stays blocked.

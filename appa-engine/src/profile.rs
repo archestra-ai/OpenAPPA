@@ -422,6 +422,7 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
         .collect();
     let mut document = identity_document(
         &RegistryConfig {
+            recorders: Default::default(),
             trust_chain: registry.trust_chain().clone(),
             tools: Vec::new(),
             annotators: Vec::new(),
@@ -688,6 +689,7 @@ mod tests {
 
     fn config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
+            recorders: Default::default(),
             trust_chain: chain(),
             tools: tools.into_iter().map(ToolDeclaration::Declared).collect(),
             annotators: vec![],

@@ -71,7 +71,7 @@ fn replay_refuses_a_released_tool_nothing_covers_and_a_forged_wildcard_record() 
                 receiving: Label::new(TRUSTED, Audience::public()),
                 proposed_effects: EffectSet::default(),
                 annotation: None,
-                file_basis: None,
+                held: None,
                 subject: crate::basis::fixture_subject(&traj()),
                 evidence: crate::audience::AudienceEvidence::default(),
                 terms: crate::fact::ReleaseTerms::none(),

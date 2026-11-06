@@ -169,7 +169,7 @@ mod tests {
     use super::*;
     use crate::config::Token;
     use crate::model::MAX_ATTEMPTS;
-    use crate::recorder::ConsultBackend;
+    use crate::transcriber::ConsultBackend;
 
     type Requests = Arc<Mutex<Vec<(HeaderMap, serde_json::Value)>>>;
 

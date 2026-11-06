@@ -84,7 +84,7 @@ pub(crate) struct OutcomeContract<'a> {
 }
 
 impl OutcomeContract<'_> {
-    /// The declared output label a result of this dispatch carries, before its file basis.
+    /// The declared output label a result of this dispatch carries, before any held message.
     pub(crate) fn output_label(&self) -> Label {
         let pinned = self.contract.output_label();
         match &self.head_output {
@@ -119,6 +119,7 @@ pub(crate) fn outcome_contract<'a>(
             requires: crate::contract::Requires::default(),
         });
     contract.delta = terms.delta.clone();
+    contract.forwards = terms.forwards.clone();
     contract.tags = terms.tags.clone();
     contract.emits = emits.clone();
     Some(OutcomeContract {
@@ -187,7 +188,7 @@ pub(crate) fn bound_candidate(
     let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let derived = registered
         .derive_output(
-            &call.output_label_from(&contract.output_label(), receiving),
+            &call.output_label_from(&contract.output_label()),
             &contract.contract.tags,
             context,
         )
@@ -249,8 +250,8 @@ pub(crate) fn admit_result(
     }
 
     let trajectory = views.trajectory().clone();
-    let receiving = views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
-    let output_label = || call.output_label_from(&contract.output_label(), receiving);
+    views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
+    let output_label = || call.output_label_from(&contract.output_label());
     let close_success = || Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
@@ -288,7 +289,7 @@ pub(crate) fn admit_result(
             outcome: CloseOutcome::Failure,
         }],
         ResultAdmission::FailureWithBody { body } => {
-            if call.file_basis().is_none() {
+            if call.held().is_none() {
                 return Err(AdmitError::ObservationMismatch);
             }
             let observed = RawResultDigest::of(body.as_str().as_bytes());
@@ -302,7 +303,7 @@ pub(crate) fn admit_result(
             ]
         }
         ResultAdmission::FailureNoValue { observed } => {
-            if call.file_basis().is_none() {
+            if call.held().is_none() {
                 return Err(AdmitError::ObservationMismatch);
             }
             vec![Fact::DispatchClosed {
@@ -508,6 +509,7 @@ mod tests {
             annotator: crate::names::AnnotatorName::new("directory"),
         };
         Registry::build_covered(RegistryConfig {
+            recorders: Default::default(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![
                 ToolDeclaration::Declared(get),
@@ -549,7 +551,7 @@ mod tests {
             receiving: Label::top(),
             proposed_effects: EffectSet::new([EffectKind::new("read")]).unwrap(),
             annotation: call.annotation().cloned(),
-            file_basis: call.file_basis().cloned(),
+            held: call.held().cloned(),
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
         };
@@ -568,13 +570,11 @@ mod tests {
     /// The label `call` returns at the bound its open dispatch received.
     fn released_output(reg: &Registry, log: &[Fact], dispatch: &DispatchId, call: &ResolvedCall) -> Label {
         let contract = reg.annotation_of(call).expect("the fixture registers the tool");
-        let views = views_of(log);
-        let receiving = views
+        views_of(log)
             .view(&traj())
             .receiving_bound(dispatch)
-            .expect("the fixture opened the dispatch")
-            .clone();
-        call.output_label(&contract, &receiving)
+            .expect("the fixture opened the dispatch");
+        call.output_label(&contract)
     }
 
     fn offer() -> crate::value::OfferId {
@@ -640,14 +640,14 @@ mod tests {
     }
 
     #[test]
-    fn file_failure_body_is_admitted_at_the_result_label_without_success_effects() {
+    fn a_held_read_failure_body_is_admitted_at_the_result_label_without_success_effects() {
         let reg = registry();
-        let predecessor = crate::value::FileSource {
-            version: "v1".into(),
+        let held = crate::value::HeldMessage {
+            id: "v1".into(),
             digest: "old".into(),
             label: Label::new(SUSPICIOUS, internal()),
         };
-        let call = get_call().with_file_basis(Some(crate::value::FileBasis::Replace(Some(predecessor))));
+        let call = get_call().with_held(Some(held));
         let (log, dispatch) = open_log(&call);
         let p = views_of(&log);
         let batch = admit(
@@ -675,9 +675,9 @@ mod tests {
         ));
         let projection = views_of(&[log, batch].concat());
         assert_eq!(
-            projection.view(&traj()).dispatch_call(&dispatch).unwrap().file_basis(),
-            call.file_basis(),
-            "the persisted opening rebuilds the pinned file basis"
+            projection.view(&traj()).dispatch_call(&dispatch).unwrap().held(),
+            call.held(),
+            "the persisted opening rebuilds the pinned held message"
         );
         assert!(!projection.view(&traj()).has_effect(&EffectKind::new("read")));
     }
@@ -982,6 +982,7 @@ mod tests {
             requires: Default::default(),
         };
         let reg = Registry::build_covered(RegistryConfig {
+            recorders: Default::default(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: vec![ToolDeclaration::Declared(get)],
             annotators: vec![],

@@ -2150,3 +2150,293 @@ async fn a_failing_jev_provider_refuses_the_hook_and_appends_nothing() {
         "a no-answer appends nothing to the trajectory"
     );
 }
+
+#[tokio::test]
+async fn a_released_call_reaches_its_recorder_with_the_label_it_published_and_the_evidence_judged() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    let mut answer = produced("trusted");
+    answer["answer"]["delta"]["audience"] = serde_json::json!(["insider"]);
+    answer["answer"]["evidence"] = serde_json::json!("etag:7");
+    annotator.set("classifier", Answer::Wire(answer));
+    let deliveries: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let recorder = serve(
+        Router::new()
+            .route(
+                "/record",
+                post(
+                    |State(deliveries): State<Arc<Mutex<Vec<serde_json::Value>>>>, body: String| async move {
+                        deliveries
+                            .lock()
+                            .unwrap()
+                            .push(serde_json::from_str(&body).expect("a delivery is JSON"));
+                        r#"{"version":1,"answer":{}}"#
+                    },
+                ),
+            )
+            .with_state(Arc::clone(&deliveries)),
+    )
+    .await;
+    let policy = http_policy(&url).replace(
+        "annotator = \"classifier\"\n",
+        "annotator = \"classifier\"\nrecorder = \"tracker\"\n",
+    ) + &format!("\n[externals.recorders.tracker]\nurl = \"{recorder}/record\"\n");
+    let runtime = open_runtime(&dir, &policy).await;
+
+    let offered = propose(&runtime, fetch("https://a.example")).await;
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer_of(&offered)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, fetch("https://a.example")).await;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let records = loop {
+        let records: Vec<serde_json::Value> = deliveries
+            .lock()
+            .unwrap()
+            .iter()
+            .inspect(|delivery| {
+                assert_eq!(delivery["kind"], "recorder");
+                assert_eq!(delivery["name"], "tracker");
+                assert_eq!(delivery["root"], root().0);
+            })
+            .flat_map(|delivery| delivery["records"].as_array().cloned().unwrap_or_default())
+            .collect();
+        if records.iter().any(|record| record["record"] == "outcome") || Instant::now() > deadline {
+            break records;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let released = records
+        .iter()
+        .find(|record| record["record"] == "released")
+        .expect("the release is delivered");
+    assert_eq!(released["tool"], "fetch");
+    assert_eq!(released["arguments"], serde_json::json!({ "url": "https://a.example" }));
+    assert_eq!(
+        released["label"],
+        serde_json::json!({ "trust": "trusted", "audience": [["insider"]] }),
+        "the call published its delta"
+    );
+    assert_eq!(released["evidence"], "etag:7");
+    let outcome = records
+        .iter()
+        .find(|record| record["record"] == "outcome")
+        .expect("the outcome is delivered");
+    assert_eq!(outcome["dispatch"], released["dispatch"]);
+    assert_eq!(outcome["outcome"], "success");
+}
+
+/// What a recording endpoint received, by the path it was posted to, and how many more
+/// deliveries that carry an outcome it refuses.
+#[derive(Clone, Default)]
+struct Recordings {
+    received: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+    refuse_outcomes: Arc<Mutex<usize>>,
+}
+
+impl Recordings {
+    /// Every record posted to `path`, once some record satisfies `done` or ten seconds pass.
+    async fn records(&self, path: &str, done: impl Fn(&serde_json::Value) -> bool) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let records: Vec<serde_json::Value> = self
+                .received
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(posted, _)| posted == path)
+                .flat_map(|(_, delivery)| delivery["records"].as_array().cloned().unwrap_or_default())
+                .collect();
+            if records.iter().any(&done) || Instant::now() > deadline {
+                return records;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+async fn serve_recordings() -> (String, Recordings) {
+    use axum::extract::Path;
+    use axum::http::StatusCode;
+    let recordings = Recordings::default();
+    let url = serve(
+        Router::new()
+            .route(
+                "/{path}",
+                post(
+                    |Path(path): Path<String>, State(recordings): State<Recordings>, body: String| async move {
+                        let delivery: serde_json::Value = serde_json::from_str(&body).expect("a delivery is JSON");
+                        let has_outcome = delivery["records"]
+                            .as_array()
+                            .is_some_and(|records| records.iter().any(|record| record["record"] == "outcome"));
+                        let mut refusals = recordings.refuse_outcomes.lock().unwrap();
+                        if has_outcome && *refusals > 0 {
+                            *refusals -= 1;
+                            return (StatusCode::SERVICE_UNAVAILABLE, String::new());
+                        }
+                        recordings.received.lock().unwrap().push((path, delivery));
+                        (StatusCode::OK, r#"{"version":1,"answer":{}}"#.to_string())
+                    },
+                ),
+            )
+            .with_state(recordings.clone()),
+    )
+    .await;
+    (url, recordings)
+}
+
+fn recorded_policy(annotator: &str, recorder: &str) -> String {
+    http_policy(annotator).replace(
+        "annotator = \"classifier\"\n",
+        "annotator = \"classifier\"\nrecorder = \"tracker\"\n",
+    ) + &format!("\n[externals.recorders.tracker]\nurl = \"{recorder}\"\n")
+}
+
+/// Releases and runs one fetch of `url`, accepting the narrowing the annotator's answer asks.
+async fn released_and_ran(runtime: &Arc<Runtime>, url: &str) {
+    let offered = propose(runtime, fetch(url)).await;
+    if matches!(offered, HookDecision::DenyCall { .. }) {
+        assert!(matches!(
+            runtime.execute_remedy(&actor(), offer_of(&offered)).await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        assert_eq!(
+            propose(runtime, fetch(url)).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+    }
+    ran(runtime, fetch(url)).await;
+}
+
+/// The last record a session appends reaches a recorder that refused it at first, though the
+/// family appends nothing after it: delivery retries on its own.
+#[tokio::test]
+async fn a_recorder_that_refuses_a_family_s_last_outcome_receives_it_on_a_retry() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
+    let (recorder, recordings) = serve_recordings().await;
+    *recordings.refuse_outcomes.lock().unwrap() = 2;
+    let runtime = open_runtime(&dir, &recorded_policy(&url, &format!("{recorder}/a"))).await;
+
+    released_and_ran(&runtime, "https://a.example").await;
+
+    let records = recordings.records("a", |record| record["record"] == "outcome").await;
+    assert!(
+        records.iter().any(|record| record["record"] == "outcome"),
+        "the outcome is delivered on a retry: {records:?}"
+    );
+    assert_eq!(
+        *recordings.refuse_outcomes.lock().unwrap(),
+        0,
+        "both refusals were taken"
+    );
+}
+
+/// A recorder rebound under the same name to another endpoint reads the family from its
+/// start: what the old endpoint already received is not withheld from the new one.
+#[tokio::test]
+async fn a_recorder_rebound_under_its_name_receives_the_family_from_its_start() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Wire(produced("trusted")));
+    let (recorder, recordings) = serve_recordings().await;
+    let runtime = open_runtime(&dir, &recorded_policy(&url, &format!("{recorder}/a"))).await;
+
+    released_and_ran(&runtime, "https://a.example").await;
+    let first = recordings.records("a", |record| record["record"] == "outcome").await;
+    let first = first
+        .iter()
+        .find(|record| record["record"] == "released")
+        .expect("the old endpoint receives the release")["dispatch"]
+        .clone();
+
+    let config_path = dir.path().join("appa.toml");
+    std::fs::write(&config_path, recorded_policy(&url, &format!("{recorder}/b"))).expect("the rebinding writes");
+    runtime
+        .reload(Config::load(&config_path).expect("the rebinding loads"))
+        .expect("the rebinding opens");
+    released_and_ran(&runtime, "https://b.example").await;
+
+    let records = recordings
+        .records("b", |record| {
+            record["record"] == "released" && record["dispatch"] == first
+        })
+        .await;
+    assert!(
+        records
+            .iter()
+            .any(|record| record["record"] == "released" && record["dispatch"] == first),
+        "the new endpoint receives the release the old one already had: {records:?}"
+    );
+}
+
+/// A command recorder that never answers takes no process permit a command Annotator needs:
+/// with a delivery stalled in each of many sessions, every later call is still judged
+/// promptly.
+#[tokio::test]
+async fn a_hung_command_recorder_never_delays_a_command_annotator() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(
+        dir.path().join("answer.sh"),
+        "cat > /dev/null\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"trust\":\"trusted\"},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
+    )
+    .expect("the annotator writes");
+    std::fs::write(
+        dir.path().join("hang.sh"),
+        "cat > /dev/null\necho x >> stalled\nsleep 60",
+    )
+    .expect("the recorder writes");
+    let policy = command_policy("answer.sh", false).replace(
+        "annotator = \"classifier\"\n",
+        "annotator = \"classifier\"\nrecorder = \"tracker\"\n",
+    ) + "\n[externals.recorders.tracker]\ncommand = [\"/bin/sh\", \"hang.sh\"]\n";
+    let runtime = open_runtime(&dir, &policy).await;
+
+    for session in 0..12 {
+        let actor = Actor {
+            root: TrajectoryId(format!("session-{session}")),
+            child: None,
+        };
+        let opened = hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: actor.root.clone(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+            },
+        )
+        .await;
+        assert_eq!(opened, HookDecision::Ack);
+        let started = Instant::now();
+        let decision = hooks::handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: actor.clone(),
+                call: fetch("https://a.example"),
+                call_id: None,
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+        .await;
+        assert_eq!(decision, HookDecision::AllowCall { spawn: None }, "session {session}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "session {session} waited {:?} behind stalled recorder deliveries",
+            started.elapsed()
+        );
+    }
+    let stalled = std::fs::read_to_string(dir.path().join("stalled")).unwrap_or_default();
+    assert!(!stalled.is_empty(), "the recorder was delivered to, and stalled");
+}

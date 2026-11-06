@@ -2,10 +2,10 @@
 title: Coding agents
 category: Deep Dive
 order: 4
-description: Tool-flow enforcement, tracked files, isolated processing, shell rules, and checked delegation for coding agents.
+description: Tool-flow enforcement, file labels, SafeBash, shell rules, and checked delegation for coding agents.
 ---
 
-OpenAPPA checks coding-agent flows at the harness boundary. The [Claude Code](/claude-code) integration checks built-in and MCP tool calls and results. It adds three default boundaries: protected sessions, checked subagent returns, and contracts for native file and shell tools. Runtime-owned file tools provide a separate experimental mode that can preserve Labels across file operations.
+OpenAPPA checks coding-agent flows at the harness boundary. The [Claude Code](/claude-code) integration checks built-in and MCP tool calls and results. It adds three default boundaries: protected sessions, checked subagent returns, and contracts for native file and shell tools.
 
 ## Protected sessions
 
@@ -23,208 +23,63 @@ This lets a subagent read a private ticket or credential-adjacent log and return
 
 ## Shell and native file tools
 
-Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code), which gives native tools these contracts:
+Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code). It routes `Read`, `Write`, and `Edit` through the [file-tracker](#files-that-keep-their-labels), confines every shell command to the files and hosts it declares ([SafeBash](#safebash)), and blocks `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`.
 
-- **Reading credentials narrows the trajectory.** Read, Grep, Bash, or PowerShell calls that contain configured credential-path spellings narrow the audience to `self`.
+The `coding` battery gives the canonical shell and file tools of other harnesses these contracts:
+
+- **Reading credentials narrows the trajectory.** Read, search, or shell calls that contain configured credential-path spellings narrow the audience to `self`.
 - **Writing where another process looks requires trust.** Writes to credential and control paths require a `trusted` trajectory. After suspicious input, the exact call requires human review.
-- **Changing the controls requires review.** Writes to Claude Code settings or OpenAPPA policy always ask the person running the session.
-- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for Bash, PowerShell, and Monitor calls. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
+- **Changing the controls requires review.** Writes to harness settings or OpenAPPA policy always ask the person running the session.
+- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for each shell command. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
 
-These contracts label what a command reads or returns; they do not sandbox the command. Use [isolated file processing](#isolated-file-processing) or an operating-system sandbox for confinement.
+These contracts label what a command reads or returns; they do not sandbox the command. For confinement, see [SafeBash](#safebash).
 
-## File taint tracking
+## Files that keep their labels
 
-> **Experimental.** File taint tracking is off by default and is not yet a supported security boundary. See [Limits](#limits) before you rely on it.
+A coding agent writes files that outlive its trajectory. The file-tracker plugin keeps a label on every file a mediated tool call writes, so a later read of that file carries the restriction the write carried. The read can happen in the same session, in a fresh session, or after a resume.
 
-A tracked file version has a [Label](/how-it-works#the-core-concepts): its trust and audience. On write, the new version inherits the trajectory's current Label combined with the tool's `delta`.
+The plugin is a [recorder](/contracts#recorders) and an [annotator](/contracts#annotators) for the same tools:
 
-Without file tracking, content that the agent writes to disk loses its Label. A later native read does not recover provenance from the earlier write, although its tool contract can still apply a path-based Label. Runtime-owned file tools keep the Label with each recorded version. In this example, reading under `secrets/` narrows the trajectory to `self`. Writing under `public/` requires data that anyone may read. [Turn it on](#turn-it-on) has the complete policy:
+- As a recorder, it receives the label each released call published: the trajectory's label at release, combined with the call's `forwards` and `delta`. It stores that label on each file the call wrote.
+- As an annotator, it answers a `Read` with the stored label as `delta`. An `Edit` forwards the file's existing label, so the edited file keeps it. A `Write` replaces the file, so the new label replaces the old one.
 
-```toml
-[[policy.tool]]
-name = "mcp/appa/appa_read_file(file_path:secrets/*)"
-delta = { audience = ["self"] }
+The plugin's built-in path rules give credential paths such as `.env*` and `~/.ssh/*` the audience `self` before any call touches them. They also set the trust a write to a control file such as `CLAUDE.md` requires. A deployment adds rules in `~/.config/appa/file-tracker.toml`. The plugin never denies a call: the engine checks the annotation's `requires`.
 
-[[policy.tool]]
-name = "mcp/appa/appa_write_file(file_path:public/*)"
-requires = { audience = { contains = ["public"] } }
+### SafeBash
 
-[[policy.tool]]
-name = "mcp/appa/appa_copy_file(destination_path:public/*)"
-requires = { audience = { contains = ["public"] } }
-```
+A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and the system directories (`/usr`, `/etc`, `/lib` and similar), write only its output files, and connect only to its hosts. Every other top-level directory, such as `/home`, `/opt` or `/srv`, is hidden from it, and so are the working directory and the temporary directories. A file in `/etc` or `/run` that a path rule labels, such as an SSH host key or a token, is hidden too. The command starts without the environment variables whose names hold credentials: a word such as `TOKEN`, `SECRET`, `PASSWORD`, `KEY` or `AUTH`, and every `ANTHROPIC_` and `APPA_` variable. A write to an undeclared path does not reach the disk. Each output file is emptied when the command starts, so a command that is refused or cannot start leaves its outputs unchanged.
 
-1. The subagent reads `secrets/deploy-notes.txt`. It executes the offered narrowing remedy, then retries with its trajectory narrowed to `self`.
-2. The subagent writes `summary.md`. The new file version carries the `self` Label.
-3. The main agent tries to copy `summary.md` into `public/`. OpenAPPA refuses the copy because `public/*` requires `public` data.
-4. If the main agent reads `summary.md`, its trajectory also narrows to `self` before the content enters model context.
+APPA builds no sandbox of its own. It confines each command in the best sandbox the harness has:
 
-### Why hooks alone are not enough
-
-For most tools, OpenAPPA checks the call when the harness proposes it and labels the result when the harness reports it. A native file tool breaks that model, because the value that flows is the file's content, and the hook never sees it:
-
-- A native Read returns bytes nothing has labeled. By the time the result hook executes, the payload has entered model context.
-- A native Write replaces content, but nothing in the call says which version of the file the model read.
-- Claude Code validates some calls before the hook runs. A native Edit can report a failed match, which reveals file content, before OpenAPPA sees the call.
-- A copy or move must carry the source's Label to the destination, even though the model never sees the bytes.
-
-To track content propagation, the runtime supplies replacement MCP file tools: `appa_read_file`, `appa_write_file`, `appa_edit_file`, `appa_copy_file`, and `appa_move_file`. A sixth tool, `appa_process_files`, appears when a sandbox backend is configured. The model proposes paths and content. It never supplies a Label, file version, or trajectory identity.
-
-The harness still registers its native tools. Complete mediation therefore requires the runtime to refuse native filesystem and shell calls after the first file call binds the workspace.
-
-### Two Labels per call
-
-A file call has two Label outcomes. The **trajectory Label** is the Label after the result enters model context. The **published file Label** is the Label recorded for new file content.
-
-| Operation | The trajectory Label combines | The published file Label combines |
+| Where | Tool | Sandbox |
 |---|---|---|
-| Read | trajectory, file | — |
-| Write, new file | trajectory, tool `delta` | trajectory, tool `delta` |
-| Write, replacing a file | trajectory, previous version, tool `delta` | trajectory, tool `delta` |
-| Edit | trajectory, previous version, tool `delta` | trajectory, previous version, tool `delta` |
-| Copy or Move | trajectory, tool `delta` | trajectory, source, tool `delta` |
-| Process | trajectory, tool `delta` | trajectory, every input, tool `delta` |
+| Claude Code started by `clappa`, on a tested release | Claude Code's own `Bash`, with the three lists added | Claude Code's built-in sandbox (bubblewrap on Linux, Seatbelt on macOS) and its proxy, configured for each call |
+| Claude Code otherwise | `mcp/file-tracker/SafeBash`, served by the file-tracker | Anthropic's sandbox runtime `srt`, the same runtime, started for each call |
 
-Label combination takes the minimum trust rank and intersects the audiences. The result is never less restrictive than any input.
+Before each session, `clappa` loads a preload into Claude Code and runs its self-test. The self-test checks that the lists survive Claude Code's input handling, that an undeclared file is hidden and an undeclared write does not reach the disk, and that each command reaches only its own hosts. If the release is not on the tested list or any check fails, `clappa` disables `Bash`, registers SafeBash, and prints why. A `Bash` call that declares no lists, such as one from Claude Code started without `clappa`, is refused. Both tools return the exit code, standard output and standard error as a successful result, so the call's label applies whatever the exit code.
 
-Three rows need attention:
+The annotator forwards the combined label of the input files, and the call's result carries it. The recorder applies the published label to every output file.
 
-- **Write uses trajectory provenance.** The new content carries everything already in model context, through the trajectory Label. It does not add the replaced file as a content dependency. The old version stays in history.
-- **Edit also uses file provenance.** The patch derives from the previous version, so the runtime records that version as a dependency and combines its Label.
-- **Copy and Move keep the payload out of the trajectory.** They return a fixed confirmation, so the source Label does not enter model context. The destination still gets the source's Label, and `requires` is checked against it. A copy of a `self` file into a destination that only accepts `public` data is refused, even though the model never saw the bytes.
+The label of a copied secret therefore survives across sessions. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later shell command that reads `/tmp/notes.txt` narrows its session to `self`, in this session or in any other, so a later public sink such as `WebFetch` is refused.
 
-`requires` is checked before the call, against what the call sends: the trajectory Label, combined with the tool's `forwards` and the file content the call sends. An Edit sends the previous version, a Copy or Move sends the source, and a Process sends every input. A Read sends no file content, and a Write does not send the version it replaces.
+The hosts a call declares do not change its label. The sandbox confines the command to them, but APPA does not check what a host may receive.
 
-An error message gets the same Label a success would have had, so an error cannot reveal more than a success.
+### Per harness
 
-### One event stream per workspace
+| Harness | File tools | Shell |
+|---|---|---|
+| Claude Code | `Read`, `Write`, `Edit`, `Bash`, and `mcp/file-tracker/SafeBash` use the file-tracker annotator and recorder. | `clappa` confines `Bash` per call in Claude Code's sandbox, or serves SafeBash where it cannot. It starts Claude Code without `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`, and the battery blocks them. |
+| OpenCode | No file-tracker yet: the battery gives `read`, `write` and `edit` static rules, and a read under `*/private/*` narrows the session to `internal`. | The shell permits only `pwd`. |
+| Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. No file-tracker runs. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
 
-The runtime records file transitions in an append-only event stream for each canonical workspace. A root trajectory binds permanently to its working directory on its first file call. Its subagents inherit that binding. Separate roots bound to the same workspace share its versions, Labels, receipts, and one active reservation.
-
-A path receives the configured initial Label only when a call first touches it and no history exists. The runtime records a content digest to verify the bytes. The digest does not classify them. Events retain version metadata, not historical file content.
-
-Workspace events and root bindings use the configured SQLite, memory, or PostgreSQL event-log backend. Durable backends preserve them across runtime restarts. A restart does not clear an active quarantine.
-
-A workspace's event stream records the policy it opened under, and its Labels rank against that policy's trust chain. Every root of the runtime's `deployment` can use the stream across policy revisions while each revision keeps the same trust chain. After a revision changes the chain, file tools refuse calls in that workspace.
-
-The runtime requires exclusive ownership of a dedicated workspace. No other process may edit it. The workspace cannot contain symlinks or hard links. Keep policy, database, credentials, plugins, and sandbox backends outside it.
-
-### Durability and repair
-
-Only one file operation can hold the workspace reservation. The runtime records the proposed operation and its output Label before changing the filesystem. It then changes the file, records the new version, and admits the result.
-
-The filesystem and event log cannot commit in one atomic transaction. If an outcome is missing after the writer stops, the runtime tries to repair the event stream:
-
-- If the workspace still matches the pinned input, it releases the reservation.
-- If the workspace matches an output that the recorded request could produce, it records that version under the request's bound Label. It does not claim that the call succeeded.
-- If neither state matches, the workspace stays quarantined. Every later file call into that workspace is refused.
-
-If a runtime crash prevents automatic repair, stop every workspace writer and run:
-
-```sh
-appa files repair --workspace /path/to/workspace
-```
-
-Repair never chooses a new Label. To assign the configured initial Label to selected current files, resolve any pending operation and run an explicit relabel:
-
-```sh
-appa files relabel --workspace /path/to/workspace path/to/file
-```
-
-### Turn it on
-
-The `[file_tracking]` table enables the feature. Its settings define the initial Label for a path that has no recorded history. This complete policy enables file tracking with the `secrets/` and `public/` rules from the example:
-
-The policy must explicitly declare all six file tools; undeclared tools are refused. Tool-input sanitizers and rewrite routes are disallowed because they can change paths after pinning. Output-only sanitizers remain available, but `confined_results` cannot name a runtime-owned file tool.
-
-```toml
-[policy]
-version = 2
-
-[file_tracking]
-initial_trust = "suspicious"
-initial_audience = "public"
-
-# The first matching rule wins, so selected paths come first.
-[[policy.tool]]
-name = "mcp/appa/appa_read_file(file_path:secrets/*)"
-delta = { audience = ["self"] }
-
-[[policy.tool]]
-name = "mcp/appa/appa_write_file(file_path:public/*)"
-requires = { audience = { contains = ["public"] } }
-
-[[policy.tool]]
-name = "mcp/appa/appa_copy_file(destination_path:public/*)"
-requires = { audience = { contains = ["public"] } }
-
-# Declare every file tool. An empty delta leaves Labels unchanged.
-[[policy.tool]]
-name = "mcp/appa/appa_read_file"
-delta = {}
-
-[[policy.tool]]
-name = "mcp/appa/appa_write_file"
-delta = {}
-
-[[policy.tool]]
-name = "mcp/appa/appa_edit_file"
-delta = {}
-
-[[policy.tool]]
-name = "mcp/appa/appa_copy_file"
-delta = {}
-
-[[policy.tool]]
-name = "mcp/appa/appa_move_file"
-delta = {}
-
-[[policy.tool]]
-name = "mcp/appa/appa_process_files"
-delta = {}
-
-# Subagent spawns run only when the policy declares them.
-[[policy.tool]]
-name = "host/claude-code/Agent"
-delta = {}
-
-[policy.deployment]
-context_control = true
-
-[externals]
-timeout_ms = 5000
-max_body_bytes = 65536
-```
-
-If the default Claude Code install already uses port 8787, run this experimental runtime on another port. `clappa` selects the installed default runtime, so use the explicit environment variables below to select this one:
-
-```sh
-appa runtime --config /host/file-policy.toml --db /host/runtime.db --listen 127.0.0.1:8788
-cd /path/to/workspace
-APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude
-```
-
-The runtime warns that complete file mediation requires native tools and implicit reads to be disabled. The installed Claude Code plugin cannot enforce that condition. Native tools remain visible. After the first file call binds the workspace, the runtime refuses native filesystem and shell calls. Other policy-approved tools, including MCP tools, continue through ordinary admission.
-
-The [file mediation design note](https://github.com/archestra-ai/OpenAPPA/blob/main/appa-runtime/FILE-MEDIATION.md) specifies the event stream, reservation lifecycle, repair rules, and test coverage.
+The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. The SafeBash fallback needs `srt` on `PATH`.
 
 ### Limits
 
-File taint tracking covers runtime-owned file calls and nothing outside them:
-
-- **Claude Code is not confined.** Native tools stay installed. Native filesystem and shell calls are refused after binding, but Claude Code can perform native validation before a hook. It also reads project instructions and memory without a tool call.
-- **Inference is not checked.** Requests to the model provider and final responses remain outside this boundary.
-- **Only declared processing is isolated.** Before binding, a shell `cp` or `mv` does not carry a Label. After binding, native shell calls are refused.
-- **The filesystem and event log are not one transaction.** Automatic or manual repair handles only states attributable to the recorded request. Incompatible states remain quarantined.
-- **Relabelling is an operator action.** File operations and repair never lower a Label. Tool-input sanitizers and rewrites remain unsupported.
-- **Outside writers break the model.** The runtime assumes exclusive ownership of the workspace.
-
-## Isolated file processing
-
-Some work needs a program rather than a file tool: a script that totals invoices, a formatter, or a build step. `appa_process_files(input_paths, output_path, command)` runs one shell command on snapshots of the declared input files. The command writes one output file.
-
-The runtime does not mount the workspace. The command sees read-only copies of the inputs and a private output directory. A sandbox backend built from [agentsh](https://github.com/archestra-ai/OpenAPPA/tree/main/integrations/agentsh) runs it with Linux namespaces, Landlock, and seccomp. The command has no network, an empty environment, and resource limits. If the sandbox cannot start, the command does not run.
-
-The output file, stdout, stderr, and failures receive the combined Label of every declared input. OpenAPPA cannot see which inputs the program used, so all declared inputs contribute.
-
-Enable it by adding `--file-process-backend /host/backend` to the runtime command. It requires `[file_tracking]`.
+- A shell command can send its input files to any host it declares. Network destinations carry no policy yet.
+- Credential variables are withheld by name. A variable whose name does not say it holds a credential reaches the command.
+- The system directories other than `/etc` and `/run`, such as `/usr` and `/lib`, are assumed to hold no credentials. A labeled file there is readable by a command that does not declare it.
+- A file that changes outside a mediated call keeps its recorded label. A process outside the sandbox can still copy a file without its label.
+- A read waits while a write of the same file has not yet reached the recorder. If the write does not settle within the wait, the read fails and the agent can propose it again.
+- The stored audience must be one clause of audiences the policy declares. A file that two unrelated restricted audiences wrote fails its next annotation.
+- Model-provider requests and assistant messages are not mediated.

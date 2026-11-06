@@ -1,13 +1,14 @@
-//! Claude Code battery: a command naming a credential path, or one of the Databricks CLI's
-//! credential commands with its global flags anywhere before the verb, narrows the session
-//! to `self` by a static rule, and no classifier is asked. Every other shell command, and
-//! every Monitor call, is the Annotator's. PowerShell follows the same rules.
+//! The coding battery's shell rules, in a deployment that binds its canonical `shell` and
+//! `powershell` to Claude Code's Bash and PowerShell: a command naming a credential path, or
+//! one of the Databricks CLI's credential commands with its global flags anywhere before
+//! the verb, narrows the session to `self` by a static rule, and no classifier is asked.
+//! Every other command is the Annotator's. PowerShell follows the same rules.
 #![cfg(unix)]
 mod common;
 
-use appa_runtime::api::{ConsultRecord, ConsultRecorder, Runtime};
+use appa_runtime::api::{ConsultRecord, ConsultTranscriber, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{fake_claude, propose, raw, repo_root, session_runtime};
+use common::{fake_claude, including_coding_on_native_claude_code_tools, propose, raw, repo_root, session_runtime};
 use std::sync::Arc;
 
 fn bash(command: &str) -> ProposedCall {
@@ -26,21 +27,11 @@ fn shell(tool: &str, command: &str) -> ProposedCall {
     }
 }
 
-/// The shipped default and battery under a failing `claude`: a static credential
-/// rule narrows without consulting the Bash Annotator.
+/// The shipped default over the coding battery bound to Claude Code's native tools, under a
+/// failing `claude`: a static credential rule narrows without consulting the Bash
+/// Annotator, and a call that reaches the Annotator is refused.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    for battery in ["coding", "claude-code"] {
-        let target = dir.path().join("batteries").join(battery);
-        std::fs::create_dir_all(&target).unwrap();
-        std::fs::copy(
-            repo_root()
-                .join("marketplace/batteries")
-                .join(battery)
-                .join("appa.toml"),
-            target.join("appa.toml"),
-        )
-        .unwrap();
-    }
+    let include = including_coding_on_native_claude_code_tools(dir.path());
     let command = fake_claude(dir.path(), "exit 1");
     let path = dir.path().join("appa.toml");
     let root_policy =
@@ -48,7 +39,7 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
     std::fs::write(
         &path,
         format!(
-            "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{root_policy}\n[externals.claude_code]\ncommand = \"{command}\"\n",
+            "{include}{root_policy}\n[externals.claude_code]\ncommand = \"{command}\"\n",
             command = command.display(),
         ),
     )
@@ -234,32 +225,10 @@ async fn a_command_naming_a_dotenv_file_narrows_and_one_merely_containing_env_do
     }
 }
 
-#[tokio::test]
-async fn a_monitor_call_is_the_annotators_whether_it_runs_a_command_or_opens_a_socket() {
-    let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
-
-    for arguments in [
-        serde_json::json!({ "command": "tail -f build.log", "description": "build", "timeout_ms": 60000 }),
-        serde_json::json!({ "ws": { "url": "wss://events.example/stream" }, "description": "events", "timeout_ms": 60000 }),
-    ] {
-        let monitor = ProposedCall {
-            tool: "host/claude-code/Monitor".to_string(),
-            arguments: raw(arguments.clone()),
-            cwd: None,
-        };
-        let decision = propose(&runtime, monitor).await;
-        assert!(
-            matches!(decision, HookDecision::Refuse { .. }),
-            "an unanswered Annotator fails closed for {arguments}: {decision:?}"
-        );
-    }
-}
-
 #[derive(Default)]
 struct Consulted(std::sync::Mutex<Vec<String>>);
 
-impl ConsultRecorder for Consulted {
+impl ConsultTranscriber for Consulted {
     fn record(&self, record: ConsultRecord) {
         self.0.lock().unwrap().push(record.external_name);
     }
@@ -274,7 +243,7 @@ impl Consulted {
 /// The runtime with the name of every external it consults kept in the returned recorder.
 async fn recorded(dir: &tempfile::TempDir) -> (Arc<Runtime>, Arc<Consulted>) {
     let consulted = Arc::new(Consulted::default());
-    let runtime = Arc::new(runtime(dir).await.recording(consulted.clone()));
+    let runtime = Arc::new(runtime(dir).await.transcribing(consulted.clone()));
     (runtime, consulted)
 }
 

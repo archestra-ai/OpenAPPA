@@ -403,22 +403,6 @@ pub(crate) fn withheld_return_instruction(cause: &str) -> String {
 const CLEAR_KEPT: &str = "APPA kept this session's label across /clear: a subagent or a call it started is still \
                           running or owed. Run /clear again after it finishes to start with a clean label.";
 
-fn file_tracking_context(runtime: &Runtime) -> String {
-    "APPA file tracking is enabled. Use appa_read_file(file_path), appa_write_file(file_path, content), \
-     appa_edit_file(file_path, old_string, new_string), and \
-     appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
-     Paths resolve within this root session's working directory. The first file call binds the root \
-     and its subagents to that shared workspace. After binding, APPA refuses the harness's native \
-     filesystem and shell tools. Other policy-approved tools remain available. APPA does not track \
-     observations that the harness makes before a call."
-        .to_owned()
-        + if runtime.file_process_enabled() {
-            " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
-        } else {
-            ""
-        }
-}
-
 /// The runtime's reporting tool as a policy names it.
 #[cfg(feature = "daemon")]
 const YELL_TOOL: &str = "mcp/appa/yell";
@@ -685,13 +669,10 @@ impl Dispatcher<'_> {
         {
             tracing::warn!(root = %root.0, %error, "the session's peer identity was not recorded");
         }
-        let context = [
-            matches!(launched, LaunchedStart::ClearKept(_)).then_some(CLEAR_KEPT.to_owned()),
-            runtime.file_tracking_enabled().then(|| file_tracking_context(runtime)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let context = [matches!(launched, LaunchedStart::ClearKept(_)).then_some(CLEAR_KEPT.to_owned())]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         match opened.and_then(|_| runtime.live(&root, &root)) {
             Ok(()) if context.is_empty() => HookDecision::Ack,
             Ok(()) => HookDecision::Context {
@@ -914,11 +895,6 @@ impl Dispatcher<'_> {
     ) -> HookDecision {
         if is_control_tool(&call.tool) {
             tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
-            return HookDecision::Ack;
-        }
-        if self.runtime.file_tracking_enabled() && crate::api::files::owns(&call) {
-            // The runtime-owned tool admitted its observation before returning via MCP.
-            // A transport/argument failure before execution leaves its reservation intact.
             return HookDecision::Ack;
         }
         let failed = matches!(outcome, ToolOutcome::Failure { .. });

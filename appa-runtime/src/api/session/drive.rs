@@ -659,6 +659,7 @@ impl Session {
             match appended {
                 Ok(()) => {
                     self.inner.shared.spawn_holds.appended();
+                    self.inner.deliver_records(&self.root);
                     return Ok(decision);
                 }
                 Err(appa_eventlog::AppendError::ReadClaimLost) => {

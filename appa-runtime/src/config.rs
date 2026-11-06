@@ -63,9 +63,6 @@ pub struct Config {
     /// Deliberately outside [`PolicyFile`]: changing one must not move the policy file key
     /// that every session's opening binds to.
     pub reporting: Reporting,
-    /// Root-local file tracking configuration. Its presence enables one in-memory file
-    /// ledger per root trajectory; it is not part of the stored policy bytes.
-    pub file_tracking: Option<FileTrackingConfig>,
     included_batteries: Vec<String>,
     /// Whether the deployment serves `appa/do_something`. Never read from the document: a
     /// replay opts in with [`Config::with_do_something`], so no policy file can serve it.
@@ -78,22 +75,6 @@ pub struct Reporting {
     /// May an agent send a report on its own, through the `yell` tool? Off unless the
     /// deployment says otherwise, so an upgrade never starts an agent reporting.
     pub agent_yell: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FileTrackingConfig {
-    pub initial_trust: String,
-    pub initial_audience: InitialFileAudience,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum InitialFileAudience {
-    #[serde(rename = "self")]
-    Self_,
-    Internal,
-    Public,
 }
 
 /// The runtime's own environment namespace: its wiring (`APPA_CONFIG`, `APPA_DB`,
@@ -308,6 +289,10 @@ pub struct Externals {
     /// The deployer's instruction on reading each context provider's facts, for every provider
     /// in `context` that declares a `hint`.
     pub context_hints: BTreeMap<ContextProviderName, ContextHint>,
+    /// One recorder per `[externals.recorders.<name>]`, under its name: delivered the dispatch
+    /// records of every call whose declaration names it, after they are appended. Never
+    /// consulted: a recorder neither denies nor delays a call.
+    pub recorders: BTreeMap<String, Transport>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -952,15 +937,18 @@ pub(crate) enum Section {
     Audience,
     /// One context provider per `[externals.context.<name>]`.
     Context,
+    /// One recorder per `[externals.recorders.<name>]`.
+    Recorders,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 5] = [
+    pub(crate) const ALL: [Section; 6] = [
         Section::Authorities,
         Section::Sanitizers,
         Section::Annotators,
         Section::Audience,
         Section::Context,
+        Section::Recorders,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -970,6 +958,7 @@ impl Section {
             Section::Annotators => "annotators",
             Section::Audience => "audience",
             Section::Context => "context",
+            Section::Recorders => "recorders",
         }
     }
 
@@ -988,7 +977,7 @@ impl Section {
     /// on its policy declaration instead, and an audience entry is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
-            Section::Annotators | Section::Audience | Section::Context => {
+            Section::Annotators | Section::Audience | Section::Context | Section::Recorders => {
                 return Err(ConfigError::BuiltinNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
@@ -1019,8 +1008,6 @@ struct RawConfig {
     /// reaches [`PolicyFile::bytes`]. See [`Config::load`].
     #[serde(default)]
     reporting: RawReporting,
-    /// Root-file only, and stripped before the composed document is rendered.
-    file_tracking: Option<FileTrackingConfig>,
     /// Offline packaging inputs, not part of the policy identity.
     #[serde(default)]
     bundle: RawBundle,
@@ -1091,6 +1078,8 @@ struct RawExternals {
     audience: BTreeMap<String, RawAudienceBinding>,
     #[serde(default)]
     context: BTreeMap<String, RawContextBinding>,
+    #[serde(default)]
+    recorders: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
     jev: Option<RawJev>,
@@ -1103,6 +1092,7 @@ impl RawExternals {
             (Section::Authorities, &self.authorities),
             (Section::Sanitizers, &self.sanitizers),
             (Section::Annotators, &self.annotators),
+            (Section::Recorders, &self.recorders),
         ];
         bindings
             .into_iter()
@@ -1286,13 +1276,13 @@ impl Config {
                 field: "credentials".to_string(),
             });
         }
-        // The reporting and file-tracking knobs are this machine's, not the policy's, and
+        // The reporting knobs are this machine's, not the policy's, and
         // the packaging inputs are authored, not composed. They are read from the root
         // file's own parse and dropped from the composed document, so the stored text — and
         // with it the policy file key every opening binds to — is byte-identical whether or
         // not the deployment set them.
         let _ = &root.bundle.files;
-        for local in ["include", "reporting", "file_tracking", "bundle"] {
+        for local in ["include", "reporting", "bundle"] {
             table.remove(local);
         }
 
@@ -1329,7 +1319,6 @@ impl Config {
         let reporting = Reporting {
             agent_yell: root.reporting.agent_yell,
         };
-        let file_tracking = root.file_tracking.clone();
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         add_composed_metadata(&mut document, &raw.externals, &origins)?;
@@ -1338,7 +1327,6 @@ impl Config {
             stored,
             raw,
             reporting,
-            file_tracking,
             origins,
             included_batteries.into_iter().collect(),
             keys,
@@ -1500,7 +1488,6 @@ impl Config {
             rendered,
             raw,
             Reporting::default(),
-            None,
             BTreeMap::new(),
             included_batteries.into_iter().collect(),
             keys,
@@ -1594,12 +1581,10 @@ impl Config {
             .into_iter()
             .map(|key| (key, source_dir.to_path_buf()))
             .collect();
-        let file_tracking = raw.file_tracking.clone();
         Config::validate_composed(
             text,
             raw,
             Reporting::default(),
-            file_tracking,
             origins,
             Vec::new(),
             KeySource::Lookup(&lookup),
@@ -1610,7 +1595,6 @@ impl Config {
         text: String,
         raw: RawConfig,
         reporting: Reporting,
-        file_tracking: Option<FileTrackingConfig>,
         origins: BTreeMap<String, PathBuf>,
         included_batteries: Vec<String>,
         keys: KeySource<'_>,
@@ -1625,6 +1609,7 @@ impl Config {
             annotators,
             audience,
             context,
+            recorders,
             claude_code,
             llm,
             jev,
@@ -1661,7 +1646,6 @@ impl Config {
             credentials: raw.credentials,
             inventory: raw.appa_inventory,
             reporting,
-            file_tracking,
             included_batteries,
             do_something: crate::do_something::DoSomething::Refused,
             externals: Externals {
@@ -1680,6 +1664,10 @@ impl Config {
                     .map(|(name, implementation)| (name, transport_only(implementation)))
                     .collect(),
                 context_hints,
+                recorders: resolve(Section::Recorders, recorders)?
+                    .into_iter()
+                    .map(|(name, implementation)| (name, transport_only(implementation)))
+                    .collect(),
                 claude_code: resolve_claude_code(claude_code)?,
                 llm,
                 jev,
@@ -3035,9 +3023,10 @@ mod tests {
                         AudienceImplementation::Readers(_) => Bound::Readers,
                     });
             }
-            Section::Annotators | Section::Context => {
+            Section::Annotators | Section::Context | Section::Recorders => {
                 let table = match section {
                     Section::Context => &config.externals.context,
+                    Section::Recorders => &config.externals.recorders,
                     _ => &config.externals.annotators,
                 };
                 return table.get(name).map(Bound::of);
@@ -3319,7 +3308,7 @@ mod tests {
         // An Annotator names a stock builtin on its policy declaration, never here, and a
         // context provider takes none; an audience entry has no builtin key at all.
         for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
-            for section in [Section::Annotators, Section::Context] {
+            for section in [Section::Annotators, Section::Context, Section::Recorders] {
                 assert!(
                     matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
                     "{} must refuse builtin {builtin}",
@@ -4804,10 +4793,6 @@ mod tests {
             ("include", "include = [\"battery.toml\"]"),
             ("appa_composed", "[appa_composed]\ncommand_cwd = {}"),
             ("reporting", "[reporting]\nagent_yell = true"),
-            (
-                "file_tracking",
-                "[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"",
-            ),
             ("bundle", "[bundle]\nfiles = []"),
             ("appa_inventory", "[appa_inventory]\ntools = []"),
         ] {
@@ -5117,50 +5102,6 @@ mod tests {
         )
         .expect("the configuration is written");
         assert!(matches!(Config::load(&path), Err(ConfigError::Unparsable { .. })));
-    }
-
-    #[test]
-    fn file_tracking_is_off_without_its_complete_root_table() {
-        let dir = tempfile::tempdir().expect("temp directory");
-        assert!(reporting_config(dir.path(), "").file_tracking.is_none());
-
-        let enabled = reporting_config(
-            dir.path(),
-            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"self\"\n",
-        )
-        .file_tracking
-        .expect("the complete table enables file tracking");
-        assert_eq!(enabled.initial_trust, "suspicious");
-        assert_eq!(enabled.initial_audience, InitialFileAudience::Self_);
-
-        for table in [
-            "[file_tracking]\ninitial_trust=\"suspicious\"\n",
-            "[file_tracking]\ninitial_audience=\"public\"\n",
-            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"unknown\"\n",
-            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"public\"\nextra=true\n",
-        ] {
-            let path = dir.path().join("appa.toml");
-            std::fs::write(
-                &path,
-                format!("[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n{table}"),
-            )
-            .expect("the configuration is written");
-            assert!(
-                matches!(Config::load(&path), Err(ConfigError::Unparsable { .. })),
-                "{table}"
-            );
-        }
-    }
-
-    #[test]
-    fn file_tracking_settings_do_not_move_the_policy_file_key() {
-        let dir = tempfile::tempdir().expect("temp directory");
-        let without = reporting_config(dir.path(), "");
-        let with = reporting_config(
-            dir.path(),
-            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"public\"\n",
-        );
-        assert_eq!(without.policy_file().bytes(), with.policy_file().bytes());
     }
 
     /// A fragment confines the results of tools it declares itself, and nothing else of the

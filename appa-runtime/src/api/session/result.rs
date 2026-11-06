@@ -107,13 +107,10 @@ impl Session {
             Ok(dispatch) => dispatch,
             Err(_) => return Ok(()),
         };
-        let Some(basis) = crate::api::embedded::basis_of(&log, &self.trajectory, &dispatch) else {
+        let Some(held) = crate::api::embedded::held_of(&log, &self.trajectory, &dispatch) else {
             return Ok(());
         };
-        let appa_engine::value::FileBasis::Read(source) = &basis else {
-            return Ok(());
-        };
-        let Ok(id) = crate::api::embedded::EmbeddedPeerId::parse(&source.version) else {
+        let Ok(id) = crate::api::embedded::EmbeddedPeerId::parse(&held.id) else {
             return Ok(());
         };
         let Some(row) = self
@@ -126,7 +123,7 @@ impl Session {
         };
         if row.recipient != self.trajectory.as_str()
             || row.status != appa_eventlog::embedded::EmbeddedStatus::Read
-            || crate::api::embedded::message_basis(&row, policy.engine().trust_chain()) != basis
+            || crate::api::embedded::held_message(&row, policy.engine().trust_chain()) != held
         {
             return Ok(());
         }
@@ -149,61 +146,6 @@ impl Session {
         o: ToolOutcome,
     ) -> Result<ToolResultDecision, EventError> {
         self.refuse_substituted_embedded_read(&call, call_id.as_deref(), &o)?;
-        if self.inner.shared.files.is_some() && crate::api::files::owns(&call) {
-            crate::api::files::operation(&call)?;
-            let log = self.inner.log(&self.root)?;
-            let deployment = self.deployment();
-            let policy = self.inner.resolve_policy(&deployment, &log)?;
-            let open = self.report_calls(call_id.as_deref())?;
-            let dispatch = classify_report_identified(
-                &call,
-                call_id.as_deref(),
-                || policy.engine().canonical_bytes(&call),
-                &open,
-                log.call_bindings(),
-                &self.trajectory,
-            )
-            .map_err(UnreportableOutcome::refusal)?;
-            let key = crate::api::files::key(&dispatch)?;
-            // Preserve actual failure text: the native failure hook cannot reliably replace it.
-            // A missing observation is repaired after its writer has stopped.
-            let o = match o {
-                ToolOutcome::Success {
-                    body: OutcomeBody::Unavailable | OutcomeBody::TooLarge { .. },
-                } => ToolOutcome::Success {
-                    body: OutcomeBody::Available(String::new()),
-                },
-                other => other,
-            };
-            if matches!(o, ToolOutcome::Success { .. }) {
-                // Verify the physical version before admitting a successful result. A later
-                // trajectory append failure cannot erase this already-published file's Label
-                // from the authoritative workspace event stream.
-                self.ledger({
-                    let key = key.clone();
-                    move |store, actor| store.finish(actor, &key, true)
-                })
-                .await?;
-            }
-            let decision = self.report_outcome(&call, call_id.as_deref(), &o).await?;
-            match &o {
-                ToolOutcome::Indeterminate => {
-                    self.repair_file_reservation(&dispatch).await;
-                    return Err(crate::api::files::refused(
-                        "missing outcome; no file result can be delivered",
-                    ));
-                }
-                ToolOutcome::Failure { .. } => {
-                    self.ledger({
-                        let key = key.clone();
-                        move |store, actor| store.finish(actor, &key, false)
-                    })
-                    .await?;
-                }
-                ToolOutcome::Success { .. } => {}
-            }
-            return outcome_decision(decision, &self.deployment().externals);
-        }
         let o = self.cap_outcome(o);
         outcome_decision(
             self.report_outcome(&call, call_id.as_deref(), &o).await?,

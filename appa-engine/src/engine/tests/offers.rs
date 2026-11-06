@@ -89,6 +89,7 @@ fn an_output_sanitizer_plan_binds_its_sanitizer_when_the_approval_releases() {
         hint: None,
     };
     let e = open_engine(RegistryConfig {
+        recorders: Default::default(),
         sanitizers: vec![declassify],
         ..test_config(vec![crm_tool()])
     });

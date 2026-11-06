@@ -25,10 +25,30 @@ fn default_config_path() -> PathBuf {
     repo_root().join("marketplace/plugins/claude-code/default.appa.toml")
 }
 
-/// The shipped default config, byte for byte: what the marketplace writes on a
-/// first install, and what the fixture's config holds.
+/// The shipped default config as a first install writes it: the plugin's default with
+/// its batteries included. It is what the fixture's config holds.
 pub fn shipped_default_config() -> String {
-    fs::read_to_string(default_config_path()).expect("the shipped default is readable")
+    let default = fs::read_to_string(default_config_path()).expect("the shipped default is readable");
+    format!("include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{default}")
+}
+
+/// Write the shipped default config into `directory` beside the batteries it includes.
+pub fn write_shipped_default_config(directory: &Path) -> PathBuf {
+    for battery in ["coding", "claude-code"] {
+        let into = directory.join("batteries").join(battery);
+        fs::create_dir_all(&into).expect("the battery directory is created");
+        fs::copy(
+            repo_root()
+                .join("marketplace/batteries")
+                .join(battery)
+                .join("appa.toml"),
+            into.join("appa.toml"),
+        )
+        .expect("the battery is copied");
+    }
+    let config = directory.join("appa.toml");
+    fs::write(&config, shipped_default_config()).expect("the config is written");
+    config
 }
 
 pub fn executable(path: &Path) {
@@ -224,7 +244,7 @@ impl Fixture {
         }
         let config = root.join("config");
         fs::create_dir_all(&config).expect("config directory");
-        fs::write(config.join("appa.toml"), shipped_default_config()).expect("the config is written");
+        write_shipped_default_config(&config);
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("the stand-in runtime binds");
         let url = format!("http://{}", listener.local_addr().expect("the bound address"));

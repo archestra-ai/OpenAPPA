@@ -78,6 +78,8 @@ pub enum ConfigError {
         annotator: String,
         field: &'static str,
     },
+    #[error("tool {tool} names an empty recorder")]
+    EmptyRecorder { tool: String },
     #[error("tool {tool}: annotator {annotator} input {input} reads {reads}, {reason}")]
     AnnotatorInput {
         tool: String,

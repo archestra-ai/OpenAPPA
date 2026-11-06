@@ -1689,3 +1689,55 @@ delta = {}
         Err(ConfigError::UnknownTrustRank { name, .. }) if name == "vetted"
     ));
 }
+
+/// A recorder binds to the declaration that names it: the first matching selector wins, a call
+/// the explicit declarations do not cover falls to the wildcard's recorder, and a declaration
+/// that names none has none.
+#[test]
+fn a_recorder_follows_the_declaration_a_call_selects() {
+    let config = load(
+        r#"
+version = 2
+
+[[annotator]]
+name = "file-tracker"
+
+[[tool]]
+name = "Write(file_path:/scratch/*)"
+delta = {}
+
+[[tool]]
+name = "Write"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[tool]]
+name = "*"
+annotator = "file-tracker"
+recorder = "catch-all"
+"#,
+    )
+    .expect("the policy loads");
+    let engine = config.engine();
+    let recorder = |tool: &str, arguments: &str| {
+        let call = engine
+            .resolve_call(ToolName::new(tool), arguments.as_bytes())
+            .expect("the call resolves");
+        engine.recorder(&call).map(|name| name.as_str().to_string())
+    };
+    assert_eq!(recorder("Write", r#"{"file_path":"/scratch/a"}"#), None);
+    assert_eq!(
+        recorder("Write", r#"{"file_path":"/repo/a"}"#).as_deref(),
+        Some("file-tracker")
+    );
+    assert_eq!(recorder("Unwritten", "{}").as_deref(), Some("catch-all"));
+    assert_eq!(
+        engine
+            .registry()
+            .recorders()
+            .into_iter()
+            .map(|name| name.as_str())
+            .collect::<Vec<_>>(),
+        ["catch-all", "file-tracker"]
+    );
+}

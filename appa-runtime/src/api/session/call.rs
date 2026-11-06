@@ -17,13 +17,13 @@ pub(super) const FAN_OUT_AHEAD: &str = "[appa] A return declared ahead covers a 
 pub(super) const APPLY_BELOW: &str = " Apply a plan below.";
 
 /// One proposed tool call and what came with it: the host's call id, the spawn it starts, the
-/// prompt a fan-out spawn is keyed by, and the file basis a tracked file call was pinned to.
+/// prompt a fan-out spawn is keyed by, and the held peer message a held read delivers.
 struct Proposal {
     call: ProposedCall,
     call_id: Option<String>,
     spawn: Option<SpawnKind>,
     prompt: Option<PromptKey>,
-    file_basis: Option<appa_engine::value::FileBasis>,
+    held_message: Option<appa_engine::value::HeldMessage>,
 }
 
 impl Session {
@@ -52,7 +52,7 @@ impl Session {
                 call_id,
                 spawn,
                 prompt,
-                file_basis: None,
+                held_message: None,
             })
             .await;
         crate::telemetry::policy(&result, &tool, started.elapsed().as_secs_f64());
@@ -60,168 +60,38 @@ impl Session {
     }
 
     async fn check_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
-        let call = &proposal.call;
-        if let Some(id) = crate::api::peer::held_read(call) {
-            let log = self.inner.log(&self.root)?;
-            let chain = self.inner.trust_chain(&self.deployment(), &log)?;
-            let basis = crate::api::peer::held_basis(&self.inner.store, &self.root, &id, &chain)?;
-            return self
-                .propose_tool_call(Proposal {
-                    file_basis: Some(basis),
-                    ..proposal
-                })
-                .await;
-        }
-        let Some(files) = &self.inner.shared.files else {
-            return self.propose_tool_call(proposal).await;
-        };
-        if !crate::api::files::owns(call) {
-            let bound = files
-                .root_is_bound(&self.inner.store, &self.root)
-                .map_err(crate::api::files::refused)?;
-            if bound && crate::api::files::bypasses_tracking(call) {
-                return Err(crate::api::files::refused(
-                    "the bound workspace refuses native filesystem and shell tools",
-                ));
-            }
-            return self.propose_tool_call(proposal).await;
-        }
-        let ledger_policy = match call.cwd.as_deref() {
-            Some(cwd) => files.bind(&self.inner.store, &self.root, cwd),
-            None => files.store(&self.inner.store, &self.root),
-        }
-        .and_then(|store| store.policy())
-        .map_err(crate::api::files::refused)?;
-        let (operation, path) = crate::api::files::operation(call)?;
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        // A family shares the ledger with every family of its deployment while the ledger opened
-        // under a policy file the deployment published with the trust chain the family is judged
-        // under: the ledger's labels rank against that chain.
-        let followed = log.deployment();
-        let shares_ledger = followed.as_str() == files.deployment
-            && match self
-                .inner
-                .store
-                .published_as(followed, &ledger_policy)
-                .map_err(|error| EventError::Storage(error.to_string()))?
-            {
-                Some(revision) => {
-                    let ledger_chain = self.inner.replay_engine(revision.value(), None)?;
-                    let judging = self.inner.trust_chain(&deployment, &log)?;
-                    ledger_chain.trust_chain().names().eq(judging.names())
-                }
-                None => false,
-            };
-        if !shares_ledger {
-            return Err(crate::api::files::refused(
-                "the workspace ledger must belong to the trajectory's policy and rank its labels against \
-                 the same trust chain",
-            ));
-        }
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let view = policy.rebuild_view(&log)?;
-        let expected = policy.engine().file_dispatch(&view, &self.trajectory, call)?;
-        let key = crate::api::files::key(&expected)?;
-        let pin = match operation {
-            appa_eventlog::files::FileOperation::Process => {
-                if files.process_backend.is_none() {
-                    return Err(crate::api::files::refused("isolated processing is not enabled"));
-                }
-                let args: crate::api::files::ProcessArgs =
-                    serde_json::from_str(call.arguments.get()).map_err(crate::api::files::refused)?;
-                self.ledger({
-                    let (key, path, inputs) = (key.clone(), path.clone(), args.input_paths);
-                    move |store, actor| store.prepare_process(actor, &key, &inputs, &path)
-                })
-                .await?
-            }
-            appa_eventlog::files::FileOperation::Copy | appa_eventlog::files::FileOperation::Move => {
-                let args: crate::api::files::FileTransferArgs =
-                    serde_json::from_str(call.arguments.get()).map_err(crate::api::files::refused)?;
-                self.ledger({
-                    let (key, path, source) = (key.clone(), path.clone(), args.source_path);
-                    move |store, actor| store.prepare_transfer(actor, &key, operation, &source, &path)
-                })
-                .await?
-            }
-            _ => {
-                self.ledger({
-                    let (key, path) = (key.clone(), path.clone());
-                    move |store, actor| store.prepare(actor, &key, operation, &path)
-                })
-                .await?
-            }
-        };
-        // Managed writes must not reconfigure Claude Code, Git hooks, or MCP execution.
-        // Claude loads instruction files implicitly, outside the file-tool observation path.
-        let moved_from = match &pin.basis {
-            appa_eventlog::files::PinnedBasis::Move { source, .. } => Some(source.path.as_str()),
-            _ => None,
-        };
-        if operation != appa_eventlog::files::FileOperation::Read
-            && std::iter::once(pin.path.as_str())
-                .chain(moved_from)
-                .flat_map(|path| path.split('/'))
-                .any(|part| {
-                    matches!(
-                        part,
-                        ".claude" | ".git" | ".mcp.json" | ".appa" | "CLAUDE.md" | "CLAUDE.local.md"
-                    )
-                })
-        {
-            files
-                .store(&self.inner.store, &self.root)
-                .map_err(crate::api::files::refused)?
-                .cancel(&self.trajectory.0, &key)
-                .map_err(crate::api::files::refused)?;
-            return Err(crate::api::files::refused(
-                "execution-control files are not writable in file-tracking mode",
-            ));
-        }
-        let decision = self
-            .propose_tool_call(Proposal {
-                file_basis: Some(pin.file_basis()),
-                ..proposal
-            })
-            .await;
-        match &decision {
-            Ok(ToolCallDecision::Allow { dispatch, .. }) => {
-                if dispatch != &expected {
-                    return Err(crate::api::files::refused("dispatch changed while reserving the file"));
-                }
+        let held_message = match crate::api::peer::held_read(&proposal.call) {
+            Some(id) => {
                 let log = self.inner.log(&self.root)?;
-                let view = policy.rebuild_view(&log)?;
-                let label = policy.engine().file_output_label(&view, dispatch)?;
-                files
-                    .store(&self.inner.store, &self.root)
-                    .map_err(crate::api::files::refused)?
-                    .bind(&self.trajectory.0, &key, dispatch, &label)
-                    .map_err(crate::api::files::refused)?;
+                let chain = self.inner.trust_chain(&self.deployment(), &log)?;
+                Some(crate::api::peer::held_message(
+                    &self.inner.store,
+                    &self.root,
+                    &id,
+                    &chain,
+                )?)
             }
-            _ => {
-                files
-                    .store(&self.inner.store, &self.root)
-                    .map_err(crate::api::files::refused)?
-                    .cancel(&self.trajectory.0, &key)
-                    .map_err(crate::api::files::refused)?;
-            }
-        }
-        decision
+            None => None,
+        };
+        self.propose_tool_call(Proposal {
+            held_message,
+            ..proposal
+        })
+        .await
     }
 
-    pub(crate) async fn propose_with_basis(
+    pub(crate) async fn propose_with_held(
         &self,
         call: ProposedCall,
         call_id: Option<String>,
-        basis: appa_engine::value::FileBasis,
+        held: appa_engine::value::HeldMessage,
     ) -> Result<ToolCallDecision, EventError> {
         self.propose_tool_call(Proposal {
             call,
             call_id,
             spawn: None,
             prompt: None,
-            file_basis: Some(basis),
+            held_message: Some(held),
         })
         .await
     }
@@ -312,7 +182,7 @@ impl Session {
             call_id,
             spawn,
             prompt,
-            file_basis,
+            held_message,
         } = proposal;
         let spawn = *spawn;
         self.inner.note_working_directory(&self.root, call.cwd.as_deref());
@@ -328,8 +198,10 @@ impl Session {
         let decision = self
             .drive_with_evidence(
                 |context, mut evidence| {
-                    if let Some(basis) = file_basis {
-                        evidence.push(ExternalEvidence::File { basis: basis.clone() });
+                    if let Some(message) = held_message {
+                        evidence.push(ExternalEvidence::Held {
+                            message: message.clone(),
+                        });
                     }
                     Ok(EngineEvent::ModelResponse {
                         call: call.clone(),

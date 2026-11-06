@@ -149,6 +149,9 @@ pub(crate) struct RawTool {
     /// The registered `[[annotator]]` that produces this tool's semantics per call. Replaces
     /// the static `delta`/`forwards`/`requires`/`effects` — a declaration carries one recipe.
     pub(crate) annotator: Option<String>,
+    /// The `[externals.recorders]` entry that receives the label each released call of this
+    /// declaration publishes. Routing only: it changes no decision.
+    pub(crate) recorder: Option<String>,
 }
 
 #[derive(Deserialize)]

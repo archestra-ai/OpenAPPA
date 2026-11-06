@@ -288,6 +288,12 @@ async fn run_command_process(
     let Some((executable, arguments)) = command.argv.split_first() else {
         return Err(NoAnswerReason::Unregistered);
     };
+    // `appa` names this runtime's own executable, which serves the plugins it ships, so a
+    // binding to one works wherever the runtime runs, on PATH or not.
+    let executable = match executable.as_str() {
+        "appa" => std::env::current_exe().map_err(|_| NoAnswerReason::Unreachable)?,
+        other => std::path::PathBuf::from(other),
+    };
     let mut configured = tokio::process::Command::new(executable);
     configured
         .args(arguments)

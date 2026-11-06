@@ -45,7 +45,7 @@ impl Session {
     /// most common reason an agent appears to be stuck for no reason the trajectory's facts
     /// explain, and the duration is only knowable at the await.
     ///
-    /// With a recorder attached, the consult is also transcribed and its record handed over
+    /// With a transcriber attached, the consult is also transcribed and its record handed over
     /// once the outcome is known. `call` is the canonical call an annotation consult judges.
     #[tracing::instrument(target = "appa_telemetry", name = "appa.external.call", skip_all, fields(
         appa.trajectory.root = crate::telemetry::name(&self.root.0),
@@ -65,7 +65,7 @@ impl Session {
         let deployment = self.deployment();
         let externals = &deployment.externals;
         let consulting = async {
-            match &self.inner.recorder {
+            match &self.inner.transcriber {
                 // Boxed: the transport future is large, and every drive awaits it deep in the stack.
                 Some(_) => Box::pin(externals.consult_transcribed(consult, elicitation, ruling)).await,
                 None => (Box::pin(externals.consult(consult, elicitation, ruling)).await, None),
@@ -101,7 +101,7 @@ impl Session {
                 dispatch: None,
             },
         );
-        if let (Some(recorder), Some(transcript)) = (&self.inner.recorder, transcript) {
+        if let (Some(transcriber), Some(transcript)) = (&self.inner.transcriber, transcript) {
             // The host's code: whatever it does, the outcome below stands.
             let recorded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let context = ConsultContext {
@@ -117,13 +117,13 @@ impl Session {
                 if let Some(record) =
                     ConsultRecord::new(consult, &outcome, transcript, started_at, duration_ms, context)
                 {
-                    recorder.record(record);
+                    transcriber.record(record);
                 }
             }));
             if recorded.is_err() {
                 tracing::warn!(
                     external = consult.name,
-                    "the consult recorder panicked; the record is dropped"
+                    "the consult transcriber panicked; the record is dropped"
                 );
             }
         }

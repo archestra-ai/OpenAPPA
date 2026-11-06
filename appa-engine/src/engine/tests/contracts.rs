@@ -91,6 +91,7 @@ fn required_rulings_route_each_gap_to_its_authority() {
         hint: None,
     };
     let cfg = RegistryConfig {
+        recorders: Default::default(),
         authorities: vec![officer],
         ..test_config(vec![wire])
     };
@@ -354,6 +355,7 @@ fn ordered_read_engine_tagged(desks: &[&str], private_tag: &str) -> Engine {
     };
     open_engine_at(
         RegistryConfig {
+            recorders: Default::default(),
             tools: {
                 let mut tools = vec![public];
                 tools.extend(declared(vec![private, plain_tool("note")]));
@@ -753,6 +755,7 @@ fn a_rewrite_into_a_contract_reading_a_group_asks_for_its_answer_afresh() {
     };
     let e = open_engine_at(
         RegistryConfig {
+            recorders: Default::default(),
             sanitizers: vec![input_sanitizer(
                 "redact",
                 &["insider"],
@@ -867,7 +870,7 @@ fn replay_refuses_a_corrupt_dispatched_call() {
                 receiving: Label::new(TRUSTED, Audience::public()),
                 proposed_effects: EffectSet::default(),
                 annotation: None,
-                file_basis: None,
+                held: None,
                 subject: crate::basis::fixture_subject(&traj()),
                 evidence: crate::audience::AudienceEvidence::default(),
                 terms: crate::fact::ReleaseTerms::none(),
@@ -913,6 +916,7 @@ fn the_ruling_binds_the_payload_by_digest_and_never_copies_it() {
         hint: None,
     };
     let cfg = RegistryConfig {
+        recorders: Default::default(),
         authorities: vec![officer],
         ..test_config(vec![wire])
     };

@@ -28,7 +28,6 @@ mod call;
 mod child;
 mod consult;
 mod drive;
-mod file_calls;
 mod remedy;
 mod result;
 
@@ -185,7 +184,6 @@ impl Session {
                 .await
             {
                 Ok(_) => {
-                    self.repair_file_reservation(&dispatch.id).await;
                     tracing::debug!(
                         trajectory = %self.trajectory.0,
                         dispatch = ?dispatch.id,
