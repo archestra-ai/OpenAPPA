@@ -767,7 +767,7 @@ pub enum ConfigError {
         source: Box<appa_package::ManifestError>,
     },
     #[error(
-        "the root config includes {path:?}, a file of a battery with target policies other than its base; include the battery's base, and {BATTERY_TARGET_VARIABLE} picks the target policy"
+        "the root config includes {path:?} from a battery with target policies; include the battery's base instead, and {BATTERY_TARGET_VARIABLE} picks the target policy"
     )]
     TargetPolicyIncluded { path: String },
     #[error(
