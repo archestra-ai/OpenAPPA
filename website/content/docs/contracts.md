@@ -1348,6 +1348,17 @@ timeout_ms = 2000
 max_body_bytes = 65536
 ```
 
+An entry can also name every policy file in one folder, such as `mcp/*.toml`. Then each team can add its own file without a change to the root:
+
+```toml
+include = [
+  "batteries/github/appa.toml",
+  "mcp/*.toml",
+]
+```
+
+In such an entry, `*` matches any run of characters in a file name. Only the file name can hold `*`, and it MUST end in `.toml`. The matching files load at the entry's position, in file-name order, as if `include` listed each one. A hidden file does not match. A folder that does not exist matches no file. A file that another entry names on its own loads only at that entry. A hosted policy cannot use such an entry, because no files are beside it.
+
 OpenAPPA checks declarations in the root file first, then declarations from included files in the order listed by `include`. The following rules apply:
 
 - An included file cannot include another file.
