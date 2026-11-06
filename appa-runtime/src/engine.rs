@@ -4276,6 +4276,9 @@ struct ReturnBounds {
 /// Formats the example return floor label and permitted trust ranks.
 struct ReturnSpelling {
     floor: String,
+    /// The floor at the lowest trust a return may carry, with this session's audience; `None`
+    /// when that is this session's own trust.
+    lowest_trust_floor: Option<String>,
     ranks: String,
 }
 
@@ -4288,13 +4291,15 @@ impl ReturnSpelling {
         } else {
             usize::from(label.trust.rank()) + 1
         };
-        let lowest = usize::from(lowest.rank());
+        let lowest_rank = usize::from(lowest.rank());
         ReturnSpelling {
             floor: label_spelling(chain, label),
+            lowest_trust_floor: (lowest_rank + 1 < held)
+                .then(|| label_spelling(chain, &Label::new(*lowest, label.audience.clone()))),
             ranks: chain
                 .names()
-                .skip(lowest)
-                .take(held.saturating_sub(lowest))
+                .skip(lowest_rank)
+                .take(held.saturating_sub(lowest_rank))
                 .map(|name| format!("\"{}\"", terminal_safe(name)))
                 .collect::<Vec<_>>()
                 .join(", "),
@@ -4310,7 +4315,7 @@ fn return_instruction(
     description: &str,
     include_display_plan: bool,
 ) -> String {
-    let ReturnSpelling { floor, ranks } = spelling;
+    let ReturnSpelling { floor, ranks, .. } = spelling;
     let body = match route {
         ReturnRoute::Void => {
             let call = remedy_call(control, id, "", description, include_display_plan);
@@ -4747,11 +4752,18 @@ fn block_feedback(
         // Steer toward declaring ahead, so the next spawn meets no block for it. A fan-out spawn
         // declares at its block.
         if spawn == Some(appa_engine::transition::SpawnKind::Single) {
+            let control = control_spelling(naming, presentation);
             reason.push_str(&format!(
-                " Next time, declare right before the subagent call: {}(label: {}).",
-                control_spelling(naming, presentation),
+                " Next time, declare right before the subagent call: {control}(label: {}) when the subagent does \
+                 only what this session may.",
                 spelling.floor,
             ));
+            if let Some(lowest) = &spelling.lowest_trust_floor {
+                reason.push_str(&format!(
+                    " When the subagent must be able to lower its trust, declare {control}(label: {lowest}) \
+                     instead; its return can then lower this session's trust to that floor."
+                ));
+            }
         }
         reasons.push(reason);
     }
@@ -5540,6 +5552,7 @@ mod tests {
         ];
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
+            lowest_trust_floor: None,
             ranks: String::new(),
         };
         assert_eq!(
@@ -5603,6 +5616,7 @@ mod tests {
             &OfferId("offer-1".to_string()),
             &super::ReturnSpelling {
                 floor: "{}".to_string(),
+                lowest_trust_floor: None,
                 ranks: String::new(),
             },
             BARE_CONTROL_TOOL,
@@ -5637,6 +5651,7 @@ mod tests {
         };
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
+            lowest_trust_floor: None,
             ranks: String::new(),
         };
         let lines = |naming| {
@@ -5693,6 +5708,7 @@ mod tests {
         let offers = vec![(OfferId("offer-1".to_string()), PlanId::new(1))];
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
+            lowest_trust_floor: None,
             ranks: String::new(),
         };
         let blocked = |naming| {
@@ -5746,12 +5762,70 @@ mod tests {
         );
     }
 
+    fn audience_of(chain: appa_engine::label::ChainAudience) -> appa_engine::label::Audience {
+        use appa_engine::label::{Audience, Clause};
+        Audience::of_declared(&DeclaredAudience::Union(
+            Clause::new([chain], [], []).expect("a chain clause"),
+        ))
+    }
+
+    fn suspicious_trusted() -> TrustChain {
+        TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()])
+    }
+
+    /// The strict floor is this session's label. The lower-trust floor keeps its audience
+    /// and takes the lowest trust a return may carry; it is absent where that trust is this
+    /// session's own.
+    #[test]
+    fn a_return_spelling_names_the_current_label_and_the_lowest_trust_floor_with_this_audience() {
+        use appa_engine::label::{Audience, ChainAudience, Label};
+        let chain = suspicious_trusted();
+        let internal = audience_of(ChainAudience::Internal);
+        for (label, lowest, floor, lowest_trust_floor) in [
+            (
+                Label::top(),
+                Trust::new(0),
+                "{trust: \"trusted\", audience: [\"public\"]}",
+                Some("{trust: \"suspicious\", audience: [\"public\"]}"),
+            ),
+            (
+                Label::new(Trust::new(1), internal.clone()),
+                Trust::new(0),
+                "{trust: \"trusted\", audience: [\"internal\"]}",
+                Some("{trust: \"suspicious\", audience: [\"internal\"]}"),
+            ),
+            (
+                Label::new(Trust::new(1), Audience::public()),
+                Trust::new(1),
+                "{trust: \"trusted\", audience: [\"public\"]}",
+                None,
+            ),
+            (
+                Label::new(Trust::new(0), internal),
+                Trust::new(0),
+                "{trust: \"suspicious\", audience: [\"internal\"]}",
+                None,
+            ),
+        ] {
+            let spelling = super::ReturnSpelling::of(&chain, &ReturnBounds { label, lowest });
+            assert_eq!(spelling.floor, floor);
+            assert_eq!(spelling.lowest_trust_floor.as_deref(), lowest_trust_floor);
+        }
+    }
+
     #[test]
     fn a_declaration_renders_a_ready_call_and_a_gap_plan_says_it_asks_for_approval() {
-        let spelling = super::ReturnSpelling {
-            floor: "{trust: \"suspicious\", audience: [\"self\"]}".to_string(),
-            ranks: "\"suspicious\"".to_string(),
-        };
+        let spelling = super::ReturnSpelling::of(
+            &suspicious_trusted(),
+            &ReturnBounds {
+                label: appa_engine::label::Label::new(
+                    Trust::new(0),
+                    audience_of(appa_engine::label::ChainAudience::Self_),
+                ),
+                lowest: Trust::new(0),
+            },
+        );
+        assert_eq!(spelling.ranks, "\"suspicious\"");
         let render = |plan: &ExecutableRemedyPlan, display: bool| {
             remedy_instruction(
                 plan,
