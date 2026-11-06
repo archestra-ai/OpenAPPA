@@ -43,7 +43,7 @@ A share makes something readable by more people, so it needs trusted data those 
 
 `publish_app` and `update_knowledge_connector` select their rule by scope or visibility. An update that sends a `team_ids` list is checked against that list even when it names no visibility, since it replaces who the connector is shared with. A connector that mirrors its source system's permissions has readers no source here can list, so it requires data sharable with `internal`. A call may name at most 100 teams.
 
-The Archestra proxy adds string arrays no selector could read from the original objects: `initialGrantPrincipals` (`<type>:<id>`, the organization as `organization`, sent only with a non-empty `initialGrants`) and `transferModes` (`value` or `link` per credential). A create that sends grants requires `trusted` data sharable with `internal`, which holds every principal a grant can name; without grants it requires what the create alone needs. A credential transfer that only returns links requires nothing; any other transfer requires `trusted` and `internal`.
+The Archestra proxy adds string arrays no selector could read from the original objects: `initialGrantPrincipals` (`<type>:<id>`, the organization as `organization`, sent only with a non-empty `initialGrants`) and `transferModes` (`value` or `link` per credential). A create that sends grants requires `trusted` data sharable with `internal`, which holds every principal a grant can name; without grants it requires what the create alone needs. A credential transfer that only returns links declares a `key` and `label` every reader of the agent sees, so it requires `internal`; any other transfer requires `trusted` and `internal`.
 
 ## Agent runs
 

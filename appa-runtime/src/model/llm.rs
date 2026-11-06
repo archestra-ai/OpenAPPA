@@ -153,7 +153,9 @@ impl LlmBackend {
 }
 
 /// One fresh, memoryless agent per consult: the preamble and declaration as the system
-/// prompt, the artifact as the only user turn, the schema enforced natively.
+/// prompt, the artifact as the only user turn, the schema enforced natively. No sampling
+/// setting is sent, as `claude -p` sends none: the model's defaults hold, and a model
+/// that refuses `temperature` (Anthropic's `claude-sonnet-5`) still answers.
 async fn run<M: CompletionModel + 'static>(
     model: M,
     prompt: &ModelPrompt,
@@ -165,7 +167,6 @@ async fn run<M: CompletionModel + 'static>(
         .output_schema_raw(schema)
         .output_mode(OutputMode::Native)
         .max_tokens(max_tokens)
-        .temperature(0.0)
         .build()
         .prompt(prompt.input.as_str())
         .await
@@ -396,6 +397,7 @@ mod tests {
             property_names(&prompt().schema)
         );
         assert!(body["max_tokens"].as_u64().is_some_and(|n| n >= MIN_ANSWER_TOKENS));
+        assert!(body.get("temperature").is_none(), "some models refuse any temperature");
         assert!(
             body.get("tools")
                 .is_none_or(|tools| tools.as_array().is_none_or(Vec::is_empty))
@@ -422,6 +424,7 @@ mod tests {
         assert_eq!(text_of(&messages[0]["content"]), prompt().system);
         assert_eq!(messages[1]["role"], "user");
         assert_eq!(text_of(&messages[1]["content"]), prompt().input);
+        assert!(body.get("temperature").is_none(), "some models refuse any temperature");
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert_eq!(
             property_names(&body["response_format"]["json_schema"]["schema"]),

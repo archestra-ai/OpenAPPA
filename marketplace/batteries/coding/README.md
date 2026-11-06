@@ -20,7 +20,12 @@ claude-code` includes both. A rule no map binds is inactive.
 
 - **shell** — A command that names a credential path (`.env`, `.ssh/`,
   `.netrc`, `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows
-  the session to `self`, the requester. A client whose map entry sets
+  the session to `self`, the requester. A credential file name matches as a
+  path: after a space, `/` or `=`, at the end or before a space, or
+  double-quoted. A dotenv file also matches with a mode suffix (`.env.local`,
+  `.env.production`, `.env.development`, `.env.staging`, `.env.test`). A name
+  inside a word or a string literal, a single-quoted name, and a template such
+  as `.env.example` reach the Annotator. A client whose map entry sets
   `confined = true` withholds the command's result, and the battery offers
   `coding.strip-secrets` beside the narrowing: the model replaces
   every secret value in the output with `[redacted-secret]`, and the masked

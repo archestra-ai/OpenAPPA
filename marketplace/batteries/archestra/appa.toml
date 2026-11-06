@@ -171,7 +171,9 @@ delta = {}
 requires = { trust = "trusted" }
 
 # --- credentials: metadata only, never a secret. A setup request shows the
-# user a card. A transfer can carry a secret into a run's workspace ---
+# user a card. A transfer can carry a secret into a run's workspace; a
+# link-only transfer declares a key and label every reader of the agent
+# sees ---
 
 [[policy.tool]]
 name = "mcp/archestra/list_runtime_credentials"
@@ -208,6 +210,7 @@ requires = { trust = "trusted" }
 name = "mcp/archestra/transfer_credential(transferModes:link)"
 parameters = { type = "object", properties = { transferModes = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/transfer_credential"

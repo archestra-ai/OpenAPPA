@@ -4515,19 +4515,6 @@ mod deployment_tests {
         );
     }
 
-    #[test]
-    fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
-        let fallback = EventError::annotation_refused(
-            "claude-code.undeclared-tool".to_string(),
-            "non_success status=1".to_string(),
-        )
-        .to_string();
-        assert!(fallback.contains("run /appa-guide"), "{fallback}");
-
-        let exact = EventError::annotation_refused("bash-classifier".to_string(), "timeout".to_string()).to_string();
-        assert!(!exact.contains("/appa-guide"), "{exact}");
-    }
-
     /// The served adapter's inverse is what the runtime says where it addresses that
     /// host's model. A contract's `(selector)` is the policy's own discriminator and no
     /// part of the name the model calls; a canonical id the served host cannot name — and

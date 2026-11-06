@@ -40,9 +40,9 @@ The other built-in tools get static rules:
   rely on the deployment controlling a subagent's context.
 - **Content from elsewhere** — `FetchInboxMessage`, `ReadMcpResourceTool`,
   `ReadNotifications`, and the run titles and logs of `RemoteTrigger` return
-  `suspicious` content. Starting a remote routine is a `public` sink;
-  `DesignSync` requires `internal`.
-- **SendMessage** — A send is a `public` sink. The default root precedes this
+  `suspicious` content. Starting a remote routine and `DesignSync`
+  require `internal`.
+- **SendMessage** — A send is an `internal` sink. The default root precedes this
   rule with exceptions for protected sessions' socket and pipe addresses,
   which the runtime verifies.
 
