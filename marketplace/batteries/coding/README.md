@@ -20,7 +20,12 @@ claude-code` includes both. A rule no map binds is inactive.
 
 - **shell** — A command that names a credential path (`.env`, `.ssh/`,
   `.netrc`, `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows
-  the session to `self`, the requester. Before any other command runs, the
+  the session to `self`, the requester. A credential file name matches as a
+  path: after a space, `/` or `=`, at the end or before a space, or
+  double-quoted. A dotenv file also matches with a mode suffix (`.env.local`,
+  `.env.production`, `.env.development`, `.env.staging`, `.env.test`). A name
+  inside a word or a string literal, a single-quoted name, and a template such
+  as `.env.example` reach the Annotator. Before any other command runs, the
   `claude-code.bash-requirements` Annotator decides what trust and fresh
   attention it requires and labels its output for trust and audience, inside
   the vocabulary static rules write: a command that visibly reads the
