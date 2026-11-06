@@ -6,13 +6,18 @@
 same organization-owned **Archestra CI** App used by Archestra's Release Please
 workflow. Its installation already includes `archestra-ai/OpenAPPA`.
 
-The `release-pr` job requests a token for **OpenAPPA only**, with Contents,
-Issues, and Pull requests write permissions. Both Release Please and the
-lockfile/marketplace synchronization push use that token. App-authenticated PR
-events start CI without the workflow approval required for PR events generated
-with `GITHUB_TOKEN`. The job's `GITHUB_TOKEN` has Contents read access, checkout
-does not persist credentials, and the token action revokes its token on completion.
-Release creation and asset publication keep their separate credentials.
+Release Please runs through the organization's shared workflow,
+`archestra-ai/.github/.github/workflows/release-please.yml`, which always
+authenticates as the App and never with `GITHUB_TOKEN`. `create-releases` creates
+the draft release for a merged release PR, and `release-pr` then creates or
+updates the next release PR. The shared workflow requests a token for the
+calling repository only, with Contents and Pull requests write permissions, and
+its job holds no `GITHUB_TOKEN` permissions. `sync-release-pr` pushes the
+lockfile/marketplace synchronization with its own token for **OpenAPPA only**,
+with Contents write. App-authenticated PR events start CI without the workflow
+approval required for PR events generated with `GITHUB_TOKEN`. Checkout does not
+persist credentials, and every token is revoked when its job completes. Asset
+publication keeps its separate credentials.
 
 An organization owner configures these **OpenAPPA Actions repository secrets**:
 
