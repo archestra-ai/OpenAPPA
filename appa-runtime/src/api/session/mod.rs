@@ -174,6 +174,12 @@ impl Session {
             tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
         }
+        self.close_unreported(open, "call closed as unreported").await
+    }
+
+    /// Close each call as `Indeterminate` and repair its file reservation, in order. A call
+    /// another writer closed first is skipped.
+    async fn close_unreported(&self, open: Vec<OpenDispatch>, closed: &str) -> Result<(), EventError> {
         for dispatch in open {
             match self
                 .abandon_dispatch(dispatch.id.clone(), &ToolOutcome::Indeterminate)
@@ -185,7 +191,7 @@ impl Session {
                         trajectory = %self.trajectory.0,
                         dispatch = ?dispatch.id,
                         tool = %dispatch.tool,
-                        "call closed as unreported",
+                        "{closed}",
                     );
                 }
                 Err(EventError::UnknownDispatch) => continue,

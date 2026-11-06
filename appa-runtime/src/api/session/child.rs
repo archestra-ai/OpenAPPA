@@ -135,7 +135,10 @@ impl Session {
                 },
             });
         };
-        self.settle_open_call(open).await?;
+        // Each call it still has open got no outcome hook and closes as unreported, exactly as
+        // a turn end closes it.
+        self.close_unreported(open, "call closed as unreported at the child's end")
+            .await?;
         self.cross_return(value).await
     }
 
@@ -166,30 +169,6 @@ impl Session {
             .await?;
 
         return_decision(decision)
-    }
-
-    /// Close whatever calls this child still has open before it returns. Each got no outcome
-    /// hook and closes as unreported, exactly as a turn end closes it.
-    pub(super) async fn settle_open_call(&self, open: Vec<OpenDispatch>) -> Result<(), EventError> {
-        for open in open {
-            match self
-                .abandon_dispatch(open.id.clone(), &ToolOutcome::Indeterminate)
-                .await
-            {
-                Ok(_) => {
-                    self.repair_file_reservation(&open.id).await;
-                    tracing::debug!(
-                        trajectory = %self.trajectory.0,
-                        dispatch = ?open.id,
-                        tool = %open.tool,
-                        "call closed as unreported at the child's end"
-                    );
-                }
-                Err(EventError::UnknownDispatch) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
     }
 
     pub(super) fn liveness_of(&self, trajectory: &TrajectoryId) -> Result<Liveness, EventError> {
