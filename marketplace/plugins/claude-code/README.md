@@ -240,7 +240,9 @@ explicit about the checked boundary and its unobserved inputs.
 - `appa-package.toml` — the package manifest: the starting policy and the
   `coding` and `claude-code` batteries a first install includes with it.
 - `default.appa.toml` — a complete starting policy: the `hitl` authority,
-  the `redact-for-public` model sanitizer for public sinks, subagents run
+  the `redact-for-public` model sanitizer for public sinks, a `claude-code`
+  binding for every battery sanitizer (idle until that battery is
+  installed), subagents run
   as children of the session, sends to protected peers' addresses, the
   runtime's own tools, and a bounded per-call fallback for every tool the
   policy does not name. The other rules for the harness's

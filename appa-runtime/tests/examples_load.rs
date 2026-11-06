@@ -162,6 +162,73 @@ fn composed_with_the_battery_and(dir: &tempfile::TempDir, root_tail: &str) -> Co
     Config::load(&root).expect("the initialized config and battery compose")
 }
 
+/// Clappa, the Claude Code deployment, is where battery sanitizers run by default: its root
+/// binds every sanitizer a shipped battery declares, except the OpenCode battery's, whose
+/// tools never appear in a Claude Code session. Every other shipped root binds none, so in
+/// those deployments a battery sanitizer runs only once someone binds it.
+#[test]
+fn only_the_claude_code_default_binds_battery_sanitizers() {
+    let repository = repo_root();
+    let read = |path: &Path| -> toml::Value {
+        toml::from_str(&std::fs::read_to_string(path).expect("the policy is readable")).expect("the policy parses")
+    };
+    let mut declared = std::collections::BTreeSet::new();
+    for battery in std::fs::read_dir(repository.join("marketplace/batteries")).expect("the batteries are listed") {
+        let battery = battery.expect("a battery entry").path();
+        if !battery.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(&battery).expect("a battery directory is listed") {
+            let file = file.expect("a battery file").path();
+            if file.extension().is_none_or(|extension| extension != "toml") {
+                continue;
+            }
+            let policy = read(&file);
+            let names = policy
+                .get("policy")
+                .and_then(|policy| policy.get("sanitizer"))
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|sanitizer| sanitizer["name"].as_str())
+                .filter(|name| !name.starts_with("opencode."))
+                .map(str::to_owned);
+            declared.extend(names);
+        }
+    }
+    assert!(declared.contains("pagerduty.redact-for-public"), "{declared:?}");
+
+    let bound = |root: &toml::Value| -> std::collections::BTreeSet<String> {
+        root.get("externals")
+            .and_then(|externals| externals.get("sanitizers"))
+            .and_then(toml::Value::as_table)
+            .map(|table| table.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let clappa = bound(&read(
+        &repository.join("marketplace/plugins/claude-code/default.appa.toml"),
+    ));
+    let missing: Vec<&String> = declared.iter().filter(|name| !clappa.contains(*name)).collect();
+    assert!(
+        missing.is_empty(),
+        "the Claude Code default leaves these unbound: {missing:?}"
+    );
+
+    for plugin in std::fs::read_dir(repository.join("marketplace/plugins")).expect("the plugins are listed") {
+        let root = plugin.expect("a plugin entry").path().join("default.appa.toml");
+        if !root.exists() || root.starts_with(repository.join("marketplace/plugins/claude-code")) {
+            continue;
+        }
+        let other = bound(&read(&root));
+        let battery_bindings: Vec<&String> = other.iter().filter(|name| declared.contains(*name)).collect();
+        assert!(
+            battery_bindings.is_empty(),
+            "{} binds {battery_bindings:?}",
+            root.display()
+        );
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn the_initialized_default_composes_with_the_claude_code_battery() {
