@@ -47,7 +47,7 @@ mod served {
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::post;
 
-    use super::common::{audit_len, propose, raw, root, serve};
+    use super::common::{actor, audit_len, last_offer, propose, raw, root, serve};
     use super::{defaults, hosted};
 
     type Requests = Arc<Mutex<Vec<(Option<String>, serde_json::Value)>>>;
@@ -186,7 +186,145 @@ mod served {
             Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"));
         assert!(matches!(
             Runtime::open_with_store(config, store, None),
-            Err(OpenError::ArchestraNotConfigured(name)) if name == "classifier"
+            Err(OpenError::ArchestraNotConfigured { kind: "annotator", name }) if name == "classifier"
+        ));
+    }
+
+    /// A battery's sanitizer, with the model chosen by the hosting deployment: the root
+    /// binds it to the host's endpoint. The read offers it, the host receives the raw result
+    /// with the sanitizer's hint, and its rewrite is what the agent receives.
+    #[tokio::test]
+    async fn a_battery_sanitizer_bound_to_archestra_rewrites_the_confined_result() {
+        use appa_runtime::api::RemedyOutcome;
+        use appa_runtime::config::{Config, HostedBattery};
+        use appa_runtime_api::{OutcomeBody, ToolOutcome};
+
+        const BATTERY: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "mcp/tracker/read"
+delta = { audience = ["internal"] }
+tags = ["tracker"]
+
+[[policy.sanitizer]]
+name = "tracker.redact-for-public"
+on = ["tool_output"]
+tags = ["tracker"]
+hint = "Remove every customer name."
+
+[policy.sanitizer.permits]
+audience = { from = ["internal"], to = ["public"] }
+
+[policy.deployment]
+confined_results = ["mcp/tracker/read"]
+"#;
+        let compose = |root: &str, defaults: HostDefaults| {
+            let battery = HostedBattery {
+                name: "tracker",
+                base: BATTERY,
+                target: None,
+                token_env: &[],
+            };
+            Config::hosted_composed(root, &[battery], defaults, |_| None)
+        };
+        let bound_root =
+            "[policy]\nversion = 2\n[externals.sanitizers.\"tracker.redact-for-public\"]\nbuiltin = \"archestra\"\n";
+        let (url, requests) = serve_host(
+            StatusCode::OK,
+            serde_json::json!({ "body": "Ticket from [redacted]: checkout fails." }).to_string(),
+        )
+        .await;
+        let config = compose(bound_root, with_endpoint(url)).expect("the bound battery composes");
+        let store =
+            Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"));
+        let runtime = Arc::new(Runtime::open_with_store(config, store, None).expect("the deployment opens"));
+        assert_eq!(
+            hooks::handle(
+                &runtime,
+                HookEvent::SessionStart {
+                    root: root(),
+                    principal: None,
+                    address: None,
+                    title: None,
+                    start: None,
+                    launch: None,
+                },
+            )
+            .await,
+            HookDecision::Ack
+        );
+
+        let read = ProposedCall {
+            tool: "mcp/tracker/read".to_string(),
+            arguments: raw(serde_json::json!({ "id": "T-1" })),
+            cwd: None,
+        };
+        let HookDecision::DenyCall { feedback, offers, .. } = propose(&runtime, read.clone()).await else {
+            panic!("the read narrows the session");
+        };
+        assert_eq!(offers.len(), 2, "the narrowing and the sanitizer: {feedback}");
+        let line = feedback
+            .lines()
+            .skip_while(|line| !line.contains("sanitizer tracker.redact-for-public"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("the sanitizer is offered: {feedback}"));
+        assert!(matches!(
+            runtime.execute_remedy(&actor(), last_offer(line)).await,
+            RemedyOutcome::Authorized { .. }
+        ));
+        assert_eq!(
+            propose(&runtime, read.clone()).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+        let delivered = hooks::handle(
+            &runtime,
+            HookEvent::ToolResult {
+                actor: actor(),
+                call: read,
+                call_id: None,
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available("Ticket from Globex Ltd: checkout fails.".to_string()),
+                },
+            },
+        )
+        .await;
+        assert_eq!(
+            delivered,
+            HookDecision::DeliverValue {
+                value: "Ticket from [redacted]: checkout fails.".to_string()
+            },
+            "the host's rewrite is what crosses, at the session's own `public` audience"
+        );
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1, "one consult, to the host");
+        let (bearer, body) = &requests[0];
+        assert_eq!(bearer.as_deref(), Some("Bearer host-token"));
+        assert!(body["system"].as_str().unwrap().contains("Remove every customer name."));
+        assert!(
+            body["input"].as_str().unwrap().contains("Globex Ltd"),
+            "a sanitizer sees the raw value it cleans"
+        );
+
+        // Unbound, the sanitizer is left out and the read offers only the narrowing; bound
+        // under a host that supplies no endpoint, the deployment does not open.
+        let unbound = compose("[policy]\nversion = 2\n", defaults()).expect("the unbound battery composes");
+        assert!(
+            unbound
+                .policy_file()
+                .value()
+                .get("sanitizer")
+                .and_then(|declared| declared.as_array())
+                .is_none_or(Vec::is_empty),
+            "the unbound sanitizer is left out"
+        );
+        let endpointless = compose(bound_root, defaults()).expect("the binding validates");
+        let store =
+            Arc::new(appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"));
+        assert!(matches!(
+            Runtime::open_with_store(endpointless, store, None),
+            Err(OpenError::ArchestraNotConfigured { kind: "sanitizer", name }) if name == "tracker.redact-for-public"
         ));
     }
 

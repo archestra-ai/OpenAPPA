@@ -12,31 +12,31 @@ digest = "sha256:a761af6f896616e522cdfbc51914ec73c7b7510fb939b53c462f48bf0bd0f48
 
 [packages.battery.cloudflare]
 path = "batteries/cloudflare"
-digest = "sha256:f2f36697ae27c3b6b06a4d14d38c1f0c8dfd8d06f5c942e42dd5a2809d40f83f"
+digest = "sha256:2abfa7803175b2df2cec277b178f1b32cf3419969c2c1bdf15b1d892ede4fea6"
 
 [packages.battery.coding]
 path = "batteries/coding"
-digest = "sha256:4e12eeaea7db7d9dd5191b860138ab874667598d4bca3bba16ff7ed16a4a81c0"
+digest = "sha256:77c8cb2dee628fff630af99052353525f19347200580acf3d0feded060a12002"
 
 [packages.battery.databricks]
 path = "batteries/databricks"
-digest = "sha256:b7d2b9775200029a387966d98c50950b5bb1b09cd7bcd26cfc31d8ee36aaba47"
+digest = "sha256:4e3d6c473acb34e19bd97c954077d055fbb97c6e9477a8d93041b2c15ebba0ea"
 
 [packages.battery.github]
 path = "batteries/github"
-digest = "sha256:0efca5bd2b30cb36281973ec9bdbb0178df0b9886d0dffa3da87b04bfaea7745"
+digest = "sha256:6b550d555592bef3ecc1cfdf6fdcc933da971fcceea9ec94d915af5d6e53b719"
 
 [packages.battery.google-workspace]
 path = "batteries/google-workspace"
-digest = "sha256:de225718c25e1d430f2c46fa94d2894151a02fb888b397b0f0954ba3d555ccfb"
+digest = "sha256:cabd32b3151110ff4ff0c96304beca981c446044baf9027ee8902ffe8014c3ba"
 
 [packages.battery.grain]
 path = "batteries/grain"
-digest = "sha256:898e12e29827ba96df975680daaaec270a8e0ac0df71ea380d8dcaeaa7df0f3b"
+digest = "sha256:ac0ab21081cc5ea4610f0598524ee524920a7cc17c1b129228c91ce0fc08814b"
 
 [packages.battery.huggingface]
 path = "batteries/huggingface"
-digest = "sha256:4398d35d47b9bc8ea6a787dbeecb9cf176302f6bf5f882879ca32e303b9ef98d"
+digest = "sha256:7695c4d233d7b4cfefa4801d50f72c484349e21bbd78d06a0e3703605eaf4b78"
 
 [packages.battery.jev]
 path = "batteries/jev"
@@ -44,43 +44,43 @@ digest = "sha256:947d07b8166f5b620a063ea9ee071af539b595b10d19a8915e3ec5979a4b31a
 
 [packages.battery.launchdarkly]
 path = "batteries/launchdarkly"
-digest = "sha256:3fd6e8d6f1bf073bbde1486db29875ef22039ba80c699cbed54214da175fc8ed"
+digest = "sha256:1607849ff756151c1bd6da2e233d914b3c622df3ec5496bf55016e746de344a7"
 
 [packages.battery.linear]
 path = "batteries/linear"
-digest = "sha256:dd896a6e21807c53b33ce63a59d6d10a5bad704d8680cbf8e599d7db94ab5f7c"
+digest = "sha256:5b38519235932d4901c3a8439a5f18ecec283a7b2b6f2f917907268d7ab2cfec"
 
 [packages.battery.microsoft-learn]
 path = "batteries/microsoft-learn"
-digest = "sha256:677d6f558357722d19c0d5ccfc67dcce86b2f2fdfb2d3782d38e81cbdad8876d"
+digest = "sha256:cce5739593b4a601f49ec2a2fa622498548c552ca4ad356c8172a7b5de71c6e0"
 
 [packages.battery.monday]
 path = "batteries/monday"
-digest = "sha256:b62bac99745b33ffc0ca04dd0759b626a707a320b1605fa5528d9657370f40a7"
+digest = "sha256:5329ca1071c834b64615895d6bef32ee5b9b60ebc48d791d73d9aa6638a27f18"
 
 [packages.battery.notion]
 path = "batteries/notion"
-digest = "sha256:1ecca63a78f0a732eaf9de0a294efed998e04902c8220f60c4dc0b4b7da5d975"
+digest = "sha256:cb435b1691d64afceb3c53c58da1d818df0edfef9a1e23cc1be05c7da2fe976f"
 
 [packages.battery.opencode]
 path = "batteries/opencode"
-digest = "sha256:949d9b9520eedb386af5c0acb6ec3e4ccec36a13f8385c2852a16fa2b8fe4322"
+digest = "sha256:83beecb0f3938f2d0268118c0ecc689d23bbe34dbed4adcd4ce27a10a7d2e908"
 
 [packages.battery.pagerduty]
 path = "batteries/pagerduty"
-digest = "sha256:9b520a5cdcfa1238599899e635da41e9530c60fd74ac6f988385923be0258637"
+digest = "sha256:b372e45ed1ac5fc653b94e2c58a21a47fb7d8707654bd493142252c802461a65"
 
 [packages.battery.posthog]
 path = "batteries/posthog"
-digest = "sha256:d24e2e9bd734dcd18a4b7b23510a5c57e41c091cd77d205ab5dbf5e6a01fa4cd"
+digest = "sha256:6e331f0306d1eed4b9300447f3c49a61e1285ccea9564828b23efd753a91f095"
 
 [packages.battery.sentry]
 path = "batteries/sentry"
-digest = "sha256:2dbf649d56d65e8631051582f50b6fadf89389f3180c325569fa33addf25cbef"
+digest = "sha256:c88ee062cb4e0dd3e75ffc4c2b285714cfa80eff9a1483dffe9fe1601bbf8f46"
 
 [packages.battery.slack]
 path = "batteries/slack"
-digest = "sha256:db79c7108f54b02788de2d006d192d49013d9e00cddd775889428db3dc40671c"
+digest = "sha256:46873c9011e2f63e0b8d03576ee718383e67d24a1922849e45122c08ad19bbda"
 
 [packages.battery.xmemory]
 path = "batteries/xmemory"
@@ -88,7 +88,7 @@ digest = "sha256:276b44dd41b0a94b6c8aac3a7407ed81689ee0f03c02676308d87db5eba4f99
 
 [packages.plugin.claude-code]
 path = "plugins/claude-code"
-digest = "sha256:08f80827d32d4038e4c73babd093d610192ffeb6d60ad65bf7cb1d3090b4faae"
+digest = "sha256:2c41a2b43ff5dad14679fda94495f058ec93e66df538163d5b2051fc3b55585f"
 
 [packages.plugin.kagent]
 path = "plugins/kagent"

@@ -37,11 +37,11 @@ instructions from a confined result, which then keeps the session's trust.
 `<battery>.redact-for-public`, which returns an `internal` record at `public`
 once the model removes what outside readers may not see. `coding` and
 `monday` add `<battery>.strip-secrets`, which returns a credential read at
-`internal` instead of `self`. A battery sanitizer names no model: the root
-binds the ones the deployment runs under `[externals.sanitizers]`, for
-example to `builtin = "llm"` or, where the `claude` CLI is installed,
-`builtin = "claude-code"`. A battery sanitizer the root does not bind is left
-out, and the battery's `[policy.deployment] confined_results` entries that
+`internal` instead of `self`. The model for a battery sanitizer is configured
+in the deployment, not in the battery: the root binds the ones it runs under
+`[externals.sanitizers]`, for example to `builtin = "llm"` or, where the
+`claude` CLI is installed, to `builtin = "claude-code"`. A battery sanitizer
+the root does not bind is left out, and the battery's `[policy.deployment] confined_results` entries that
 only it covers are dropped with it, so the battery decides as it would
 without sanitizers. The Claude Code plugin's default config binds the
 `coding` sanitizers. `archestra` and

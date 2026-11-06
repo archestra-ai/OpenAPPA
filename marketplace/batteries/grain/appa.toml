@@ -268,11 +268,11 @@ requires = { trust = "trusted", attention = ["human-approval"] }
 
 # --- sanitizers ---
 
-# These sanitizers name no model: the deployment chooses one by binding each
-# under `[externals.sanitizers]`, for example `builtin = "llm"` with an
-# `[externals.llm]` profile, `builtin = "claude-code"` where the `claude` CLI is
-# installed, or a URL. A sanitizer nothing binds is left out of the composed
-# policy and never offered, and its results stay unconfined.
+# The model for each sanitizer is configured in the deployment, not here: the
+# root binds it under `[externals.sanitizers]`, for example `builtin = "llm"`
+# with an `[externals.llm]` profile, `builtin = "claude-code"` where the
+# `claude` CLI is installed, or a URL. A sanitizer nothing binds is left out
+# of the composed policy and never offered, and its results stay unconfined.
 
 # An output sanitizer that endorses what Grain's meeting tools returns: the
 # model the deployment binds keeps the data and drops every instruction, so the result

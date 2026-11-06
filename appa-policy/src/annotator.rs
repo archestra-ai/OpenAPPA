@@ -57,12 +57,12 @@ impl AnnotatorBuiltin {
             .find(|builtin| builtin.wire_name() == name)
     }
 
-    /// The builtin a `[[sanitizer]]` may name on its declaration: one of the two model
-    /// transports, which rewrite a value by the sanitizer's `hint`. Jev classifies calls and
-    /// rewrites nothing; the host-supplied transport serves Annotators only.
+    /// The builtin a `[[sanitizer]]` may name on its declaration: a model transport, which
+    /// rewrites a value by the sanitizer's `hint`. Jev classifies calls and rewrites nothing.
     pub(crate) fn parse_sanitizer(name: &str) -> Option<AnnotatorBuiltin> {
-        [AnnotatorBuiltin::ClaudeCode, AnnotatorBuiltin::Llm]
+        AnnotatorBuiltin::ALL
             .into_iter()
+            .filter(|builtin| *builtin != AnnotatorBuiltin::Jev)
             .find(|builtin| builtin.wire_name() == name)
     }
 }

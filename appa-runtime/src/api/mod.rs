@@ -496,9 +496,9 @@ pub enum OpenError {
     },
     #[error("annotator {0} names the builtin \"jev\", but the deployment declares no [externals.jev]")]
     JevNotConfigured(String),
-    #[error("annotator {0} names the builtin \"archestra\", but the host supplies no archestra endpoint")]
+    #[error("{kind} {name} names the builtin \"archestra\", but the host supplies no archestra endpoint")]
     #[cfg(feature = "archestra")]
-    ArchestraNotConfigured(String),
+    ArchestraNotConfigured { kind: &'static str, name: String },
     #[error("annotator {0} names the builtin \"jev\", which judges the complete call and takes no inputs")]
     JevInputs(String),
     #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
@@ -4070,6 +4070,28 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             });
         }
     }
+    // The host-supplied transport, named on a declaration or in a binding, opens only where
+    // the host supplies its endpoint.
+    #[cfg(feature = "archestra")]
+    if externals.archestra.is_none() {
+        let declared = declared_builtins
+            .iter()
+            .filter(|(_, builtin)| **builtin == appa_policy::AnnotatorBuiltin::Archestra)
+            .map(|(name, _)| name.to_string());
+        let bound = externals
+            .sanitizers
+            .iter()
+            .filter(|(_, bound)| {
+                matches!(bound, crate::config::Implementation::Builtin(named) if named == crate::config::ARCHESTRA_BUILTIN)
+            })
+            .map(|(name, _)| name.clone());
+        if let Some(name) = declared.chain(bound).next() {
+            return Err(OpenError::ArchestraNotConfigured {
+                kind: "sanitizer",
+                name,
+            });
+        }
+    }
     // A binding with no declaration stays idle rather than refused, as an unreferenced
     // audience source does: a root binds the sanitizers of the batteries it may include,
     // and composition leaves out a battery's sanitizer the root does not bind.
@@ -4111,7 +4133,10 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             }
             #[cfg(feature = "archestra")]
             appa_policy::AnnotatorBuiltin::Archestra if externals.archestra.is_none() => {
-                return Err(OpenError::ArchestraNotConfigured(name.to_string()));
+                return Err(OpenError::ArchestraNotConfigured {
+                    kind: "annotator",
+                    name: name.to_string(),
+                });
             }
             // Jev judges the complete call and answers the lowest or the highest rank.
             appa_policy::AnnotatorBuiltin::Jev if !binding.inputs.is_empty() => {

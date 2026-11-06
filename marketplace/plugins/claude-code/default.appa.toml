@@ -169,8 +169,9 @@ builtin = "hitl"
 [externals.sanitizers.redact-for-public]
 builtin = "claude-code"
 
-# The `coding` battery's sanitizers name no model; a Claude Code session has
-# the `claude` CLI, so this policy binds them to it. A sanitizer of another
+# The model for the `coding` battery's sanitizers is configured here, not in
+# the battery. A Claude Code session has the `claude` CLI, so this policy
+# binds them to it. A sanitizer of another
 # battery runs once it is bound here the same way.
 [externals.sanitizers."coding.strip-secrets"]
 builtin = "claude-code"

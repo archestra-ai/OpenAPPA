@@ -90,9 +90,10 @@ claude-code` includes both. A rule no map binds is inactive.
   and keeps its facts, code and links, and the result returns at the
   session's own trust. The sanitizer is tagged `web`.
 
-Both sanitizers name no model. A deployment runs one by binding it under
-`[externals.sanitizers]`, for example to `builtin = "llm"` or, where the
-`claude` CLI is installed, `builtin = "claude-code"`; the Claude Code
+The model for both sanitizers is configured in the deployment, not in the
+battery. A deployment runs one by binding it under `[externals.sanitizers]`,
+for example to `builtin = "llm"` or, where the `claude` CLI is installed,
+`builtin = "claude-code"`; the Claude Code
 plugin's default config binds both. A sanitizer the root does not bind is
 not offered. APPA does not verify what the model removed: binding a
 sanitizer registers it as trusted. A root rule for a tool precedes the

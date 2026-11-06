@@ -415,6 +415,20 @@ impl ExternalServices {
             for (name, implementation) in table {
                 let backend = match implementation {
                     Implementation::Transport(transport) => Backend::from(transport),
+                    #[cfg(feature = "archestra")]
+                    Implementation::Builtin(builtin)
+                        if section == Section::Sanitizers && builtin == crate::config::ARCHESTRA_BUILTIN =>
+                    {
+                        // A host-supplied transport: served only where the host supplies it.
+                        archestra
+                            .clone()
+                            .map(|archestra| Backend::Model(PromptModel::Archestra(archestra)))
+                            .ok_or_else(|| ModulesError::UnknownBuiltin {
+                                section: section.name(),
+                                name: name.clone(),
+                                builtin,
+                            })?
+                    }
                     Implementation::Builtin(builtin) => {
                         builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref())?
                     }

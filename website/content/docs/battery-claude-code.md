@@ -23,7 +23,7 @@ Two batteries cover Claude Code's built-in `Read`, `Grep`, `Write`, `Edit` and `
 
 The default config `appa plugin install claude-code` writes handles tools that the batteries do not name.
 
-The `coding` battery's sanitizers name no model. The default config binds both to the Claude Code model (`builtin = "claude-code"` under `[externals.sanitizers]`), because a Claude Code session has the `claude` CLI. A root can bind either to `builtin = "llm"` instead. APPA does not verify what a sanitizer's model removed: binding a sanitizer registers it as trusted.
+The model for the `coding` battery's sanitizers is configured in the deployment, not in the battery. The default config binds both to the Claude Code model (`builtin = "claude-code"` under `[externals.sanitizers]`), because a Claude Code session has the `claude` CLI. A root can bind either to `builtin = "llm"` instead. APPA does not verify what a sanitizer's model removed: binding a sanitizer registers it as trusted.
 
 ## Files
 
