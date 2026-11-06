@@ -9,6 +9,8 @@ fn safebash(config: &std::path::Path, arguments: serde_json::Value) -> (String, 
     let mut server = Command::new(env!("CARGO_BIN_EXE_appa"))
         .args(["file-tracker", "mcp", "--config"])
         .arg(config)
+        .env("PROBE_SERVICE_TOKEN", "environment-secret")
+        .env("TMPDIR", scratch_of(config))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -38,6 +40,14 @@ fn safebash(config: &std::path::Path, arguments: serde_json::Value) -> (String, 
         result["content"][0]["text"].as_str().unwrap().to_string(),
         result["isError"] == true,
     )
+}
+
+/// The temporary directory SafeBash runs with beside `config`: its own, so a test sees every
+/// scratch file a call leaves.
+fn scratch_of(config: &std::path::Path) -> std::path::PathBuf {
+    let scratch = config.parent().unwrap().join("tmp");
+    std::fs::create_dir_all(&scratch).unwrap();
+    scratch
 }
 
 fn installed(program: &str) -> bool {
@@ -70,7 +80,7 @@ fn a_command_sees_only_what_it_declares() {
 
     let command = format!(
         "cat {input}; cat {other} || echo OTHER-HIDDEN; tr a-z A-Z < {input} > {output}; \
-         echo x > {root}/new.txt; \
+         echo x > {root}/new.txt; printenv PROBE_SERVICE_TOKEN || echo ENV-HIDDEN; \
          curl -sS -m 5 https://example.com >/dev/null 2>&1 || echo NET-REFUSED",
         input = input.display(),
         other = other.display(),
@@ -84,7 +94,11 @@ fn a_command_sees_only_what_it_declares() {
     assert!(!failed, "{text}");
     assert!(text.contains("declared\n"), "{text}");
     assert!(!text.contains("undeclared"), "an undeclared file is hidden: {text}");
-    for refused in ["OTHER-HIDDEN", "NET-REFUSED"] {
+    assert!(
+        !text.contains("environment-secret"),
+        "a credential variable is withheld: {text}"
+    );
+    for refused in ["OTHER-HIDDEN", "NET-REFUSED", "ENV-HIDDEN"] {
         assert!(text.contains(refused), "{refused}: {text}");
     }
     assert_eq!(std::fs::read_to_string(&output).unwrap(), "DECLARED\n");
@@ -157,6 +171,7 @@ fn a_bash_call_is_confined_to_what_it_declares() {
             .args(["file-tracker", "sandbox", "--config"])
             .arg(&config)
             .current_dir(&root)
+            .env("PROBE_SERVICE_TOKEN", "environment-secret")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -202,6 +217,15 @@ fn a_bash_call_is_confined_to_what_it_declares() {
         "the system stays readable"
     );
     assert_eq!(paths("allowRead"), serde_json::json!([input]));
+    let withheld = answer["hiddenEnvironment"].as_array().unwrap();
+    assert!(
+        withheld.iter().any(|name| name == "PROBE_SERVICE_TOKEN"),
+        "{withheld:?}"
+    );
+    assert!(
+        !withheld.iter().any(|name| name == "PATH" || name == "HOME"),
+        "{withheld:?}"
+    );
     assert_eq!(paths("allowWrite"), serde_json::json!([output]));
     assert_eq!(answer["network"]["allowedDomains"], serde_json::json!(["example.com"]));
     assert_eq!(
@@ -243,4 +267,28 @@ fn a_command_that_cannot_start_leaves_its_outputs_unchanged() {
     );
     assert!(failed && text.contains("cannot start"), "{text}");
     assert_eq!(std::fs::read_to_string(&output).unwrap(), "weeks of work\n");
+}
+
+/// A call refused after SafeBash made its scratch directory and settings file leaves neither
+/// behind.
+#[test]
+fn a_call_refused_during_setup_leaves_no_scratch_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let config = root.join("file-tracker.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "store = {:?}\n[sandbox]\ncommand = []\ntimeout_secs = 5\n",
+            root.join("store.json").display().to_string(),
+        ),
+    )
+    .unwrap();
+    let (text, failed) = safebash(
+        &config,
+        serde_json::json!({ "command": "true", "input_files": [], "output_files": [], "network_hosts": [] }),
+    );
+    assert!(failed && text.contains("empty"), "{text}");
+    let left: Vec<_> = std::fs::read_dir(scratch_of(&config)).unwrap().collect();
+    assert!(left.is_empty(), "{left:?}");
 }

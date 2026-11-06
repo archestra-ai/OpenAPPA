@@ -58,10 +58,11 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
     // The sandbox runtime opens its proxy's sockets under its temporary directory, which the
     // command must reach; the temporary directories it would otherwise use stay hidden. This
     // one is the call's own and holds nothing of the user's.
-    let scratch = std::env::temp_dir().join(format!("appa-safebash-{}-{}", std::process::id(), crate::store::now()));
-    std::fs::create_dir(&scratch).map_err(|error| format!("{}: {error}", scratch.display()))?;
-    let settings = settings(config, &named, Some(&scratch))?;
-    let file = tempfile_in_temp(&settings)?;
+    let scratch =
+        Removed(std::env::temp_dir().join(format!("appa-safebash-{}-{}", std::process::id(), crate::store::now())));
+    std::fs::create_dir(&scratch.0).map_err(|error| format!("{}: {error}", scratch.0.display()))?;
+    let settings = settings(config, &named, Some(&scratch.0))?;
+    let file = Removed(tempfile_in_temp(&settings)?);
     let (program, prefix) = config
         .sandbox
         .command
@@ -71,14 +72,27 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
     sandbox
         .args(prefix)
         .arg("--settings")
-        .arg(&file)
+        .arg(&file.0)
         .arg("-c")
         .arg(format!("{}{command}", emptying(&named)))
-        .env("TMPDIR", &scratch);
-    let finished = supervise(sandbox, config.sandbox.timeout_secs);
-    let _ = std::fs::remove_file(&file);
-    let _ = std::fs::remove_dir_all(&scratch);
-    Ok(finished?.report(config.sandbox.timeout_secs, ""))
+        .env("TMPDIR", &scratch.0);
+    for name in hidden_environment() {
+        sandbox.env_remove(name);
+    }
+    let finished = supervise(sandbox, config.sandbox.timeout_secs)?;
+    Ok(finished.report(config.sandbox.timeout_secs, ""))
+}
+
+/// A call's own scratch directory or settings file, removed however the call returns.
+struct Removed(PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = match self.0.is_dir() {
+            true => std::fs::remove_dir_all(&self.0),
+            false => std::fs::remove_file(&self.0),
+        };
+    }
 }
 
 /// The confinement of one Claude Code `Bash` call, for `clappa`'s preload to hand to Claude
@@ -96,6 +110,7 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     prepare(&named)?;
     let mut settings = settings(config, &named, None)?;
     settings["prelude"] = json!(emptying(&named));
+    settings["hiddenEnvironment"] = json!(hidden_environment());
     Ok(settings)
 }
 
@@ -220,6 +235,64 @@ const SYSTEM: &[&str] = &[
     "/private",
 ];
 
+/// The system directories a credential can live in, walked for the files a path rule labels.
+const SYSTEM_CONFIGURATION: &[&str] = &["/etc", "/run", "/private/etc"];
+
+/// Every regular file under [`SYSTEM_CONFIGURATION`] that a path rule labels: the system
+/// stays readable, its credentials do not. Symbolic links are left to their targets.
+fn labeled_system_files(config: &Config) -> Vec<PathBuf> {
+    let labeled: Vec<_> = config
+        .paths
+        .iter()
+        .filter(|rule| rule.trust.is_some() || rule.audience.is_some())
+        .collect();
+    let mut found = Vec::new();
+    let mut pending: Vec<(PathBuf, usize)> = SYSTEM_CONFIGURATION.iter().map(|dir| (PathBuf::from(dir), 0)).collect();
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(kind) = entry.file_type() else { continue };
+            let path = entry.path();
+            if kind.is_dir() && depth < 8 {
+                pending.push((path, depth + 1));
+            } else if kind.is_file() && labeled.iter().any(|rule| rule.matches(&path)) {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+/// The environment variables a command never sees: by name, the ones that hold credentials —
+/// a word of the name such as `TOKEN`, `SECRET`, `PASSWORD`, `KEY` or `AUTH`, and every
+/// `ANTHROPIC_` and `APPA_` variable. A command's environment is no declared input, so what
+/// it would carry is withheld rather than labeled.
+pub fn hidden_environment() -> Vec<String> {
+    const WORDS: &[&str] = &[
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "PASS",
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "KEY",
+        "APIKEY",
+        "AUTH",
+        "COOKIE",
+        "SESSION",
+    ];
+    std::env::vars_os()
+        .filter_map(|(name, _)| name.into_string().ok())
+        .filter(|name| {
+            let upper = name.to_ascii_uppercase();
+            upper.starts_with("ANTHROPIC_")
+                || upper.starts_with("APPA_")
+                || upper.split('_').any(|word| WORDS.contains(&word))
+        })
+        .collect()
+}
+
 /// Every top-level entry of `/` that is not [`SYSTEM`]. A symbolic link is left to its
 /// target, which is a top-level entry of its own or under one.
 fn outside_the_system(root: impl IntoIterator<Item = (PathBuf, bool)>) -> Vec<PathBuf> {
@@ -242,6 +315,11 @@ fn settings(config: &Config, named: &Named, scratch: Option<&Path>) -> Result<Va
         (entry.path(), link)
     }));
     hidden.extend(["/tmp", "/var/tmp"].iter().map(PathBuf::from));
+    hidden.extend(
+        labeled_system_files(config)
+            .into_iter()
+            .filter(|path| !named.reads.contains(path)),
+    );
     hidden.extend(std::env::var_os("HOME").map(PathBuf::from));
     hidden.extend(std::env::current_dir().ok());
     hidden.extend(config.store.parent().map(Path::to_path_buf));

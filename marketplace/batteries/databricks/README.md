@@ -200,8 +200,9 @@ every statement either way.
 
 Databricks' own agent skills route data work through the Databricks CLI
 in a shell rather than the managed servers, and this battery's rules do not
-reach a shell. Under the `claude-code` battery a shell command runs only as
-SafeBash, which must declare the hosts it reaches; no rule judges a CLI
+reach a shell. Under the `claude-code` battery a shell command runs as
+Claude Code's confined `Bash`, or as SafeBash where that is not
+available, and must declare the hosts it reaches; no rule judges a CLI
 call that reaches the workspace. The
 `coding` battery narrows the CLI's credential commands (`auth token`,
 `auth env`, `secrets get-secret`, `configure`) and its profile file to

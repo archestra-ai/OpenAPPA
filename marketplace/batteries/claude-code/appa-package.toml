@@ -1,6 +1,6 @@
 schema = 1
 name = "claude-code"
-description = "Claude Code tool rules: Read, Write and Edit labeled per file by the file-tracker, shell commands only as SafeBash, the coding battery's web rules bound to WebFetch and WebSearch, and rules for the built-in tools only Claude Code offers."
+description = "Claude Code tool rules: Read, Write and Edit labeled per file by the file-tracker, Claude Code's own Bash confined per call in its built-in sandbox, with SafeBash as the fallback, the coding battery's web rules bound to WebFetch and WebSearch, and rules for the built-in tools only Claude Code offers."
 
 [battery]
 policy = "appa.toml"

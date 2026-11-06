@@ -209,7 +209,12 @@ sandbox.wrapWithSandbox = async function (command, shell, custom, signal, option
   const confinedCommand = (current.confined.prelude ?? "") + command;
   const wrapped = await wrap.call(this, confinedCommand, shell, perCall, signal, { ...(options ?? {}), commandId: current.nonce });
   hookNetwork();
-  return wrapped;
+  // The sandbox starts without the variables that hold credentials, so neither the command
+  // nor its shell's /proc/<pid>/environ carries them.
+  const hidden = current.confined.hiddenEnvironment ?? [];
+  if (hidden.length === 0) return wrapped;
+  const quoted = (text) => `'${String(text).replace(/'/g, `'\\''`)}'`;
+  return `exec env ${hidden.map((name) => `-u ${quoted(name)}`).join(" ")} ${quoted(shell || "/bin/bash")} -c ${quoted(wrapped)}`;
 };
 
 // The proxy names the command each connection comes from by the `commandId` in its proxy
@@ -288,9 +293,10 @@ async function selfTest() {
     const stray = path.join(dir, "stray.txt");
     fs.writeFileSync(input, "DECLARED\n");
     fs.writeFileSync(secret, "UNDECLARED\n");
+    process.env.APPA_SELFTEST_TOKEN = "CANARY-ENVIRONMENT";
     const lists = { command: "true", input_files: [input], output_files: [output], network_hosts: [] };
     const confined = confinement(lists);
-    const command = `cat ${input}; cat ${secret}; tr A-Z a-z < ${input} > ${output}; echo x > ${stray}`;
+    const command = `cat ${input}; cat ${secret}; tr A-Z a-z < ${input} > ${output}; echo x > ${stray}; printenv APPA_SELFTEST_TOKEN; tr '\\0' '\\n' < /proc/$$/environ`;
     const wrapped = await calls.run({ confined, nonce: "selftest" }, () =>
       sandbox.wrapWithSandbox(command, "/bin/bash", undefined, undefined, { commandId: "selftest" }),
     );
@@ -308,7 +314,9 @@ async function selfTest() {
     check(!ran.stdout.includes("UNDECLARED"), "an undeclared file is readable");
     check(fs.readFileSync(output, "utf8") === "declared\n", `a declared output is not written: ${ran.stderr}`);
     check(!fs.existsSync(stray), "an undeclared write reached the disk");
+    check(!ran.stdout.includes("CANARY-ENVIRONMENT"), "a credential variable reaches the command");
   } finally {
+    delete process.env.APPA_SELFTEST_TOKEN;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 

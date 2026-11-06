@@ -2,9 +2,9 @@
 //! pushed to that recorder after the batch that holds them is appended.
 //!
 //! A recorder is never consulted. The runtime never waits for one, and a recorder can neither
-//! deny nor delay a call: delivery runs on its own task after the append, and a failed
-//! delivery is retried on that task, with backoff, a bounded number of times, and is otherwise
-//! left for the family's next append. Each recorder reads each family in log order, at least
+//! deny nor delay a call: delivery runs on one task per family after the append, never on a
+//! consult's process permits, and a failed delivery is retried on that task, with backoff, a
+//! bounded number of times, and is otherwise left for the family's next append. Each recorder reads each family in log order, at least
 //! once, from a cursor this process keeps per family and binding: a recorder rebound to
 //! another endpoint or command reads the family from its start. A runtime that restarts
 //! begins every cursor at the start of the log, so a recorder deduplicates by dispatch key.
@@ -34,20 +34,60 @@ const ATTEMPTS: [std::time::Duration; 8] = {
     ]
 };
 
-/// Every recorder binding's cursor into every family. A binding is its name and how it is
-/// reached — the transport's description, which names its endpoint or argv and never a
-/// credential's value.
+/// Every recorder binding's cursor into every family, and the families a delivery task is
+/// running for. A binding is its name and how it is reached — the transport's description,
+/// which names its endpoint or argv and never a credential's value.
 #[derive(Default)]
-pub(super) struct Cursors(Mutex<HashMap<(TrajectoryId, String, String), Cursor>>);
+pub(super) struct Cursors {
+    cursors: Mutex<HashMap<(TrajectoryId, String, String), Cursor>>,
+    /// A family with a delivery task, and whether it appended since that task last read it.
+    running: Mutex<HashMap<TrajectoryId, bool>>,
+}
 
 impl Cursors {
     fn of(&self, root: &TrajectoryId, recorder: &str, transport: &crate::config::Transport) -> Cursor {
         let mut cursors = self
-            .0
+            .cursors
             .lock()
             .expect("the recorder cursors mutex is never poisoned: no panic runs while it is held");
         let key = (root.clone(), recorder.to_string(), format!("{transport:?}"));
         Arc::clone(cursors.entry(key).or_default())
+    }
+
+    fn running(&self) -> std::sync::MutexGuard<'_, HashMap<TrajectoryId, bool>> {
+        self.running
+            .lock()
+            .expect("the recorder tasks mutex is never poisoned: no panic runs while it is held")
+    }
+
+    /// Whether `root` needs a task of its own; a running one is told to read the log again.
+    fn start(&self, root: &TrajectoryId) -> bool {
+        let mut running = self.running();
+        match running.get_mut(root) {
+            Some(appended) => {
+                *appended = true;
+                false
+            }
+            None => {
+                running.insert(root.clone(), false);
+                true
+            }
+        }
+    }
+
+    /// Whether `root`'s task may end: nothing was appended since it last read the log.
+    fn finish(&self, root: &TrajectoryId) -> bool {
+        let mut running = self.running();
+        match running.get_mut(root) {
+            Some(appended) if *appended => {
+                *appended = false;
+                false
+            }
+            _ => {
+                running.remove(root);
+                true
+            }
+        }
     }
 }
 
@@ -62,15 +102,29 @@ impl Inner {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        // One task per family at a time: an append while it runs makes it read the log again,
+        // so a stalled recorder holds one task, not one per append.
+        if !self.shared.recorder_cursors.start(root) {
+            return;
+        }
         let (inner, root) = (Arc::clone(self), root.clone());
         handle.spawn(async move {
-            for wait in ATTEMPTS {
-                tokio::time::sleep(wait).await;
-                if inner.deliver_family(&root).await {
+            loop {
+                let mut delivered = false;
+                for wait in ATTEMPTS {
+                    tokio::time::sleep(wait).await;
+                    if inner.deliver_family(&root).await {
+                        delivered = true;
+                        break;
+                    }
+                }
+                if !delivered {
+                    tracing::warn!(root = %root.0, "recorder delivery gave up; the family's next append retries it");
+                }
+                if inner.shared.recorder_cursors.finish(&root) {
                     return;
                 }
             }
-            tracing::warn!(root = %root.0, "recorder delivery gave up; the family's next append retries it");
         });
     }
 

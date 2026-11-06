@@ -1322,10 +1322,10 @@ impl RuntimeEngine {
                     released,
                     ..
                 } => {
-                    for call in proposals
-                        .iter()
-                        .filter(|call| !released.iter().any(|dispatch| dispatch.digest() == &call.digest()))
-                    {
+                    let digests: Vec<_> = proposals.iter().map(|call| call.digest()).collect();
+                    let released: Vec<_> = released.iter().map(|dispatch| *dispatch.digest()).collect();
+                    for at in unreleased(&digests, &released) {
+                        let call = &proposals[at];
                         if let Some(recorder) = self.engine.recorder(call) {
                             records
                                 .entry(recorder.as_str().to_string())
@@ -3679,6 +3679,26 @@ pub(crate) fn policy_file_key(bytes: &[u8]) -> String {
     EnginePolicyFileKey::of(bytes).as_str().to_string()
 }
 
+/// The positions of a batch's proposals it did not release, given the digests it proposed
+/// and the digests of the dispatches it opened. Identical siblings are counted, not matched
+/// by digest alone: one released sibling leaves each other one unreleased.
+fn unreleased<D: PartialEq>(proposed: &[D], released: &[D]) -> Vec<usize> {
+    let mut released: Vec<&D> = released.iter().collect();
+    proposed
+        .iter()
+        .enumerate()
+        .filter_map(
+            |(at, digest)| match released.iter().position(|opened| *opened == digest) {
+                Some(found) => {
+                    released.swap_remove(found);
+                    None
+                }
+                None => Some(at),
+            },
+        )
+        .collect()
+}
+
 /// Every offer a log opened, as the model was shown them. A test reads the
 /// identity it would have quoted back rather than reaching into the engine.
 #[cfg(test)]
@@ -4900,6 +4920,14 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::TrustChain;
+
+    #[test]
+    fn of_identical_siblings_only_as_many_are_released_as_dispatches_opened() {
+        assert_eq!(super::unreleased(&["a", "a", "b", "a"], &["a", "b"]), vec![1, 3]);
+        assert_eq!(super::unreleased(&["a", "a"], &[]), vec![0, 1]);
+        assert!(super::unreleased(&["a", "a"], &["a", "a"]).is_empty());
+    }
+
     use super::{
         BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
         Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId,

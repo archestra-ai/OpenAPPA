@@ -256,6 +256,10 @@ pub struct ExternalServices {
 /// pending consults fan out together, and each is a process.
 const COMMAND_CONSULT_PERMITS: usize = 8;
 
+/// How many `command` recorder deliveries may run at once across a runtime. Their own gate:
+/// a recorder that hangs never holds a permit a consult waits on.
+const COMMAND_RECORDER_PERMITS: usize = 2;
+
 /// Settle a batch of consults, every sibling included, as many at a time as the
 /// command gate admits. A consult's deadline covers its wait for a permit, so a wider
 /// fan-out would time out in the queue rather than run; a narrower one would cost a
@@ -276,6 +280,7 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     command: Arc<tokio::sync::Semaphore>,
+    recorder: Arc<tokio::sync::Semaphore>,
     /// Each model builtin's gate with the `max_concurrent` it was sized by. Only the serving
     /// deployment sizes them; a consult takes its permits from the gate current when it
     /// starts, so a resize reaches every deployment's later consults.
@@ -312,6 +317,7 @@ impl ConsultGates {
         };
         ConsultGates {
             command: Arc::new(tokio::sync::Semaphore::new(command)),
+            recorder: Arc::new(tokio::sync::Semaphore::new(COMMAND_RECORDER_PERMITS)),
             models: Arc::new(Mutex::new(AnnotatorBuiltin::ALL.map(gate))),
             jev: Arc::default(),
         }
@@ -753,7 +759,7 @@ impl ExternalServices {
                 let input = serde_json::to_vec(delivery).map_err(|_| NoAnswerReason::Malformed)?;
                 let deadline = tokio::time::Instant::now() + self.timeout;
                 let credentials = self.command_credentials(command)?;
-                let permit = acquire_within(&self.gates.command, deadline, "command", recorder).await?;
+                let permit = acquire_within(&self.gates.recorder, deadline, "recorder", recorder).await?;
                 let CommandRun { output, .. } =
                     run_command(command, input, deadline, self.max_body_bytes, None, credentials).await;
                 drop(permit);

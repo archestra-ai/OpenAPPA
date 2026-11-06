@@ -2376,3 +2376,67 @@ async fn a_recorder_rebound_under_its_name_receives_the_family_from_its_start() 
         "the new endpoint receives the release the old one already had: {records:?}"
     );
 }
+
+/// A command recorder that never answers takes no process permit a command Annotator needs:
+/// with a delivery stalled in each of many sessions, every later call is still judged
+/// promptly.
+#[tokio::test]
+async fn a_hung_command_recorder_never_delays_a_command_annotator() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(
+        dir.path().join("answer.sh"),
+        "cat > /dev/null\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"trust\":\"trusted\"},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
+    )
+    .expect("the annotator writes");
+    std::fs::write(
+        dir.path().join("hang.sh"),
+        "cat > /dev/null\necho x >> stalled\nsleep 60",
+    )
+    .expect("the recorder writes");
+    let policy = command_policy("answer.sh", false).replace(
+        "annotator = \"classifier\"\n",
+        "annotator = \"classifier\"\nrecorder = \"tracker\"\n",
+    ) + "\n[externals.recorders.tracker]\ncommand = [\"/bin/sh\", \"hang.sh\"]\n";
+    let runtime = open_runtime(&dir, &policy).await;
+
+    for session in 0..12 {
+        let actor = Actor {
+            root: TrajectoryId(format!("session-{session}")),
+            child: None,
+        };
+        let opened = hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: actor.root.clone(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+            },
+        )
+        .await;
+        assert_eq!(opened, HookDecision::Ack);
+        let started = Instant::now();
+        let decision = hooks::handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: actor.clone(),
+                call: fetch("https://a.example"),
+                call_id: None,
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+        .await;
+        assert_eq!(decision, HookDecision::AllowCall { spawn: None }, "session {session}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "session {session} waited {:?} behind stalled recorder deliveries",
+            started.elapsed()
+        );
+    }
+    let stalled = std::fs::read_to_string(dir.path().join("stalled")).unwrap_or_default();
+    assert!(!stalled.is_empty(), "the recorder was delivered to, and stalled");
+}

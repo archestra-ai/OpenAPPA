@@ -5,8 +5,8 @@ labels on the requester's own secrets. It writes its rules once, for
 canonical tools under `tool/coding/`. A client battery binds each canonical
 tool to the client's own tool with an `[aliases.tool.coding]` map. A rule
 no map binds is inactive. The `claude-code` battery binds only `fetch_url`
-and `web_search`: Claude Code's file tools go through the file-tracker
-instead, and its native shell is blocked.
+and `web_search`: Claude Code's file tools and its `Bash` go through the
+file-tracker instead.
 
 | Canonical tool | What it is | Argument the rules read |
 | --- | --- | --- |

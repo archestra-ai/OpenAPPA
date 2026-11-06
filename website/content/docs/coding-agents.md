@@ -47,7 +47,7 @@ The plugin's built-in path rules give credential paths such as `.env*` and `~/.s
 
 ### SafeBash
 
-A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and the system directories (`/usr`, `/etc`, `/lib` and similar), write only its output files, and connect only to its hosts. Every other top-level directory, such as `/home`, `/opt` or `/srv`, is hidden from it, and so are the working directory and the temporary directories. A write to an undeclared path does not reach the disk. Each output file is emptied when the command starts, so a command that is refused or cannot start leaves its outputs unchanged.
+A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and the system directories (`/usr`, `/etc`, `/lib` and similar), write only its output files, and connect only to its hosts. Every other top-level directory, such as `/home`, `/opt` or `/srv`, is hidden from it, and so are the working directory and the temporary directories. A file in `/etc` or `/run` that a path rule labels, such as an SSH host key or a token, is hidden too. The command starts without the environment variables whose names hold credentials: a word such as `TOKEN`, `SECRET`, `PASSWORD`, `KEY` or `AUTH`, and every `ANTHROPIC_` and `APPA_` variable. A write to an undeclared path does not reach the disk. Each output file is emptied when the command starts, so a command that is refused or cannot start leaves its outputs unchanged.
 
 APPA builds no sandbox of its own. It confines each command in the best sandbox the harness has:
 
@@ -69,7 +69,7 @@ The hosts a call declares do not change its label. The sandbox confines the comm
 | Harness | File tools | Shell |
 |---|---|---|
 | Claude Code | `Read`, `Write`, `Edit`, `Bash`, and `mcp/file-tracker/SafeBash` use the file-tracker annotator and recorder. | `clappa` confines `Bash` per call in Claude Code's sandbox, or serves SafeBash where it cannot. It starts Claude Code without `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`, and the battery blocks them. |
-| OpenCode | `read`, `write`, `edit`, and `appa_safebash` use the file-tracker annotator and recorder. | AppenCode removes native `shell` and `patch`. `appa_safebash` runs in a sandbox extension with a proxy. |
+| OpenCode | No file-tracker yet: the battery gives `read`, `write` and `edit` static rules, and a read under `*/private/*` narrows the session to `internal`. | The shell permits only `pwd`. |
 | Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. No file-tracker runs. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
 
 The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. The SafeBash fallback needs `srt` on `PATH`.
@@ -77,6 +77,7 @@ The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Cod
 ### Limits
 
 - A shell command can send its input files to any host it declares. Network destinations carry no policy yet.
+- Credential variables are withheld by name. A variable whose name does not say it holds a credential reaches the command.
 - A file that changes outside a mediated call keeps its recorded label. A process outside the sandbox can still copy a file without its label.
 - A read waits while a write of the same file has not yet reached the recorder. If the write does not settle within the wait, the read fails and the agent can propose it again.
 - The stored audience must be one clause of audiences the policy declares. A file that two unrelated restricted audiences wrote fails its next annotation.
