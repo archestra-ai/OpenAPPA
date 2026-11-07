@@ -125,6 +125,10 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
                 }
             }
         }
+        HookEvent::ChildTurnEnd { root, child } => {
+            let _: TrajectoryId = root;
+            let _: TrajectoryId = child;
+        }
         HookEvent::ChildEnd {
             root: _,
             child: _,

@@ -1022,6 +1022,14 @@ impl RuntimeEngine {
         }
     }
 
+    pub(crate) fn return_policy_of(
+        &self,
+        view: &EngineView,
+        child: &TrajectoryId,
+    ) -> Option<appa_engine::fact::ReturnPolicy> {
+        self.engine.return_policy_of(view, child)
+    }
+
     pub(crate) fn parent_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<TrajectoryId> {
         view.views(child)?.parent_of(child).cloned()
     }
