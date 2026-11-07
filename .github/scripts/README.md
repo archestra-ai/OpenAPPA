@@ -44,9 +44,8 @@ approve or merge release PRs.
 ## Runtime update automation
 
 After `Release OpenAPPA` publishes a complete GitHub release, it calls
-`Update OpenAPPA in Archestra`. The `release: published` event also handles
-releases published manually. The explicit call is needed because GitHub does
-not start another release workflow for releases created with `GITHUB_TOKEN`.
+`Update OpenAPPA in Archestra`. For a release published any other way, dispatch
+the updater on main with the release tag (see [Retry or backfill](#retry-or-backfill)).
 
 Only canonical stable tags such as `v1.2.3` are supported. Drafts and prereleases
 do not produce updates. The updater verifies the published release, resolves
@@ -111,10 +110,12 @@ release publishing, or organization permission is required.
 
 After approving registration and installation, an organization owner uses
 GitHub's secure UI to generate/download the App private key and enter it directly
-as an Actions repository secret in **OpenAPPA**:
+as an Actions secret of the **OpenAPPA** `archestra-update` environment. That
+environment admits main only, and only the publishing job names it:
 
-- Actions variable: `APPA_ARCHESTRA_UPDATER_APP_ID` (the registered numeric App ID).
-- Actions secret: `APPA_ARCHESTRA_UPDATER_PRIVATE_KEY` (the complete PEM key).
+- Actions repository variable: `APPA_ARCHESTRA_UPDATER_APP_ID` (the registered numeric App ID).
+- Actions environment secret: `APPA_ARCHESTRA_UPDATER_PRIVATE_KEY` in
+  `archestra-update` (the complete PEM key).
 
 Do not paste the key into chat, source files, logs, or a PR. Do not share the
 secret with other repositories. App IDs are public configuration; private keys

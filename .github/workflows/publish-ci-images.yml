@@ -127,8 +127,9 @@ jobs:
     needs: tags
     permissions:
       actions: read # Required to download image digest artifacts.
+      attestations: write # Required to record build provenance for the published images.
       contents: read # Required to check out the source that is published.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      id-token: write # Required for Workload Identity Federation and provenance signing.
     uses: $/.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.tags.outputs.tags }}
@@ -136,5 +137,3 @@ jobs:
       version_label: ${{ needs.tags.outputs.version_label }}
       checkout_ref: ${{ needs.tags.outputs.source_commit }}
       immutable: false
-    secrets:
-      APPA_GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}

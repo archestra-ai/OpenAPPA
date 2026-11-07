@@ -42,9 +42,6 @@ on:
         required: false
         type: boolean
         default: false
-    secrets:
-      APPA_GCP_WORKLOAD_IDENTITY_PROVIDER:
-        required: true
 
 permissions: {}
 
@@ -107,7 +104,7 @@ jobs:
         uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
           registry: europe-west1-docker.pkg.dev
 
       - name: Verify and checkout release source
@@ -228,8 +225,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: read # Required to download image digest artifacts.
+      attestations: write # Required to record build provenance for the published images.
       contents: read # Required to check out the source that is published.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      id-token: write # Required for Workload Identity Federation and provenance signing.
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -273,10 +271,11 @@ jobs:
         uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
           registry: europe-west1-docker.pkg.dev
 
       - name: Merge and tag image manifests
+        id: merge
         env:
           IMMUTABLE: ${{ inputs.immutable }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
@@ -325,6 +324,11 @@ jobs:
             # Record the root plus platform manifests from this exact digest.
             # The release descriptor is assembled only after every build ends.
             digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${REGISTRY}/${image}:${tags[0]}")
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::${image} did not resolve to a manifest digest"
+              exit 1
+            fi
+            echo "${image//-/_}_digest=${digest}" >> "$GITHUB_OUTPUT"
             case "$image" in
               appa-runtime) role=runtime ;;
               appa-kagent-adk) role=python ;;
@@ -335,6 +339,51 @@ jobs:
               | python3 scripts/appa-image-descriptor.py "$digest" \
               > "/tmp/appa-generation-images/${role}.json"
           done
+
+      # The attestation push reads only the `auths` entries of the Docker
+      # config, not the gcloud credential helper the auth step configured.
+      # Docker keeps using the helper; this entry is a short-lived token.
+      - name: Expose registry credentials to the attestation push
+        run: |
+          token=$(gcloud auth print-access-token)
+          echo "::add-mask::$token"
+          auth=$(printf 'oauth2accesstoken:%s' "$token" | base64 -w0)
+          echo "::add-mask::$auth"
+          config="$HOME/.docker/config.json"
+          jq --arg host "${REGISTRY%%/*}" --arg auth "$auth" '.auths[$host].auth = $auth' "$config" > "$config.tmp"
+          mv "$config.tmp" "$config"
+
+      - name: Attest appa-runtime provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-runtime
+          subject-digest: ${{ steps.merge.outputs.appa_runtime_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest appa-kagent-adk provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-kagent-adk
+          subject-digest: ${{ steps.merge.outputs.appa_kagent_adk_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest appa-demo-tools provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-demo-tools
+          subject-digest: ${{ steps.merge.outputs.appa_demo_tools_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest appa-demo-mocks provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-demo-mocks
+          subject-digest: ${{ steps.merge.outputs.appa_demo_mocks_digest }}
+          push-to-registry: true
+          create-storage-record: false
 
       - name: Upload shared image identities
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -349,8 +398,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
+      attestations: write # Required to record build provenance for the published image.
       contents: read # Required to check out the source that is published.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      id-token: write # Required for Workload Identity Federation and provenance signing.
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -363,7 +413,7 @@ jobs:
         uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
           registry: europe-west1-docker.pkg.dev
 
       - name: Verify and checkout release source
@@ -445,6 +495,7 @@ jobs:
             org.opencontainers.image.version=${{ inputs.version_label }}
 
       - name: Alias the Go image to the name kagent derives
+        id: go-image
         env:
           GO_DIGEST: ${{ steps.tags.outputs.published_digest || steps.adk-go.outputs.digest }}
           PUBLISHED: ${{ steps.tags.outputs.published_digest }}
@@ -473,10 +524,40 @@ jobs:
             echo "::error::golang-adk resolves to ${alias_digest}, not ${GO_DIGEST}"
             exit 1
           fi
+          echo "digest=${GO_DIGEST}" >> "$GITHUB_OUTPUT"
           mkdir -p /tmp/appa-generation-images
           docker buildx imagetools inspect --raw "${REGISTRY}/golang-adk@${GO_DIGEST}" \
             | python3 scripts/appa-image-descriptor.py "$GO_DIGEST" --single-platform linux/amd64 \
             > /tmp/appa-generation-images/go.json
+
+      # The attestation push reads only the `auths` entries of the Docker
+      # config, not the gcloud credential helper the auth step configured.
+      # Docker keeps using the helper; this entry is a short-lived token.
+      - name: Expose registry credentials to the attestation push
+        run: |
+          token=$(gcloud auth print-access-token)
+          echo "::add-mask::$token"
+          auth=$(printf 'oauth2accesstoken:%s' "$token" | base64 -w0)
+          echo "::add-mask::$auth"
+          config="$HOME/.docker/config.json"
+          jq --arg host "${REGISTRY%%/*}" --arg auth "$auth" '.auths[$host].auth = $auth' "$config" > "$config.tmp"
+          mv "$config.tmp" "$config"
+
+      - name: Attest appa-kagent-adk-go provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-kagent-adk-go
+          subject-digest: ${{ steps.go-image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest golang-adk provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/golang-adk
+          subject-digest: ${{ steps.go-image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
       - name: Upload Go image identity
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

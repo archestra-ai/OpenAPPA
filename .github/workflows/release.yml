@@ -56,6 +56,18 @@ jobs:
       source_commit: ${{ steps.resolve.outputs.source_commit }}
       registry_only: ${{ steps.resolve.outputs.registry_only }}
     steps:
+      # The existing-release modes publish a commit named by a tag, not the
+      # commit this run was started on. Fetch main's history so the resolve
+      # step can refuse a tag whose commit never reached main.
+      - name: Checkout main history
+        if: ${{ inputs.publish_existing_release || inputs.publish_registry_only }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
+
       - name: Resolve release to publish
         id: resolve
         env:
@@ -90,6 +102,17 @@ jobs:
             source_commit=$(gh api "repos/${GH_REPO}/commits/${tag_name}" --jq '.sha')
             if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
               echo "::error::${tag_name} did not resolve to a commit"
+              exit 1
+            fi
+            # Publishing credentials trust this workflow on main only.
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::dispatch existing-release modes on main, not ${GITHUB_REF}"
+              exit 1
+            fi
+            # Fail closed: an unknown commit, a fetch error and a commit that
+            # is not an ancestor of main all stop the release here.
+            if ! git merge-base --is-ancestor "$source_commit" origin/main; then
+              echo "::error::${tag_name} (${source_commit}) is not an ancestor of origin/main"
               exit 1
             fi
             {
@@ -294,8 +317,9 @@ jobs:
       - oci-tags
     permissions:
       actions: read # Required to download image digest artifacts.
+      attestations: write # Required to record build provenance for the published images.
       contents: read # Required to check out the release source.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      id-token: write # Required for Workload Identity Federation and provenance signing.
     uses: $/.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.oci-tags.outputs.tags }}
@@ -305,8 +329,6 @@ jobs:
       verify_release: true
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       immutable: ${{ needs.release-please.outputs.registry_only != 'true' }}
-    secrets:
-      APPA_GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
   publish-chart:
     name: Publish Helm charts
@@ -329,7 +351,7 @@ jobs:
         uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
           service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
           setup_gcloud: "true"
 
       - name: Verify and checkout release source
@@ -401,7 +423,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: read # Required to download archives from the reusable build jobs.
+      attestations: write # Required to record build provenance for the release assets.
       contents: write # Required to upload assets and publish the draft release.
+      id-token: write # Required to sign the build provenance.
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -508,6 +532,11 @@ jobs:
             exit 1
           fi
 
+      - name: Attest release asset provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
       - name: Upload release assets
         env:
           GH_REPO: ${{ github.repository }}
@@ -534,5 +563,3 @@ jobs:
     with:
       release_tag: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
-    secrets:
-      APPA_ARCHESTRA_UPDATER_PRIVATE_KEY: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}

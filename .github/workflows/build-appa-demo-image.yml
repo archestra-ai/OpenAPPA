@@ -1,10 +1,11 @@
 name: Build and deploy appa-demo
 
 # Dockerfile pins the demo runtime independently of main. Pull requests build
-# and test the image. Only a manual dispatch on main publishes and deploys it.
+# and test the image in a job that cannot request an OIDC token. Only a manual
+# dispatch on main builds, tests, publishes and deploys it, in a separate job.
 #
-# Required repository secrets: APPA_GCP_SERVICE_ACCOUNT,
-# APPA_GCP_WORKLOAD_IDENTITY_PROVIDER.
+# The appa-demo-image-push identity trusts this file only on main (infra
+# gcp/workload_identity/ci-workflow-trust.tf).
 
 on:
   pull_request:
@@ -22,16 +23,44 @@ env:
   IMAGE: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-demo/appa-demo
 
 jobs:
-  build:
-    name: Build, push and deploy
+  test:
+    name: Build and test
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
       group: appa-demo-image-${{ github.ref }}
       cancel-in-progress: true
     permissions:
-      # Read the repository to build the image from it.
-      contents: read
+      contents: read # Read the repository to build the image from it.
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Build image
+        run: docker build --tag "$IMAGE:sha-${GITHUB_SHA::12}" .
+
+      - name: Test image
+        run: |
+          docker run --detach --name appa-demo-test --publish 127.0.0.1:8787:8787 \
+            "$IMAGE:sha-${GITHUB_SHA::12}" --cors-origin https://www.openappa.com
+          trap 'docker logs appa-demo-test; docker rm --force appa-demo-test' EXIT
+          curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8787/healthz
+          python3 scripts/test_appa_demo_image.py http://127.0.0.1:8787
+
+  deploy:
+    name: Build, push and deploy
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: appa-demo-image-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read # Read the repository to build the image from it.
       id-token: write # Required for Workload Identity Federation when pushing images.
     steps:
       - name: Checkout project
@@ -52,21 +81,18 @@ jobs:
           python3 scripts/test_appa_demo_image.py http://127.0.0.1:8787
 
       - name: Authenticate to Artifact Registry
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
-          service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: appa-demo-image-push@friendly-path-465518-r6.iam.gserviceaccount.com
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
           registry: europe-west1-docker.pkg.dev
 
       - name: Push image
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         run: |
           docker push "$IMAGE:sha-${GITHUB_SHA::12}"
           docker push "$IMAGE:latest"
 
       - name: Deploy to Cloud Run
-        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         run: |
           gcloud run services update appa-demo \
             --region europe-west1 \
