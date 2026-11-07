@@ -135,6 +135,7 @@ pub enum EventName {
     SpawnResult,
     ChildStart,
     ChildEnd,
+    ChildTurnEnd,
     ChildReturn,
 }
 
@@ -276,6 +277,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Value,
         ],
         EventName::ChildStart => &[Field::RootId, Field::ChildId, Field::SpawnBinding, Field::PromptId],
+        EventName::ChildTurnEnd => &[Field::RootId, Field::ChildId],
         EventName::ChildEnd | EventName::ChildReturn => &[Field::RootId, Field::ChildId, Field::Value],
     }
 }
@@ -815,6 +817,17 @@ impl WireEvent {
                     ..Self::bare(adapter, EventName::ChildStart)
                 }
             }
+            HookEvent::ChildTurnEnd { root, child } => {
+                let (root_id, _) = ids(&Actor {
+                    root: root.clone(),
+                    child: None,
+                })?;
+                Self {
+                    root_id: Some(root_id),
+                    child_id: Some(child_host_id(root, child)?),
+                    ..Self::bare(adapter, EventName::ChildTurnEnd)
+                }
+            }
             HookEvent::ChildEnd { root, child, value } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
@@ -1125,6 +1138,10 @@ impl WireEvent {
                     (None, None) => SpawnRef::InFlight,
                 };
                 accepted(HookEvent::ChildStart { root, child, spawn })
+            }
+            EventName::ChildTurnEnd => {
+                let (root, child) = named_child()?;
+                accepted(HookEvent::ChildTurnEnd { root, child })
             }
             EventName::ChildEnd => {
                 let (root, child) = named_child()?;
@@ -1579,6 +1596,7 @@ mod tests {
                 serde_json::json!({"tool":"read","arguments":{},"outcome":{"status":"success","body":{"content":"done"}}}),
             ),
             ("child_end", serde_json::json!({"child_id":"c1"})),
+            ("child_turn_end", serde_json::json!({"child_id":"c1"})),
         ] {
             let mut body = serde_json::json!({"protocol":1,"adapter":"kagent","event":event,"root_id":"r1"});
             body.as_object_mut()
@@ -1733,6 +1751,37 @@ mod tests {
             WireEvent::read(br#"{"protocol":1,"adapter":"kagent","event":"teleport"}"#),
             Err(ParseRefusal::Malformed { .. })
         ));
+    }
+
+    #[test]
+    fn an_empty_child_turn_round_trips_and_rejects_output_or_missing_child() {
+        let event = HookEvent::ChildTurnEnd {
+            root: TrajectoryId("cc:s1".into()),
+            child: TrajectoryId("cc:s1:c1".into()),
+        };
+        let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).unwrap();
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let parsed = WireEvent::read(&bytes)
+            .unwrap()
+            .into_event(&CLAUDE_CODE, PrincipalSource::None)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(parsed.event, HookEvent::ChildTurnEnd { root, child }
+            if root.0 == "cc:s1" && child.0 == "cc:s1:c1"));
+        for extra in [
+            serde_json::json!({"value":"not empty", "child_id":"c1"}),
+            serde_json::json!({}),
+        ] {
+            let mut body =
+                serde_json::json!({"protocol":1,"adapter":"claude-code","event":"child_turn_end","root_id":"s1"});
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(
+                WireEvent::read(&serde_json::to_vec(&body).unwrap())
+                    .unwrap()
+                    .into_event(&CLAUDE_CODE, PrincipalSource::None)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

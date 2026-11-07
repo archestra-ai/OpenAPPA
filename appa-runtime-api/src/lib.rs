@@ -502,6 +502,9 @@ pub enum HookEvent {
     /// harness never ran, except an identified spawn whose subagent is still
     /// running: a background subagent works past its parent's turn.
     TurnEnd { actor: Actor },
+    /// A child finished without output. Close a no-return child permanently;
+    /// retain a child with a crossing return contract for subsequent turns.
+    ChildTurnEnd { root: TrajectoryId, child: TrajectoryId },
     ToolCall {
         actor: Actor,
         call: ProposedCall,
