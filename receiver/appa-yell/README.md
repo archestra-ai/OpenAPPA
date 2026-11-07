@@ -83,7 +83,8 @@ Terraform, in a root of its own in the infra repository, owns the bucket and
 its retention, the runtime service account (`roles/storage.objectCreator` and
 nothing else), the human readers, the deploy identity, and the function's
 configuration: region, ingress, scaling, environment. `APPA_YELL_BUCKET` is
-set there.
+set there, and so is `APPA_YELL_SLACK_WEBHOOK`, read from a Secret Manager
+secret when an instance starts.
 
 `.github/workflows/appa-yell.yml` owns the code, and only the code. It runs on
 every push to `main` that touches this directory or the workflow itself, or on
