@@ -32,13 +32,16 @@ jobs:
   create-releases:
     name: Create releases for merged release PRs
     if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
-    permissions: {} # The shared workflow writes with the Archestra CI App token only.
-    uses: archestra-ai/.github/.github/workflows/release-please.yml@da5a22fd61f56b4a7fa6bd888292018982e1139e # v1.15.0
+    permissions: {} # The shared workflow writes with the archestra-releaser App token only.
+    uses: archestra-ai/.github/.github/workflows/release-please.yml@ec618a434b933bcd826401c4c615210f2f56d2a0 # v1.16.0
     with:
       skip-github-pull-request: true
+      # The archestra-releaser App's key lives only in this environment, which
+      # only main can deploy to.
+      environment: releaser
     secrets:
-      APP_ID: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
-      APP_PRIVATE_KEY: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
   release-please:
     name: Create or resolve release
@@ -139,13 +142,16 @@ jobs:
     name: Create or update next release PR
     if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
     needs: release-please
-    permissions: {} # The shared workflow writes with the Archestra CI App token only.
-    uses: archestra-ai/.github/.github/workflows/release-please.yml@da5a22fd61f56b4a7fa6bd888292018982e1139e # v1.15.0
+    permissions: {} # The shared workflow writes with the archestra-releaser App token only.
+    uses: archestra-ai/.github/.github/workflows/release-please.yml@ec618a434b933bcd826401c4c615210f2f56d2a0 # v1.16.0
     with:
       skip-github-release: true
+      # The archestra-releaser App's key lives only in this environment, which
+      # only main can deploy to.
+      environment: releaser
     secrets:
-      APP_ID: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
-      APP_PRIVATE_KEY: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
   sync-release-pr:
     name: Synchronize release PR versions
@@ -153,6 +159,8 @@ jobs:
     needs: release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Holds the archestra-releaser App's key; main only.
+    environment: releaser
     permissions:
       contents: read # Required to check out the release PR; the App handles writes.
     steps:
@@ -160,8 +168,8 @@ jobs:
         id: release-pr-token
         uses: archestra-ai/.github/actions/github-app-token@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
         with:
-          app-id: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
-          private-key: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: archestra-ai
           repositories: OpenAPPA
           permission-contents: write
