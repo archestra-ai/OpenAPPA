@@ -34,7 +34,10 @@ jobs:
   canary:
     name: Defended vs empty
     runs-on: ubuntu-latest
-    environment: canary # Holds the Slack webhook; deploys from main only.
+    # Holds the Slack webhook; deploys from main only.
+    environment:
+      name: canary
+      deployment: false # A secrets and branch gate; nothing is deployed.
     timeout-minutes: 150
     permissions:
       contents: read
