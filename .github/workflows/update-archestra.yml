@@ -1,11 +1,8 @@
 name: Update OpenAPPA in Archestra
 
 on:
-  # Releases published with GITHUB_TOKEN do not emit another workflow event.
-  # release.yml calls this workflow after publishing; this event also covers
-  # stable releases published manually by a maintainer.
-  release:
-    types: [published]
+  # release.yml calls this workflow after publishing. For a release published
+  # any other way, dispatch this workflow on main with its tag.
   workflow_dispatch:
     inputs:
       release_tag:
@@ -20,9 +17,6 @@ on:
       source_commit:
         type: string
         required: true
-    secrets:
-      APPA_ARCHESTRA_UPDATER_PRIVATE_KEY:
-        required: true
 
 permissions: {}
 
@@ -35,8 +29,7 @@ jobs:
     name: Validate release and prepare Cargo update
     if: >-
       github.repository == 'archestra-ai/OpenAPPA' &&
-      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') &&
-      (github.event_name != 'release' || !github.event.release.prerelease)
+      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -67,7 +60,7 @@ jobs:
       - name: Verify release and regenerate Cargo pins and lockfile
         id: prepare
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           GH_TOKEN: ${{ github.token }}
         run: >-
@@ -106,6 +99,10 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    # Holds APPA_ARCHESTRA_UPDATER_PRIVATE_KEY; deploys from main only. A job
+    # in a called workflow reads its own environment's secrets, so release.yml
+    # does not pass the key.
+    environment: archestra-update
     timeout-minutes: 10
     permissions:
       contents: read
