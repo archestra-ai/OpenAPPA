@@ -46,7 +46,7 @@ jobs:
           fetch-depth: 1
 
       - name: Deploy production
-        uses: archestra-ai/.github/actions/vercel-deploy@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
+        uses: archestra-ai/.github/actions/vercel-deploy@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
         with:
           token: ${{ secrets.VERCEL_TOKEN }}
           org-id: ${{ vars.VERCEL_ORG_ID }}
