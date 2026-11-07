@@ -33,7 +33,7 @@ jobs:
     name: Create releases for merged release PRs
     if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
     permissions: {} # The shared workflow writes with the archestra-releaser App token only.
-    uses: archestra-ai/.github/.github/workflows/release-please.yml@ec618a434b933bcd826401c4c615210f2f56d2a0 # v1.16.0
+    uses: archestra-ai/.github/.github/workflows/release-please.yml@dc1baa65f528a62f6623c86a748824c9c4c925a7 # v1.17.0
     with:
       skip-github-pull-request: true
       # The archestra-releaser App's key lives only in this environment, which
@@ -143,7 +143,7 @@ jobs:
     if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
     needs: release-please
     permissions: {} # The shared workflow writes with the archestra-releaser App token only.
-    uses: archestra-ai/.github/.github/workflows/release-please.yml@ec618a434b933bcd826401c4c615210f2f56d2a0 # v1.16.0
+    uses: archestra-ai/.github/.github/workflows/release-please.yml@dc1baa65f528a62f6623c86a748824c9c4c925a7 # v1.17.0
     with:
       skip-github-release: true
       # The archestra-releaser App's key lives only in this environment, which
@@ -160,7 +160,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # Holds the archestra-releaser App's key; main only.
-    environment: releaser
+    environment:
+      name: releaser
+      deployment: false # A secrets and branch gate; nothing is deployed.
     permissions:
       contents: read # Required to check out the release PR; the App handles writes.
     steps:

@@ -102,7 +102,9 @@ jobs:
     # Holds APPA_ARCHESTRA_UPDATER_PRIVATE_KEY; deploys from main only. A job
     # in a called workflow reads its own environment's secrets, so release.yml
     # does not pass the key.
-    environment: archestra-update
+    environment:
+      name: archestra-update
+      deployment: false # A secrets and branch gate; nothing is deployed.
     timeout-minutes: 10
     permissions:
       contents: read
