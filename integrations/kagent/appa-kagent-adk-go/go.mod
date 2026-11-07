@@ -7,11 +7,9 @@ require (
 	github.com/go-logr/logr v1.4.4
 	github.com/go-logr/zapr v1.3.0
 	go.uber.org/zap v1.28.0
-	google.golang.org/adk/v2 v2.6.0
+	google.golang.org/adk/v2 v2.3.0
 	google.golang.org/genai v1.74.0
 )
-
-require github.com/coder/websocket v1.8.15 // indirect
 
 require (
 	cloud.google.com/go v0.123.0 // indirect
@@ -69,7 +67,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/ollama/ollama v0.32.4 // indirect
-	github.com/openai/openai-go/v3 v3.71.1 // indirect
+	github.com/openai/openai-go/v3 v3.52.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
