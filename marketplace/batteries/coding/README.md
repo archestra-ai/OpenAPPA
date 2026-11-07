@@ -26,7 +26,15 @@ file-tracker instead.
   double-quoted. A dotenv file also matches with a mode suffix (`.env.local`,
   `.env.production`, `.env.development`, `.env.staging`, `.env.test`). A name
   inside a word or a string literal, a single-quoted name, and a template such
-  as `.env.example` reach the Annotator. Before any other command runs, the
+  as `.env.example` reach the Annotator. Where a client's map entry sets
+  `confined = true` and the root binds `coding.strip-secrets` (the Claude Code
+  default does not, because the file-tracker serves Bash there), the command's
+  result is withheld and the battery offers
+  `coding.strip-secrets` beside the narrowing: the model replaces
+  every secret value in the output with `[redacted-secret]`, and the masked
+  output returns at `internal`, not `self`. It never reaches `public` without
+  another remedy. The sanitizer is tagged `credentials`, so it applies only to
+  the credential rules, not to a command the Annotator narrowed. Before any other command runs, the
   `claude-code.bash-requirements` Annotator decides what trust and fresh
   attention it requires and labels its output for trust and audience, inside
   the vocabulary static rules write: a command that visibly reads the
@@ -83,7 +91,22 @@ file-tracker instead.
   reaches. The root's `[policy.deployment] hint` can mark a source trusted
   or suspicious either way. A search result is a `suspicious` source. A
   search, through `web_search` or a Google search URL, requires no audience:
-  the query goes only to the search provider.
+  the query goes only to the search provider. Where the deployment confines
+  the result (the Claude Code default root confines WebFetch but not
+  WebSearch), a fetch the Annotator labels `suspicious` or a confined search
+  offers `coding.strip-instructions` beside the trust narrowing: the model
+  removes every instruction from the result and keeps its facts, code and
+  links, and the result returns at the session's own trust. The sanitizer is
+  tagged `web`.
+
+The model for both sanitizers is configured in the deployment, not in the
+battery. A deployment runs one by binding it under `[externals.sanitizers]`,
+for example to `builtin = "llm"` or, where the `claude` CLI is installed,
+`builtin = "claude-code"`; the Claude Code
+plugin's default config binds only `coding.strip-instructions`. A sanitizer the root does not bind is
+not offered. APPA does not verify what the model removed: binding a
+sanitizer registers it as trusted. A root rule for a tool precedes the
+battery's, and a root rule without the battery's tag offers no sanitizer.
 
 The Annotators run the local `claude` command (`builtin = "claude-code"`); on
 Windows it must resolve to `claude.exe`. An Annotator reads the client's call

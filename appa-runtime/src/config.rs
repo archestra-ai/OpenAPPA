@@ -13,7 +13,7 @@ use std::time::Duration;
 use appa_engine::audience::{DeclaredTemplate, SelectorTemplate, SourceRegistration, well_formed_reader};
 use appa_engine::authority::{ContextHint, HintTooLong};
 use appa_engine::label::{ChainAudience, ReaderId};
-use appa_engine::names::{ContextProviderName, ProviderName};
+use appa_engine::names::{ContextProviderName, ProviderName, SanitizerName};
 use appa_package::BatteryTarget;
 use appa_policy::AnnotatorBuiltin;
 use appa_runtime_api::PrincipalSource;
@@ -1866,16 +1866,24 @@ fn declaration_name(declaration: &toml::Value) -> Option<&str> {
     declaration.as_table()?.get("name")?.as_str()
 }
 
-/// The annotator names a policy declares; a root's set decides which included
-/// defaults its own declarations replace.
-fn declared_annotators(policy: &toml::Value) -> std::collections::BTreeSet<String> {
-    policy
-        .get("annotator")
-        .and_then(toml::Value::as_array)
+/// The named components a root may replace in an included default: Annotators and
+/// Sanitizers. Each is one named policy component, not an ordered matcher.
+const REPLACEABLE: [&str; 2] = ["annotator", "sanitizer"];
+
+/// The annotator and sanitizer names a policy declares, by field; a root's set decides
+/// which included defaults its own declarations replace.
+fn declared_components(policy: &toml::Value) -> std::collections::BTreeSet<(String, String)> {
+    REPLACEABLE
         .into_iter()
-        .flatten()
-        .filter_map(declaration_name)
-        .map(str::to_owned)
+        .flat_map(|field| {
+            policy
+                .get(field)
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(declaration_name)
+                .map(move |name| (field.to_owned(), name.to_owned()))
+        })
         .collect()
 }
 
@@ -1979,17 +1987,49 @@ fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Ta
 struct Composition {
     document: toml::Value,
     version: i64,
-    root_annotators: std::collections::BTreeSet<String>,
-    replaced_annotators: std::collections::BTreeSet<String>,
+    root_components: std::collections::BTreeSet<(String, String)>,
+    /// The root components that name their builtin, and so take no binding.
+    root_builtin_components: std::collections::BTreeSet<(String, String)>,
+    replaced_components: std::collections::BTreeSet<(String, String)>,
     origins: BTreeMap<String, PathBuf>,
     tool_maps: Vec<(tool_aliases::MapOrigin, tool_aliases::ToolMaps)>,
+    /// The included Sanitizers that name no builtin: each runs only where the deployment
+    /// binds it, and is left out of the composed policy where nothing does.
+    included_sanitizers: std::collections::BTreeSet<String>,
+    /// The root's own `confined_results`, which composition never drops.
+    root_confined: std::collections::BTreeSet<String>,
+    /// Each result an included fragment confines, with the tags of the fragment's rules for
+    /// that tool: an included confinement stays only while a Sanitizer can reach it.
+    included_confined: BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl Composition {
     fn new(mut document: toml::Value) -> Result<Composition, ConfigError> {
         let policy = document.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
         let version = policy_version(policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_annotators = declared_annotators(policy);
+        let root_components = declared_components(policy);
+        let root_builtin_components = REPLACEABLE
+            .into_iter()
+            .flat_map(|field| {
+                policy
+                    .get(field)
+                    .and_then(toml::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|declaration| declaration.get("builtin").is_some())
+                    .filter_map(declaration_name)
+                    .map(move |name| (field.to_owned(), name.to_owned()))
+            })
+            .collect();
+        let root_confined = policy
+            .get("deployment")
+            .and_then(|deployment| deployment.get("confined_results"))
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_owned)
+            .collect();
         // Fragments append their externals to the root's table, so an absent one is the
         // empty table a root file without fragment externals holds.
         let table = document.as_table_mut().expect("a TOML document parses as a table");
@@ -1999,10 +2039,14 @@ impl Composition {
         Ok(Composition {
             document,
             version,
-            root_annotators,
-            replaced_annotators: std::collections::BTreeSet::new(),
+            root_components,
+            root_builtin_components,
+            replaced_components: std::collections::BTreeSet::new(),
             origins: BTreeMap::new(),
             tool_maps: Vec::new(),
+            included_sanitizers: std::collections::BTreeSet::new(),
+            root_confined,
+            included_confined: BTreeMap::new(),
         })
     }
 
@@ -2072,7 +2116,9 @@ impl Composition {
             .and_then(toml::Value::as_table_mut)
             .expect("a composition's root policy is a table");
         if let Some(deployment) = included_policy.remove("deployment") {
-            compose_included_confinement(root_policy, &included_policy, deployment, path)?;
+            for (tool, tags) in compose_included_confinement(root_policy, &included_policy, deployment, path)? {
+                self.included_confined.entry(tool).or_default().extend(tags);
+            }
         }
         for (field, value) in included_policy {
             if field == "version" {
@@ -2084,18 +2130,31 @@ impl Composition {
             let toml::Value::Array(mut declarations) = value else {
                 return Err(refused(field));
             };
-            if field == "annotator" {
-                // An Annotator is one named policy component, not an ordered matcher. The root
-                // may replace one included default so a deployment can own its trusted hint and
-                // mandate without editing a battery. A second included declaration with that
-                // name remains in the composed policy, where normal duplicate validation refuses
-                // it instead of silently choosing between two batteries.
+            if REPLACEABLE.contains(&field.as_str()) {
+                // An Annotator or a Sanitizer is one named policy component, not an ordered
+                // matcher. The root may replace one included default so a deployment can own
+                // its trusted hint, mandate, and model builtin without editing a battery. A
+                // second included declaration with that name remains in the composed policy,
+                // where normal duplicate validation refuses it instead of silently choosing
+                // between two batteries.
                 declarations.retain(|declaration| {
                     let Some(name) = declaration_name(declaration) else {
                         return true;
                     };
-                    !(self.root_annotators.contains(name) && self.replaced_annotators.insert(name.to_string()))
+                    let key = (field.clone(), name.to_string());
+                    !(self.root_components.contains(&key) && self.replaced_components.insert(key))
                 });
+            }
+            if field == "sanitizer" {
+                self.included_sanitizers.extend(
+                    declarations
+                        .iter()
+                        .filter(|declaration| declaration.get("builtin").is_none())
+                        .filter_map(declaration_name)
+                        // The engine applies `attest-schema` itself; it takes no binding.
+                        .filter(|name| *name != SanitizerName::ATTEST_SCHEMA)
+                        .map(str::to_owned),
+                );
             }
             let Some(destination) = root_policy
                 .entry(field.clone())
@@ -2149,7 +2208,23 @@ impl Composition {
                 .ok_or_else(|| ConfigError::RootField {
                     field: format!("externals.{section_name}"),
                 })?;
+            let component = match section {
+                Some(Section::Sanitizers) => Some("sanitizer"),
+                Some(Section::Annotators) => Some("annotator"),
+                _ => None,
+            };
             for (name, entry) in entries {
+                // A replaced component's included binding belongs to the declaration the root
+                // replaced. The root's own binding, or a builtin on its declaration, takes its
+                // place; a root declaration with neither keeps the included binding.
+                if let Some(component) = component {
+                    let key = (component.to_owned(), name.clone());
+                    if self.replaced_components.contains(&key)
+                        && (destination.contains_key(&name) || self.root_builtin_components.contains(&key))
+                    {
+                        continue;
+                    }
+                }
                 if destination.contains_key(&name) {
                     let path = display.to_string();
                     return Err(match section {
@@ -2172,6 +2247,12 @@ impl Composition {
 
     fn finish(self) -> Result<(toml::Value, BTreeMap<String, PathBuf>), ConfigError> {
         let mut document = self.document;
+        leave_out_unbound_included_sanitizers(
+            &mut document,
+            &self.included_sanitizers,
+            &self.root_confined,
+            &self.included_confined,
+        );
         let aliases = aliases::of_document(&document)?;
         tool_aliases::lower(&mut document, self.tool_maps, &aliases)?;
         Ok((document, self.origins))
@@ -2187,7 +2268,7 @@ fn compose_included_confinement(
     included_policy: &toml::map::Map<String, toml::Value>,
     deployment: toml::Value,
     include_path: &Path,
-) -> Result<(), ConfigError> {
+) -> Result<Vec<(String, Vec<String>)>, ConfigError> {
     let refused = |field: &str| ConfigError::IncludedPolicyField {
         path: include_path.display().to_string(),
         field: format!("deployment.{field}"),
@@ -2231,12 +2312,113 @@ fn compose_included_confinement(
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
         .ok_or_else(|| refused("confined_results"))?;
+    let mut tagged = Vec::new();
     for tool in confined {
         if !destination.iter().any(|entry| entry.as_str() == Some(&tool)) {
-            destination.push(toml::Value::String(tool));
+            destination.push(toml::Value::String(tool.clone()));
         }
+        let tags = included_policy
+            .get("tool")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|rule| declaration_name(rule).is_some_and(|name| name.split('(').next().unwrap_or(name) == tool))
+            .filter_map(|rule| rule.get("tags").and_then(toml::Value::as_array))
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        tagged.push((tool, tags));
     }
-    Ok(())
+    Ok(tagged)
+}
+
+/// An included Sanitizer that names no builtin says what to remove, not which model
+/// removes it: that is the deployment's to say, by binding it under `[externals.sanitizers]`
+/// or by re-declaring it. One nothing binds is left out of the composed policy, so no plan
+/// offers a consult that cannot answer, and the deployment decides as it would without the
+/// Sanitizer. Leaving one out only removes remedies; it never permits a flow. An included
+/// confinement a left-out output Sanitizer could reach (untagged, or sharing a tag with the
+/// fragment's rule for the tool) goes with it, unless a remaining one reaches it too. The
+/// root's own Sanitizers and confinements are its declarations and are never left out.
+fn leave_out_unbound_included_sanitizers(
+    document: &mut toml::Value,
+    included_sanitizers: &std::collections::BTreeSet<String>,
+    root_confined: &std::collections::BTreeSet<String>,
+    included_confined: &BTreeMap<String, std::collections::BTreeSet<String>>,
+) {
+    let bound: std::collections::BTreeSet<String> = document
+        .get("externals")
+        .and_then(|externals| externals.get(Section::Sanitizers.name()))
+        .and_then(toml::Value::as_table)
+        .map(|table| table.keys().cloned().collect())
+        .unwrap_or_default();
+    let Some(policy) = document.get_mut("policy").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    let scope = |declaration: &toml::Value| -> Option<Option<Vec<String>>> {
+        let on_output = declaration
+            .get("on")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|on| on.iter().any(|stage| stage.as_str() == Some("tool_output")));
+        // An empty tag list is unscoped, as in the engine's `Scope::covers`.
+        on_output.then(|| {
+            declaration
+                .get("tags")
+                .and_then(toml::Value::as_array)
+                .filter(|tags| !tags.is_empty())
+                .map(|tags| tags.iter().filter_map(toml::Value::as_str).map(str::to_owned).collect())
+        })
+    };
+    let mut kept_scopes = Vec::new();
+    let mut left_out_scopes = Vec::new();
+    if let Some(sanitizers) = policy.get_mut("sanitizer").and_then(toml::Value::as_array_mut) {
+        sanitizers.retain(|declaration| {
+            let Some(name) = declaration_name(declaration) else {
+                return true;
+            };
+            let kept = !included_sanitizers.contains(name) || bound.contains(name);
+            if !kept {
+                tracing::info!(
+                    sanitizer = name,
+                    "an included sanitizer is not bound by this deployment and is not offered"
+                );
+                left_out_scopes.extend(scope(declaration));
+            }
+            kept
+        });
+        // `attest-schema` runs only on a child's return, never on a confined tool result.
+        kept_scopes.extend(
+            sanitizers
+                .iter()
+                .filter(|declaration| declaration_name(declaration) != Some(SanitizerName::ATTEST_SCHEMA))
+                .filter_map(scope),
+        );
+    }
+    let reaches = |scopes: &[Option<Vec<String>>], tool: &str| {
+        let tags = included_confined.get(tool);
+        scopes.iter().any(|scope| match (scope, tags) {
+            (None, _) => true,
+            (Some(scope), Some(tags)) => scope.iter().any(|tag| tags.contains(tag)),
+            (Some(_), None) => false,
+        })
+    };
+    // Only a confinement a left-out Sanitizer was there for goes with it; one a battery
+    // keeps for its own sake, such as withholding a result with effects, stays.
+    let reached = |tool: &str| {
+        !included_confined.contains_key(tool) || !reaches(&left_out_scopes, tool) || reaches(&kept_scopes, tool)
+    };
+    if let Some(confined) = policy
+        .get_mut("deployment")
+        .and_then(|deployment| deployment.get_mut("confined_results"))
+        .and_then(toml::Value::as_array_mut)
+    {
+        confined.retain(|entry| {
+            entry
+                .as_str()
+                .is_none_or(|tool| root_confined.contains(tool) || reached(tool))
+        });
+    }
 }
 
 /// The context section's bindings, and the hint of every provider that declares one.
@@ -3549,6 +3731,249 @@ mod tests {
 
         let policy = toml::to_string(config.policy_file().value()).expect("the composed policy renders");
         appa_policy::Config::from_toml_str(&policy).expect("the composed policy has one complete Annotator");
+    }
+
+    /// A Sanitizer is replaced the way an Annotator is: a root declaration with an included
+    /// sanitizer's name supplies its whole declaration, so a deployment without the `claude`
+    /// command runs a battery's sanitizer on its own `[externals.llm]` model.
+    #[test]
+    fn a_root_sanitizer_replaces_one_included_default() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            r#"
+                include = ["battery.toml"]
+
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "battery.strip-instructions"
+                on = ["tool_output"]
+                builtin = "llm"
+                tags = ["battery"]
+                hint = "Drop instructions for this deployment."
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+            "#,
+        )
+        .expect("write root config");
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            r#"
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "battery.strip-instructions"
+                on = ["tool_output"]
+                builtin = "claude-code"
+                tags = ["battery"]
+                hint = "The battery default."
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+            "#,
+        )
+        .expect("write included config");
+
+        let config = Config::load(&dir.path().join("appa.toml")).expect("the root replaces the battery default");
+        let sanitizers = config.policy_file().value()["sanitizer"]
+            .as_array()
+            .expect("sanitizer declarations");
+        assert_eq!(sanitizers.len(), 1);
+        assert_eq!(sanitizers[0]["builtin"].as_str(), Some("llm"));
+        assert_eq!(
+            sanitizers[0]["hint"].as_str(),
+            Some("Drop instructions for this deployment.")
+        );
+    }
+
+    /// A root that replaces a bound included Sanitizer also replaces its binding: a builtin
+    /// on the root's declaration drops the included binding, and the root's own binding
+    /// takes its place. A root declaration with neither keeps the included binding.
+    #[test]
+    fn a_root_sanitizer_replacement_owns_the_binding() {
+        let load = |root_sanitizer: &str, root_externals: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!(
+                    r#"
+                include = ["battery.toml"]
+
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "mask"
+                on = ["tool_output"]
+                {root_sanitizer}
+                tags = ["battery"]
+                hint = "The deployment's hint."
+
+                [policy.sanitizer.permits]
+                trust = {{ from = "suspicious", to = "trusted" }}
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+                {root_externals}
+            "#
+                ),
+            )
+            .expect("write root config");
+            std::fs::write(
+                dir.path().join("battery.toml"),
+                r#"
+                [policy]
+                version = 2
+
+                [[policy.tool]]
+                name = "lookup"
+                delta = { trust = "suspicious" }
+                tags = ["battery"]
+
+                [[policy.sanitizer]]
+                name = "mask"
+                on = ["tool_output"]
+                tags = ["battery"]
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+
+                [policy.deployment]
+                confined_results = ["lookup"]
+
+                [externals.sanitizers.mask]
+                builtin = "redact-secrets"
+            "#,
+            )
+            .expect("write included config");
+            Config::load(&dir.path().join("appa.toml")).map(|config| config.externals.sanitizers.get("mask").cloned())
+        };
+
+        assert!(
+            load(r#"builtin = "llm""#, "")
+                .expect("a builtin replaces the binding")
+                .is_none()
+        );
+        assert!(matches!(
+            load("", "[externals.sanitizers.mask]\nbuiltin = \"claude-code\"").expect("the root binding wins"),
+            Some(Implementation::Builtin(builtin)) if builtin == "claude-code"
+        ));
+        assert!(matches!(
+            load("", "").expect("the included binding stays"),
+            Some(Implementation::Builtin(builtin)) if builtin == "redact-secrets"
+        ));
+    }
+
+    /// An included Sanitizer that names no builtin runs only where the deployment binds it.
+    /// Unbound, it is left out with the confinement only it could reach, so the composed
+    /// policy is the one the battery would compose to without it. The root's own
+    /// confinement stays either way.
+    #[test]
+    fn an_unbound_included_sanitizer_is_left_out_with_the_confinement_it_needs() {
+        let battery = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "mcp/tracker/read"
+            delta = { audience = ["internal"] }
+            tags = ["tracker"]
+
+            [[policy.tool]]
+            name = "mcp/tracker/list"
+            delta = { audience = ["internal"] }
+            tags = ["listing"]
+
+            [[policy.sanitizer]]
+            name = "tracker.redact"
+            on = ["tool_output"]
+            tags = ["tracker"]
+            hint = "Remove personal data."
+
+            [policy.sanitizer.permits]
+            audience = { from = ["internal"], to = ["public"] }
+
+            [policy.deployment]
+            confined_results = ["mcp/tracker/read", "mcp/tracker/list"]
+        "#;
+        let composed_with = |battery_tail: &str, root_tail: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            std::fs::write(dir.path().join("battery.toml"), format!("{battery}{battery_tail}")).expect("write battery");
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!(
+                    "include = [\"battery.toml\"]\n[policy]\nversion = 2\n[policy.deployment]\nconfined_results = [\"mcp/tracker/list\"]\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n{root_tail}"
+                ),
+            )
+            .expect("write root");
+            let config = Config::load(&dir.path().join("appa.toml")).expect("the deployment composes");
+            let policy = config.policy_file().value().clone();
+            let sanitizers: Vec<String> = policy
+                .get("sanitizer")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|declaration| declaration_name(declaration).map(str::to_owned))
+                .collect();
+            let confined: Vec<String> = policy["deployment"]["confined_results"]
+                .as_array()
+                .expect("confined results")
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect();
+            (sanitizers, confined)
+        };
+        let composed = |root_tail: &str| composed_with("", root_tail);
+
+        assert_eq!(
+            composed(""),
+            (Vec::new(), vec!["mcp/tracker/list".to_string()]),
+            "unbound: the sanitizer and the confinement only it reaches are left out; the root's stays"
+        );
+        assert_eq!(
+            composed("[externals.sanitizers.\"tracker.redact\"]\nbuiltin = \"redact-email\"\n"),
+            (
+                vec!["tracker.redact".to_string()],
+                vec!["mcp/tracker/list".to_string(), "mcp/tracker/read".to_string()]
+            ),
+            "bound: the sanitizer runs and keeps the confinement its tag reaches"
+        );
+
+        // `attest-schema` is the engine's: it takes no binding, so an included one stays, and
+        // it never runs on a tool result, so a root one keeps no battery confinement.
+        let attest = "\n[[policy.sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\n[policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        // An explicit `tags = []` is unscoped, as in the engine: bound, it reaches every
+        // result, so it keeps the confinement the left-out `tracker.redact` needed.
+        let unscoped = "\n[[policy.sanitizer]]\nname = \"tracker.all\"\non = [\"tool_output\"]\ntags = []\n[policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        assert_eq!(
+            composed_with(
+                unscoped,
+                "[externals.sanitizers.\"tracker.all\"]\nbuiltin = \"redact-email\"\n"
+            ),
+            (
+                vec!["tracker.all".to_string()],
+                vec!["mcp/tracker/list".to_string(), "mcp/tracker/read".to_string()]
+            ),
+            "a bound sanitizer with empty tags reaches every confined result"
+        );
+
+        for (battery_tail, root_tail) in [(attest, ""), ("", attest)] {
+            assert_eq!(
+                composed_with(battery_tail, root_tail),
+                (vec!["attest-schema".to_string()], vec!["mcp/tracker/list".to_string()]),
+                "attest-schema declared by the {}",
+                if battery_tail.is_empty() { "root" } else { "battery" }
+            );
+        }
     }
 
     /// A command's working directory is its declaring file's, in every section, and the

@@ -124,6 +124,9 @@ trust = { from = "suspicious", to = "trusted" }
 # check the subagent's return as a branch of the parent.
 [policy.deployment]
 context_control = true
+# WebFetch's result is withheld until `coding.strip-instructions`, bound
+# below, has run on it, when the agent chooses that sanitizer.
+confined_results = ["host/claude-code/WebFetch"]
 
 # Batteries and Annotators can require fresh attention, trusted data, or a
 # wider audience before a tool runs. This authority shows the person running
@@ -177,6 +180,78 @@ command = ["appa", "file-tracker", "annotate"]
 
 [externals.recorders.file-tracker]
 command = ["appa", "file-tracker", "record"]
+
+# The model for each battery sanitizer is configured here, not in the battery.
+# A Claude Code session has the `claude` CLI, so this policy binds every
+# battery sanitizer to it, and each one is offered by default, except
+# `coding.strip-secrets`: the file-tracker labels credential reads here, and
+# no shell result is confined for it to run on. A
+# binding for a battery this deployment does not include stays idle, and it
+# activates when `appa battery install` adds that battery. To turn one
+# sanitizer off, delete its binding: the battery then decides as it would
+# without it.
+[externals.sanitizers."coding.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."cloudflare.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."cloudflare.redact-for-public"]
+builtin = "claude-code"
+
+[externals.sanitizers."databricks.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."github.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."google-workspace.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."grain.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."huggingface.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."launchdarkly.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."linear.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."linear.redact-for-public"]
+builtin = "claude-code"
+
+[externals.sanitizers."microsoft-learn.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."monday.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."monday.strip-secrets"]
+builtin = "claude-code"
+
+[externals.sanitizers."notion.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."pagerduty.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."pagerduty.redact-for-public"]
+builtin = "claude-code"
+
+[externals.sanitizers."posthog.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."sentry.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."sentry.redact-for-public"]
+builtin = "claude-code"
+
+[externals.sanitizers."slack.strip-instructions"]
+builtin = "claude-code"
 
 # Who `self` and `internal` are, read from a directory when a decision needs
 # actual membership: a rule naming an individual recipient

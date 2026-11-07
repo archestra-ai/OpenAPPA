@@ -90,3 +90,9 @@ names is refused; the installed default root adds a wildcard fallback for it.
 
 Root rules take precedence over both batteries. Add a root rule when a
 particular tool needs stricter, looser, or fully blocked behavior.
+
+The map confines no result. A root that binds `coding.strip-instructions`
+confines WebFetch itself with `confined_results = ["host/claude-code/WebFetch"]`
+under `[policy.deployment]`; the installed default root already does.
+WebSearch stays unconfined: Claude Code's replacement of its result is not
+verified live.

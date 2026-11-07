@@ -220,6 +220,10 @@ pub(crate) struct RawSanitizer {
     pub(crate) on: Vec<String>,
     #[serde(default)]
     pub(crate) hint: Option<String>,
+    /// The model transport this Sanitizer carries: `"claude-code"` or `"llm"`. A Sanitizer
+    /// that names one takes no deployment binding, as an Annotator that names one does.
+    #[serde(default)]
+    pub(crate) builtin: Option<String>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
     pub(crate) permits: RawSanitizerPermits,

@@ -4,6 +4,9 @@
 # tool set varies by Claude Code version; regenerate the list from a live
 # session when it drifts. Include the `coding` battery beside this one.
 
+# Claude Code spells each argument as the canonical tools do. A root that
+# binds `coding.strip-instructions` confines WebFetch itself. WebSearch stays
+# unconfined: Claude Code's replacement of its result is not verified live.
 [aliases.tool.coding]
 fetch_url = [{ name = "host/claude-code/WebFetch", args = { url = "url" } }]
 web_search = [{ name = "host/claude-code/WebSearch" }]

@@ -216,6 +216,21 @@ fn an_inline_binding_on_the_reserved_attest_schema_is_refused() {
 }
 
 #[test]
+fn a_model_builtin_on_the_reserved_attest_schema_is_refused() {
+    for builtin in ["llm", "claude-code"] {
+        let policy = format!(
+            "version = 2\n\
+             [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\nbuiltin = \"{builtin}\"\n\
+             [sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n"
+        );
+        assert!(
+            matches!(load(&policy), Err(ConfigError::ReservedSanitizerBuiltin { builtin: found }) if found == builtin),
+            "attest-schema accepted builtin {builtin}"
+        );
+    }
+}
+
+#[test]
 fn an_input_sanitizer_registers_with_its_scope_and_refuses_a_trust_mandate() {
     let policy = |mandate: &str| {
         format!(
