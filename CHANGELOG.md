@@ -1,5 +1,87 @@
 # Changelog
 
+## [0.39.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.38.1...v0.39.0) (2026-11-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **engine:** `[file_tracking]`, the appa_*_file MCP tools, `--file-process-backend`, `appa files`, `appa claude-files` and `appa file-mcp` are removed.
+
+### Features
+
+* **engine:** Recorders in APPA, starting with Claude Code ([#790](https://github.com/archestra-ai/OpenAPPA/issues/790)) ([8ce5d78](https://github.com/archestra-ai/OpenAPPA/commit/8ce5d78c3f75921d66d9896776e95a93940016aa))
+* **runtime:** add context-provider and deployment hints to annotator prompts ([#773](https://github.com/archestra-ai/OpenAPPA/issues/773)) ([8885b5c](https://github.com/archestra-ai/OpenAPPA/commit/8885b5c749db7284f7570696c53ee9fbdd334be4))
+
+
+### Bug Fixes
+
+* **archestra:** require an internal audience for credential link declarations ([#798](https://github.com/archestra-ai/OpenAPPA/issues/798)) ([c4462b8](https://github.com/archestra-ai/OpenAPPA/commit/c4462b8e554faff03b4c030e40e4fdf2d33f96c3))
+* **batteries:** label every Archestra built-in tool ([#789](https://github.com/archestra-ai/OpenAPPA/issues/789)) ([a5d5be0](https://github.com/archestra-ai/OpenAPPA/commit/a5d5be01bdabba8ce194c4b9631d9a1c37575c5c))
+* **batteries:** treat Claude Code SendMessage and RemoteTrigger as internal sinks ([#787](https://github.com/archestra-ai/OpenAPPA/issues/787)) ([c77025f](https://github.com/archestra-ai/OpenAPPA/commit/c77025f0373af360c29ef5b3cb754197e9d5d57e))
+* **coding:** match a dotenv file in the shell credential floor as a path, not a substring ([#785](https://github.com/archestra-ai/OpenAPPA/issues/785)) ([1f7df9c](https://github.com/archestra-ai/OpenAPPA/commit/1f7df9c12204a9b5d344213b0a707f9d4c1328fb))
+* **coding:** match credential files and dotenv modes as path tokens; offer a lower-trust return floor ([#803](https://github.com/archestra-ai/OpenAPPA/issues/803)) ([14cafea](https://github.com/archestra-ai/OpenAPPA/commit/14cafea4e871470e10d6bc94f768ec2513490c63))
+* **deps:** bump taubench aiohttp, certifi and filelock ([ff7c2f2](https://github.com/archestra-ai/OpenAPPA/commit/ff7c2f2e58c615ad203180d48604b98c6ba182c5))
+* **deps:** bump website shadcn to drop vulnerable zod 3 ([#835](https://github.com/archestra-ai/OpenAPPA/issues/835)) ([1086a64](https://github.com/archestra-ai/OpenAPPA/commit/1086a646682148f1a4839f2f88712e2364b1f28a))
+* **deps:** bump website shadcn to drop zod 3 ([1086a64](https://github.com/archestra-ai/OpenAPPA/commit/1086a646682148f1a4839f2f88712e2364b1f28a))
+* **deps:** patch high-severity advisories in bench lockfiles ([#834](https://github.com/archestra-ai/OpenAPPA/issues/834)) ([8a67fc0](https://github.com/archestra-ai/OpenAPPA/commit/8a67fc07bde1f3d2f4a942683db03bf5af113628))
+* **deps:** patch high-severity advisories in website, kagent and appa-yell ([#831](https://github.com/archestra-ai/OpenAPPA/issues/831)) ([914aa9f](https://github.com/archestra-ai/OpenAPPA/commit/914aa9f8c56d8aff652526d8040b07efb6cea9db))
+* **deps:** patch taubench aiohttp, certifi and filelock advisories ([#836](https://github.com/archestra-ai/OpenAPPA/issues/836)) ([ff7c2f2](https://github.com/archestra-ai/OpenAPPA/commit/ff7c2f2e58c615ad203180d48604b98c6ba182c5))
+* **engine:** say that a narrowing's impact leaves per-call labeled tools unjudged ([#784](https://github.com/archestra-ai/OpenAPPA/issues/784)) ([8a4762b](https://github.com/archestra-ai/OpenAPPA/commit/8a4762b78cb39bf9f2e5edf20e2d798887f9e38f))
+* **github:** follow subshells, conditions and wrappers in the context provider ([#771](https://github.com/archestra-ai/OpenAPPA/issues/771)) ([5ab9b43](https://github.com/archestra-ai/OpenAPPA/commit/5ab9b4363d461cc0afaf7ae312ce083327f84b18))
+* **github:** follow token overrides, unmoving git config, and unread variables in the context provider ([#775](https://github.com/archestra-ai/OpenAPPA/issues/775)) ([fc46b12](https://github.com/archestra-ai/OpenAPPA/commit/fc46b128babfeaf0f29e288d326ae3d3db12627e))
+* **google-workspace:** use Google Drive sharing settings for audience resolution ([#750](https://github.com/archestra-ai/OpenAPPA/issues/750)) ([73f7fba](https://github.com/archestra-ai/OpenAPPA/commit/73f7fba77651a9fc20ced57ec09b2564a03446c5))
+* **kagent:** describe the demo restart tool's name argument ([#796](https://github.com/archestra-ai/OpenAPPA/issues/796)) ([f90b8ba](https://github.com/archestra-ai/OpenAPPA/commit/f90b8ba769d4f627266f69bae6100afa6ba5c0ca))
+* **kagent:** select the narrowing remedy by its current wording in marketplace acceptance ([#794](https://github.com/archestra-ai/OpenAPPA/issues/794)) ([5f1c06b](https://github.com/archestra-ai/OpenAPPA/commit/5f1c06b8109465d3187ba53785a0007a86146805))
+* **label-guide:** keep the project's own toolchain releases out of the trust gate ([#788](https://github.com/archestra-ai/OpenAPPA/issues/788)) ([777b332](https://github.com/archestra-ai/OpenAPPA/commit/777b3327b6617e1ff484e7f6f51a12b9c8a461ad))
+* **runtime:** a runtime started inside a Claude Code session keeps the user's Claude login ([#801](https://github.com/archestra-ai/OpenAPPA/issues/801)) ([61b59b0](https://github.com/archestra-ai/OpenAPPA/commit/61b59b0ba399a027e2d4e8732b45711adb4716ee))
+* **runtime:** admit a peer read under unscoped output sanitizers ([#786](https://github.com/archestra-ai/OpenAPPA/issues/786)) ([ee33806](https://github.com/archestra-ai/OpenAPPA/commit/ee338061f176055967889d6685448457c01c3d60))
+* **runtime:** carry a url or command external's refusal reason ([#770](https://github.com/archestra-ai/OpenAPPA/issues/770)) ([8cb36f4](https://github.com/archestra-ai/OpenAPPA/commit/8cb36f4866cd685eb14d18ff7e7f69720ad9f119))
+* **runtime:** claude temperature bug ([#802](https://github.com/archestra-ai/OpenAPPA/issues/802)) ([45e700a](https://github.com/archestra-ai/OpenAPPA/commit/45e700a524335a1425b98d84ae3dbb8c3d3728b5))
+* **runtime:** drop only the largest context answers past jev's cap ([#769](https://github.com/archestra-ai/OpenAPPA/issues/769)) ([30f606a](https://github.com/archestra-ai/OpenAPPA/commit/30f606a34b4c271e5c638771847e2ea384236e51))
+* **runtime:** judge manifest writes and selected images by provenance, and reuse identical claude-code annotations ([#782](https://github.com/archestra-ai/OpenAPPA/issues/782)) ([4be942a](https://github.com/archestra-ai/OpenAPPA/commit/4be942a1688e90795e9b74f4e5f3dcaeb35d2321))
+* **runtime:** judge result trust by open-write surfaces, not by external sources ([#783](https://github.com/archestra-ai/OpenAPPA/issues/783)) ([afac6f1](https://github.com/archestra-ai/OpenAPPA/commit/afac6f1a367dc4e73fc4cb41b66e9fabc3634522))
+* **runtime:** keep a model sanitizer's rewritten value unwrapped ([#797](https://github.com/archestra-ai/OpenAPPA/issues/797)) ([5b1ed02](https://github.com/archestra-ai/OpenAPPA/commit/5b1ed021f4354e9c208767332eb2026cf92b1731))
+* **runtime:** move to zip 9 for the extract advisories ([#680](https://github.com/archestra-ai/OpenAPPA/issues/680)) ([8b61c1f](https://github.com/archestra-ai/OpenAPPA/commit/8b61c1f55322c0297652fbab432ffa0e0cd1c1db))
+* **runtime:** tell a command external the budget it has left ([#772](https://github.com/archestra-ai/OpenAPPA/issues/772)) ([91d36b4](https://github.com/archestra-ai/OpenAPPA/commit/91d36b4de7416ecc34d889c677c684e5beb28b79))
+
+
+### Performance Improvements
+
+* **engine:** index redispatch candidates in the planner-cap lint ([#792](https://github.com/archestra-ai/OpenAPPA/issues/792)) ([953b84f](https://github.com/archestra-ai/OpenAPPA/commit/953b84fdf5d758dff37b49358099be934afdaf68))
+
+
+### Documentation
+
+* **batteries:** say how each battery script is run in its opening line ([#793](https://github.com/archestra-ai/OpenAPPA/issues/793)) ([aee8066](https://github.com/archestra-ai/OpenAPPA/commit/aee8066772edc5681ddeb6025aad126cd60abf2e))
+
+
+### Dependencies
+
+* bump @streamdown/code from 1.1.1 to 2.0.0 in /website ([#827](https://github.com/archestra-ai/OpenAPPA/issues/827)) ([e01f542](https://github.com/archestra-ai/OpenAPPA/commit/e01f54224d5c64bf306229fbefc2cc19c849693c))
+* bump archestra-ai/.github/actions/cargo-release-age from 1.0.0 to 1.10.2 ([#780](https://github.com/archestra-ai/OpenAPPA/issues/780)) ([9473b70](https://github.com/archestra-ai/OpenAPPA/commit/9473b70c454d947f5a1fb173da7a7beb900f680d))
+* bump archestra-ai/.github/actions/github-app-token from 1.1.0 to 1.10.2 ([#776](https://github.com/archestra-ai/OpenAPPA/issues/776)) ([25bcb84](https://github.com/archestra-ai/OpenAPPA/commit/25bcb840eb59e9c9626d6544d852b37e3ea35ae8))
+* bump archestra-ai/.github/actions/google-auth from 1.1.0 to 1.10.2 ([#778](https://github.com/archestra-ai/OpenAPPA/issues/778)) ([9ac4cb1](https://github.com/archestra-ai/OpenAPPA/commit/9ac4cb1165c36e03821594fa3bfb4a352286880b))
+* bump archestra-ai/.github/actions/vercel-deploy from 1.1.0 to 1.10.2 ([#779](https://github.com/archestra-ai/OpenAPPA/issues/779)) ([7f7fbd8](https://github.com/archestra-ai/OpenAPPA/commit/7f7fbd884b348db166f38392b088ec9aaf18c6a4))
+* bump archestra-ai/.github/actions/vercel-deploy from 1.10.2 to 1.13.0 ([#815](https://github.com/archestra-ai/OpenAPPA/issues/815)) ([1e5a7d5](https://github.com/archestra-ai/OpenAPPA/commit/1e5a7d57c85620de85a0938359c0c7b5f62054cc))
+* bump astral-sh/setup-uv from 10.3.0 to 10.3.2 ([#777](https://github.com/archestra-ai/OpenAPPA/issues/777)) ([4b799d0](https://github.com/archestra-ai/OpenAPPA/commit/4b799d02c79abf9e0df9ca4901b15bb35c6eda58))
+* bump astral-sh/setup-uv from 10.3.2 to 10.3.3 ([#812](https://github.com/archestra-ai/OpenAPPA/issues/812)) ([f9c32d3](https://github.com/archestra-ai/OpenAPPA/commit/f9c32d347fe1ffcfc8d808528f7125116b741926))
+* bump next from 15.5.28 to 16.4.3 in /website ([#826](https://github.com/archestra-ai/OpenAPPA/issues/826)) ([7451641](https://github.com/archestra-ai/OpenAPPA/commit/74516415ebeb0e80167ee351e7a51bf47fb1d573))
+* bump pyo3 from 0.29.2 to 0.30.1 ([#823](https://github.com/archestra-ai/OpenAPPA/issues/823)) ([e9f87e6](https://github.com/archestra-ai/OpenAPPA/commit/e9f87e6d57a7ff7d6918f14fdf2ffb21bebc9ab3))
+* bump serde_json_canonicalizer from 0.3.2 to 0.4.1 ([#821](https://github.com/archestra-ai/OpenAPPA/issues/821)) ([73e58a2](https://github.com/archestra-ai/OpenAPPA/commit/73e58a2a274c101cb5f0a751b58688adeaf186ce))
+* bump the rust-dependencies group across 1 directory with 17 updates ([#781](https://github.com/archestra-ai/OpenAPPA/issues/781)) ([a59fc32](https://github.com/archestra-ai/OpenAPPA/commit/a59fc32bb4ce349de87b56e20c9b036196968b7c))
+* bump typescript from 5.9.3 to 7.0.2 in /integrations/opencode ([#819](https://github.com/archestra-ai/OpenAPPA/issues/819)) ([5d6e514](https://github.com/archestra-ai/OpenAPPA/commit/5d6e5147b8860a99c7693bd44d9b6a16e76a11e6))
+
+
+### Code Refactoring
+
+* **runtime:** split the session module and fold its repeated reads ([#800](https://github.com/archestra-ai/OpenAPPA/issues/800)) ([d4c2ec9](https://github.com/archestra-ai/OpenAPPA/commit/d4c2ec99478538a3eeeb4643288e4d69f1579aa5))
+
+
+### Miscellaneous Chores
+
+* **deps:** bump joserfc from 1.7.5 to 1.7.6 in /integrations/kagent/appa-kagent-adk ([#833](https://github.com/archestra-ai/OpenAPPA/issues/833)) ([c7b9e00](https://github.com/archestra-ai/OpenAPPA/commit/c7b9e008fe118aaf29cfe939fb474d3c44fde130))
+* **deps:** bump joserfc in /integrations/kagent/appa-kagent-adk ([c7b9e00](https://github.com/archestra-ai/OpenAPPA/commit/c7b9e008fe118aaf29cfe939fb474d3c44fde130))
+
 ## [0.38.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.38.0...v0.38.1) (2026-11-01)
 
 
