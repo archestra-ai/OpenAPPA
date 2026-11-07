@@ -522,7 +522,7 @@ jobs:
           permission-actions: read
 
       - name: Publish through release-images
-        uses: archestra-ai/.github/actions/release-images-publish@c5dcc3ca6008c1f2dc7b9c005aa6c81d3353542e # release-images-publish
+        uses: archestra-ai/.github/actions/release-images-publish@460fc8af7169871b967b6b2d31d8b2e2c758d978 # v1.18.0
         with:
           token: ${{ steps.publisher-token.outputs.token }}
           project: openappa
@@ -793,7 +793,7 @@ jobs:
           permission-actions: read
 
       - name: Run the publisher dry run
-        uses: archestra-ai/.github/actions/release-images-publish@c5dcc3ca6008c1f2dc7b9c005aa6c81d3353542e # release-images-publish
+        uses: archestra-ai/.github/actions/release-images-publish@460fc8af7169871b967b6b2d31d8b2e2c758d978 # v1.18.0
         with:
           token: ${{ steps.publisher-token.outputs.token }}
           project: openappa
