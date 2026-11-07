@@ -69,13 +69,13 @@ importers:
         version: 1.28.0(react@19.2.7)
       mcp-handler:
         specifier: ^2.1.0
-        version: 2.1.0(@modelcontextprotocol/server@2.4.0)(next@15.5.28(@babel/core@7.29.7)(@types/node@22.20.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))
+        version: 2.1.0(@modelcontextprotocol/server@2.4.0)(next@15.5.28(@babel/core@7.29.7)(@types/node@26.6.6)(react-dom@19.2.7(react@19.2.7))(react@19.2.7))
       nanoid:
         specifier: ^6.0.1
         version: 6.0.1
       next:
         specifier: ^15.5.28
-        version: 15.5.28(@babel/core@7.29.7)(@types/node@22.20.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+        version: 15.5.28(@babel/core@7.29.7)(@types/node@26.6.6)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       posthog-js:
         specifier: ^1.417.3
         version: 1.417.3
@@ -129,8 +129,8 @@ importers:
         specifier: ^4.1.0
         version: 4.3.2
       '@types/node':
-        specifier: ^22.15.0
-        version: 22.20.1
+        specifier: ^26.6.6
+        version: 26.6.6
       '@types/react':
         specifier: ^19.1.0
         version: 19.2.17
@@ -1100,8 +1100,8 @@ packages:
   '@types/ms@2.1.0':
     resolution: {integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==}
 
-  '@types/node@22.20.1':
-    resolution: {integrity: sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==}
+  '@types/node@26.6.6':
+    resolution: {integrity: sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==}
 
   '@types/react-dom@19.2.3':
     resolution: {integrity: sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==}
@@ -2839,8 +2839,8 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
-  undici-types@6.21.0:
-    resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
   undici@7.30.1:
     resolution: {integrity: sha512-03KrMbjIFDWQR5RNPrSw3bd1r12JpyFQl9/yxjUbJtqkjmllqC5lFjZh6ujeuJCKr8EOQvRW872Oy/az+nLYxg==}
@@ -3955,9 +3955,9 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@22.20.1':
+  '@types/node@26.6.6':
     dependencies:
-      undici-types: 6.21.0
+      undici-types: 8.9.0
 
   '@types/react-dom@19.2.3(@types/react@19.2.17)':
     dependencies:
@@ -4888,13 +4888,13 @@ snapshots:
 
   marked@17.0.6: {}
 
-  mcp-handler@2.1.0(@modelcontextprotocol/server@2.4.0)(next@15.5.28(@babel/core@7.29.7)(@types/node@22.20.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)):
+  mcp-handler@2.1.0(@modelcontextprotocol/server@2.4.0)(next@15.5.28(@babel/core@7.29.7)(@types/node@26.6.6)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)):
     dependencies:
       '@modelcontextprotocol/server': 2.4.0
       chalk: 5.6.2
       commander: 11.1.0
     optionalDependencies:
-      next: 15.5.28(@babel/core@7.29.7)(@types/node@22.20.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      next: 15.5.28(@babel/core@7.29.7)(@types/node@26.6.6)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
 
   mdast-util-find-and-replace@3.0.2:
     dependencies:
@@ -5370,7 +5370,7 @@ snapshots:
 
   nanoid@6.0.1: {}
 
-  next@15.5.28(@babel/core@7.29.7)(@types/node@22.20.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
+  next@15.5.28(@babel/core@7.29.7)(@types/node@26.6.6)(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
     dependencies:
       '@next/env': 15.5.28
       '@swc/helpers': 0.5.15
@@ -5388,7 +5388,7 @@ snapshots:
       '@next/swc-linux-x64-musl': 15.5.28
       '@next/swc-win32-arm64-msvc': 15.5.28
       '@next/swc-win32-x64-msvc': 15.5.28
-      sharp: 0.35.5(@types/node@22.20.1)
+      sharp: 0.35.5(@types/node@26.6.6)
     transitivePeerDependencies:
       - '@babel/core'
       - '@types/node'
@@ -5808,7 +5808,7 @@ snapshots:
       - babel-plugin-macros
       - supports-color
 
-  sharp@0.35.5(@types/node@22.20.1):
+  sharp@0.35.5(@types/node@26.6.6):
     dependencies:
       '@img/colour': 1.1.0
       detect-libc: 2.1.2
@@ -5839,7 +5839,7 @@ snapshots:
       '@img/sharp-win32-arm64': 0.35.5
       '@img/sharp-win32-ia32': 0.35.5
       '@img/sharp-win32-x64': 0.35.5
-      '@types/node': 22.20.1
+      '@types/node': 26.6.6
     optional: true
 
   shebang-command@2.0.0:
@@ -6011,7 +6011,7 @@ snapshots:
 
   typescript@5.9.3: {}
 
-  undici-types@6.21.0: {}
+  undici-types@8.9.0: {}
 
   undici@7.30.1: {}
 
