@@ -53,7 +53,7 @@ elif "--raw" in sys.argv:
                     (inputs / (value * 64)).touch()
             program = "\n".join(body).replace("/tmp/digests", str(root / "digests")).replace(
                 "/tmp/appa-generation-images", str(root / "identities"))
-            registry = subprocess.check_output([sys.executable, str(SCRIPT.with_name("appa-oci-tags.py")), "registry"], text=True).strip()
+            registry = subprocess.check_output([sys.executable, str(SCRIPT.with_name("appa-oci-tags.py")), "staging"], text=True).strip()
             environment = dict(os.environ, REGISTRY=registry, TAGS="v1.2.3", IMMUTABLE="false", PATH=str(root) + os.pathsep + os.environ["PATH"])
             # macOS /bin/bash is 3.x; the workflow uses GitHub's modern bash.
             bash = shutil.which("bash")

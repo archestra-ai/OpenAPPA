@@ -19,6 +19,8 @@ mocks:
     repository: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-mocks
     tag: ""
     pullPolicy: IfNotPresent
+    # Release charts pin the released digest; empty uses the tag.
+    digest: ""
   # Seconds a change-board consult waits for a member's ruling before it
   # answers nothing. The chart adds five seconds for the HTTP client and
   # five more for the runtime consult, with a 30-second runtime minimum.
@@ -30,6 +32,8 @@ tools:
     repository: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-tools
     tag: ""
     pullPolicy: IfNotPresent
+    # Release charts pin the released digest; empty uses the tag.
+    digest: ""
 
 # The delegated children. The policy names each child by its canonical
 # id, `agent/<namespace>/<childName>`. The chart renders those ids from

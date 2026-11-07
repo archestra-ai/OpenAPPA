@@ -114,6 +114,8 @@ jobs:
             chart:
               - 'integrations/kagent/demo/chart/**'
               - 'charts/appa-runtime/**'
+              - 'scripts/appa-chart-digests.py'
+              - 'scripts/test_appa_chart_digests.py'
               - '.github/workflows/ci.yml'
             rust: &rust
               - '**/*.rs'
@@ -169,6 +171,8 @@ jobs:
               - 'scripts/test_appa_oci_tags.py'
               - 'scripts/appa-image-descriptor.py'
               - 'scripts/test_appa_image_descriptor.py'
+              - 'scripts/appa-release-subjects.py'
+              - 'scripts/test_appa_release_subjects.py'
               - 'scripts/appa-gar-cleanup-policies.json'
               - '.github/actions/auth-to-gar/**'
               - '.github/actions/check-release-versions/**'
@@ -294,7 +298,7 @@ jobs:
       - name: Test release battery refresh
         run: |
           python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.2'
-          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py scripts/test_appa_image_descriptor.py
+          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py scripts/test_appa_image_descriptor.py scripts/test_appa_release_subjects.py
           python3 -m unittest discover -s marketplace/plugins/claude-code -p 'test_*.py'
 
       - name: Check release versions
@@ -946,6 +950,10 @@ jobs:
         run: |
           sh integrations/kagent/demo/chart/tests/render-test.sh
           sh charts/appa-runtime/tests/render-test.sh
+
+      # release.yml pins both charts' images to the released digests.
+      - name: Pin release digests
+        run: python3 -m unittest scripts/test_appa_chart_digests.py
 
   # The deterministic A2A matrix: the real runtime, the real plugin, the real
   # kagent executor, mock externals and a scripted model. No cluster, no key.

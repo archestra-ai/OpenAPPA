@@ -1,9 +1,11 @@
 name: Publish OCI images
 
-# Builds the five OpenAPPA images, merges the four multi-arch indexes, and
-# attaches the caller's tags. Release callers pass one immutable v* tag.
+# Builds the five OpenAPPA images into the appa-ci staging repository,
+# merges the four multi-arch indexes, and attaches the caller's tags. Release
+# callers pass one immutable v* tag; release.yml then has
+# archestra-ai/release-images publish the staged digests to appa-public.
 # CI callers pass rolling sha-/pr-/main/latest tags. Charts stay in
-# release.yml: their versions are SemVer without v and must not be GC'd.
+# release.yml. Nothing here writes appa-public.
 #
 # Repository variable APPA_YELL_ENDPOINT, the receiver `appa yell` reports to,
 # is exported into the appa-runtime image so a runtime in a cluster can send.
@@ -42,11 +44,27 @@ on:
         required: false
         type: boolean
         default: false
+    outputs:
+      appa_runtime_digest:
+        description: Staged appa-runtime index digest
+        value: ${{ jobs.publish-shared-images.outputs.appa_runtime_digest }}
+      appa_kagent_adk_digest:
+        description: Staged appa-kagent-adk index digest
+        value: ${{ jobs.publish-shared-images.outputs.appa_kagent_adk_digest }}
+      appa_demo_tools_digest:
+        description: Staged appa-demo-tools index digest
+        value: ${{ jobs.publish-shared-images.outputs.appa_demo_tools_digest }}
+      appa_demo_mocks_digest:
+        description: Staged appa-demo-mocks index digest
+        value: ${{ jobs.publish-shared-images.outputs.appa_demo_mocks_digest }}
+      appa_kagent_adk_go_digest:
+        description: Staged appa-kagent-adk-go (and golang-adk) digest
+        value: ${{ jobs.publish-images.outputs.go_digest }}
 
 permissions: {}
 
 env:
-  REGISTRY: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public
+  REGISTRY: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-ci
 
 jobs:
   publish-shared-image-legs:
@@ -228,6 +246,11 @@ jobs:
       attestations: write # Required to record build provenance for the published images.
       contents: read # Required to check out the source that is published.
       id-token: write # Required for Workload Identity Federation and provenance signing.
+    outputs:
+      appa_runtime_digest: ${{ steps.merge.outputs.appa_runtime_digest }}
+      appa_kagent_adk_digest: ${{ steps.merge.outputs.appa_kagent_adk_digest }}
+      appa_demo_tools_digest: ${{ steps.merge.outputs.appa_demo_tools_digest }}
+      appa_demo_mocks_digest: ${{ steps.merge.outputs.appa_demo_mocks_digest }}
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -281,7 +304,7 @@ jobs:
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           TAGS: ${{ inputs.tags }}
         run: |
-          test "$(python3 scripts/appa-oci-tags.py registry)" = "$REGISTRY"
+          test "$(python3 scripts/appa-oci-tags.py staging)" = "$REGISTRY"
           mapfile -t tags < <(printf '%s\n' "$TAGS" | awk 'NF')
           if [ "${#tags[@]}" -eq 0 ]; then
             echo "::error::no image tags to publish"
@@ -401,6 +424,8 @@ jobs:
       attestations: write # Required to record build provenance for the published image.
       contents: read # Required to check out the source that is published.
       id-token: write # Required for Workload Identity Federation and provenance signing.
+    outputs:
+      go_digest: ${{ steps.go-image.outputs.digest }}
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

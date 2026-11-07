@@ -9,12 +9,21 @@
 # `appa` into `APPA_INSTALL_DIR` (default `~/.local/bin`). It never runs
 # `appa plugin install`: changing the Claude Code profile is the person's call.
 #
+# When the GitHub CLI (`gh`) is installed and signed in, the script also checks
+# the archive's build provenance: OpenAPPA's release workflow on main must have
+# attested exactly these bytes. `APPA_VERIFY_PROVENANCE` is `auto` (the
+# default: check when gh can), `require` (refuse without the check) or `skip`.
+#
 # Linux and macOS on x86_64 and aarch64 only. Windows users unpack the zip from
 # the releases page. `APPA_REPOSITORY_URL` exists for appa-install-test.sh,
 # which serves a local release.
 set -eu
 
 repository=${APPA_REPOSITORY_URL:-https://github.com/archestra-ai/OpenAPPA}
+# Provenance always names the project's own repository and release workflow,
+# wherever the archive was downloaded from.
+provenance_repository=archestra-ai/OpenAPPA
+provenance=${APPA_VERIFY_PROVENANCE:-auto}
 tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'
 
 fail() {
@@ -48,6 +57,10 @@ command_line() { printf '      %s%s%s\n' "$bold" "$1" "$off"; }
 friendly() { case $1 in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
+case $provenance in
+  auto | require | skip) ;;
+  *) fail "APPA_VERIFY_PROVENANCE must be auto, require or skip" ;;
+esac
 # The digest comes from the same host as the archive, so the transport must be
 # HTTPS, redirects included. Only appa-install-test.sh's loopback release is
 # served over plain HTTP.
@@ -143,6 +156,26 @@ listed=$(grep -E "^[0-9a-f]{64}  $archive\$" "$work/SHA256SUMS" || true)
 expected=${listed%% *}
 actual=$(digest "$work/$archive")
 [ "$actual" = "$expected" ] || fail "checksum mismatch for $archive"
+
+# The checksum proves the download arrived intact; provenance proves OpenAPPA's
+# release workflow, on main and on a GitHub-hosted runner, built these bytes.
+# Without gh (or signed out) `auto` installs on the checksum alone. A failed
+# check is never skipped.
+if [ "$provenance" != skip ]; then
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    step "$(printf 'Verifying the build provenance of %s' "$archive")"
+    if ! gh attestation verify "$work/$archive" \
+      --repo "$provenance_repository" \
+      --signer-workflow "$provenance_repository/.github/workflows/release.yml" \
+      --source-ref refs/heads/main \
+      --deny-self-hosted-runners >/dev/null 2>"$work/provenance.err"; then
+      cat "$work/provenance.err" >&2
+      fail "$archive has no build provenance from OpenAPPA's release workflow; APPA_VERIFY_PROVENANCE=skip installs on the checksum alone"
+    fi
+  elif [ "$provenance" = require ]; then
+    fail "APPA_VERIFY_PROVENANCE=require needs the GitHub CLI (gh), signed in"
+  fi
+fi
 
 # The digest is published by the same host that serves the archive, so it
 # proves the download arrived intact, not that the release is honest. The Rust

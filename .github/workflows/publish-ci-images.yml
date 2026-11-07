@@ -1,8 +1,8 @@
 name: Publish CI images
 
-# Rolling tags for appa-public. These are not releases. A new digest is
-# attached to sha-/main/latest on each image-changing push; GAR
-# deletes those prefixes after 30 days and keeps the last ten versions.
+# Rolling tags in the appa-ci staging repository. These are not releases. A
+# new digest is attached to sha-/main/latest on each image-changing push; GAR
+# deletes versions after 30 days and keeps the last ten.
 
 on:
   push:

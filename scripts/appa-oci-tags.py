@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Tag contract for OpenAPPA images and charts in appa-public.
+"""Tag contract for OpenAPPA images and charts.
 
-Release images use an immutable v* tag. Rolling CI tags are sha-, pr-,
-main, and latest. Chart versions stay SemVer without a v prefix and live
-under charts/, so GAR prefix matching can garbage-collect CI images
-without deleting releases or charts.
+Every build pushes to the appa-ci staging repository: rolling CI tags
+(sha-, pr-, main, latest) and release candidates (v*). archestra-ai/release-images
+publishes a release's attested digests from there to appa-public under an
+immutable v* tag, its charts under charts/ (SemVer without a v prefix), and
+moves appa-public's latest to the newest release. GAR prefix matching in
+appa-public keeps v* tags and charts.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ GAR_HOST = "europe-west1-docker.pkg.dev"
 GAR_PROJECT = "friendly-path-465518-r6"
 GAR_REPOSITORY = "appa-public"
 REGISTRY = f"{GAR_HOST}/{GAR_PROJECT}/{GAR_REPOSITORY}"
+STAGING = f"{GAR_HOST}/{GAR_PROJECT}/appa-ci"
 CHARTS_OCI = f"oci://{REGISTRY}/charts"
 
 IMAGE_PACKAGES = (
@@ -50,6 +53,10 @@ POLICY_PATH = Path(__file__).with_name("appa-gar-cleanup-policies.json")
 
 def registry() -> str:
     return REGISTRY
+
+
+def staging() -> str:
+    return STAGING
 
 
 def charts_oci() -> str:
@@ -167,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("registry")
+    sub.add_parser("staging")
     sub.add_parser("charts-oci")
 
     release = sub.add_parser("release-image")
@@ -184,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "registry":
         return _print_lines([registry()])
+    if args.command == "staging":
+        return _print_lines([staging()])
     if args.command == "charts-oci":
         return _print_lines([charts_oci()])
     if args.command == "release-image":
