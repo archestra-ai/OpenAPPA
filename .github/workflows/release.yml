@@ -331,7 +331,8 @@ jobs:
       actions: read # Required to download image digest artifacts.
       attestations: write # Required to record build provenance for the published images.
       contents: read # Required to check out the release source.
-      id-token: write # Required for Workload Identity Federation and provenance signing.
+      id-token: write # Required to sign the build provenance.
+      packages: write # Required to push to the ghcr.io/archestra-ai/ci staging packages.
     uses: $/.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.oci-tags.outputs.tags }}
@@ -427,8 +428,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # OpenAPPA cannot write appa-public. Attest the staged digests under their
-  # appa-public names and the charts by file name, in this run, then ask
+  # OpenAPPA cannot write its public GHCR names. Attest the staged digests
+  # under their public names and the charts by file name, in this run, then ask
   # archestra-ai/release-images to publish exactly those; it verifies the
   # attestations (signer release.yml, main, this run attempt) first.
   publish-release-images:
@@ -481,7 +482,7 @@ jobs:
         with:
           subject-checksums: release-subjects.txt
 
-      # appa-public's latest follows the newest stable release. A draft is
+      # :latest follows the newest stable release. A draft is
       # not yet listed, so this release is newer unless a later one exists.
       - name: Decide whether latest moves
         id: latest
@@ -691,10 +692,10 @@ jobs:
       source_commit: ${{ needs.release-please.outputs.source_commit }}
 
   # A dry run of the release-images path that writes no release name: stage a
-  # published version's images in appa-ci, package both charts as
+  # published version's images in ghcr.io/archestra-ai/ci, package both charts as
   # 0.0.0-smoke.<run>, attest them as a release would, and send a smoke
   # request. The publisher verifies and copies everything, but only to
-  # publisher-smoke-<request> tags and appa-public/publisher-smoke.
+  # publisher-smoke-<request> tags and ghcr.io/archestra-ai/publisher-smoke.
   publisher-smoke:
     name: Publisher dry run
     if: ${{ inputs.publisher_smoke_version != '' && github.ref == 'refs/heads/main' }}
@@ -705,7 +706,8 @@ jobs:
     permissions:
       attestations: write # Required to store the build provenance attestation.
       contents: read # Required to check out the charts and scripts.
-      id-token: write # Required for Workload Identity Federation and provenance signing.
+      id-token: write # Required to sign the build provenance.
+      packages: write # Required to stage the images in ghcr.io/archestra-ai/ci.
     env:
       SOURCE_VERSION: ${{ inputs.publisher_smoke_version }}
     steps:
@@ -725,22 +727,20 @@ jobs:
           test "$(gh release view "v$SOURCE_VERSION" --json isDraft --jq .isDraft)" = false \
             || { echo "::error::v$SOURCE_VERSION is not a published release"; exit 1; }
 
-      - name: Authenticate to Artifact Registry
-        id: gcp
-        uses: archestra-ai/.github/actions/google-auth@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
-        with:
-          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
-          token_format: access_token
-
+      # A version released before OpenAPPA published to GHCR is read from
+      # Artifact Registry appa-public, anonymously.
       - name: Stage the published images
         id: stage
         env:
-          GAR_TOKEN: ${{ steps.gcp.outputs.access_token }}
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
         run: |
-          printf '%s' "$GAR_TOKEN" | skopeo login europe-west1-docker.pkg.dev --username oauth2accesstoken --password-stdin
+          printf '%s' "$GHCR_TOKEN" | skopeo login ghcr.io --username "$GHCR_USER" --password-stdin
           public=$(python3 scripts/appa-oci-tags.py registry)
           staging=$(python3 scripts/appa-oci-tags.py staging)
+          if ! skopeo inspect --raw "docker://$public/appa-runtime:v$SOURCE_VERSION" > /dev/null 2>&1; then
+            public=europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public
+          fi
           digests='{}'
           for image in appa-runtime appa-kagent-adk appa-kagent-adk-go golang-adk appa-demo-tools appa-demo-mocks; do
             skopeo copy --all --preserve-digests --retry-times 3 --digestfile digest \

@@ -174,7 +174,6 @@ jobs:
               - 'scripts/appa-release-subjects.py'
               - 'scripts/test_appa_release_subjects.py'
               - 'scripts/appa-gar-cleanup-policies.json'
-              - '.github/actions/auth-to-gar/**'
               - '.github/actions/check-release-versions/**'
               - '.github/release-please/**'
               - '.github/workflows/ci.yml'

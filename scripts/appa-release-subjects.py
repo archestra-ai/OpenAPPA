@@ -4,9 +4,9 @@
 Reads the staged digest of every OpenAPPA image and the release's chart
 archives, and writes:
 
-  release-images.json   {"<appa-public name>": "sha256:<digest>"}, the request
+  release-images.json   {"<public name>": "sha256:<digest>"}, the request
   release-subjects.txt  "<sha256>  <name>" lines for attest-build-provenance:
-                        each image under its appa-public name, each chart by
+                        each image under its public name, each chart by
                         its file name
 
 The publisher copies a digest only when this run attested it under exactly
@@ -24,7 +24,7 @@ import re
 import sys
 from pathlib import Path
 
-PUBLIC = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public"
+PUBLIC = "ghcr.io/archestra-ai"
 IMAGES = ("appa-runtime", "appa-kagent-adk", "appa-kagent-adk-go", "golang-adk",
           "appa-demo-tools", "appa-demo-mocks")
 CHARTS = ("appa-runtime", "appa-kagent-demo")

@@ -14,7 +14,7 @@ SPEC.loader.exec_module(DIGESTS)
 RUNTIME = "sha256:" + "a" * 64
 TOOLS = "sha256:" + "b" * 64
 MOCKS = "sha256:" + "c" * 64
-PUBLIC = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public"
+PUBLIC = "ghcr.io/archestra-ai"
 
 
 def render(chart: Path, values: str) -> str:

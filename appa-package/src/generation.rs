@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const REPOSITORY: &str = "archestra-ai/OpenAPPA";
-pub const IMAGE_REGISTRY: &str = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public";
+pub const IMAGE_REGISTRY: &str = "ghcr.io/archestra-ai";
 pub const DESCRIPTOR_FILE: &str = "appa-generation.json";
 pub const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 

@@ -369,11 +369,11 @@ mod tests {
             let values: serde_json::Value = serde_json::from_slice(&files["kagent-values.json"]).unwrap();
             assert_eq!(
                 values["controller"]["agentImage"]["registry"],
-                "europe-west1-docker.pkg.dev"
+                "ghcr.io"
             );
             assert_eq!(
                 values["controller"]["agentImage"]["repository"],
-                "friendly-path-465518-r6/appa-public/appa-kagent-adk"
+                "archestra-ai/appa-kagent-adk"
             );
             assert_eq!(
                 values["controller"]["agentImage"]["tag"],

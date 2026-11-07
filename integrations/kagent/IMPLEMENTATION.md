@@ -2,7 +2,7 @@
 
 `appa-adapter-kagent` is the Rust adapter crate, a workspace crate compiled into `appa-runtime`. The runtime selects it through its closed `Adapter` enum ([appa-runtime/src/main.rs](../../appa-runtime/src/main.rs)). The plugins post the canonical hook envelope ([appa-runtime-api/src/wire.rs](../../appa-runtime-api/src/wire.rs)) to `POST /hook` directly; the crate derives the canonical tool id and whether a call is a spawn from the structured tool spelling the plugins send.
 
-The agent side wraps the kagent ADK runtimes and takes its names from them. The `appa-kagent-adk` python package (plugin + entrypoint) builds as the `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk` image from its [Dockerfile](appa-kagent-adk/Dockerfile). The `appa-kagent-adk-go` Go module (plugin + runtime main) builds as the `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk-go` image from its [Dockerfile](appa-kagent-adk-go/Dockerfile). The release workflow publishes both images, and three more, at the immutable `v<version>` tag ([Delivery units](#delivery-units)). Operators can also build them from source. The crate name never names an image.
+The agent side wraps the kagent ADK runtimes and takes its names from them. The `appa-kagent-adk` python package (plugin + entrypoint) builds as the `ghcr.io/archestra-ai/appa-kagent-adk` image from its [Dockerfile](appa-kagent-adk/Dockerfile). The `appa-kagent-adk-go` Go module (plugin + runtime main) builds as the `ghcr.io/archestra-ai/appa-kagent-adk-go` image from its [Dockerfile](appa-kagent-adk-go/Dockerfile). The release workflow publishes both images, and three more, at the immutable `v<version>` tag ([Delivery units](#delivery-units)). Operators can also build them from source. The crate name never names an image.
 
 Both images read `APPA_RUNTIME_URL`, and both emit the same canonical wire.
 
@@ -141,7 +141,7 @@ kind: Harness
 spec:
   kagent: {}
   workload:
-    image: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-adk@sha256:<digest>
+    image: ghcr.io/archestra-ai/appa-kagent-adk@sha256:<digest>
   env:
     - name: APPA_RUNTIME_URL
       value: http://appa-runtime.appa-system:8787
@@ -607,9 +607,9 @@ appa-kagent-demo release
 
 Every unit lives in this repository.
 
-[release.yml](../../.github/workflows/release.yml) publishes five images to `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public` at the immutable `v<version>` tag. `appa-runtime` and `appa-kagent-adk` publish for `linux/amd64` and `linux/arm64`. `appa-kagent-adk-go`, `appa-demo-tools`, and `appa-demo-mocks` publish for `linux/amd64`. Each build attaches an SBOM and provenance. Both Helm charts publish as OCI artifacts under `charts/` with unprefixed SemVer tags, and as GitHub release assets; each chart pulls its images by the released digest. `golang-adk` names the `appa-kagent-adk-go` digest for kagent 0.9.12. OpenAPPA builds every image into the `appa-ci` staging repository. [archestra-ai/release-images](https://github.com/archestra-ai/release-images) copies a release's digests to `appa-public` and pushes its charts, only after it verifies the build provenance that release.yml attested for them in the same run. `latest` in `appa-public` names the newest stable release. Image-changing CI pushes rolling `sha-`, `pr-`, `main`, and `latest` tags to `appa-ci`, where versions expire after 30 days.
+[release.yml](../../.github/workflows/release.yml) publishes five images to `ghcr.io/archestra-ai` at the immutable `v<version>` tag. `appa-runtime` and `appa-kagent-adk` publish for `linux/amd64` and `linux/arm64`. `appa-kagent-adk-go`, `appa-demo-tools`, and `appa-demo-mocks` publish for `linux/amd64`. Each build attaches an SBOM and provenance. Both Helm charts publish as OCI artifacts under `charts/` with unprefixed SemVer tags, and as GitHub release assets; each chart pulls its images by the released digest. `golang-adk` names the `appa-kagent-adk-go` digest for kagent 0.9.12. OpenAPPA builds every image into `ghcr.io/archestra-ai/ci/<image>`. [archestra-ai/release-images](https://github.com/archestra-ai/release-images) copies a release's digests to `ghcr.io/archestra-ai/<image>` and pushes its charts, only after it verifies the build provenance that release.yml attested for them in the same run. `latest` names the newest stable release. Image-changing CI pushes rolling `sha-`, `pr-`, `main`, and `latest` tags to `ghcr.io/archestra-ai/ci/<image>` only.
 
-Every Dockerfile pins each `FROM` and `COPY --from` base by digest, with the tag beside it for the reader. The image jobs in [ci.yml](../../.github/workflows/ci.yml) build all five on a pull request that can break them, including native arm64 checks for the runtime and Python adapter. They push none. [publish-ci-images.yml](../../.github/workflows/publish-ci-images.yml) publishes the rolling tags to `appa-ci`. No workflow scans the images.
+Every Dockerfile pins each `FROM` and `COPY --from` base by digest, with the tag beside it for the reader. The image jobs in [ci.yml](../../.github/workflows/ci.yml) build all five on a pull request that can break them, including native arm64 checks for the runtime and Python adapter. They push none. [publish-ci-images.yml](../../.github/workflows/publish-ci-images.yml) publishes the rolling tags to `ghcr.io/archestra-ai/ci`. No workflow scans the images.
 
 ## Verification matrix
 

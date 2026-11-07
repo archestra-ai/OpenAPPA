@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Tag contract for OpenAPPA images and charts.
 
-Every build pushes to the appa-ci staging repository: rolling CI tags
+Every build pushes to ghcr.io/archestra-ai/ci staging: rolling CI tags
 (sha-, pr-, main, latest) and release candidates (v*). archestra-ai/release-images
-publishes a release's attested digests from there to appa-public under an
-immutable v* tag, its charts under charts/ (SemVer without a v prefix), and
-moves appa-public's latest to the newest release. GAR prefix matching in
-appa-public keeps v* tags and charts.
+publishes a release's attested digests from there to ghcr.io/archestra-ai under
+an immutable v* tag, its charts under charts/ (SemVer without a v prefix), and
+moves :latest to the newest stable release.
+
+The cleanup helpers below mirror the Artifact Registry policies of appa-public,
+which keeps the releases published there before GHCR.
 """
 
 from __future__ import annotations
@@ -17,11 +19,8 @@ import re
 import sys
 from pathlib import Path
 
-GAR_HOST = "europe-west1-docker.pkg.dev"
-GAR_PROJECT = "friendly-path-465518-r6"
-GAR_REPOSITORY = "appa-public"
-REGISTRY = f"{GAR_HOST}/{GAR_PROJECT}/{GAR_REPOSITORY}"
-STAGING = f"{GAR_HOST}/{GAR_PROJECT}/appa-ci"
+REGISTRY = "ghcr.io/archestra-ai"
+STAGING = f"{REGISTRY}/ci"
 CHARTS_OCI = f"oci://{REGISTRY}/charts"
 
 IMAGE_PACKAGES = (
