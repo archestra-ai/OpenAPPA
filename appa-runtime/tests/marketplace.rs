@@ -36,7 +36,7 @@ fn kagent_package_images_follow_the_release_registry_and_version() {
     };
     for (name, reference) in images {
         let expected = format!(
-            "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-kagent-{}:v{}",
+            "ghcr.io/archestra-ai/appa-kagent-{}:v{}",
             name.as_str(),
             env!("CARGO_PKG_VERSION"),
         );

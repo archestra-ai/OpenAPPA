@@ -16,7 +16,7 @@ curl -fsSL https://openappa.com/install.sh | sh &&
   ~/.local/bin/appa plugin install claude-code
 ```
 
-The installer places `appa` in `~/.local/bin`.
+The installer places `appa` in `~/.local/bin`. It verifies the download against the release's `SHA256SUMS`. When the GitHub CLI (`gh`) is installed and signed in, it also verifies the build provenance: OpenAPPA's release workflow on `main` attested exactly those bytes. `APPA_VERIFY_PROVENANCE=require` refuses to install without that check. `APPA_VERIFY_PROVENANCE=skip` installs on the checksum alone.
 
 `appa plugin install claude-code` configures Claude Code's user environment:
 1. Deploys the runtime binary under APPA's data directory.

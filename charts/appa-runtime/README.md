@@ -4,7 +4,9 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-runtime:v0.38.1`. # x-release-please-version
+The image of this chart version is `ghcr.io/archestra-ai/appa-runtime:v0.38.1`. # x-release-please-version
+
+OpenAPPA publishes its images to `ghcr.io/archestra-ai/<image>` and its charts to `ghcr.io/archestra-ai/charts/<chart>`. A `v<version>` image tag never moves. `latest` names the newest stable release. Each chart pulls its images by the digest released with it. `ghcr.io/archestra-ai/ci/<image>` holds unreleased builds of `main`.
 
 ## Install
 
@@ -12,7 +14,7 @@ Install a released chart from Artifact Registry after setting
 `APPA_VERSION` to an OpenAPPA release that contains the chart:
 
 ```sh
-helm install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
+helm install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" --namespace appa --create-namespace
 ```
 
@@ -31,7 +33,7 @@ checkout.
 The chart can install the configuring kagent Agent with the runtime:
 
 ```sh
-helm install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
+helm install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" --namespace appa --create-namespace \
   --set appaGuide.enabled=true \
   --set appaGuide.namespace=kagent

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use appa_package::generation::{Generation, IMAGE_REGISTRY, Image};
+use appa_package::generation::{Generation, Image};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -36,7 +36,8 @@ pub(super) fn artifacts(
         )
     })?;
     let mut files = BTreeMap::new();
-    let (registry, prefix) = IMAGE_REGISTRY
+    let (registry, prefix) = published
+        .image_registry()
         .split_once('/')
         .ok_or_else(|| InstallError::Invalid("published image registry lacks its repository prefix".into()))?;
     let mut documents = BTreeMap::new();
@@ -55,7 +56,7 @@ pub(super) fn artifacts(
             .ok_or_else(|| InstallError::Invalid(format!("this version has no {name} image")))?;
         images.insert(
             name,
-            json!({"repository": image.repository(),
+            json!({"repository": published.image_repository(image),
             "tag": published.release(), "digest": digests.digest(),
             "platforms": digests.platforms()}),
         );
@@ -63,7 +64,7 @@ pub(super) fn artifacts(
     documents.insert(
         "images.json".to_owned(),
         json!({"schema": 1,
-        "commit": generation.commit(), "registry": IMAGE_REGISTRY,
+        "commit": generation.commit(), "registry": published.image_registry(),
         "runtime_url": "http://appa-runtime.appa.svc.cluster.local:18787",
         "images": images}),
     );
@@ -367,13 +368,10 @@ mod tests {
                 }
             }
             let values: serde_json::Value = serde_json::from_slice(&files["kagent-values.json"]).unwrap();
-            assert_eq!(
-                values["controller"]["agentImage"]["registry"],
-                "europe-west1-docker.pkg.dev"
-            );
+            assert_eq!(values["controller"]["agentImage"]["registry"], "ghcr.io");
             assert_eq!(
                 values["controller"]["agentImage"]["repository"],
-                "friendly-path-465518-r6/appa-public/appa-kagent-adk"
+                "archestra-ai/appa-kagent-adk"
             );
             assert_eq!(
                 values["controller"]["agentImage"]["tag"],
