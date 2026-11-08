@@ -2,7 +2,7 @@
 """Tag contract for OpenAPPA images and charts.
 
 Every build pushes to ghcr.io/archestra-ai/ci staging: rolling CI tags
-(sha-, pr-, main, latest) and release candidates (v*). archestra-ai/release-images
+(sha-, pr-, main, latest) and release candidates (v*). archestra-ai/release-publisher
 publishes a release's attested digests from there to ghcr.io/archestra-ai under
 an immutable v* tag, its charts under charts/ (SemVer without a v prefix), and
 moves :latest to the newest stable release.

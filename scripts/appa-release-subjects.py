@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Name a release's staged artifacts for archestra-ai/release-images.
+"""Name a release's staged artifacts for archestra-ai/release-publisher.
 
 Reads the staged digest of every OpenAPPA image and the release's chart
 archives, and writes:
