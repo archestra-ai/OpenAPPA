@@ -345,7 +345,7 @@ jobs:
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       immutable: ${{ needs.release-please.outputs.registry_only != 'true' }}
 
-  # archestra-ai/release-images pushes the charts after verifying them; this
+  # archestra-ai/release-publisher pushes the charts after verifying them; this
   # job only packages them, pinned to the staged image digests.
   package-charts:
     name: Package Helm charts
@@ -432,7 +432,7 @@ jobs:
 
   # OpenAPPA cannot write its public GHCR names. Attest the staged digests
   # under their public names and the charts by file name, in this run, then ask
-  # archestra-ai/release-images to publish exactly those; it verifies the
+  # archestra-ai/release-publisher to publish exactly those; it verifies the
   # attestations (signer release.yml, main, this run attempt) first.
   publish-release-images:
     name: Publish images and charts through release-images
@@ -442,7 +442,7 @@ jobs:
       - publish-oci-images
       - package-charts
     runs-on: ubuntu-latest
-    # A stable release waits in release-images for an Engineering member who
+    # A stable release waits in release-publisher for an Engineering member who
     # did not merge it to approve it; this job waits with it, up to the
     # longest a GitHub-hosted job may run.
     timeout-minutes: 360
