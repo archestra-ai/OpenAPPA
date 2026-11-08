@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.39.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.39.0...v0.39.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* **ci:** pass the Archestra updater key to the called update workflow ([#847](https://github.com/archestra-ai/OpenAPPA/issues/847)) ([92338b0](https://github.com/archestra-ai/OpenAPPA/commit/92338b05aca74955e6027c609084d1ab1404706a))
+
 ## [0.39.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.38.1...v0.39.0) (2026-11-08)
 
 
