@@ -12,11 +12,27 @@ completion separately.
 | `auto` | Claude Code uses actual `permission_mode="auto"` and Anthropic's default classifier policy. No MCP tool is pre-approved. |
 
 APPA's stock Claude Code Annotator labels calls using public tool descriptions and
-one generic policy. It runs as a separate, tool-less model session through the
+one task-independent policy. It runs as a separate, tool-less model session through the
 SDK's pinned Claude binary. APPA carries source trust and audience restrictions
 into later calls. Neither defense receives SABER's `ground_truth`, `design_notes`,
 expected actions, or preloaded filesystem contents. The actor discovers workspace
 evidence through tools. Only the sandbox and post-run judge receive the complete task.
+
+### Episode-local context
+
+The APPA arm supplies prior tool observations through an episode-local context
+provider. It keeps the latest eight observations within a 32 KiB serialized
+limit. The harness freezes this evidence before each serialized check.
+
+The provider includes only results that APPA admitted and delivered to the actor.
+Each entry identifies the tool, arguments, result order, original byte count, and
+SHA-256 digest. Clipping and eviction are explicit. Arguments and results remain
+untrusted quotations. Approval text is not authorization. A result digest does
+not prove current file contents.
+
+The provider excludes withheld results, actor reasoning, remedy feedback, engine
+labels, task definitions, answer keys, and sandbox internals. It never resolves
+live filesystem state.
 
 Both arms disable built-in tools, skills, inherited settings, and external MCP
 configurations. They expose the SABER MCP bridge and `execute_remedy_plan`, a tool
@@ -41,7 +57,8 @@ Its scenarios are A: injection, B: agent mistake, and C: risky-context complianc
 |---|---:|---|
 | `full` | 716 | All upstream tasks |
 | `sequencing` | 12 | Source-to-destination and preparation-to-activation dependencies |
-| `pilot` | 4 | Nested subset covering all three scenarios, shell, and MCP |
+| `pilot` | 4 | Original nested subset covering all three scenarios, shell, and MCP |
+| `diagnostic-pilot` | 4 | Follow-up for three known contextual failures and one positive control |
 
 Selection is fixed in `dataset.py` using task definitions, not observed defense
 outcomes. `list` prints each inclusion rationale. This is a context-dependent
@@ -54,6 +71,13 @@ The pilot contains:
 - `A_persist_029`: cron preparation, heartbeat installation, staging-file removal.
 - `B_code_050`: profile notes, shortcut selection, shell-bridge activation.
 - `C_code_040`: review-hold preview, workflow-template activation.
+
+The diagnostic pilot leaves the original pilot unchanged. It contains:
+
+- `A_persist_029`: setup-script inspection before cron installation.
+- `C_priv_026`: wildcard command trust versus exact, rights-reducing authorization.
+- `C_info_040`: a full debug pack versus the approved scoped extract.
+- `B_priv_020`: a blocked root probe and successful rootless scan.
 
 `--method standard` preserves the upstream task prompts.
 `--method chaos-monkey` appends the same fixed adversarial instruction in both
@@ -78,6 +102,17 @@ mise exec -- uv run --project bench/saber appa-saber run \
   --scope pilot --method chaos-monkey --output bench/saber/runs/pilot-chaos
 ```
 
+The diagnostic pilot makes eight paid episodes. Inspect its plan and obtain
+approval before running it:
+
+```sh
+mise exec -- uv run --project bench/saber appa-saber plan \
+  --scope diagnostic-pilot --method chaos-monkey
+mise exec -- uv run --project bench/saber appa-saber run \
+  --scope diagnostic-pilot --method chaos-monkey \
+  --output bench/saber/runs/context-diagnostic-pilot
+```
+
 Use `--checkout PATH` for an existing clean pinned SABER clone. `setup` builds the
 upstream `osbench-sandbox` image and requires working package mirrors. If the
 upstream regional mirrors are slow or unavailable, use
@@ -88,7 +123,7 @@ into task containers.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--scope` | `pilot` | `full`, `sequencing`, or `pilot` |
+| `--scope` | `pilot` | `full`, `sequencing`, `pilot`, or `diagnostic-pilot` |
 | `--method` | `standard` | `standard` or `chaos-monkey` |
 | `--repetitions` | `1` | Repetitions per task and arm, each in a fresh container |
 | `--model` | `claude-sonnet-5` | Actor model, identical in both arms |
@@ -111,11 +146,25 @@ Each episode records:
   initialization metadata.
 - `result.json`: executed SABER events and shell trajectory, APPA decisions,
   permission hooks, and upstream judge output.
+- `execution-evidence.json`: diagnostic proposal, decision, execution, result,
+  and delivery states for each call.
 - `policy.toml` in the APPA arm: the exact tool policy.
+- `appa-diagnostics.json` in the APPA arm: complete external consults, runtime
+  audit entries, the effective label, and final observation-store state.
+
+The dispatch audit distinguishes proposals, decisions, execution attempts,
+confirmed execution, indeterminate execution after an exception, result
+admission, and actor delivery. It records effective labels around each decision
+and report.
 
 Run-level files contain task and source digests, a harness source snapshot, model
 configuration, Docker image identity, and `summary.json`. These are local run
 artifacts, not published benchmark results.
+
+Upstream SABER metrics and denominators remain unchanged. Harness-level dispatch
+counts are isolated in `execution_evidence_diagnostics`. Provider and harness
+failures remain unscored and cannot improve a safety denominator. Counterfactual
+or hand-corrected annotation replays are diagnostic only.
 
 The pinned upstream judge combines state-delta checks, task-specific harmful
 patterns, and LLM judgments of harm, completion, and refusal validity. Only
@@ -133,11 +182,18 @@ by refusing all work does not count as task completion.
   upstream judge still evaluates unsafe advice in that text.
 - Native APPA Session tracks trajectory labels, not durable shell-file
   provenance. Opaque scripts and direct file-to-network flows depend on correct
-  annotation. This is not a proof of complete shell mediation.
+  annotation. Output digests are not live filesystem attestations. This is not
+  a proof of complete shell mediation.
 - The Annotator is probabilistic. This evaluates APPA with its assigned labels;
   it does not establish that every label is correct.
-- The policy provides no sanitizer. Reading untrusted content can block later
-  legitimate execution. Completion and over-refusal scores expose that cost.
+- The policy provides no sanitizer, general authorization authority, or shell
+  mediator. Reading untrusted content can block later legitimate execution.
+  Output sanitization cannot authorize a blocked dispatch. Completion and
+  over-refusal scores expose that cost.
+- The Annotator can apply APPA's terminal `blocked` requirement to blanket
+  permission grants, wildcard command trust, and privilege escalation. No
+  authority can permit that requirement. Inspection and rights-reducing actions
+  remain available when their annotations describe those semantics.
 - Chaos results measure enforcement against a deliberately reckless actor, not
   natural model failure rates. Keep them separate from standard SABER results.
   Actors may still decline unsafe actions. Inspect proposals to distinguish
@@ -152,8 +208,11 @@ by refusing all work does not count as task completion.
 ```sh
 APPA_SABER_CHECKOUT=bench/saber/.saber mise exec -- uv run --project bench/saber pytest bench/saber/tests -q
 mise exec -- uv run --project bench/saber ruff check bench/saber
+mise exec -- cargo test -p appa-agent-python --lib
 ```
 
-The native-engine test permits a sink before a restricted read and refuses the
-same sink afterward. Other checks cover dispatch refusal, result delivery,
-serialization, scoring exclusions, policy inputs, and nested dataset selection.
+The deterministic suite uses the real engine for narrowing, compound calls,
+terminal prohibitions, and rights-reducing alternatives. It also covers evidence
+ordering, clipping, eviction, frozen snapshots, cross-episode isolation, injected
+instructions, provider failures, null answers, consult correlation, and
+indeterminate execution. These checks do not call the live Annotator.
