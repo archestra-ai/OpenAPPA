@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.40.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.39.1...v0.40.0) (2026-11-08)
+
+
+### Features
+
+* **archestra:** label the LLM log tools ([#852](https://github.com/archestra-ai/OpenAPPA/issues/852)) ([c57383a](https://github.com/archestra-ai/OpenAPPA/commit/c57383a70b76ada557747db22ea2bf0a2c7cc575))
+
+
+### Bug Fixes
+
+* **ci:** run the publish jobs in the existing-release modes ([#853](https://github.com/archestra-ai/OpenAPPA/issues/853)) ([acb9853](https://github.com/archestra-ai/OpenAPPA/commit/acb9853b01851b72701506bc53fe207abc9f51ba))
+
 ## [0.39.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.39.0...v0.39.1) (2026-11-08)
 
 
