@@ -147,7 +147,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_READ_TOKEN: ${{ github.token }}
-          BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
+          # The updater App's bot account. The shared token action outputs
+          # only the token, so the slug is spelled out here.
+          BOT_LOGIN: openappa-archestra-updater[bot]
         run: >-
           python3 openappa/.github/scripts/appa-archestra-update.py publish
           --source openappa --bundle prepared/update.json --bot-login "$BOT_LOGIN"
