@@ -4,7 +4,7 @@
 release.yml runs this on a chart's values.yaml before `helm package`. For
 each IMAGE=DIGEST argument it finds the one `image:` block whose
 `repository:` ends in `/IMAGE` and sets its `digest: ""` line to DIGEST, so
-the packaged chart pulls exactly the images archestra-ai/release-images
+the packaged chart pulls exactly the images archestra-ai/release-publisher
 published from this release. A chart installed with --set image.tag keeps
 working: the templates use the tag only when the digest is empty.
 
