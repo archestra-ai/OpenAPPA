@@ -23,8 +23,8 @@ The battery declares no rule for these tools:
 ## Reads
 
 - Discovery and the session's own surfaces add no label: `search_tools`, `search_files`, `load_skill`, `ask_user`, `todo_write`, and `whoami`. A validation or a yell resolve adds no label either.
-- A read of Archestra's configuration, rosters, guardrails policy, yells, helper consults, files, apps, and run state adds `internal`.
-- A read that returns text that strangers can write adds `internal` and `suspicious`: `query_knowledge_sources` (synced mail and tickets) and `get_schedule_trigger_run_transcript` (every tool result the run read).
+- A read of Archestra's configuration, rosters, guardrails policy, yells, helper consults, files, apps, run state, and LLM session list (`list_llm_sessions`) adds `internal`.
+- A read that returns text that strangers can write adds `internal` and `suspicious`: `query_knowledge_sources` (synced mail and tickets) `get_schedule_trigger_run_transcript` (every tool result the run read), and the LLM request logs `list_llm_interactions`, `get_llm_interaction`, and `get_llm_session_logs` (prompts, responses, and tool results).
 
 ## Writes
 

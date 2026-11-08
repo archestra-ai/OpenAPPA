@@ -615,6 +615,25 @@ name = "mcp/archestra/delete_limit"
 delta = {}
 requires = { trust = "trusted" }
 
+# --- LLM logs: a session list carries usage metadata only; a request log
+# carries the prompts, responses, and tool results the agent read ---
+
+[[policy.tool]]
+name = "mcp/archestra/list_llm_sessions"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_llm_interactions"
+delta = { audience = ["internal"], trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp/archestra/get_llm_interaction"
+delta = { audience = ["internal"], trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp/archestra/get_llm_session_logs"
+delta = { audience = ["internal"], trust = "suspicious" }
+
 # --- knowledge: a search returns what the connected sources synced, mail
 # and tickets strangers wrote among them. An assignment shows a knowledge
 # base to an agent's users. A connector update is checked against the
