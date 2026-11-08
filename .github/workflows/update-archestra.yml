@@ -17,6 +17,11 @@ on:
       source_commit:
         type: string
         required: true
+    secrets:
+      # Passed by name only: the publish job's archestra-update environment
+      # supplies the value (see that job).
+      APPA_ARCHESTRA_UPDATER_PRIVATE_KEY:
+        required: false
 
 permissions: {}
 
@@ -99,9 +104,10 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.changed == 'true'
     runs-on: ubuntu-latest
-    # Holds APPA_ARCHESTRA_UPDATER_PRIVATE_KEY; deploys from main only. A job
-    # in a called workflow reads its own environment's secrets, so release.yml
-    # does not pass the key.
+    # Holds APPA_ARCHESTRA_UPDATER_PRIVATE_KEY; deploys from main only. A
+    # called workflow sees only the secrets its caller passes, so release.yml
+    # passes the key by name; GitHub then resolves it from this job's
+    # environment. A dispatch reads the environment directly.
     environment:
       name: archestra-update
       deployment: false # A secrets and branch gate; nothing is deployed.

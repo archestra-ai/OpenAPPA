@@ -692,6 +692,10 @@ jobs:
     with:
       release_tag: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
+    # Empty here: the key lives only in the archestra-update environment,
+    # which the called job names and GitHub resolves the name from.
+    secrets:
+      APPA_ARCHESTRA_UPDATER_PRIVATE_KEY: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}
 
   # A dry run of the release-images path that writes no release name: stage a
   # published version's images in ghcr.io/archestra-ai/ci, package both charts as
