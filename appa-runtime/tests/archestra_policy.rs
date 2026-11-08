@@ -230,6 +230,7 @@ const TABLE: &[Class] = &[
             ("get_mcp_server_tools", r#"{"mcpServerId": "s"}"#),
             ("inspect_guardrails_server", r#"{"id": "s"}"#),
             ("get_mcp_server_logs", r#"{"id": "s"}"#),
+            ("list_llm_sessions", r#"{"limit": 10}"#),
         ],
     },
     // Text strangers can write.
@@ -239,6 +240,9 @@ const TABLE: &[Class] = &[
         calls: &[
             ("get_schedule_trigger_run_transcript", r#"{"run_id": "r"}"#),
             ("query_knowledge_sources", r#"{"query": "invoices"}"#),
+            ("list_llm_interactions", r#"{"limit": 10}"#),
+            ("get_llm_interaction", r#"{"interaction_id": "i"}"#),
+            ("get_llm_session_logs", r#"{"session_id": "s"}"#),
         ],
     },
     // Guardrails, destructive and control-plane writes.
