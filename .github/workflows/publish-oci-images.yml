@@ -3,7 +3,7 @@ name: Publish OCI images
 # Builds the five OpenAPPA images into ghcr.io/archestra-ai/ci staging,
 # merges the four multi-arch indexes, and attaches the caller's tags. Release
 # callers pass one immutable v* tag; release.yml then has
-# archestra-ai/release-images publish the staged digests to ghcr.io/archestra-ai.
+# archestra-ai/release-publisher publish the staged digests to ghcr.io/archestra-ai.
 # CI callers pass rolling sha-/pr-/main/latest tags. Charts stay in
 # release.yml. Nothing here writes the public ghcr.io/archestra-ai names.
 #

@@ -20,7 +20,7 @@ on:
         required: false
         type: string
       publisher_smoke_version:
-        description: Dry-run the release-images publisher with this published version's images (scratch names only)
+        description: Dry-run the release publisher with this published version's images (scratch names only)
         required: false
         type: string
 
@@ -345,7 +345,7 @@ jobs:
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       immutable: ${{ needs.release-please.outputs.registry_only != 'true' }}
 
-  # archestra-ai/release-images pushes the charts after verifying them; this
+  # archestra-ai/release-publisher pushes the charts after verifying them; this
   # job only packages them, pinned to the staged image digests.
   package-charts:
     name: Package Helm charts
@@ -371,7 +371,7 @@ jobs:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
 
-      # The charts pull exactly the digests release-images publishes for this
+      # The charts pull exactly the digests release-publisher publishes for this
       # release, not whatever a tag names later.
       - name: Pin the charts to the release images
         env:
@@ -400,8 +400,8 @@ jobs:
             test "$(helm show chart "$chart" | sed -n 's/^appVersion: *//p')" = "$VERSION"
           done
 
-      # release-images downloads this artifact from this run by name.
-      - name: Upload the charts for release-images
+      # release-publisher downloads this artifact from this run by name.
+      - name: Upload the charts for release-publisher
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-charts
@@ -432,10 +432,10 @@ jobs:
 
   # OpenAPPA cannot write its public GHCR names. Attest the staged digests
   # under their public names and the charts by file name, in this run, then ask
-  # archestra-ai/release-images to publish exactly those; it verifies the
+  # archestra-ai/release-publisher to publish exactly those; it verifies the
   # attestations (signer release.yml, main, this run attempt) first.
   publish-release-images:
-    name: Publish images and charts through release-images
+    name: Publish images and charts through release-publisher
     if: ${{ needs.release-please.outputs.should_publish == 'true' }}
     needs:
       - release-please
@@ -518,15 +518,16 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: archestra-ai
-          repositories: release-images
+          repositories: release-publisher
           # Send the repository_dispatch and watch the run it starts.
           permission-contents: write
           permission-actions: read
 
-      - name: Publish through release-images
+      - name: Publish through release-publisher
         uses: archestra-ai/.github/actions/release-images-publish@460fc8af7169871b967b6b2d31d8b2e2c758d978 # v1.18.0
         with:
           token: ${{ steps.publisher-token.outputs.token }}
+          publisher-repository: archestra-ai/release-publisher
           project: openappa
           version: ${{ needs.release-please.outputs.version }}
           images-file: release-images.json
@@ -693,7 +694,7 @@ jobs:
       release_tag: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
 
-  # A dry run of the release-images path that writes no release name: stage a
+  # A dry run of the release-publisher path that writes no release name: stage a
   # published version's images in ghcr.io/archestra-ai/ci, package both charts as
   # 0.0.0-smoke.<run>, attest them as a release would, and send a smoke
   # request. The publisher verifies and copies everything, but only to
@@ -767,7 +768,7 @@ jobs:
           helm package integrations/kagent/demo/chart --version "$version" --app-version "$SOURCE_VERSION" --destination release-charts
           python3 scripts/appa-release-subjects.py "$version" "$DIGESTS" release-charts
 
-      # release-images downloads this artifact from this run by name.
+      # release-publisher downloads this artifact from this run by name.
       - name: Upload the smoke charts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -789,7 +790,7 @@ jobs:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: archestra-ai
-          repositories: release-images
+          repositories: release-publisher
           # Send the repository_dispatch and watch the run it starts.
           permission-contents: write
           permission-actions: read
@@ -798,6 +799,7 @@ jobs:
         uses: archestra-ai/.github/actions/release-images-publish@460fc8af7169871b967b6b2d31d8b2e2c758d978 # v1.18.0
         with:
           token: ${{ steps.publisher-token.outputs.token }}
+          publisher-repository: archestra-ai/release-publisher
           project: openappa
           version: 0.0.0-smoke.${{ github.run_id }}
           images-file: release-images.json
