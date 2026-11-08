@@ -212,9 +212,7 @@ jobs:
 
   batteries-artifact:
     name: Build the batteries artifact
-    if: >-
-      needs.release-please.outputs.should_publish == 'true' &&
-      needs.release-please.outputs.registry_only != 'true'
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.release-please.outputs.registry_only != 'true' }}
     needs: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -275,9 +273,7 @@ jobs:
 
   build-binaries:
     name: Build release binaries
-    if: >-
-      needs.release-please.outputs.should_publish == 'true' &&
-      needs.release-please.outputs.registry_only != 'true'
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.release-please.outputs.registry_only != 'true' && needs.batteries-artifact.result == 'success' }}
     needs:
       - release-please
       - batteries-artifact
@@ -292,7 +288,7 @@ jobs:
 
   oci-tags:
     name: Resolve release image tags
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' }}
     needs: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -325,7 +321,7 @@ jobs:
 
   publish-oci-images:
     name: Publish OCI images
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.oci-tags.result == 'success' }}
     needs:
       - release-please
       - oci-tags
@@ -349,7 +345,7 @@ jobs:
   # job only packages them, pinned to the staged image digests.
   package-charts:
     name: Package Helm charts
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.publish-oci-images.result == 'success' }}
     needs:
       - release-please
       - publish-oci-images
@@ -436,7 +432,7 @@ jobs:
   # attestations (signer release.yml, main, this run) first.
   attest-release-images:
     name: Attest images and charts
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.package-charts.result == 'success' }}
     needs:
       - release-please
       - publish-oci-images
@@ -520,6 +516,7 @@ jobs:
   publish-release-images:
     name: Publish images and charts through release-publisher
     needs: [release-please, attest-release-images]
+    if: ${{ !cancelled() && !failure() && needs.attest-release-images.result == 'success' }}
     permissions:
       actions: read # Required to download the chart artifact.
     uses: archestra-ai/.github/.github/workflows/release-publish.yml@add9951c121764e9d62f71591ab694b257c14077 # v1.21.0
@@ -537,9 +534,7 @@ jobs:
 
   publish-release:
     name: Publish GitHub release
-    if: >-
-      needs.release-please.outputs.should_publish == 'true' &&
-      needs.release-please.outputs.registry_only != 'true'
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.release-please.outputs.registry_only != 'true' && needs.build-binaries.result == 'success' && needs.publish-release-images.result == 'success' }}
     needs:
       - release-please
       - batteries-artifact
@@ -685,6 +680,7 @@ jobs:
   update-archestra:
     name: Propose Archestra runtime update
     needs: [release-please, publish-release]
+    if: ${{ !cancelled() && !failure() && needs.publish-release.result == 'success' }}
     permissions:
       contents: read
       actions: read # Allow the updater to download its prepared Cargo bundle.
