@@ -433,26 +433,24 @@ jobs:
   # OpenAPPA cannot write its public GHCR names. Attest the staged digests
   # under their public names and the charts by file name, in this run, then ask
   # archestra-ai/release-publisher to publish exactly those; it verifies the
-  # attestations (signer release.yml, main, this run attempt) first.
-  publish-release-images:
-    name: Publish images and charts through release-publisher
+  # attestations (signer release.yml, main, this run) first.
+  attest-release-images:
+    name: Attest images and charts
     if: ${{ needs.release-please.outputs.should_publish == 'true' }}
     needs:
       - release-please
       - publish-oci-images
       - package-charts
     runs-on: ubuntu-latest
-    # A stable release waits in release-publisher for an Engineering member who
-    # did not merge it to approve it; this job waits with it, up to the
-    # longest a GitHub-hosted job may run.
-    timeout-minutes: 360
-    # Holds the archestra-releaser App's key; main only.
-    environment: releaser
+    timeout-minutes: 15
     permissions:
       actions: read # Required to download the chart artifact.
       attestations: write # Required to store the build provenance attestation.
-      contents: read # Required to check out the subjects script.
+      contents: read # Required to check out the subjects script and list releases.
       id-token: write # Required to sign the build provenance attestation.
+    outputs:
+      images: ${{ steps.subjects.outputs.images }}
+      latest: ${{ steps.latest.outputs.channels }}
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -468,6 +466,7 @@ jobs:
           path: release-charts
 
       - name: Collect release subjects
+        id: subjects
         env:
           VERSION: ${{ needs.release-please.outputs.version }}
           RUNTIME: ${{ needs.publish-oci-images.outputs.appa_runtime_digest }}
@@ -481,6 +480,7 @@ jobs:
             '{"appa-runtime": $runtime, "appa-kagent-adk": $adk, "appa-kagent-adk-go": $go,
               "golang-adk": $go, "appa-demo-tools": $tools, "appa-demo-mocks": $mocks}')
           python3 scripts/appa-release-subjects.py "$VERSION" "$digests" release-charts
+          echo "images=$(jq -c . release-images.json)" >> "$GITHUB_OUTPUT"
 
       - name: Attest release images and charts
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
@@ -514,30 +514,26 @@ jobs:
             echo "channels=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Generate a publisher token
-        id: publisher-token
-        uses: archestra-ai/.github/actions/github-app-token@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: archestra-ai
-          repositories: release-publisher
-          # Send the repository_dispatch and watch the run it starts.
-          permission-contents: write
-          permission-actions: read
-
-      - name: Publish through release-publisher
-        uses: archestra-ai/.github/actions/release-images-publish@460fc8af7169871b967b6b2d31d8b2e2c758d978 # v1.18.0
-        with:
-          token: ${{ steps.publisher-token.outputs.token }}
-          publisher-repository: archestra-ai/release-publisher
-          project: openappa
-          version: ${{ needs.release-please.outputs.version }}
-          images-file: release-images.json
-          latest: ${{ steps.latest.outputs.channels }}
-          charts: |
-            release-charts/appa-runtime-${{ needs.release-please.outputs.version }}.tgz
-            release-charts/appa-kagent-demo-${{ needs.release-please.outputs.version }}.tgz
+  # Waits for the publisher, a stable release's approval included, up to 360
+  # minutes. An expired approval: Re-run failed jobs (a new request and
+  # approval; the attestation of the earlier attempt still counts).
+  publish-release-images:
+    name: Publish images and charts through release-publisher
+    needs: [release-please, attest-release-images]
+    permissions:
+      actions: read # Required to download the chart artifact.
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@99f2e3eb74603dbe4b785982467aed3ab28fc082 # v1.20.0
+    with:
+      # Holds the archestra-releaser App's key; main only.
+      environment: releaser
+      project: openappa
+      version: ${{ needs.release-please.outputs.version }}
+      images: ${{ needs.attest-release-images.outputs.images }}
+      latest: ${{ needs.attest-release-images.outputs.latest }}
+      chart-artifact: release-charts
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
   publish-release:
     name: Publish GitHub release
@@ -710,9 +706,7 @@ jobs:
     name: Publisher dry run
     if: ${{ inputs.publisher_smoke_version != '' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    # Holds the archestra-releaser App's key; main only.
-    environment: releaser
+    timeout-minutes: 30
     permissions:
       attestations: write # Required to store the build provenance attestation.
       contents: read # Required to check out the charts and scripts.
@@ -720,6 +714,8 @@ jobs:
       packages: write # Required to stage the images in ghcr.io/archestra-ai/ci.
     env:
       SOURCE_VERSION: ${{ inputs.publisher_smoke_version }}
+    outputs:
+      images: ${{ steps.charts.outputs.images }}
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -761,6 +757,7 @@ jobs:
           echo "digests=$(jq -c . <<< "$digests")" >> "$GITHUB_OUTPUT"
 
       - name: Package the smoke charts
+        id: charts
         env:
           DIGESTS: ${{ steps.stage.outputs.digests }}
         run: |
@@ -774,6 +771,7 @@ jobs:
           helm package charts/appa-runtime --version "$version" --app-version "$SOURCE_VERSION" --destination release-charts
           helm package integrations/kagent/demo/chart --version "$version" --app-version "$SOURCE_VERSION" --destination release-charts
           python3 scripts/appa-release-subjects.py "$version" "$DIGESTS" release-charts
+          echo "images=$(jq -c . release-images.json)" >> "$GITHUB_OUTPUT"
 
       # release-publisher downloads this artifact from this run by name.
       - name: Upload the smoke charts
@@ -790,27 +788,20 @@ jobs:
         with:
           subject-checksums: release-subjects.txt
 
-      - name: Generate a publisher token
-        id: publisher-token
-        uses: archestra-ai/.github/actions/github-app-token@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
-        with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          owner: archestra-ai
-          repositories: release-publisher
-          # Send the repository_dispatch and watch the run it starts.
-          permission-contents: write
-          permission-actions: read
-
-      - name: Run the publisher dry run
-        uses: archestra-ai/.github/actions/release-images-publish@460fc8af7169871b967b6b2d31d8b2e2c758d978 # v1.18.0
-        with:
-          token: ${{ steps.publisher-token.outputs.token }}
-          publisher-repository: archestra-ai/release-publisher
-          project: openappa
-          version: 0.0.0-smoke.${{ github.run_id }}
-          images-file: release-images.json
-          smoke: "true"
-          charts: |
-            release-charts/appa-runtime-0.0.0-smoke.${{ github.run_id }}.tgz
-            release-charts/appa-kagent-demo-0.0.0-smoke.${{ github.run_id }}.tgz
+  publisher-smoke-publish:
+    name: Publisher dry run (publish)
+    needs: publisher-smoke
+    permissions:
+      actions: read # Required to download the chart artifact.
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@99f2e3eb74603dbe4b785982467aed3ab28fc082 # v1.20.0
+    with:
+      # Holds the archestra-releaser App's key; main only.
+      environment: releaser
+      project: openappa
+      version: 0.0.0-smoke.${{ github.run_id }}
+      images: ${{ needs.publisher-smoke.outputs.images }}
+      chart-artifact: release-charts
+      smoke: true
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
