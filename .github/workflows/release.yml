@@ -442,7 +442,10 @@ jobs:
       - publish-oci-images
       - package-charts
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A stable release waits in release-images for an Engineering member who
+    # did not merge it to approve it; this job waits with it, up to the
+    # longest a GitHub-hosted job may run.
+    timeout-minutes: 360
     # Holds the archestra-releaser App's key; main only.
     environment: releaser
     permissions:
