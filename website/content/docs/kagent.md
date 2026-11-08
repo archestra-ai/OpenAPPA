@@ -44,7 +44,7 @@ OpenAPPA publishes its images to `ghcr.io/archestra-ai/<image>` and its charts t
 Deploy the demo:
 
 ```sh
-APPA_VERSION=0.38.1 # x-release-please-version
+APPA_VERSION=0.39.0 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 
@@ -202,7 +202,7 @@ If you already run kagent with your own agents, use `appa-guide` to configure po
 Update the controller with the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
 
 ```sh
-APPA_VERSION=0.38.1 # x-release-please-version
+APPA_VERSION=0.39.0 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 RUNTIME_NAMESPACE=appa
