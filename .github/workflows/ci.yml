@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-    # `labeled` carries the run-e2e label that starts the live e2e subset.
+    # `labeled` carries the run-e2e label that starts the marketplace kagent
+    # acceptance rehearsal.
     types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
@@ -1037,7 +1038,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # The live A2A matrix runs on demand only, and it carries NO same-named
+  # The live A2A matrix runs on a manual dispatch from main only. It reads
+  # the OpenRouter key from GCP Secret Manager as ci-appa-canary, which
+  # trusts this file on main only (infra gcp/workload_identity/ci-secrets.tf),
+  # so no pull request reaches the key. This is the one job in this file that
+  # may request an OIDC token. It carries NO same-named
   # placeholder job. GitHub treats a skipped check run as satisfying a
   # required status check, so the real job reports its own name when its
   # `if` is false and nothing waits on a context that never arrives. A
@@ -1058,17 +1063,11 @@ jobs:
   # documents the same three commands for a laptop or a dev VM.
   kagent-a2a-e2e:
     name: kagent A2A E2E
-    needs: changes
-    # A pull request runs the matrix when it carries the label and it
-    # changes an e2e path. A fork never reads the OpenRouter key.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      (contains(github.event.pull_request.labels.*.name, 'run-e2e') ||
-      github.event.label.name == 'run-e2e') &&
-      needs.changes.outputs.e2e == 'true')
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Workload Identity Federation: the OpenRouter key read.
     timeout-minutes: 60
     env:
       KIND_CLUSTER: appa-e2e
@@ -1150,9 +1149,41 @@ jobs:
       - name: Load the images into the cluster
         run: bash integrations/kagent/e2e/ci/kind-up.sh
 
+      - name: Authenticate to read the OpenRouter key
+        uses: archestra-ai/.github/actions/google-auth@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
+        with:
+          service_account: ci-appa-canary@friendly-path-465518-r6.iam.gserviceaccount.com
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
+
+      - name: Read the OpenRouter key
+        id: e2e-secrets
+        uses: google-github-actions/get-secretmanager-secrets@bc9c54b29fdffb8a47776820a7d26e77b379d262 # v3.0.0
+        with:
+          secrets: |-
+            openrouter_api_key:friendly-path-465518-r6/ci-appa-canary-openrouter-api-key
+
+      - name: Check the OpenRouter key
+        env:
+          OPENROUTER_API_KEY: ${{ steps.e2e-secrets.outputs.openrouter_api_key }}
+        run: |
+          # A placeholder version (not an OpenRouter key) would otherwise fail
+          # every model call and read as a test failure.
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::ci-appa-canary-openrouter-api-key is empty. Add a version in Secret Manager (infra gcp/workload_identity/README.md, \"Rotating a CI secret\")."
+            exit 1
+          fi
+          echo "::add-mask::$OPENROUTER_API_KEY"
+          case "$OPENROUTER_API_KEY" in
+            sk-or-*) ;;
+            *)
+              echo "::error::ci-appa-canary-openrouter-api-key does not hold an OpenRouter key (no sk-or- prefix). Add a version with the real key."
+              exit 1
+              ;;
+          esac
+
       - name: Install kagent, runtime and demo fixtures
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_API_KEY: ${{ steps.e2e-secrets.outputs.openrouter_api_key }}
         run: bash integrations/kagent/e2e/ci/install.sh
 
       - name: Setup uv
@@ -1191,8 +1222,8 @@ jobs:
           retention-days: 7
 
   # The installer, offline-restore and native-approval rehearsal on a kind
-  # cluster. Like the live matrix above it runs on demand: every push to main
-  # and every `run-e2e`-labeled pull request that changes what it exercises,
+  # cluster. It runs on a manual dispatch, every push to main and every
+  # `run-e2e`-labeled pull request that changes what it exercises,
   # never on an unlabeled pull request. It reads no secrets, so a fork may
   # run it. Same rule as above: no same-named placeholder job.
   marketplace-kagent-acceptance:
