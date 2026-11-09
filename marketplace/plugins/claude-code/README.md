@@ -220,9 +220,10 @@ status.
 Do not replace the installed command with an `APPA_GATE=1` alias. An alias
 cannot record the resumable session or load `clappa`'s session settings.
 
-Only sessions started with `APPA_GATE=1` are protected. The binary reads
-the variable from the Claude Code process environment, fixed at launch,
-so a session cannot turn the protection off mid-session. A plain
+Only sessions with `APPA_GATE=1` are protected. The binary reads the
+variable from the environment Claude Code gives its hooks. A Claude Code
+settings file that sets `APPA_GATE` overrides the launcher's value, including
+during a session, so keep it out of user and project settings. A plain
 `claude` session stays unprotected, and the binary prints nothing
 into it. Protection belongs to the process, not the saved conversation:
 resume a protected conversation with `clappa --resume`, not `claude --resume`.

@@ -603,7 +603,7 @@ jobs:
       # previous release wrote; the previous release must refuse what this checkout wrote. The
       # run exits non-zero on the first case that does not hold.
       - name: Mixed-version proof (PostgreSQL)
-        run: cargo run --locked --manifest-path scripts/mixed-version/Cargo.toml
+        run: scripts/mixed-version/run.sh
 
   # Stable-named gate so a required check named "Rust Checks" still
   # covers the split jobs. Both jobs skipped is success: their paths

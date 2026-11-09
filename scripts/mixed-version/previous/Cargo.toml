@@ -1,0 +1,15 @@
+# Historical release fixture: keep its original SQLite dependency isolated from
+# the patched current release. This binary only opens the test PostgreSQL store.
+[package]
+name = "appa-mixed-version-previous"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+old_engine = { package = "appa-engine", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "06bc9cef7166a0de0885a4607508a9fc6e6a0123" }
+old_eventlog = { package = "appa-eventlog", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "06bc9cef7166a0de0885a4607508a9fc6e6a0123", features = ["postgres"] }
+old_policy = { package = "appa-policy", git = "https://github.com/archestra-ai/OpenAPPA.git", rev = "06bc9cef7166a0de0885a4607508a9fc6e6a0123" }
+serde_json = "1"

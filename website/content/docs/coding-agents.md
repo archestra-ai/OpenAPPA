@@ -9,7 +9,15 @@ OpenAPPA checks coding-agent flows at the harness boundary. The [Claude Code](/c
 
 ## Protected sessions
 
-The Claude Code install protects only sessions started through `clappa`. Start `clappa` for a protected session and `claude` for an ordinary session. Protection is fixed when the process starts, so the agent cannot turn it off during that session.
+`appa plugin install claude-code` adds hook entries, the `appa` MCP server, the `appa-guide` skill, and the `clappa` command to your Claude Code setup. The hooks act only in a process that has `APPA_GATE=1`. A plain `claude` session runs without OpenAPPA checks, labels, or blocked calls. The `appa` MCP tools stay visible to the model in that session.
+
+Start `clappa` for a protected session and `claude` for an ordinary session. `clappa` is the supported launcher. It sets `APPA_GATE=1` when Claude Code starts. Protection runs on the client, so Claude Code settings can turn it off with `APPA_GATE` or `disableAllHooks`.
+
+`clappa` is not the only way to set the gate. A session that gets `APPA_GATE=1` from your own launcher or from `env` in Claude Code settings runs the same hooks and policy. Also set `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`, because OpenAPPA does not support backgrounded sessions. `clappa` also provides the following, which a session without it does not have unless your launcher sets the same values:
+
+- **A launch token.** Without it, a new session ID opens a fresh label.
+- **A fork's parent.** Without it, a fork runs with a clean label even though it carries the parent's conversation. Do not fork such a session.
+- **A messaging address.** Without it, a session cannot receive peer messages.
 
 Protected sessions fail closed: while the runtime is unavailable, every hooked action is blocked. The status line shows the trajectory's current trust and audience. The [Claude Code guide](/claude-code) covers installation, policy setup, and a first blocked flow.
 

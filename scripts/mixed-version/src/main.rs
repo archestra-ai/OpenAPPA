@@ -1,4 +1,4 @@
-//! Mixed-version proof: the previous release (the `rev` in Cargo.toml) and this checkout share one
+//! Mixed-version proof: the previous release (the `rev` in previous/Cargo.toml) and this checkout share one
 //! PostgreSQL store, as old and new pods do during a rolling release and after a rollback. Both
 //! open families that follow a deployment. This checkout reads and continues the families the
 //! previous release opened. The previous release refuses every family this checkout opened or
@@ -19,89 +19,117 @@ fn unique(prefix: &str) -> String {
 }
 
 mod old {
-    use super::*;
-    pub use old_engine::fact::Fact;
-    use old_engine::profile::{DeploymentName, PolicyRevision};
-    use old_engine::transition::{EngineEvent, ProposalBatch, ProposalBatchId, ProposedCall};
-    use old_engine::value::{OfferNonce, ToolName, TrajectoryId};
+    use std::cell::RefCell;
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-    pub fn store() -> old_eventlog::LogStore {
-        old_eventlog::LogStore::open(old_eventlog::Backend::Postgres {
-            url: url(),
-            max_connections: NonZeroUsize::new(2).unwrap(),
-        })
-        .expect("the old store opens")
+    pub struct Store(RefCell<Worker>);
+    struct Worker {
+        child: Child,
+        stdin: Option<ChildStdin>,
+        stdout: BufReader<ChildStdout>,
     }
 
-    /// The policy compiled as the previous release's snapshot engine: a family it opens names no
-    /// deployment.
-    pub fn snapshot(policy: &str) -> old_engine::engine::Engine {
-        old_policy::Config::from_toml_str(policy).expect("compiles").engine().clone()
+    impl Drop for Worker {
+        fn drop(&mut self) {
+            // Closing stdin ends the worker's request loop before waiting.
+            self.stdin.take();
+            let _ = self.child.wait();
+        }
     }
 
-    pub fn line(policy: &str, deployment: &str, revision: u64) -> old_engine::engine::Engine {
-        snapshot(policy).at(DeploymentName::new(deployment), PolicyRevision::new(revision))
+    pub struct Engine {
+        policy: String,
+        deployment: Option<String>,
+        revision: Option<u64>,
     }
 
-    pub fn publish(store: &old_eventlog::LogStore, deployment: &str, expected: Option<u64>, policy: &str) -> u64 {
-        store
-            .publish(&DeploymentName::new(deployment), expected.map(PolicyRevision::new), policy.as_bytes())
-            .expect("publishes")
-            .revision
-            .value()
+    pub fn store() -> Store {
+        let executable = std::env::current_exe()
+            .expect("current executable")
+            .with_file_name(format!("appa-mixed-version-previous{}", std::env::consts::EXE_SUFFIX));
+        let mut child = Command::new(executable)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("build the historical worker first: scripts/mixed-version/run.sh");
+        let stdin = child.stdin.take().expect("worker stdin");
+        let stdout = BufReader::new(child.stdout.take().expect("worker stdout"));
+        Store(RefCell::new(Worker {
+            child,
+            stdin: Some(stdin),
+            stdout,
+        }))
     }
 
-    pub fn open(store: &old_eventlog::LogStore, engine: &old_engine::engine::Engine, root: &str) {
-        let id = TrajectoryId::new(root);
-        let opening = engine
-            .open_trajectory(&id, old_engine::profile::PolicyFileKey::of(POLICY.as_bytes()), None)
-            .expect("seals")
-            .into_unsealed();
-        store.create_root(opening, POLICY.as_bytes()).expect("the old version opens the root");
+    fn request(store: &Store, request: serde_json::Value) -> Result<serde_json::Value, String> {
+        let mut worker = store.0.borrow_mut();
+        let input = worker.stdin.as_mut().expect("worker input remains open");
+        writeln!(input, "{request}").expect("historical worker accepts a request");
+        input.flush().expect("historical worker request flushes");
+        let mut response = String::new();
+        if worker
+            .stdout
+            .read_line(&mut response)
+            .expect("historical worker response reads")
+            == 0
+        {
+            // A broken worker is an infrastructure failure, never an expected
+            // rollback refusal that could make the compatibility proof pass.
+            panic!("historical worker exited before returning a result");
+        }
+        serde_json::from_str(&response).expect("historical worker returns a serialized Result")
     }
 
-    /// Replay the family (each batch under its own revision), propose one `note` call, append.
-    pub fn decide(
-        store: &old_eventlog::LogStore,
-        engine: &old_engine::engine::Engine,
-        root: &str,
-        batch: &str,
-    ) -> Result<Vec<Fact>, String> {
-        let id = TrajectoryId::new(root);
-        let log = store.log(&id).map_err(|e| format!("old read: {e}"))?;
-        let view = engine
-            .replay(&id, &log.stamped_batches(), &[])
-            .map_err(|e| format!("old replay: {e}"))?;
-        let call = engine.resolve_call(ToolName::new("note"), b"{}").unwrap();
-        let decision = engine
-            .handle(
-                &view,
-                EngineEvent::Proposals(ProposalBatch {
-                    id: ProposalBatchId::new(batch),
-                    trajectory: id.clone(),
-                    provider_results: Vec::new(),
-                    proposals: vec![ProposedCall {
-                        tool: call.tool().clone(),
-                        arguments: call.canonical_arguments().canonical_bytes().to_vec(),
-                        annotation: None,
-                    }],
-                    spawn: None,
-                    offer_nonce: OfferNonce::new([1; 32]),
-                    evidence: Vec::new(),
-                    audience: Default::default(),
-                }),
-            )
-            .map_err(|e| format!("old decide: {e}"))?;
-        let facts = decision.append.expect("a release appends").into_unsealed();
-        store.append(&log, &facts, None).map_err(|e| format!("old append: {e}"))?;
-        Ok(facts)
+    pub fn snapshot(policy: &str) -> Engine {
+        Engine {
+            policy: policy.into(),
+            deployment: None,
+            revision: None,
+        }
     }
 
-    pub fn reads(store: &old_eventlog::LogStore, root: &str) -> Result<u64, String> {
-        store
-            .log(&TrajectoryId::new(root))
-            .map(|log| log.basis())
-            .map_err(|e| format!("old read: {e}"))
+    pub fn line(policy: &str, deployment: &str, revision: u64) -> Engine {
+        Engine {
+            policy: policy.into(),
+            deployment: Some(deployment.into()),
+            revision: Some(revision),
+        }
+    }
+
+    pub fn publish(store: &Store, deployment: &str, expected: Option<u64>, policy: &str) -> u64 {
+        request(
+            store,
+            serde_json::json!({"method": "publish", "deployment": deployment,
+            "expected": expected, "policy": policy}),
+        )
+        .expect("publishes")
+        .as_u64()
+        .expect("revision")
+    }
+
+    pub fn open(store: &Store, engine: &Engine, root: &str) {
+        request(
+            store,
+            serde_json::json!({"method": "open", "policy": engine.policy,
+            "deployment": engine.deployment, "revision": engine.revision, "root": root}),
+        )
+        .expect("opens");
+    }
+
+    pub fn decide(store: &Store, engine: &Engine, root: &str, batch: &str) -> Result<usize, String> {
+        request(
+            store,
+            serde_json::json!({"method": "decide", "policy": engine.policy,
+            "deployment": engine.deployment, "revision": engine.revision, "root": root, "batch": batch}),
+        )
+        .map(|count| usize::try_from(count.as_u64().expect("fact count")).expect("fact count fits usize"))
+    }
+
+    pub fn reads(store: &Store, root: &str) -> Result<u64, String> {
+        request(store, serde_json::json!({"method": "reads", "root": root}))
+            .map(|position| position.as_u64().expect("position"))
     }
 }
 
@@ -130,7 +158,11 @@ mod new {
 
     pub fn publish(store: &new_eventlog::LogStore, deployment: &str, expected: Option<u64>, policy: &str) -> u64 {
         store
-            .publish(&DeploymentName::new(deployment), expected.map(PolicyRevision::new), policy.as_bytes())
+            .publish(
+                &DeploymentName::new(deployment),
+                expected.map(PolicyRevision::new),
+                policy.as_bytes(),
+            )
             .expect("publishes")
             .revision
             .value()
@@ -142,7 +174,9 @@ mod new {
             .open_trajectory(&id, new_engine::profile::PolicyFileKey::of(POLICY.as_bytes()), None)
             .expect("seals")
             .into_unsealed();
-        store.create_root(opening, POLICY.as_bytes()).expect("the new version opens the root");
+        store
+            .create_root(opening, POLICY.as_bytes())
+            .expect("the new version opens the root");
     }
 
     /// Replay the family (each batch under its own revision), propose one `note` call, append.
@@ -179,7 +213,9 @@ mod new {
             )
             .map_err(|e| format!("new decide: {e}"))?;
         let facts = decision.append.expect("a release appends").into_unsealed();
-        store.append(&log, &facts, None).map_err(|e| format!("new append: {e}"))?;
+        store
+            .append(&log, &facts, None)
+            .map_err(|e| format!("new append: {e}"))?;
         Ok(facts)
     }
 
@@ -250,7 +286,7 @@ fn main() {
     old::open(&old_store, &old_at_one, &root_a);
     check(
         "A1 old version opens a following family and decides",
-        old::decide(&old_store, &old_at_one, &root_a, "a1").map(|f| f.len()),
+        old::decide(&old_store, &old_at_one, &root_a, "a1"),
     );
     check(
         "A2 new version reads the deployment it follows",
@@ -325,7 +361,7 @@ fn main() {
     old::open(&old_store, &snapshot, &root_d);
     check(
         "D1 old version opens a pinned family and decides",
-        old::decide(&old_store, &snapshot, &root_d, "d1").map(|f| f.len()),
+        old::decide(&old_store, &snapshot, &root_d, "d1"),
     );
     check(
         "D2 new version refuses it as a family opened before live policy revisions",
