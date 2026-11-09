@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.40.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.40.0...v0.40.1) (2026-11-09)
+
+
+### Bug Fixes
+
+* **claude-code:** stop routing the default policy through the file-tracker ([#855](https://github.com/archestra-ai/OpenAPPA/issues/855)) ([9545d10](https://github.com/archestra-ai/OpenAPPA/commit/9545d101189b1c0c0fb9e4c22f91ba88fd4217a6))
+
+
+### Documentation
+
+* **claude-code:** state what a protected session depends on ([#856](https://github.com/archestra-ai/OpenAPPA/issues/856)) ([492694d](https://github.com/archestra-ai/OpenAPPA/commit/492694dc9a05947cd428a05f01b0a69fa72f7016))
+
 ## [0.40.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.39.1...v0.40.0) (2026-11-08)
 
 
