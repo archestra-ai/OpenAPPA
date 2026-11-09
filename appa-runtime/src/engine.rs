@@ -80,7 +80,7 @@ use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, Remedy
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AnswerDelta, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration,
-    ContextArtifact, HistoryEntry, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    ContextArtifact, HistoryEntry, ReviewedNarrowing, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling, SpawnKind};
 
@@ -1994,7 +1994,8 @@ impl RuntimeEngine {
             let Some((offer, _)) = offers.iter().find(|(_, planned)| *planned == plan.id) else {
                 continue;
             };
-            reviews.extend(self.reviews_of(offer, &block.call, &plan.required, plan.narrowing()));
+            let narrows = reviewed_narrowing(plan, block.block.narrowing_impact.as_ref(), self.naming);
+            reviews.extend(self.reviews_of(offer, &block.call, &plan.required, narrows.as_ref()));
         }
         reviews
     }
@@ -2016,7 +2017,12 @@ impl RuntimeEngine {
                 call,
                 required,
                 narrowing,
-            }) => self.reviews_of(offer, &call, &required, narrowing.as_ref()),
+            }) => self.reviews_of(
+                offer,
+                &call,
+                &required,
+                ReviewedNarrowing::unjudged(narrowing.as_ref()).as_ref(),
+            ),
             _ => Vec::new(),
         }
     }
@@ -2026,7 +2032,7 @@ impl RuntimeEngine {
         offer: &OfferId,
         call: &ResolvedCall,
         required: &[RequiredRuling],
-        narrowing: Option<&appa_engine::check::Narrowing>,
+        narrows: Option<&ReviewedNarrowing>,
     ) -> Vec<PendingReview> {
         let registry = self.engine.registry();
         let chain = registry.trust_chain();
@@ -2034,7 +2040,7 @@ impl RuntimeEngine {
             .iter()
             .filter_map(|requirement| {
                 let declaration = AuthorityDeclaration::of(registry.authority(&requirement.authority)?, chain);
-                let artifact = AuthorityArtifact::of(call, requirement, narrowing, chain);
+                let artifact = AuthorityArtifact::of(call, requirement, narrows, chain);
                 Some(PendingReview {
                     offer: offer.clone(),
                     authority: requirement.authority.as_str().to_string(),
@@ -2310,6 +2316,7 @@ impl RuntimeEngine {
     ) -> AuthorityOutcome {
         let registry = self.engine.registry();
         let chain = registry.trust_chain();
+        let narrows = ReviewedNarrowing::unjudged(narrowing);
         let mut approvals = Vec::new();
         let mut requests = Vec::new();
         for requirement in required {
@@ -2326,7 +2333,7 @@ impl RuntimeEngine {
                     requests.push(ExternalRequest::Authority {
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
-                        artifact: AuthorityArtifact::of(call, requirement, narrowing, chain),
+                        artifact: AuthorityArtifact::of(call, requirement, narrows.as_ref(), chain),
                         review,
                     });
                 }
@@ -4491,6 +4498,27 @@ impl std::fmt::Display for SessionNarrowing {
     }
 }
 
+/// What one plan's review says about the narrowing. The impact is the block's, so a plan that
+/// clears the narrowing without accepting it, such as an output sanitizer, takes none of it.
+fn reviewed_narrowing(
+    plan: &ExecutableRemedyPlan,
+    impact: Option<&appa_engine::plan::NarrowingImpact>,
+    naming: ToolNaming,
+) -> Option<ReviewedNarrowing> {
+    let spell = |tools: &[ToolName]| {
+        tools
+            .iter()
+            .map(|tool| terminal_safe(&naming.model_spelling(tool.as_str())))
+            .collect()
+    };
+    plan.narrowing().and(impact).map(|impact| ReviewedNarrowing::Judged {
+        blocked: spell(&impact.blocked),
+        sign_off: spell(&impact.sign_off),
+        recipient_checked: spell(&impact.recipient_checked),
+        per_call: !impact.per_call.is_empty(),
+    })
+}
+
 fn remedy_description(plan: &ExecutableRemedyPlan, registry: Option<&Registry>, target: &str) -> String {
     match plan.return_step() {
         Some(route) => return_description(route),
@@ -5967,6 +5995,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn only_a_plan_accepting_the_narrowing_reviews_its_impact_in_the_hosts_spelling() {
+        use crate::consult::ReviewedNarrowing;
+        use appa_engine::check::Narrowing;
+        use appa_engine::label::Label;
+        use appa_engine::plan::NarrowingImpact;
+
+        let plan = |step| ExecutableRemedyPlan {
+            id: PlanId::new(1),
+            steps: vec![step],
+            required: vec![],
+        };
+        let accepts = plan(RemedyStep::Accept(Narrowing {
+            from: Label::new(Trust::new(2), Audience::public()),
+            to: Label::new(Trust::new(0), Audience::public()),
+        }));
+        let sanitizes = plan(RemedyStep::Sanitize(SanitizerName::new("strip")));
+        let impact = NarrowingImpact {
+            sign_off: vec![ToolName::new("host/claude-code/Bash")],
+            blocked: vec![ToolName::new("send\nmail")],
+            recipient_checked: vec![],
+            per_call: vec![ToolName::new("*")],
+        };
+        let naming = ToolNaming::Canonical {
+            adapter: appa_adapter_claude_code::adapter(),
+        };
+        assert_eq!(
+            super::reviewed_narrowing(&accepts, Some(&impact), naming),
+            Some(ReviewedNarrowing::Judged {
+                blocked: vec!["send\u{FFFD}mail".to_string()],
+                sign_off: vec!["Bash".to_string()],
+                recipient_checked: vec![],
+                per_call: true,
+            })
+        );
+        assert_eq!(super::reviewed_narrowing(&sanitizes, Some(&impact), naming), None);
+        assert_eq!(super::reviewed_narrowing(&accepts, None, naming), None);
     }
 
     #[test]
