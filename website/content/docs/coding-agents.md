@@ -11,7 +11,7 @@ OpenAPPA checks coding-agent flows at the harness boundary. The [Claude Code](/c
 
 `appa plugin install claude-code` adds hook entries, the `appa` MCP server, the `appa-guide` skill, and the `clappa` command to your Claude Code setup. The hooks act only in a process that has `APPA_GATE=1`. A plain `claude` session runs without OpenAPPA checks, labels, or blocked calls. The `appa` MCP tools stay visible to the model in that session.
 
-Start `clappa` for a protected session and `claude` for an ordinary session. `clappa` is the supported launcher. It sets `APPA_GATE=1` when Claude Code starts. A Claude Code settings file that sets `APPA_GATE` overrides that value, including during a session. Keep `APPA_GATE` out of user and project settings, and review a project's `.claude/settings.json` before you start a protected session in it. The default policy asks the person running the session before a `Write` or `Edit` changes Claude Code settings.
+Start `clappa` for a protected session and `claude` for an ordinary session. `clappa` is the supported launcher. It sets `APPA_GATE=1` when Claude Code starts. Protection runs on the client, so Claude Code settings can turn it off with `APPA_GATE` or `disableAllHooks`.
 
 `clappa` is not the only way to set the gate. A session that gets `APPA_GATE=1` from your own launcher or from `env` in Claude Code settings runs the same hooks and policy. Also set `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`, because OpenAPPA does not support backgrounded sessions. `clappa` also provides the following, which a session without it does not have unless your launcher sets the same values:
 
