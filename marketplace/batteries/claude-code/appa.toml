@@ -1,10 +1,18 @@
-# Claude Code rules: the map that binds the `coding` battery's canonical web
-# tools to Claude Code's own, Claude Code's file tools routed through the
-# file-tracker, and the built-in tools only Claude Code offers. The built-in
-# tool set varies by Claude Code version; regenerate the list from a live
-# session when it drifts. Include the `coding` battery beside this one.
+# Claude Code rules: the map that binds the `coding` battery's canonical tools
+# to Claude Code's own, then the built-in tools only Claude Code offers. The
+# built-in tool set varies by Claude Code version; regenerate the list from a
+# live session when it drifts. Include the `coding` battery beside this one.
 
+# Claude Code spells each argument as the canonical tools do. Bash and
+# PowerShell results stay confined so a sanitizer the root declares can run
+# on them.
 [aliases.tool.coding]
+shell = [{ name = "host/claude-code/Bash", args = { command = "command" }, confined = true }]
+powershell = [{ name = "host/claude-code/PowerShell", args = { command = "command" }, confined = true }]
+read_file = [{ name = "host/claude-code/Read", args = { file_path = "file_path" } }]
+search_files = [{ name = "host/claude-code/Grep", args = { path = "path" } }]
+write_file = [{ name = "host/claude-code/Write", args = { file_path = "file_path" } }]
+edit_file = [{ name = "host/claude-code/Edit", args = { file_path = "file_path" } }]
 fetch_url = [{ name = "host/claude-code/WebFetch", args = { url = "url" } }]
 web_search = [{ name = "host/claude-code/WebSearch" }]
 
@@ -12,73 +20,17 @@ web_search = [{ name = "host/claude-code/WebSearch" }]
 [policy]
 version = 2
 
-# --- files carry labels: the file-tracker reads and writes them ---
-
-# The file-tracker is both the Annotator and the recorder of every file tool.
-# As a recorder it receives the label each released call published (the
-# session's label, met with what the call forwards and brings back) and keeps
-# it on the files the call wrote. As an Annotator it returns that label when a
-# later call, in this session or another, reads the file. Its built-in path
-# rules classify credentials (`.env*`, `~/.ssh/*`, ...) as `self`, and require
-# a trusted session to write instructions, hooks and shell profiles, before
-# any call touches them. The person running the session adds rules in
-# `~/.config/appa/file-tracker.toml`. The plugin's root policy binds the
-# file-tracker to `appa file-tracker`.
+# Monitor runs a shell command, or opens a WebSocket, and its output reaches
+# the model as later notifications that no tool result carries. Its Annotator
+# labels the call before it runs, as the `coding` battery's shell Annotator does.
 [[policy.annotator]]
-name = "file-tracker"
-
-[[policy.tool]]
-name = "host/claude-code/Read"
-annotator = "file-tracker"
-recorder = "file-tracker"
-
-[[policy.tool]]
-name = "host/claude-code/Write"
-annotator = "file-tracker"
-recorder = "file-tracker"
-
-[[policy.tool]]
-name = "host/claude-code/Edit"
-annotator = "file-tracker"
-recorder = "file-tracker"
-
-# A shell command declares the files it reads and writes and the hosts it
-# reaches, and a sandbox confines it to exactly those. `clappa` adds the three
-# lists to Claude Code's own Bash and confines each call in Claude Code's
-# sandbox; where it cannot, it serves SafeBash instead, which runs in
-# Anthropic's sandbox runtime `srt`. A Bash call that names no lists — Claude
-# Code started without `clappa` — is refused: the file-tracker cannot judge it.
-[[policy.tool]]
-name = "host/claude-code/Bash"
-annotator = "file-tracker"
-recorder = "file-tracker"
-
-[[policy.tool]]
-name = "mcp/file-tracker/SafeBash"
-annotator = "file-tracker"
-recorder = "file-tracker"
-
-# --- unmediated execution and content reads: no file label reaches them ---
-
-# These tools run commands, or read or write file content, out of the
-# file-tracker's sight. `clappa` starts Claude Code with them disabled; these
-# rules refuse them at the hook too, so a session started some other way
-# cannot run them either.
-[[policy.tool]]
-name = "host/claude-code/PowerShell"
-requires = { attention = ["blocked"] }
+name = "claude-code.monitor-requirements"
+builtin = "claude-code"
 
 [[policy.tool]]
 name = "host/claude-code/Monitor"
-requires = { attention = ["blocked"] }
-
-[[policy.tool]]
-name = "host/claude-code/Grep"
-requires = { attention = ["blocked"] }
-
-[[policy.tool]]
-name = "host/claude-code/NotebookEdit"
-requires = { attention = ["blocked"] }
+description = "Runs a shell command or opens a WebSocket and streams each output line to the agent."
+annotator = "claude-code.monitor-requirements"
 
 # --- tools whose results stay inside the session's trust boundary ---
 
@@ -154,6 +106,10 @@ delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/ListMcpResourcesTool"
+delta = {}
+
+[[policy.tool]]
+name = "host/claude-code/NotebookEdit"
 delta = {}
 
 [[policy.tool]]

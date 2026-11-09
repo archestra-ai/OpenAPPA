@@ -571,12 +571,19 @@ impl Drop for Signals {
 mod tests {
     use super::*;
 
-    /// The shipped Claude Code policy launches Claude Code without its unmediated tools and
-    /// with SafeBash; a policy that binds no file-tracker launches it unchanged.
+    /// A policy that binds the file-tracker launches Claude Code without its unmediated tools
+    /// and with SafeBash; the shipped policy binds none and launches it unchanged.
     #[test]
     fn only_a_policy_binding_the_file_tracker_disables_the_unmediated_tools() {
         let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/claude-code");
-        assert!(bound(&plugin.join("default.appa.toml")));
+        assert!(!bound(&plugin.join("default.appa.toml")));
+        let tracked = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tracked.path(),
+            "[externals.recorders.file-tracker]\ncommand = [\"appa\", \"file-tracker\", \"record\"]\n",
+        )
+        .unwrap();
+        assert!(bound(tracked.path()));
         let untracked = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(untracked.path(), "[policy]\nversion = 2\n").unwrap();
         assert!(!bound(untracked.path()));

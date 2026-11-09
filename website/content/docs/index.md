@@ -5,7 +5,7 @@ order: 1
 description: OpenAPPA is an open-source, deterministic security engine for real-world agentic applications.
 ---
 
-OpenAPPA is a frontier deterministic AI guardrail that is 100% resistant to data exfiltration caused by prompt injection or model hallucination, and the first of its kind that doesn't break agents.
+OpenAPPA is a deterministic information-flow engine for agents: once a flow's contract says data may not reach a reader, a prompt injection or model hallucination cannot change that decision. It is the first of its kind that doesn't break agents. Where a model Annotator supplies the contract, as for Claude Code shell commands, the decision is only as accurate as that judgment ([limits](/coding-agents#limits)).
 
 Backed by a [NeurIPS-accepted paper](/paper), it is open, vendor-agnostic, and MIT-licensed.
 
