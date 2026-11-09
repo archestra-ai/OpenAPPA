@@ -28,9 +28,9 @@ The defaults expect:
 ## Install
 
 ```sh
-APPA_VERSION=0.38.1 # x-release-please-version
+APPA_VERSION=0.40.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
+  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
   --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
   --set-string modelConfig.name=default-model-config \
@@ -66,8 +66,8 @@ upgrading this chart cannot change runtime policy.
 | `runtime.url` | `http://appa-runtime.appa.svc.cluster.local:18787` | Existing shared runtime used by every demo Agent. |
 | `runtime.reasoningEffort` | `""` | Optional reasoning effort passed to each Agent model request. |
 | `modelConfig.name` | `default-model-config` | Existing kagent ModelConfig used by every demo Agent. |
-| `tools.image.*` | `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-tools:v<appVersion>` | Demo MCP server image. |
-| `mocks.image.*` | `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/appa-demo-mocks:v<appVersion>` | Demo policy-service image. |
+| `tools.image.*` | `ghcr.io/archestra-ai/appa-demo-tools:v<appVersion>` | Demo MCP server image. |
+| `mocks.image.*` | `ghcr.io/archestra-ai/appa-demo-mocks:v<appVersion>` | Demo policy-service image. |
 | `mocks.approvalWindowSeconds` | `120` | Change-board ruling window, from 1 to 280 seconds. The HTTP timeout adds 5 seconds; the runtime adds 5 more, with a 30-second minimum. |
 | `seed.enabled` | `true` | Replay the five website scenario chats after install or upgrade; remove replaced seed-owned chats without touching user-created chats. |
 | `seed.controllerUrl` | controller in the release namespace | kagent controller receiving seeded sessions. |
@@ -105,7 +105,7 @@ answers and exposes the change board at `/pending` and `/decide`.
 ## Images
 
 This chart directly uses only `appa-demo-tools` and `appa-demo-mocks`.
-Both default to `v<appVersion>` in `europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public`. kagent
+Both default to `v<appVersion>` in `ghcr.io/archestra-ai`. kagent
 and the runtime releases separately select `appa-kagent-adk`,
 `appa-kagent-adk-go`/`golang-adk`, and `appa-runtime`.
 

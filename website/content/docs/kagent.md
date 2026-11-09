@@ -39,10 +39,12 @@ Export your OpenAI API key:
 export OPENAI_API_KEY="your-api-key"
 ```
 
+OpenAPPA publishes its images to `ghcr.io/archestra-ai/<image>` and its charts to `ghcr.io/archestra-ai/charts/<chart>`. A `v<version>` image tag never moves. `latest` names the newest stable release. Each chart pulls its images by the digest released with it. `ghcr.io/archestra-ai/ci/<image>` holds unreleased builds of `main`.
+
 Deploy the demo:
 
 ```sh
-APPA_VERSION=0.38.1 # x-release-please-version
+APPA_VERSION=0.40.0 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 
@@ -61,8 +63,8 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set registry=ghcr.io \
   --set kmcp.podSecurityContext.runAsUser=65532 \
   --set kmcp.podSecurityContext.runAsGroup=65532 \
-  --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
-  --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
+  --set controller.agentImage.registry=ghcr.io \
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
   --set-string controller.agentImage.tag="v$APPA_VERSION" \
   --set providers.default=openAI \
   --set-string providers.openAI.apiKeySecretRef=kagent-openai \
@@ -83,7 +85,7 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --force-conflicts --wait --timeout 10m
 
 helm upgrade --install appa-kagent-demo \
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
+  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \
   --set-string runtime.url="http://appa-runtime.$KAGENT_NAMESPACE.svc.cluster.local:18787" \
   --set-string modelConfig.name=default-model-config \
@@ -94,7 +96,7 @@ helm upgrade --install appa-kagent-demo \
 # template ConfigMap as the shared runtime's live configuration.
 DEMO_POLICY=$(mktemp)
 helm template appa-kagent-demo \
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
+  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \
   --set-string runtime.url="http://appa-runtime.$KAGENT_NAMESPACE.svc.cluster.local:18787" \
   --set-string modelConfig.name=default-model-config \
@@ -102,7 +104,7 @@ helm template appa-kagent-demo \
   | kubectl create --dry-run=client -f - -o jsonpath='{.data.appa\.toml}' > "$DEMO_POLICY"
 
 helm upgrade --install appa-runtime \
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
+  oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \
   --set persistence.enabled=false \
   --set-file config.contents="$DEMO_POLICY" \
@@ -200,7 +202,7 @@ If you already run kagent with your own agents, use `appa-guide` to configure po
 Update the controller with the `appa-kagent-adk` plugin image and deploy `appa-runtime`:
 
 ```sh
-APPA_VERSION=0.38.1 # x-release-please-version
+APPA_VERSION=0.40.0 # x-release-please-version
 KAGENT_VERSION=0.9.12
 KAGENT_NAMESPACE=kagent
 RUNTIME_NAMESPACE=appa
@@ -208,13 +210,13 @@ RUNTIME_NAMESPACE=appa
 helm upgrade kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --version "$KAGENT_VERSION" -n "$KAGENT_NAMESPACE" --reuse-values \
   --set registry=ghcr.io \
-  --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
-  --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
+  --set controller.agentImage.registry=ghcr.io \
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
   --set-string controller.agentImage.tag="v$APPA_VERSION" \
   --force-conflicts --wait --timeout 10m
 
 helm upgrade --install appa-runtime \
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
+  oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" -n "$RUNTIME_NAMESPACE" --create-namespace \
   --set persistence.enabled=false \
   --set appaGuide.enabled=true \
@@ -234,7 +236,7 @@ To retain trajectory audit logs and battery updates across restarts, enable pers
 
 ```sh
 helm upgrade --install appa-runtime \
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
+  oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" -n "$RUNTIME_NAMESPACE" --create-namespace \
   --set persistence.enabled=true \
   --set appaGuide.enabled=true \

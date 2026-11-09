@@ -1,11 +1,8 @@
 name: Update OpenAPPA in Archestra
 
 on:
-  # Releases published with GITHUB_TOKEN do not emit another workflow event.
-  # release.yml calls this workflow after publishing; this event also covers
-  # stable releases published manually by a maintainer.
-  release:
-    types: [published]
+  # release.yml calls this workflow after publishing. For a release published
+  # any other way, dispatch this workflow on main with its tag.
   workflow_dispatch:
     inputs:
       release_tag:
@@ -21,8 +18,10 @@ on:
         type: string
         required: true
     secrets:
+      # Passed by name only: the publish job's archestra-update environment
+      # supplies the value (see that job).
       APPA_ARCHESTRA_UPDATER_PRIVATE_KEY:
-        required: true
+        required: false
 
 permissions: {}
 
@@ -35,8 +34,7 @@ jobs:
     name: Validate release and prepare Cargo update
     if: >-
       github.repository == 'archestra-ai/OpenAPPA' &&
-      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') &&
-      (github.event_name != 'release' || !github.event.release.prerelease)
+      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -67,7 +65,7 @@ jobs:
       - name: Verify release and regenerate Cargo pins and lockfile
         id: prepare
         env:
-          RELEASE_TAG: ${{ inputs.release_tag || github.event.release.tag_name }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           GH_TOKEN: ${{ github.token }}
         run: >-
@@ -106,6 +104,13 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    # Holds APPA_ARCHESTRA_UPDATER_PRIVATE_KEY; deploys from main only. A
+    # called workflow sees only the secrets its caller passes, so release.yml
+    # passes the key by name; GitHub then resolves it from this job's
+    # environment. A dispatch reads the environment directly.
+    environment:
+      name: archestra-update
+      deployment: false # A secrets and branch gate; nothing is deployed.
     timeout-minutes: 10
     permissions:
       contents: read
@@ -128,7 +133,7 @@ jobs:
 
       - name: Create Archestra-only installation token
         id: app-token
-        uses: archestra-ai/.github/actions/github-app-token@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
+        uses: archestra-ai/.github/actions/github-app-token@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
         with:
           app-id: ${{ vars.APPA_ARCHESTRA_UPDATER_APP_ID }}
           private-key: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}
@@ -142,7 +147,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_READ_TOKEN: ${{ github.token }}
-          BOT_LOGIN: ${{ steps.app-token.outputs.app-slug }}[bot]
+          # The updater App's bot account. The shared token action outputs
+          # only the token, so the slug is spelled out here.
+          BOT_LOGIN: openappa-archestra-updater[bot]
         run: >-
           python3 openappa/.github/scripts/appa-archestra-update.py publish
           --source openappa --bundle prepared/update.json --bot-login "$BOT_LOGIN"

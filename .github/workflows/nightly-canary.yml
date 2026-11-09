@@ -11,12 +11,13 @@ name: Nightly Canary
 # Results stay internal: the run directory is uploaded as a workflow
 # artifact, the verdict goes to Slack, and nothing is committed back.
 #
-# Required repository secrets: OPENROUTER_API_KEY (model access),
-# APPA_CANARY_SLACK_WEBHOOK_URL (incoming webhook; skipped when absent).
+# Required secrets: OPENROUTER_API_KEY (model access) and, in the `canary`
+# environment, APPA_CANARY_SLACK_WEBHOOK_URL (incoming webhook; skipped when
+# absent). The environment admits main only.
 # Optional GCS copy of the run records: set the APPA_CANARY_GCS_BUCKET
-# repository variable (bucket name, no gs:// prefix) and grant the
-# APPA_GCP_SERVICE_ACCOUNT / APPA_GCP_WORKLOAD_IDENTITY_PROVIDER identity
-# write access to it.
+# repository variable (bucket name, no gs:// prefix). The upload uses
+# appa-demo-image-push, which trusts this file only on main (infra
+# gcp/workload_identity/ci-workflow-trust.tf).
 
 on:
   schedule:
@@ -33,6 +34,10 @@ jobs:
   canary:
     name: Defended vs empty
     runs-on: ubuntu-latest
+    # Holds the Slack webhook; deploys from main only.
+    environment:
+      name: canary
+      deployment: false # A secrets and branch gate; nothing is deployed.
     timeout-minutes: 150
     permissions:
       contents: read
@@ -48,7 +53,7 @@ jobs:
         run: rustup show
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -74,10 +79,10 @@ jobs:
 
       - name: Authenticate to Google Cloud
         if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}
-        uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
+        uses: archestra-ai/.github/actions/google-auth@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
         with:
-          service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: appa-demo-image-push@friendly-path-465518-r6.iam.gserviceaccount.com
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
 
       - name: Set up Google Cloud
         if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}

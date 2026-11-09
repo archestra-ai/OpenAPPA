@@ -19,6 +19,10 @@ on:
         description: Existing version without the v prefix (for example, 0.2.0)
         required: false
         type: string
+      publisher_smoke_version:
+        description: Dry-run the release publisher with this published version's images (scratch names only)
+        required: false
+        type: string
 
 permissions: {}
 
@@ -27,14 +31,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Create releases before calculating the next release PR. A draft release
+  # needs its forced tag to exist before Release Please can anchor that calculation.
+  create-releases:
+    name: Create releases for merged release PRs
+    if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only && !inputs.publisher_smoke_version }}
+    permissions: {} # The shared workflow writes with the archestra-releaser App token only.
+    uses: archestra-ai/.github/.github/workflows/release-please.yml@dc1baa65f528a62f6623c86a748824c9c4c925a7 # v1.17.0
+    with:
+      skip-github-pull-request: true
+      # The archestra-releaser App's key lives only in this environment, which
+      # only main can deploy to.
+      environment: releaser
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
   release-please:
     name: Create or resolve release
+    needs: create-releases
+    # Also runs for the existing-release modes, which skip create-releases.
+    if: ${{ !cancelled() && (needs.create-releases.result == 'success' || needs.create-releases.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write # Required to create release tags and draft release metadata.
-      issues: write # Required to apply Release Please labels.
-      pull-requests: write # Required to create and update the release approval PR.
+      contents: write # Required to read draft releases.
     outputs:
       should_publish: ${{ steps.resolve.outputs.should_publish }}
       tag_name: ${{ steps.resolve.outputs.tag_name }}
@@ -42,25 +63,24 @@ jobs:
       source_commit: ${{ steps.resolve.outputs.source_commit }}
       registry_only: ${{ steps.resolve.outputs.registry_only }}
     steps:
-      # Create releases before calculating the next release PR. A draft release
-      # needs its forced tag to exist before Release Please can anchor that calculation.
-      - name: Create releases for merged release PRs
-        if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
-        id: release
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+      # The existing-release modes publish a commit named by a tag, not the
+      # commit this run was started on. Fetch main's history so the resolve
+      # step can refuse a tag whose commit never reached main.
+      - name: Checkout main history
+        if: ${{ inputs.publish_existing_release || inputs.publish_registry_only }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          token: ${{ github.token }}
-          config-file: .github/release-please/release-please-config.json
-          manifest-file: .github/release-please/.release-please-manifest.json
-          target-branch: main
-          skip-github-pull-request: true
+          ref: main
+          persist-credentials: false
+          fetch-depth: 0
+          filter: blob:none
 
       - name: Resolve release to publish
         id: resolve
         env:
-          ACTION_RELEASE_CREATED: ${{ steps.release.outputs.release_created }}
-          ACTION_TAG_NAME: ${{ steps.release.outputs.tag_name }}
-          ACTION_VERSION: ${{ steps.release.outputs.version }}
+          ACTION_RELEASE_CREATED: ${{ needs.create-releases.outputs.release_created }}
+          ACTION_TAG_NAME: ${{ needs.create-releases.outputs.tag_name }}
+          ACTION_VERSION: ${{ needs.create-releases.outputs.version }}
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
           INPUT_PUBLISH_EXISTING_RELEASE: ${{ inputs.publish_existing_release }}
@@ -91,6 +111,17 @@ jobs:
               echo "::error::${tag_name} did not resolve to a commit"
               exit 1
             fi
+            # Publishing credentials trust this workflow on main only.
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::dispatch existing-release modes on main, not ${GITHUB_REF}"
+              exit 1
+            fi
+            # Fail closed: an unknown commit, a fetch error and a commit that
+            # is not an ancestor of main all stop the release here.
+            if ! git merge-base --is-ancestor "$source_commit" origin/main; then
+              echo "::error::${tag_name} (${source_commit}) is not an ancestor of origin/main"
+              exit 1
+            fi
             {
               echo "should_publish=true"
               echo "version=${INPUT_VERSION}"
@@ -109,57 +140,61 @@ jobs:
             echo "registry_only=false"
           } >> "$GITHUB_OUTPUT"
 
+  # App-authenticated PR creation and pushes start CI without the approval
+  # required for pull_request events generated with GITHUB_TOKEN.
   release-pr:
     name: Create or update next release PR
-    if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only }}
+    if: ${{ !inputs.publish_existing_release && !inputs.publish_registry_only && !inputs.publisher_smoke_version }}
     needs: release-please
+    permissions: {} # The shared workflow writes with the archestra-releaser App token only.
+    uses: archestra-ai/.github/.github/workflows/release-please.yml@dc1baa65f528a62f6623c86a748824c9c4c925a7 # v1.17.0
+    with:
+      skip-github-release: true
+      # The archestra-releaser App's key lives only in this environment, which
+      # only main can deploy to.
+      environment: releaser
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
+  sync-release-pr:
+    name: Synchronize release PR versions
+    if: ${{ needs.release-pr.outputs.prs_created == 'true' }}
+    needs: release-pr
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Holds the archestra-releaser App's key; main only.
+    environment:
+      name: releaser
+      deployment: false # A secrets and branch gate; nothing is deployed.
     permissions:
       contents: read # Required to check out the release PR; the App handles writes.
     steps:
-      # App-authenticated PR creation and pushes start CI without the approval
-      # required for pull_request events generated with GITHUB_TOKEN.
-      - name: Generate release PR token
+      - name: Generate release PR push token
         id: release-pr-token
-        uses: archestra-ai/.github/actions/github-app-token@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
+        uses: archestra-ai/.github/actions/github-app-token@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
         with:
-          app-id: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_ID }}
-          private-key: ${{ secrets.ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: archestra-ai
           repositories: OpenAPPA
           permission-contents: write
-          permission-issues: write
-          permission-pull-requests: write
-
-      - name: Create or update next release PR
-        id: release-pr
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        with:
-          token: ${{ steps.release-pr-token.outputs.token }}
-          config-file: .github/release-please/release-please-config.json
-          manifest-file: .github/release-please/.release-please-manifest.json
-          target-branch: main
-          skip-github-release: true
 
       - name: Checkout release PR
-        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ fromJSON(steps.release-pr.outputs.pr).headBranchName }}
+          ref: ${{ fromJSON(needs.release-pr.outputs.pr).headBranchName }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Synchronize release version
-        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
         uses: $/.github/actions/check-release-versions
         with:
           relock: "true"
 
       - name: Update release PR
-        if: ${{ steps.release-pr.outputs.prs_created == 'true' }}
         env:
-          RELEASE_PR: ${{ steps.release-pr.outputs.pr }}
+          RELEASE_PR: ${{ needs.release-pr.outputs.pr }}
           RELEASE_PUSH_TOKEN: ${{ steps.release-pr-token.outputs.token }}
         run: |
           release_branch=$(jq -er '.headBranchName' <<<"$RELEASE_PR")
@@ -177,9 +212,7 @@ jobs:
 
   batteries-artifact:
     name: Build the batteries artifact
-    if: >-
-      needs.release-please.outputs.should_publish == 'true' &&
-      needs.release-please.outputs.registry_only != 'true'
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.release-please.outputs.registry_only != 'true' }}
     needs: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -240,9 +273,7 @@ jobs:
 
   build-binaries:
     name: Build release binaries
-    if: >-
-      needs.release-please.outputs.should_publish == 'true' &&
-      needs.release-please.outputs.registry_only != 'true'
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.release-please.outputs.registry_only != 'true' && needs.batteries-artifact.result == 'success' }}
     needs:
       - release-please
       - batteries-artifact
@@ -257,7 +288,7 @@ jobs:
 
   oci-tags:
     name: Resolve release image tags
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' }}
     needs: release-please
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -290,14 +321,16 @@ jobs:
 
   publish-oci-images:
     name: Publish OCI images
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.oci-tags.result == 'success' }}
     needs:
       - release-please
       - oci-tags
     permissions:
       actions: read # Required to download image digest artifacts.
+      attestations: write # Required to record build provenance for the published images.
       contents: read # Required to check out the release source.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      id-token: write # Required to sign the build provenance.
+      packages: write # Required to push to the ghcr.io/archestra-ai/ci staging packages.
     uses: $/.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.oci-tags.outputs.tags }}
@@ -307,18 +340,19 @@ jobs:
       verify_release: true
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       immutable: ${{ needs.release-please.outputs.registry_only != 'true' }}
-    secrets:
-      APPA_GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
 
-  publish-chart:
-    name: Publish Helm charts
-    if: ${{ needs.release-please.outputs.should_publish == 'true' }}
-    needs: release-please
+  # archestra-ai/release-publisher pushes the charts after verifying them; this
+  # job only packages them, pinned to the staged image digests.
+  package-charts:
+    name: Package Helm charts
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.publish-oci-images.result == 'success' }}
+    needs:
+      - release-please
+      - publish-oci-images
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read # Required to verify and check out the release tag.
-      id-token: write # Required for Workload Identity Federation when pushing charts.
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -327,18 +361,23 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Authenticate to Artifact Registry
-        uses: archestra-ai/.github/actions/google-auth@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
-        with:
-          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          setup_gcloud: "true"
-
       - name: Verify and checkout release source
         uses: $/.github/actions/verify-release-source
         with:
           release_ref: ${{ needs.release-please.outputs.tag_name }}
           source_commit: ${{ needs.release-please.outputs.source_commit }}
+
+      # The charts pull exactly the digests release-publisher publishes for this
+      # release, not whatever a tag names later.
+      - name: Pin the charts to the release images
+        env:
+          RUNTIME_DIGEST: ${{ needs.publish-oci-images.outputs.appa_runtime_digest }}
+          TOOLS_DIGEST: ${{ needs.publish-oci-images.outputs.appa_demo_tools_digest }}
+          MOCKS_DIGEST: ${{ needs.publish-oci-images.outputs.appa_demo_mocks_digest }}
+        run: |
+          python3 scripts/appa-chart-digests.py charts/appa-runtime/values.yaml "appa-runtime=$RUNTIME_DIGEST"
+          python3 scripts/appa-chart-digests.py integrations/kagent/demo/chart/values.yaml \
+            "appa-demo-tools=$TOOLS_DIGEST" "appa-demo-mocks=$MOCKS_DIGEST"
 
       - name: Package and verify the chart
         env:
@@ -357,16 +396,15 @@ jobs:
             test "$(helm show chart "$chart" | sed -n 's/^appVersion: *//p')" = "$VERSION"
           done
 
-      - name: Log in to the chart registry
-        run: gcloud auth print-access-token | helm registry login europe-west1-docker.pkg.dev --username oauth2accesstoken --password-stdin
-
-      - name: Publish the chart
-        env:
-          CHARTS_OCI: oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts
-          VERSION: ${{ needs.release-please.outputs.version }}
-        run: |
-          helm push "dist/appa-runtime-${VERSION}.tgz" "$CHARTS_OCI"
-          helm push "dist/appa-kagent-demo-${VERSION}.tgz" "$CHARTS_OCI"
+      # release-publisher downloads this artifact from this run by name.
+      - name: Upload the charts for release-publisher
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-charts
+          path: dist/*.tgz
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload the runtime chart artifact
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -388,22 +426,130 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # OpenAPPA cannot write its public GHCR names. Attest the staged digests
+  # under their public names and the charts by file name, in this run, then ask
+  # archestra-ai/release-publisher to publish exactly those; it verifies the
+  # attestations (signer release.yml, main, this run) first.
+  attest-release-images:
+    name: Attest images and charts
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.package-charts.result == 'success' }}
+    needs:
+      - release-please
+      - publish-oci-images
+      - package-charts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read # Required to download the chart artifact.
+      attestations: write # Required to store the build provenance attestation.
+      contents: read # Required to check out the subjects script and list releases.
+      id-token: write # Required to sign the build provenance attestation.
+    outputs:
+      images: ${{ steps.subjects.outputs.images }}
+      latest: ${{ steps.latest.outputs.channels }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Download the charts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-charts
+          path: release-charts
+
+      - name: Collect release subjects
+        id: subjects
+        env:
+          VERSION: ${{ needs.release-please.outputs.version }}
+          RUNTIME: ${{ needs.publish-oci-images.outputs.appa_runtime_digest }}
+          ADK: ${{ needs.publish-oci-images.outputs.appa_kagent_adk_digest }}
+          ADK_GO: ${{ needs.publish-oci-images.outputs.appa_kagent_adk_go_digest }}
+          TOOLS: ${{ needs.publish-oci-images.outputs.appa_demo_tools_digest }}
+          MOCKS: ${{ needs.publish-oci-images.outputs.appa_demo_mocks_digest }}
+        run: |
+          digests=$(jq -n --arg runtime "$RUNTIME" --arg adk "$ADK" --arg go "$ADK_GO" \
+            --arg tools "$TOOLS" --arg mocks "$MOCKS" \
+            '{"appa-runtime": $runtime, "appa-kagent-adk": $adk, "appa-kagent-adk-go": $go,
+              "golang-adk": $go, "appa-demo-tools": $tools, "appa-demo-mocks": $mocks}')
+          python3 scripts/appa-release-subjects.py "$VERSION" "$digests" release-charts
+          echo "images=$(jq -c . release-images.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Attest release images and charts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: release-subjects.txt
+
+      # :latest follows the newest stable release. A draft is
+      # not yet listed, so this release is newer unless a later one exists.
+      - name: Decide whether latest moves
+        id: latest
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          if [[ "$VERSION" == *-* ]]; then
+            echo "channels=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # No published release yet is the only error that moves latest.
+          if ! current=$(gh api "repos/$GH_REPO/releases/latest" --jq '.tag_name' 2> latest.err); then
+            grep -q 'HTTP 404' latest.err || { cat latest.err; exit 1; }
+            current=
+          fi
+          current=${current#v}
+          newest=$(printf '%s\n' "$VERSION" ${current:+"$current"} | sort -V | tail -1)
+          if [ "$newest" = "$VERSION" ]; then
+            echo "channels=stable" >> "$GITHUB_OUTPUT"
+          else
+            echo "v${current} is newer; latest stays."
+            echo "channels=" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Waits for the publisher, a stable release's approval included, up to 360
+  # minutes. An expired approval: Re-run failed jobs (a new request and
+  # approval; the attestation of the earlier attempt still counts).
+  publish-release-images:
+    name: Publish images and charts through release-publisher
+    needs: [release-please, attest-release-images]
+    if: ${{ !cancelled() && !failure() && needs.attest-release-images.result == 'success' }}
+    permissions:
+      actions: read # Required to download the chart artifact.
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@add9951c121764e9d62f71591ab694b257c14077 # v1.21.0
+    with:
+      # Holds the archestra-releaser App's key; main only.
+      environment: releaser
+      project: openappa
+      version: ${{ needs.release-please.outputs.version }}
+      images: ${{ needs.attest-release-images.outputs.images }}
+      latest: ${{ needs.attest-release-images.outputs.latest }}
+      chart-artifact: release-charts
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
   publish-release:
     name: Publish GitHub release
-    if: >-
-      needs.release-please.outputs.should_publish == 'true' &&
-      needs.release-please.outputs.registry_only != 'true'
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.release-please.outputs.registry_only != 'true' && needs.build-binaries.result == 'success' && needs.publish-release-images.result == 'success' }}
     needs:
       - release-please
       - batteries-artifact
       - build-binaries
       - publish-oci-images
-      - publish-chart
+      - package-charts
+      # Images and charts are public before the release that names them.
+      - publish-release-images
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       actions: read # Required to download archives from the reusable build jobs.
+      attestations: write # Required to record build provenance for the release assets.
       contents: write # Required to upload assets and publish the draft release.
+      id-token: write # Required to sign the build provenance.
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -510,6 +656,11 @@ jobs:
             exit 1
           fi
 
+      - name: Attest release asset provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
       - name: Upload release assets
         env:
           GH_REPO: ${{ github.repository }}
@@ -529,6 +680,7 @@ jobs:
   update-archestra:
     name: Propose Archestra runtime update
     needs: [release-please, publish-release]
+    if: ${{ !cancelled() && !failure() && needs.publish-release.result == 'success' }}
     permissions:
       contents: read
       actions: read # Allow the updater to download its prepared Cargo bundle.
@@ -536,5 +688,116 @@ jobs:
     with:
       release_tag: ${{ needs.release-please.outputs.tag_name }}
       source_commit: ${{ needs.release-please.outputs.source_commit }}
+    # Empty here: the key lives only in the archestra-update environment,
+    # which the called job names and GitHub resolves the name from.
     secrets:
       APPA_ARCHESTRA_UPDATER_PRIVATE_KEY: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}
+
+  # A dry run of the release-publisher path that writes no release name: stage a
+  # published version's images in ghcr.io/archestra-ai/ci, package both charts as
+  # 0.0.0-smoke.<run>, attest them as a release would, and send a smoke
+  # request. The publisher verifies and copies everything, but only to
+  # publisher-smoke-<request> tags and ghcr.io/archestra-ai/publisher-smoke.
+  publisher-smoke:
+    name: Publisher dry run
+    if: ${{ inputs.publisher_smoke_version != '' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      attestations: write # Required to store the build provenance attestation.
+      contents: read # Required to check out the charts and scripts.
+      id-token: write # Required to sign the build provenance.
+      packages: write # Required to stage the images in ghcr.io/archestra-ai/ci.
+    env:
+      SOURCE_VERSION: ${{ inputs.publisher_smoke_version }}
+    outputs:
+      images: ${{ steps.charts.outputs.images }}
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check the source version
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ "$SOURCE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::publisher_smoke_version must be a release version without v"; exit 1; }
+          test "$(gh release view "v$SOURCE_VERSION" --json isDraft --jq .isDraft)" = false \
+            || { echo "::error::v$SOURCE_VERSION is not a published release"; exit 1; }
+
+      # A version released before OpenAPPA published to GHCR is read from
+      # Artifact Registry appa-public, anonymously.
+      - name: Stage the published images
+        id: stage
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GHCR_TOKEN" | skopeo login ghcr.io --username "$GHCR_USER" --password-stdin
+          public=$(python3 scripts/appa-oci-tags.py registry)
+          staging=$(python3 scripts/appa-oci-tags.py staging)
+          if ! skopeo inspect --raw "docker://$public/appa-runtime:v$SOURCE_VERSION" > /dev/null 2>&1; then
+            public=europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public
+          fi
+          digests='{}'
+          for image in appa-runtime appa-kagent-adk appa-kagent-adk-go golang-adk appa-demo-tools appa-demo-mocks; do
+            skopeo copy --all --preserve-digests --retry-times 3 --digestfile digest \
+              "docker://$public/$image:v$SOURCE_VERSION" "docker://$staging/$image:publisher-smoke-$GITHUB_RUN_ID"
+            digests=$(jq --arg image "$image" --arg digest "$(cat digest)" '.[$image] = $digest' <<< "$digests")
+          done
+          skopeo logout --all
+          echo "digests=$(jq -c . <<< "$digests")" >> "$GITHUB_OUTPUT"
+
+      - name: Package the smoke charts
+        id: charts
+        env:
+          DIGESTS: ${{ steps.stage.outputs.digests }}
+        run: |
+          version="0.0.0-smoke.${GITHUB_RUN_ID}"
+          python3 scripts/appa-chart-digests.py charts/appa-runtime/values.yaml \
+            "appa-runtime=$(jq -r '."appa-runtime"' <<< "$DIGESTS")"
+          python3 scripts/appa-chart-digests.py integrations/kagent/demo/chart/values.yaml \
+            "appa-demo-tools=$(jq -r '."appa-demo-tools"' <<< "$DIGESTS")" \
+            "appa-demo-mocks=$(jq -r '."appa-demo-mocks"' <<< "$DIGESTS")"
+          mkdir -p release-charts
+          helm package charts/appa-runtime --version "$version" --app-version "$SOURCE_VERSION" --destination release-charts
+          helm package integrations/kagent/demo/chart --version "$version" --app-version "$SOURCE_VERSION" --destination release-charts
+          python3 scripts/appa-release-subjects.py "$version" "$DIGESTS" release-charts
+          echo "images=$(jq -c . release-images.json)" >> "$GITHUB_OUTPUT"
+
+      # release-publisher downloads this artifact from this run by name.
+      - name: Upload the smoke charts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-charts
+          path: release-charts/*.tgz
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Attest smoke images and charts
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-checksums: release-subjects.txt
+
+  publisher-smoke-publish:
+    name: Publisher dry run (publish)
+    needs: publisher-smoke
+    permissions:
+      actions: read # Required to download the chart artifact.
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@add9951c121764e9d62f71591ab694b257c14077 # v1.21.0
+    with:
+      # Holds the archestra-releaser App's key; main only.
+      environment: releaser
+      project: openappa
+      version: 0.0.0-smoke.${{ github.run_id }}
+      images: ${{ needs.publisher-smoke.outputs.images }}
+      chart-artifact: release-charts
+      smoke: true
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}

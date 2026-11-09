@@ -43,7 +43,7 @@ jobs:
 
       - name: Check new Cargo dependency release ages
         if: github.event_name == 'pull_request' || github.event_name == 'push'
-        uses: archestra-ai/.github/actions/cargo-release-age@33a9bb2908d4ef0b09d2162e072705a44d87734f # v1.10.2
+        uses: archestra-ai/.github/actions/cargo-release-age@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
           lockfiles: |
@@ -114,6 +114,8 @@ jobs:
             chart:
               - 'integrations/kagent/demo/chart/**'
               - 'charts/appa-runtime/**'
+              - 'scripts/appa-chart-digests.py'
+              - 'scripts/test_appa_chart_digests.py'
               - '.github/workflows/ci.yml'
             rust: &rust
               - '**/*.rs'
@@ -169,8 +171,9 @@ jobs:
               - 'scripts/test_appa_oci_tags.py'
               - 'scripts/appa-image-descriptor.py'
               - 'scripts/test_appa_image_descriptor.py'
+              - 'scripts/appa-release-subjects.py'
+              - 'scripts/test_appa_release_subjects.py'
               - 'scripts/appa-gar-cleanup-policies.json'
-              - '.github/actions/auth-to-gar/**'
               - '.github/actions/check-release-versions/**'
               - '.github/release-please/**'
               - '.github/workflows/ci.yml'
@@ -294,7 +297,7 @@ jobs:
       - name: Test release battery refresh
         run: |
           python3 -c 'import yaml' 2>/dev/null || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.2'
-          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py scripts/test_appa_image_descriptor.py
+          python3 -m unittest scripts/test_appa_refresh_batteries.py scripts/test_appa_guide_runtime.py scripts/test_appa_oci_tags.py scripts/test_appa_image_descriptor.py scripts/test_appa_release_subjects.py
           python3 -m unittest discover -s marketplace/plugins/claude-code -p 'test_*.py'
 
       - name: Check release versions
@@ -375,7 +378,7 @@ jobs:
           retention-days: 7
 
       - name: Setup uv for OTLP verification
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
 
       - name: Verify value-safe OTLP export with a real runtime
         run: uv run scripts/verify-runtime-telemetry.py target/debug/appa
@@ -745,7 +748,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -788,7 +791,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -809,7 +812,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -835,7 +838,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -861,7 +864,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -947,6 +950,10 @@ jobs:
           sh integrations/kagent/demo/chart/tests/render-test.sh
           sh charts/appa-runtime/tests/render-test.sh
 
+      # release.yml pins both charts' images to the released digests.
+      - name: Pin release digests
+        run: python3 -m unittest scripts/test_appa_chart_digests.py
+
   # The deterministic A2A matrix: the real runtime, the real plugin, the real
   # kagent executor, mock externals and a scripted model. No cluster, no key.
   kagent-integration:
@@ -979,7 +986,7 @@ jobs:
         run: cargo build --package appa --locked
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -1149,7 +1156,7 @@ jobs:
         run: bash integrations/kagent/e2e/ci/install.sh
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -1218,7 +1225,7 @@ jobs:
           helm version
           kubectl version --client
       - name: Setup fixture test environment
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: false
       - name: Check fixture and evidence contracts
