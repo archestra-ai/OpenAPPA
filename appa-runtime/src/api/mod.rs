@@ -865,7 +865,18 @@ impl Deployment {
         naming: ToolNaming,
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config, naming)?;
-        validate_deployment(&policy, &config.externals)?;
+        // A sanitizer binding no declaration names is idle: a root binds the sanitizers of a
+        // battery it may install later. It stays in the composed config, but nothing here
+        // validates or builds it, so it cannot stop this deployment from opening.
+        let declared: std::collections::BTreeSet<String> = policy
+            .registry_config()
+            .sanitizers
+            .iter()
+            .map(|sanitizer| sanitizer.name.as_str().to_string())
+            .collect();
+        let mut in_use = config.externals.clone();
+        in_use.sanitizers.retain(|name, _| declared.contains(name));
+        validate_deployment(&policy, &in_use)?;
         let policy = match config.do_something {
             DoSomething::Refused => policy,
             DoSomething::Served => {
@@ -881,7 +892,7 @@ impl Deployment {
             .collect();
         // A Sanitizer naming a model builtin on its declaration is served by the same backend
         // a binding naming that builtin resolves to.
-        let mut bindings = config.externals.clone();
+        let mut bindings = in_use;
         bindings
             .sanitizers
             .extend(policy.sanitizer_builtins().map(|(name, builtin)| {
@@ -4704,6 +4715,26 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             )))
             .is_ok()
         );
+    }
+
+    /// A sanitizer binding no declaration names is idle, so a model key it cannot reach does
+    /// not stop the deployment from opening; once a declaration names it, the key is checked.
+    #[test]
+    fn an_idle_sanitizer_binding_does_not_block_opening() {
+        let externals = "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n\
+                         [externals.sanitizers.\"future.mask\"]\nbuiltin = \"llm\"\n";
+        let tool = "[[policy.tool]]\nname = \"post\"\ndelta = {}\ntags = [\"outbound\"]\n";
+        let declared = "[[policy.sanitizer]]\nname = \"future.mask\"\non = [\"tool_input\"]\ntags = [\"outbound\"]\n\
+                        [policy.sanitizer.permits]\naudience = { from = [\"internal\"], to = [\"public\"] }\n";
+        let document = |sanitizer: &str| format!("[policy]\nversion = 2\n{tool}{sanitizer}\n{externals}");
+        assert!(
+            load(claude_config(&document(""))).is_ok(),
+            "the idle binding is not validated"
+        );
+        assert!(matches!(
+            load(claude_config(&document(declared))),
+            Err(OpenError::ModelKeyMissing { kind: "sanitizer", name, .. }) if name == "future.mask"
+        ));
     }
 
     fn keyed_config(document: &str) -> Config {

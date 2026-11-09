@@ -1990,6 +1990,11 @@ struct Composition {
     root_components: std::collections::BTreeSet<(String, String)>,
     /// The root components that name their builtin, and so take no binding.
     root_builtin_components: std::collections::BTreeSet<(String, String)>,
+    /// The annotators and sanitizers the root binds under its own `[externals]`.
+    root_bound: std::collections::BTreeSet<(String, String)>,
+    /// The included Sanitizer declarations a root declaration replaced: their scope says
+    /// which included confinements they were there for.
+    replaced_sanitizers: Vec<toml::Value>,
     replaced_components: std::collections::BTreeSet<(String, String)>,
     origins: BTreeMap<String, PathBuf>,
     tool_maps: Vec<(tool_aliases::MapOrigin, tool_aliases::ToolMaps)>,
@@ -2021,6 +2026,18 @@ impl Composition {
                     .map(move |name| (field.to_owned(), name.to_owned()))
             })
             .collect();
+        let root_bound = [("sanitizer", Section::Sanitizers), ("annotator", Section::Annotators)]
+            .into_iter()
+            .flat_map(|(component, section)| {
+                document
+                    .get("externals")
+                    .and_then(|externals| externals.get(section.name()))
+                    .and_then(toml::Value::as_table)
+                    .into_iter()
+                    .flat_map(|table| table.keys())
+                    .map(move |name| (component.to_owned(), name.clone()))
+            })
+            .collect();
         let root_confined = policy
             .get("deployment")
             .and_then(|deployment| deployment.get("confined_results"))
@@ -2041,6 +2058,8 @@ impl Composition {
             version,
             root_components,
             root_builtin_components,
+            root_bound,
+            replaced_sanitizers: Vec::new(),
             replaced_components: std::collections::BTreeSet::new(),
             origins: BTreeMap::new(),
             tool_maps: Vec::new(),
@@ -2142,7 +2161,11 @@ impl Composition {
                         return true;
                     };
                     let key = (field.clone(), name.to_string());
-                    !(self.root_components.contains(&key) && self.replaced_components.insert(key))
+                    let replaced = self.root_components.contains(&key) && self.replaced_components.insert(key);
+                    if replaced && field == "sanitizer" {
+                        self.replaced_sanitizers.push(declaration.clone());
+                    }
+                    !replaced
                 });
             }
             if field == "sanitizer" {
@@ -2214,13 +2237,15 @@ impl Composition {
                 _ => None,
             };
             for (name, entry) in entries {
-                // A replaced component's included binding belongs to the declaration the root
-                // replaced. The root's own binding, or a builtin on its declaration, takes its
-                // place; a root declaration with neither keeps the included binding.
+                // An included binding for a component the root declares belongs to the
+                // declaration the root replaces. The root's own binding, or a builtin on its
+                // declaration, takes its place; a root declaration with neither keeps the
+                // included binding. This reads only the root, so it holds whichever of a
+                // battery's files declares the component and whichever binds it, in any order.
                 if let Some(component) = component {
                     let key = (component.to_owned(), name.clone());
-                    if self.replaced_components.contains(&key)
-                        && (destination.contains_key(&name) || self.root_builtin_components.contains(&key))
+                    if self.root_components.contains(&key)
+                        && (self.root_bound.contains(&key) || self.root_builtin_components.contains(&key))
                     {
                         continue;
                     }
@@ -2250,6 +2275,7 @@ impl Composition {
         leave_out_unbound_included_sanitizers(
             &mut document,
             &self.included_sanitizers,
+            &self.replaced_sanitizers,
             &self.root_confined,
             &self.included_confined,
         );
@@ -2344,6 +2370,7 @@ fn compose_included_confinement(
 fn leave_out_unbound_included_sanitizers(
     document: &mut toml::Value,
     included_sanitizers: &std::collections::BTreeSet<String>,
+    replaced_sanitizers: &[toml::Value],
     root_confined: &std::collections::BTreeSet<String>,
     included_confined: &BTreeMap<String, std::collections::BTreeSet<String>>,
 ) {
@@ -2371,7 +2398,9 @@ fn leave_out_unbound_included_sanitizers(
         })
     };
     let mut kept_scopes = Vec::new();
-    let mut left_out_scopes = Vec::new();
+    // A replaced included sanitizer is gone too: the root's replacement, kept below, decides
+    // which of its confinements still have a sanitizer to run on.
+    let mut left_out_scopes: Vec<Option<Vec<String>>> = replaced_sanitizers.iter().filter_map(scope).collect();
     if let Some(sanitizers) = policy.get_mut("sanitizer").and_then(toml::Value::as_array_mut) {
         sanitizers.retain(|declaration| {
             let Some(name) = declaration_name(declaration) else {
@@ -3871,6 +3900,78 @@ mod tests {
             load("", "").expect("the included binding stays"),
             Some(Implementation::Builtin(builtin)) if builtin == "redact-secrets"
         ));
+    }
+
+    /// Root replacement reads only the root, so it holds when a battery's target file binds a
+    /// sanitizer before its base declares it, and the replacement's own scope decides which
+    /// of the replaced sanitizer's confinements stay.
+    #[test]
+    fn a_root_sanitizer_replacement_is_independent_of_include_order_and_scope() {
+        let base = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "lookup"
+            delta = { trust = "suspicious" }
+            tags = ["battery"]
+
+            [[policy.sanitizer]]
+            name = "mask"
+            on = ["tool_output"]
+            tags = ["battery"]
+
+            [policy.sanitizer.permits]
+            trust = { from = "suspicious", to = "trusted" }
+
+            [policy.deployment]
+            confined_results = ["lookup"]
+        "#;
+        let target = "[policy]\nversion = 2\n[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+        let load = |root_sanitizer: &str, root_externals: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            std::fs::write(dir.path().join("base.toml"), base).expect("write base");
+            std::fs::write(dir.path().join("target.toml"), target).expect("write target");
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!(
+                    "include = [\"target.toml\", \"base.toml\"]\n[policy]\nversion = 2\n\
+                     [[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n{root_sanitizer}\n\
+                     [policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n\
+                     [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n{root_externals}"
+                ),
+            )
+            .expect("write root");
+            let config = Config::load(&dir.path().join("appa.toml")).expect("the deployment composes");
+            let confined: Vec<String> = config
+                .policy_file()
+                .value()
+                .get("deployment")
+                .and_then(|deployment| deployment.get("confined_results"))
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect();
+            (config.externals.sanitizers.get("mask").cloned(), confined)
+        };
+
+        let (binding, confined) = load("builtin = \"llm\"\ntags = [\"battery\"]", "");
+        assert!(binding.is_none(), "a root builtin replaces the target's binding");
+        assert_eq!(confined, ["lookup"]);
+        let (binding, _) = load(
+            "tags = [\"battery\"]",
+            "[externals.sanitizers.mask]\nbuiltin = \"claude-code\"\n",
+        );
+        assert!(
+            matches!(binding, Some(Implementation::Builtin(builtin)) if builtin == "claude-code"),
+            "the root binding wins over the target's"
+        );
+        let (_, confined) = load("builtin = \"llm\"\ntags = [\"other\"]", "");
+        assert!(
+            confined.is_empty(),
+            "a replacement that cannot reach `lookup` releases its confinement"
+        );
     }
 
     /// An included Sanitizer that names no builtin runs only where the deployment binds it.

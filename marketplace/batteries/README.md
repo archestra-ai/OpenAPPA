@@ -43,8 +43,10 @@ in the deployment, not in the battery: the root binds the ones it runs under
 `claude` CLI is installed, to `builtin = "claude-code"`. A battery sanitizer
 the root does not bind is left out, and the battery's `[policy.deployment] confined_results` entries that
 only it covers are dropped with it, so the battery decides as it would
-without sanitizers. The Claude Code plugin's default config binds the
-`coding` sanitizers. `archestra` and
+without sanitizers. The Claude Code plugin's default config binds every
+battery sanitizer except `coding.strip-secrets` and
+`opencode.strip-instructions`; of the `coding` sanitizers it binds only
+`coding.strip-instructions`. `archestra` and
 `xmemory` ship none: their reads keep the session's trust, and their records
 have no public core to release. `claude-code` ships none either: Claude Code's
 replacement of a result is not verified live for the `suspicious` tools it
