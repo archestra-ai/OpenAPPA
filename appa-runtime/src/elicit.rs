@@ -72,7 +72,7 @@ use rmcp::service::{PeerRequestOptions, RequestContext, RoleServer, ServiceError
 #[cfg(feature = "daemon")]
 use crate::consult::AuthorityAnswer;
 use crate::consult::{AudienceRequirement, AuthorityArtifact, AuthorityDeclaration, Requirement, ReviewedNarrowing};
-use crate::engine::recipient_list;
+use crate::engine::{recipient_list, terminal_safe};
 use crate::external::ConsultOutcome;
 #[cfg(feature = "daemon")]
 use crate::external::NoAnswerReason;
@@ -411,8 +411,10 @@ fn requirement_text(requirement: &Requirement) -> String {
         Requirement::Audience {
             required: AudienceRequirement::Readers(entries),
         } => format!("sharing with {}", recipient_list(entries)),
-        Requirement::Effect { excludes } => format!("an earlier {excludes} action in this conversation"),
-        Requirement::Attention { mark } => format!("attention: {mark}"),
+        Requirement::Effect { excludes } => {
+            format!("an earlier {} action in this conversation", terminal_safe(excludes))
+        }
+        Requirement::Attention { mark } => format!("attention: {}", terminal_safe(mark)),
     }
 }
 
@@ -696,6 +698,28 @@ mod tests {
                 ..narrowing_review(None)
             }),
             ["  (none)"]
+        );
+    }
+
+    /// A line break in a policy-authored name cannot start a line of its own.
+    #[test]
+    fn a_line_break_in_a_policy_name_stays_inside_its_bullet() {
+        assert_eq!(
+            coverage(&AuthorityArtifact {
+                requirements: vec![
+                    Requirement::Effect {
+                        excludes: "deploy\nextra".to_string()
+                    },
+                    Requirement::Attention {
+                        mark: "signoff\r\nextra".to_string()
+                    },
+                ],
+                ..artifact(serde_json::json!({}))
+            }),
+            [
+                "  - an earlier deploy\u{FFFD}extra action in this conversation",
+                "  - attention: signoff\u{FFFD}\u{FFFD}extra",
+            ]
         );
     }
 

@@ -4038,7 +4038,7 @@ fn dispatch_of(fact: &Fact) -> Option<&appa_engine::value::DispatchId> {
 
 /// `text` without a character that could restyle or break the line it is shown on: a
 /// control character, a format character, or a line or paragraph separator.
-fn terminal_safe(text: &str) -> String {
+pub(crate) fn terminal_safe(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() || is_format(c) || matches!(c, '\u{2028}' | '\u{2029}') {
