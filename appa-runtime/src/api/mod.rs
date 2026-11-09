@@ -868,6 +868,7 @@ impl Deployment {
         // A sanitizer binding no declaration names is idle: a root binds the sanitizers of a
         // battery it may install later. It stays in the composed config, but nothing here
         // validates or builds it, so it cannot stop this deployment from opening.
+        // A binding of the reserved `attest-schema` is never idle: validation refuses it.
         let declared: std::collections::BTreeSet<String> = policy
             .registry_config()
             .sanitizers
@@ -875,7 +876,9 @@ impl Deployment {
             .map(|sanitizer| sanitizer.name.as_str().to_string())
             .collect();
         let mut in_use = config.externals.clone();
-        in_use.sanitizers.retain(|name, _| declared.contains(name));
+        in_use
+            .sanitizers
+            .retain(|name, _| declared.contains(name) || name == appa_engine::names::SanitizerName::ATTEST_SCHEMA);
         validate_deployment(&policy, &in_use)?;
         let policy = match config.do_something {
             DoSomething::Refused => policy,
