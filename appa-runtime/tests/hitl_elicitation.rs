@@ -156,6 +156,7 @@ impl ClientHandler for Held {
 struct Deployment {
     url: String,
     offer: String,
+    block_review: Vec<String>,
     runtime: Arc<Runtime>,
     root: TrajectoryId,
     _dir: tempfile::TempDir,
@@ -210,7 +211,7 @@ async fn deployment_from(policy: String) -> Deployment {
         },
     )
     .await;
-    let HookDecision::DenyCall { feedback, .. } = blocked else {
+    let HookDecision::DenyCall { feedback, review, .. } = blocked else {
         panic!("a tool behind an attention mark must not release unruled: {blocked:?}");
     };
     let offer = offer_id(&feedback);
@@ -233,6 +234,7 @@ async fn deployment_from(policy: String) -> Deployment {
     Deployment {
         url,
         offer,
+        block_review: review.into_iter().map(|review| review.text).collect(),
         runtime,
         root,
         _dir: dir,
@@ -368,6 +370,7 @@ builtin = "hitl"
     Deployment {
         url,
         offer,
+        block_review: Vec::new(),
         runtime,
         root,
         _dir: dir,
@@ -433,6 +436,77 @@ async fn execute_over<H: ClientHandler>(
     let text = format!("{:?}", result.content);
     client.cancel().await.ok();
     text
+}
+
+const NARROWING_POLICY: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "publish"
+delta = { trust = "suspicious" }
+requires = { attention = ["signoff"] }
+
+[[policy.tool]]
+name = "deploy"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.authority]]
+name = "operator"
+
+[policy.authority.permits]
+trust_below = "trusted"
+attention = ["signoff"]
+
+[externals]
+timeout_ms = 1000
+review_timeout_ms = 5000
+max_body_bytes = 4096
+
+[externals.authorities.operator]
+builtin = "hitl"
+"#;
+
+/// The lines between the coverage heading and the blank line that ends it.
+fn coverage_lines(review: &str) -> Vec<&str> {
+    review
+        .lines()
+        .skip_while(|line| *line != "What this ruling would cover:")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .collect()
+}
+
+/// The block names the tools a narrowing limits; the review shown while the offer executes
+/// has the narrowing but not its impact, so it says so in general.
+#[tokio::test]
+async fn a_narrowing_review_covers_its_consequence_on_both_paths() {
+    let deployment = deployment_from(NARROWING_POLICY.to_string()).await;
+    let [block_review] = deployment.block_review.as_slice() else {
+        panic!("the block stages one review: {:?}", deployment.block_review);
+    };
+    assert_eq!(
+        coverage_lines(block_review),
+        [
+            "  - attention: signoff",
+            "  - after this, `deploy` will need approval in this conversation",
+        ]
+    );
+
+    let reviewer = Reviewer::new(ElicitationAction::Accept);
+    execute(&deployment, reviewer.clone()).await;
+    let reviews = reviewer.reviews();
+    let [execution_review] = reviews.as_slice() else {
+        panic!("one decision asks one time: {reviews:?}");
+    };
+    assert_eq!(
+        coverage_lines(execution_review),
+        [
+            "  - attention: signoff",
+            "  - after this, some tools may be blocked or need approval in this conversation",
+        ]
+    );
 }
 
 #[tokio::test]

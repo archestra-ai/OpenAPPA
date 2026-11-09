@@ -28,8 +28,6 @@ use appa_engine::registry::TrustChain;
 use appa_engine::value::ResolvedCall;
 use appa_runtime_api::Ruling;
 
-use crate::engine::SessionNarrowing;
-
 /// Which registered external a consult addresses. Closed: the wire
 /// format is per kind, not per deployment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -290,18 +288,41 @@ pub struct AuthorityArtifact {
     /// What approving also does to this session, for the human review only: the wire
     /// artifact names what the ruling covers, not what the offer accepts beside it.
     #[serde(skip)]
-    pub(crate) narrows: Option<SessionNarrowing>,
+    pub(crate) narrows: Option<ReviewedNarrowing>,
+}
+
+/// What a review tells the person about the rest of the conversation when approving also
+/// accepts a narrowing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewedNarrowing {
+    /// Judged when the call was blocked, each tool spelled as the person knows it.
+    Judged {
+        blocked: Vec<String>,
+        sign_off: Vec<String>,
+        recipient_checked: Vec<String>,
+        per_call: bool,
+    },
+    /// Read while the offer executes, where the narrowing is known but its impact is not.
+    Unjudged,
+}
+
+impl ReviewedNarrowing {
+    pub(crate) fn unjudged(narrowing: Option<&Narrowing>) -> Option<Self> {
+        narrowing
+            .filter(|narrowing| narrowing.from != narrowing.to)
+            .map(|_| Self::Unjudged)
+    }
 }
 
 impl AuthorityArtifact {
-    pub fn of(
+    pub(crate) fn of(
         call: &ResolvedCall,
         requirement: &RequiredRuling,
-        narrowing: Option<&Narrowing>,
+        narrows: Option<&ReviewedNarrowing>,
         chain: &TrustChain,
     ) -> AuthorityArtifact {
         AuthorityArtifact {
-            narrows: narrowing.and_then(|narrowing| SessionNarrowing::of(narrowing, Some(chain))),
+            narrows: narrows.cloned(),
             tool: call.tool().as_str().to_string(),
             arguments: call.arguments().clone(),
             requirements: requirement
