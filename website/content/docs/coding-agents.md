@@ -2,7 +2,7 @@
 title: Coding agents
 category: Deep Dive
 order: 4
-description: Tool-flow enforcement, file labels, SafeBash, shell rules, and checked delegation for coding agents.
+description: Tool-flow enforcement, shell rules, and checked delegation for coding agents.
 ---
 
 OpenAPPA checks coding-agent flows at the harness boundary. The [Claude Code](/claude-code) integration checks built-in and MCP tool calls and results. It adds three default boundaries: protected sessions, checked subagent returns, and contracts for native file and shell tools.
@@ -23,63 +23,28 @@ This lets a subagent read a private ticket or credential-adjacent log and return
 
 ## Shell and native file tools
 
-Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code). It routes `Read`, `Write`, and `Edit` through the [file-tracker](#files-that-keep-their-labels), confines every shell command to the files and hosts it declares ([SafeBash](#safebash)), and blocks `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`.
+Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code), which gives native tools these contracts:
 
-The `coding` battery gives the canonical shell and file tools of other harnesses these contracts:
-
-- **Reading credentials narrows the trajectory.** Read, search, or shell calls that contain configured credential-path spellings narrow the audience to `self`.
+- **Reading credentials narrows the trajectory.** Read, Grep, Bash, or PowerShell calls that contain configured credential-path spellings narrow the audience to `self`.
 - **Writing where another process looks requires trust.** Writes to credential and control paths require a `trusted` trajectory. After suspicious input, the exact call requires human review.
-- **Changing the controls requires review.** Writes to harness settings or OpenAPPA policy always ask the person running the session.
-- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for each shell command. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
+- **Changing the controls requires review.** Writes to Claude Code settings or OpenAPPA policy always ask the person running the session.
+- **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for Bash, PowerShell, and Monitor calls. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
 
-These contracts label what a command reads or returns; they do not sandbox the command. For confinement, see [SafeBash](#safebash).
-
-## Files that keep their labels
-
-A coding agent writes files that outlive its trajectory. The file-tracker plugin keeps a label on every file a mediated tool call writes, so a later read of that file carries the restriction the write carried. The read can happen in the same session, in a fresh session, or after a resume.
-
-The plugin is a [recorder](/contracts#recorders) and an [annotator](/contracts#annotators) for the same tools:
-
-- As a recorder, it receives the label each released call published: the trajectory's label at release, combined with the call's `forwards` and `delta`. It stores that label on each file the call wrote.
-- As an annotator, it answers a `Read` with the stored label as `delta`. An `Edit` forwards the file's existing label, so the edited file keeps it. A `Write` replaces the file, so the new label replaces the old one.
-
-The plugin's built-in path rules give credential paths such as `.env*` and `~/.ssh/*` the audience `self` before any call touches them. They also set the trust a write to a control file such as `CLAUDE.md` requires. A deployment adds rules in `~/.config/appa/file-tracker.toml`. The plugin never denies a call: the engine checks the annotation's `requires`.
-
-### SafeBash
-
-A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and the system directories (`/usr`, `/etc`, `/lib` and similar), write only its output files, and connect only to its hosts. Every other top-level directory, such as `/home`, `/opt` or `/srv`, is hidden from it, and so are the working directory and the temporary directories. A file in `/etc` or `/run` that a path rule labels, such as an SSH host key or a token, is hidden too. The command starts without the environment variables whose names hold credentials: a word such as `TOKEN`, `SECRET`, `PASSWORD`, `KEY` or `AUTH`, and every `ANTHROPIC_` and `APPA_` variable. A write to an undeclared path does not reach the disk. Each output file is emptied when the command starts, so a command that is refused or cannot start leaves its outputs unchanged.
-
-APPA builds no sandbox of its own. It confines each command in the best sandbox the harness has:
-
-| Where | Tool | Sandbox |
-|---|---|---|
-| Claude Code started by `clappa`, on a tested release | Claude Code's own `Bash`, with the three lists added | Claude Code's built-in sandbox (bubblewrap on Linux, Seatbelt on macOS) and its proxy, configured for each call |
-| Claude Code otherwise | `mcp/file-tracker/SafeBash`, served by the file-tracker | Anthropic's sandbox runtime `srt`, the same runtime, started for each call |
-
-Before each session, `clappa` loads a preload into Claude Code and runs its self-test. The self-test checks that the lists survive Claude Code's input handling, that an undeclared file is hidden and an undeclared write does not reach the disk, and that each command reaches only its own hosts. If the release is not on the tested list or any check fails, `clappa` disables `Bash`, registers SafeBash, and prints why. A `Bash` call that declares no lists, such as one from Claude Code started without `clappa`, is refused. Both tools return the exit code, standard output and standard error as a successful result, so the call's label applies whatever the exit code.
-
-The annotator forwards the combined label of the input files, and the call's result carries it. The recorder applies the published label to every output file.
-
-The label of a copied secret therefore survives across sessions. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later shell command that reads `/tmp/notes.txt` narrows its session to `self`, in this session or in any other, so a later public sink such as `WebFetch` is refused.
-
-The hosts a call declares do not change its label. The sandbox confines the command to them, but APPA does not check what a host may receive.
+These contracts label what a command reads or returns; they do not sandbox the command. Use an operating-system sandbox for confinement.
 
 ### Per harness
 
 | Harness | File tools | Shell |
 |---|---|---|
-| Claude Code | `Read`, `Write`, `Edit`, `Bash`, and `mcp/file-tracker/SafeBash` use the file-tracker annotator and recorder. | `clappa` confines `Bash` per call in Claude Code's sandbox, or serves SafeBash where it cannot. It starts Claude Code without `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`, and the battery blocks them. |
-| OpenCode | No file-tracker yet: the battery gives `read`, `write` and `edit` static rules, and a read under `*/private/*` narrows the session to `internal`. | The shell permits only `pwd`. |
-| Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. No file-tracker runs. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
-
-The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. The SafeBash fallback needs `srt` on `PATH`.
+| Claude Code | Static rules label `Read`, `Grep`, `Write`, and `Edit` calls by the path they name. | A model Annotator classifies each `Bash`, `PowerShell`, and `Monitor` call. |
+| OpenCode | Static rules cover `read`, `write`, and `edit`. A read under `*/private/*` narrows the session to `internal`. | The shell permits only `pwd`. |
+| Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
 
 ### Limits
 
-- A shell command can send its input files to any host it declares. Network destinations carry no policy yet.
-- Credential variables are withheld by name. A variable whose name does not say it holds a credential reaches the command.
-- The system directories other than `/etc` and `/run`, such as `/usr` and `/lib`, are assumed to hold no credentials. A labeled file there is readable by a command that does not declare it.
-- A file that changes outside a mediated call keeps its recorded label. A process outside the sandbox can still copy a file without its label.
-- A read waits while a write of the same file has not yet reached the recorder. If the write does not settle within the wait, the read fails and the agent can propose it again.
-- The stored audience must be one clause of audiences the policy declares. A file that two unrelated restricted audiences wrote fails its next annotation.
+- A model Annotator judges the visible text of a shell command. It can misjudge a command, so a flow it classifies has no deterministic guarantee.
+- Credential rules match the spellings in a command line. A command that reaches a credential through another spelling depends on the Annotator.
+- A Claude Code shell command can read and write any file its process can reach, and connect to any host.
+- A `Grep` over a directory that holds a credential file does not narrow the trajectory. Only the path as written is matched.
+- A failed shell command adds no label. A command that prints restricted data and exits non-zero leaves the trajectory's label unchanged.
 - Model-provider requests and assistant messages are not mediated.
