@@ -52,9 +52,7 @@ use crate::external::{ConsultGates, ExternalServices};
 #[cfg(feature = "daemon")]
 use crate::yell;
 use appa_engine::label::ReaderId;
-use appa_eventlog::{
-    AheadAttempt, Backend, DeclaredArguments, DeploymentName, EndKind, HostObservation, Log, LogStore, StoredLabel,
-};
+use appa_eventlog::{AheadAttempt, Backend, DeploymentName, EndKind, HostObservation, Log, LogStore, StoredLabel};
 use appa_runtime_api::Adapter;
 use host::{AheadState, Declared, HostState, host_actor, inventory_at};
 
@@ -3163,15 +3161,6 @@ pub struct LabelArgs {
     pub audience: Option<Vec<String>>,
 }
 
-impl From<&RemedyArguments> for DeclaredArguments {
-    fn from(arguments: &RemedyArguments) -> DeclaredArguments {
-        DeclaredArguments {
-            label: arguments.label.clone(),
-            return_schema: arguments.return_schema.clone(),
-        }
-    }
-}
-
 impl From<ExecuteRemedyPlanArgs> for RemedyArguments {
     fn from(args: ExecuteRemedyPlanArgs) -> RemedyArguments {
         RemedyArguments {
@@ -3242,7 +3231,7 @@ pub(crate) enum Scan {
 fn replayed<'a>(
     matches: impl IntoIterator<Item = &'a Declared>,
     expected: Option<&Actor>,
-    arguments: &DeclaredArguments,
+    arguments: &RemedyArguments,
 ) -> Option<RemedyOutcome> {
     let matches: Vec<&Declared> = matches.into_iter().collect();
     if matches.is_empty() {
@@ -3344,7 +3333,7 @@ impl Runtime {
             let ahead = AheadState::fold(log.host_records());
             matches.extend(ahead.declared_by_attempt(&attempt).into_iter().cloned());
         }
-        Ok(replayed(&matches, None, &DeclaredArguments::from(arguments)))
+        Ok(replayed(&matches, None, arguments))
     }
 
     /// The family that holds the vouch behind a declaration's key, read strictly.
@@ -3392,13 +3381,12 @@ impl Runtime {
             Ok(session) => session,
             Err(error) => return error.into(),
         };
-        let declared = DeclaredArguments::from(arguments);
         let named = authority.named();
         let written = session.append_host_judged(|context| {
             let ahead = AheadState::fold(context.log.host_records());
             if let Some(replayed) = named
                 .as_ref()
-                .and_then(|attempt| replayed(ahead.declared_by_attempt(attempt), authority.expected(), &declared))
+                .and_then(|attempt| replayed(ahead.declared_by_attempt(attempt), authority.expected(), arguments))
             {
                 return Ok((None, replayed));
             }
@@ -3432,7 +3420,7 @@ impl Runtime {
             let declaration = HostObservation::AheadDeclared {
                 actor: host_actor(&actor),
                 attempt,
-                arguments: declared.clone(),
+                arguments: arguments.clone(),
                 label: StoredLabel::named(&label, context.engine().registry().trust_chain()),
                 spends,
             };

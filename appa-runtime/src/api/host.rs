@@ -226,8 +226,8 @@ impl AheadState {
                     call_id,
                     ahead,
                     ..
-                } => state.assign(trajectory, call_id, ahead.as_ref()),
-                HostObservation::CallDenied {
+                }
+                | HostObservation::CallDenied {
                     trajectory,
                     call_id,
                     ahead,

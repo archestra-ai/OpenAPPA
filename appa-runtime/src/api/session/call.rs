@@ -155,10 +155,7 @@ impl Session {
             };
             let arguments = ahead
                 .declared(&self.trajectory, &attempt)
-                .map(|declared| RemedyArguments {
-                    label: declared.arguments.label.clone(),
-                    return_schema: declared.arguments.return_schema.clone(),
-                })
+                .map(|declared| declared.arguments.clone())
                 .ok_or_else(|| EventError::EngineInvariant("a judged declaration has no record".to_string()))?;
             match self.apply_ahead(&offer, &claim, arguments).await {
                 Ok(RemedyDecision::Authorized { .. }) => return self.propose_once(&proposal, invocation).await,
