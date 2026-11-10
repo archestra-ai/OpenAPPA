@@ -16,8 +16,9 @@ pub(super) fn remedy_presentation(
 }
 
 /// The reviews a harness with its own channel shows: one per offer whose plan consults a
-/// `hitl` authority, the texts of several such authorities joined. Authorities of every
-/// other backend answer themselves and need no person here.
+/// `hitl` authority, the texts of several such authorities joined. A joined review names no
+/// one authority, hint or scope, so those read as unknown and a host shows the whole text.
+/// Authorities of every other backend answer themselves and need no person here.
 pub(super) fn join_review(
     feedback: &[Feedback],
     externals: &crate::external::ExternalServices,
@@ -45,10 +46,16 @@ pub(in crate::api) fn reviews(
             Some(review) => {
                 review.text.push_str("\n\n");
                 review.text.push_str(&pending.text);
+                review.authority = None;
+                review.hint = None;
+                review.scope = None;
             }
             None => reviews.push(appa_runtime_api::Review {
                 offer: pending.offer.0.clone(),
                 text: pending.text.clone(),
+                authority: Some(pending.authority.clone()),
+                hint: pending.hint.clone(),
+                scope: Some(pending.scope.clone()),
             }),
         }
     }
