@@ -1,4 +1,5 @@
 use super::*;
+use appa_eventlog::AheadOutcome;
 
 /// What a spawn's block says when the return its trajectory declared ahead has lapsed. The
 /// block's reason already says to declare right before the subagent call.
@@ -15,6 +16,11 @@ pub(super) const FAN_OUT_AHEAD: &str = "[appa] A return declared ahead covers a 
 
 /// Follows a notice on a block that offers plans.
 pub(super) const APPLY_BELOW: &str = " Apply a plan below.";
+
+/// How many rounds a blocked spawn spends settling or applying the declaration it took before
+/// it refuses operationally. Each round either commits a settlement, applies, or meets a
+/// family another writer changed under it.
+const AHEAD_ROUNDS: u32 = 3;
 
 /// How many plans of stock `approve` rulings one proposal applies before its block stands. A
 /// plan can go stale between its block and its execution, and an approval can meet a label
@@ -101,84 +107,69 @@ impl Session {
         .await
     }
 
-    /// Check a return declaration made ahead of the spawn at this trajectory's label, and answer
-    /// that label: the declaration stands only there.
-    pub(crate) fn declare_return_ahead(
-        &self,
-        arguments: &RemedyArguments,
-    ) -> Result<appa_engine::label::Label, EventError> {
-        self.with_view(|context| {
-            context
-                .engine()
-                .declare_ahead(context.view, &self.trajectory, arguments)
-                .map_err(|detail| EventError::RemedyArguments { detail })
-        })
-    }
-
     /// A return this trajectory declared ahead covers its next spawn, which takes it whatever
-    /// its decision. A blocked single spawn applies it through the block's own declaration
-    /// offer, one that asks no authority, and is proposed again, so it meets only what else
-    /// blocks it. A declaration held at another label has lapsed; one no offer fits, or one a
-    /// fan-out spawn meets, is not applied. The block says which.
+    /// its decision: the spawn's first durable decision records the take. A blocked single
+    /// spawn applies it through the block's own declaration offer, one that asks no authority,
+    /// and is proposed again, so it meets only what else blocks it. A declaration held at
+    /// another label has lapsed; one no offer fits, or one a fan-out spawn meets, is not
+    /// applied, and one a turn boundary cleared is dropped. Each settlement is judged and
+    /// written where it commits, the first one wins, and a retry of the call reads it back.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
-        let decision = self.propose_resolving(&proposal).await?;
-        let spawn = proposal.spawn;
-        let Some(held) = spawn.and_then(|_| self.inner.take_held_return(&self.root, &self.trajectory)) else {
+        let invocation = appa_eventlog::InvocationNonce(rand::random());
+        let (mut decision, took) = self.propose_resolving(&proposal, invocation).await?;
+        let (Some(spawn), ToolCallDecision::Deny { .. }, Some(attempt)) = (proposal.spawn, &decision, took) else {
             return Ok(decision);
         };
-        let ToolCallDecision::Deny {
-            feedback,
-            offers,
-            display,
-            review,
-        } = decision
-        else {
-            return Ok(decision);
-        };
-        let noted = |notice: &str, apply: &str| ToolCallDecision::Deny {
-            feedback: format!("{notice}{apply}\n\n{feedback}"),
-            offers: offers.clone(),
-            display: display.clone(),
-            review: review.clone(),
-        };
-        let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
-        if spawn == Some(SpawnKind::FanOut) {
-            return Ok(noted(FAN_OUT_AHEAD, apply));
-        }
-        let route = match held.arguments.return_schema {
-            Some(_) => appa_runtime_api::OfferedReturn::Sanitized {
-                sanitizer: appa_engine::names::SanitizerName::ATTEST_SCHEMA.to_string(),
-            },
-            None => appa_runtime_api::OfferedReturn::AsSpoken,
-        };
-        let (offer, label) = self.with_view(|context| {
-            let offer = offers
-                .iter()
-                .filter(|offer| offer.returns.as_ref() == Some(&route))
-                .filter_map(|offer| crate::engine::resolve_rendered(context.log, &OfferId(offer.id.clone())))
-                .find(|offer| {
-                    context
-                        .engine()
-                        .offer_declares_only(context.view, &self.trajectory, offer)
-                });
-            Ok((offer, context.engine().label_of(context.view, &self.trajectory)))
-        })?;
-        // A lapse is told first: at a changed label no offer may fit, and the cause is the change.
-        if label != Some(held.label) {
-            return Ok(noted(LAPSED_AHEAD, apply));
-        }
-        let Some(offer) = offer else {
-            return Ok(noted(UNFIT_AHEAD, apply));
-        };
-        // A declaration that cannot be applied leaves the spawn the block it already met.
-        match self.on_remedy(offer, held.arguments, None, None).await {
-            Ok(RemedyDecision::Authorized { .. }) => self.propose_resolving(&proposal).await,
-            Ok(_) => Ok(noted(UNFIT_AHEAD, apply)),
-            Err(error) => {
-                tracing::debug!(trajectory = %self.trajectory.0, %error, "the declaration made ahead was not applied");
-                Ok(noted(UNFIT_AHEAD, apply))
+        for _ in 0..AHEAD_ROUNDS {
+            let ToolCallDecision::Deny {
+                feedback,
+                offers,
+                display,
+                review,
+            } = &decision
+            else {
+                return Ok(decision);
+            };
+            let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
+            let noted = |notice: &str| ToolCallDecision::Deny {
+                feedback: format!("{notice}{apply}\n\n{feedback}"),
+                offers: offers.clone(),
+                display: display.clone(),
+                review: review.clone(),
+            };
+            let offers = offers.clone();
+            let claim = AheadClaim {
+                attempt: &attempt,
+                spawn,
+                offers: &offers,
+            };
+            let (offer, arguments) = match self.settle_terminal(&claim)? {
+                Judgment::Settled(AheadOutcome::Applied) => {
+                    return Ok(self.propose_resolving(&proposal, invocation).await?.0);
+                }
+                Judgment::Settled(AheadOutcome::Ended) => return Ok(decision),
+                Judgment::Settled(AheadOutcome::Lapsed) => return Ok(noted(LAPSED_AHEAD)),
+                Judgment::Settled(AheadOutcome::Unfit) => return Ok(noted(UNFIT_AHEAD)),
+                Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(FAN_OUT_AHEAD)),
+                Judgment::Apply { offer, arguments } => (offer, arguments),
+                Judgment::Stale => {
+                    decision = self.propose_resolving(&proposal, invocation).await?.0;
+                    continue;
+                }
+            };
+            match self.apply_ahead(&offer, &claim, arguments).await {
+                Ok(RemedyDecision::Authorized { .. }) => {
+                    return Ok(self.propose_resolving(&proposal, invocation).await?.0);
+                }
+                Ok(_) => {}
+                Err(error) if error.is_operational() => return Err(error),
+                // The next round's commit decides what an application the engine refused means.
+                Err(error) => {
+                    tracing::debug!(trajectory = %self.trajectory.0, %error, "the declaration made ahead was not applied");
+                }
             }
         }
+        Err(EventError::Contended { attempts: AHEAD_ROUNDS })
     }
 
     /// Propose, and while the block offers a plan that asks only stock `approve` authorities,
@@ -188,23 +179,30 @@ impl Session {
     /// loop appended. An approval already recorded stays recorded, and the next proposal of the
     /// call spends it. A stock `approve` authority never denies, so a plan that was not applied
     /// lost a race: another dispatch moved its basis or took its subject. The next proposal
-    /// reads what stands after that, and the rounds bound how often it is tried.
-    async fn propose_resolving(&self, proposal: &Proposal) -> Result<ToolCallDecision, EventError> {
-        let mut decision = self.propose_once(proposal).await?;
+    /// reads what stands after that, and the rounds bound how often it is tried. A declaration
+    /// made ahead is taken by whichever of these proposals decided first.
+    async fn propose_resolving(
+        &self,
+        proposal: &Proposal,
+        invocation: appa_eventlog::InvocationNonce,
+    ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
+        let (mut decision, mut took) = self.propose_once(proposal, invocation).await?;
         for _ in 0..STOCK_APPROVE_ROUNDS {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
-                return Ok(decision);
+                break;
             };
             let Some(offer) = self.stock_approved_offer(offers)? else {
-                return Ok(decision);
+                break;
             };
             let applied = self.on_remedy(offer, RemedyArguments::default(), None, None).await;
             if !matches!(applied, Ok(RemedyDecision::Authorized { .. })) {
                 tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
             }
-            decision = self.propose_once(proposal).await?;
+            let (next, again) = self.propose_once(proposal, invocation).await?;
+            decision = next;
+            took = took.or(again);
         }
-        Ok(decision)
+        Ok((decision, took))
     }
 
     /// The first offered plan that asks only stock `approve` authorities, if the block has one.
@@ -229,7 +227,35 @@ impl Session {
         })
     }
 
-    async fn propose_once(&self, proposal: &Proposal) -> Result<ToolCallDecision, EventError> {
+    /// Settle the declaration a blocked spawn took where its judgment is terminal, in one
+    /// judged write: the settlement already recorded, else this judgment at the position and
+    /// revision it commits at. A judgment that applies writes nothing here.
+    fn settle_terminal(&self, claim: &AheadClaim<'_>) -> Result<Judgment, EventError> {
+        self.append_host_judged(|context| {
+            let ahead = AheadState::fold(context.log.host_records());
+            if let Some(outcome) = ahead.settlement(&self.trajectory, claim.attempt) {
+                return Ok((None, Judgment::Settled(outcome)));
+            }
+            Ok(match context.judge(&ahead, claim)? {
+                Judgment::Settled(outcome) => (
+                    Some(appa_eventlog::HostObservation::AheadSettled {
+                        trajectory: self.trajectory.clone(),
+                        attempt: claim.attempt.clone(),
+                        outcome,
+                    }),
+                    Judgment::Settled(outcome),
+                ),
+                apply => (None, apply),
+            })
+        })
+    }
+
+    async fn propose_once(
+        &self,
+        proposal: &Proposal,
+        invocation: appa_eventlog::InvocationNonce,
+    ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
+        let took = Took::default();
         let Proposal {
             call,
             call_id,
@@ -269,11 +295,15 @@ impl Session {
                 Occasion::Proposal {
                     call_id: call_id.as_deref(),
                     prompt: prompt.as_ref(),
+                    spawn,
+                    invocation,
+                    took: &took,
                 },
             )
             .await?;
+        let took = took.into_inner().expect("the slot's lock is never poisoned");
 
-        match decision.then {
+        let decision = match decision.then {
             Next::ModelResponse { invocations, feedback } => match (invocations.as_slice(), feedback.as_slice()) {
                 ([released], []) => {
                     tracing::debug!(
@@ -299,7 +329,8 @@ impl Session {
                 _ => Err(EventError::UnexpectedDecision),
             },
             _ => Err(EventError::UnexpectedDecision),
-        }
+        };
+        decision.map(|decision| (decision, took))
     }
 
     /// Whether the serving policy writes a contract for this tool's exact name — the
