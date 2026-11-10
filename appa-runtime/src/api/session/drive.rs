@@ -717,7 +717,7 @@ impl Session {
                 call_id,
                 prompt,
                 spawn,
-                invocation: Some(invocation),
+                invocation,
                 applies: None,
                 took: Some(took),
             },

@@ -179,14 +179,15 @@ impl Session {
     /// loop appended. An approval already recorded stays recorded, and the next proposal of the
     /// call spends it. A stock `approve` authority never denies, so a plan that was not applied
     /// lost a race: another dispatch moved its basis or took its subject. The next proposal
-    /// reads what stands after that, and the rounds bound how often it is tried. A declaration
-    /// made ahead is taken by whichever of these proposals decided first.
+    /// reads what stands after that, and the rounds bound how often it is tried. Only the
+    /// first proposal takes a declaration made ahead: when it took none, the later ones run
+    /// outside the invocation, so a declaration made meanwhile waits for the next spawn.
     async fn propose_resolving(
         &self,
         proposal: &Proposal,
         invocation: appa_eventlog::InvocationNonce,
     ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
-        let (mut decision, mut took) = self.propose_once(proposal, invocation).await?;
+        let (mut decision, took) = self.propose_once(proposal, Some(invocation)).await?;
         for _ in 0..STOCK_APPROVE_ROUNDS {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
                 break;
@@ -198,9 +199,7 @@ impl Session {
             if !matches!(applied, Ok(RemedyDecision::Authorized { .. })) {
                 tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
             }
-            let (next, again) = self.propose_once(proposal, invocation).await?;
-            decision = next;
-            took = took.or(again);
+            decision = self.propose_once(proposal, took.as_ref().map(|_| invocation)).await?.0;
         }
         Ok((decision, took))
     }
@@ -253,7 +252,7 @@ impl Session {
     async fn propose_once(
         &self,
         proposal: &Proposal,
-        invocation: appa_eventlog::InvocationNonce,
+        invocation: Option<appa_eventlog::InvocationNonce>,
     ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
         let took = Took::default();
         let Proposal {
