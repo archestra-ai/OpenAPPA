@@ -16,6 +16,11 @@ pub(super) const FAN_OUT_AHEAD: &str = "[appa] A return declared ahead covers a 
 /// Follows a notice on a block that offers plans.
 pub(super) const APPLY_BELOW: &str = " Apply a plan below.";
 
+/// How many plans of stock `approve` rulings one proposal applies before its block stands. A
+/// plan can go stale between its block and its execution, and an approval can meet a label
+/// another dispatch moved; each round proposes again and reads the block that stands then.
+const STOCK_APPROVE_ROUNDS: usize = 3;
+
 /// One proposed tool call and what came with it: the host's call id, the spawn it starts, the
 /// prompt a fan-out spawn is keyed by, and the held peer message a held read delivers.
 struct Proposal {
@@ -116,7 +121,7 @@ impl Session {
     /// blocks it. A declaration held at another label has lapsed; one no offer fits, or one a
     /// fan-out spawn meets, is not applied. The block says which.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
-        let decision = self.propose_once(&proposal).await?;
+        let decision = self.propose_resolving(&proposal).await?;
         let spawn = proposal.spawn;
         let Some(held) = spawn.and_then(|_| self.inner.take_held_return(&self.root, &self.trajectory)) else {
             return Ok(decision);
@@ -167,13 +172,59 @@ impl Session {
         };
         // A declaration that cannot be applied leaves the spawn the block it already met.
         match self.on_remedy(offer, held.arguments, None, None).await {
-            Ok(RemedyDecision::Authorized { .. }) => self.propose_once(&proposal).await,
+            Ok(RemedyDecision::Authorized { .. }) => self.propose_resolving(&proposal).await,
             Ok(_) => Ok(noted(UNFIT_AHEAD, apply)),
             Err(error) => {
                 tracing::debug!(trajectory = %self.trajectory.0, %error, "the declaration made ahead was not applied");
                 Ok(noted(UNFIT_AHEAD, apply))
             }
         }
+    }
+
+    /// Propose, and while the block offers a plan that asks only stock `approve` authorities,
+    /// apply that plan and propose again: the agent sees the call released, never the block.
+    /// The plan is read from the block that stands, never an earlier one, and every execution is
+    /// followed by a proposal, so the decision returned is never older than the last fact this
+    /// loop appended. An approval already recorded stays recorded, and the next proposal of the
+    /// call spends it. A stock `approve` authority never denies, so a plan that was not applied
+    /// lost a race: another dispatch moved its basis or took its subject. The next proposal
+    /// reads what stands after that, and the rounds bound how often it is tried.
+    async fn propose_resolving(&self, proposal: &Proposal) -> Result<ToolCallDecision, EventError> {
+        let mut decision = self.propose_once(proposal).await?;
+        for _ in 0..STOCK_APPROVE_ROUNDS {
+            let ToolCallDecision::Deny { offers, .. } = &decision else {
+                return Ok(decision);
+            };
+            let Some(offer) = self.stock_approved_offer(offers)? else {
+                return Ok(decision);
+            };
+            let applied = self.on_remedy(offer, RemedyArguments::default(), None, None).await;
+            if !matches!(applied, Ok(RemedyDecision::Authorized { .. })) {
+                tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
+            }
+            decision = self.propose_once(proposal).await?;
+        }
+        Ok(decision)
+    }
+
+    /// The first offered plan that asks only stock `approve` authorities, if the block has one.
+    fn stock_approved_offer(&self, offers: &[appa_runtime_api::OfferedRemedy]) -> Result<Option<OfferId>, EventError> {
+        let deployment = self.deployment();
+        if offers.is_empty() || !deployment.externals.has_stock_approve() {
+            return Ok(None);
+        }
+        self.with_view(|context| {
+            Ok(offers
+                .iter()
+                .filter_map(|offer| crate::engine::resolve_rendered(context.log, &OfferId(offer.id.clone())))
+                .find(|offer| {
+                    context
+                        .engine()
+                        .offer_asks_only(context.view, &self.trajectory, offer, |authority| {
+                            deployment.externals.is_stock_approve(authority)
+                        })
+                }))
+        })
     }
 
     async fn propose_once(&self, proposal: &Proposal) -> Result<ToolCallDecision, EventError> {

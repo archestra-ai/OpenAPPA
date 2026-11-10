@@ -273,6 +273,7 @@ mod held_view_law {
         let mut taint = plain_tool("taint");
         taint.delta = lowering;
         let officer = crate::authority::Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: crate::authority::Mandate {
                 trust_ceiling: Some(trusted),

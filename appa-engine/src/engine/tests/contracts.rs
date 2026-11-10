@@ -82,6 +82,7 @@ fn required_rulings_route_each_gap_to_its_authority() {
         ..plain_tool("wire")
     };
     let officer = Authority {
+        except: Vec::new(),
         name: AuthorityName::new("officer"),
         mandate: Mandate {
             trust_ceiling: Some(TRUSTED),
@@ -907,6 +908,7 @@ fn the_ruling_binds_the_payload_by_digest_and_never_copies_it() {
     let mut wire = strict_tool("wire");
     wire.requires.label.trust_floor = Some(TRUSTED);
     let officer = Authority {
+        except: Vec::new(),
         name: AuthorityName::new("officer"),
         mandate: Mandate {
             trust_ceiling: Some(TRUSTED),
