@@ -3599,8 +3599,8 @@ samp {
    label. */
 .song-mute {
   position: absolute;
-  bottom: 13%;
-  right: 13%;
+  bottom: 8%;
+  right: 8%;
   z-index: 1;
   display: grid;
   place-items: center;
