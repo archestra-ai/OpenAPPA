@@ -656,7 +656,8 @@ timeout_ms = 1000
 max_body_bytes = 4096
 
 [externals.authorities.operator]
-builtin = "approve"
+# Approves when asked. The stock "approve" is applied at the block, which this test reads.
+command = ["/bin/sh", "-c", 'cat > /dev/null; printf "%s" "{\"version\":1,\"answer\":{\"ruling\":\"approve\"}}"']
 "#;
     let id = root("restarted");
     {

@@ -141,6 +141,17 @@ impl ExecutableRemedyPlan {
         matches!(self.steps.as_slice(), [RemedyStep::Return(_)])
     }
 
+    /// Is this plan rulings alone, each by an authority `rules` accepts? Such a plan accepts no
+    /// narrowing, treats no result and declares no return, so executing it settles nothing the
+    /// agent would otherwise choose.
+    pub fn asks_only(&self, rules: impl Fn(&AuthorityName) -> bool) -> bool {
+        !self.steps.is_empty()
+            && self
+                .steps
+                .iter()
+                .all(|step| matches!(step, RemedyStep::Authorize(authority) if rules(authority)))
+    }
+
     /// The narrowing this plan asks the agent to accept, where its route carries one.
     /// A raw release path orders that acceptance before its rulings; an output-sanitizer path
     /// accepts no residual up front and has none here.
@@ -1523,10 +1534,10 @@ pub(crate) fn gap_cover(
     let mandate = &authority.mandate;
     match gap {
         Gap::TrustFloor { required, .. } => Evaluation::of_exact(
-            authority.scope.covers(tags) && mandate.trust_ceiling.is_some_and(|ceiling| ceiling >= *required),
+            authority.in_scope(tags) && mandate.trust_ceiling.is_some_and(|ceiling| ceiling >= *required),
         ),
         Gap::Includes { recipients } => {
-            if !authority.scope.covers(tags) {
+            if !authority.in_scope(tags) {
                 return Evaluation::Fails;
             }
             match &mandate.reader_ceiling {
@@ -1534,7 +1545,7 @@ pub(crate) fn gap_cover(
                 Some(ceiling) => Audience::of_declared(ceiling).includes(recipients, context),
             }
         }
-        Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
+        Gap::NoPrior(kind) => Evaluation::of_exact(authority.in_scope(tags) && mandate.waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark — never by scope.
         Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
         Gap::Prior(_) => Evaluation::Fails,
@@ -1562,7 +1573,7 @@ pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &
     let has = |wanted: fn(&Gap) -> bool| raw.requirement_gaps.iter().any(wanted);
     if has(|gap| matches!(gap, Gap::Includes { .. })) {
         for authority in registry.authorities() {
-            if authority.scope.covers(&contract.tags) {
+            if authority.in_scope(&contract.tags) {
                 atoms.extend(authority.mandate.needed_atoms(providers));
             }
         }
@@ -1716,6 +1727,7 @@ mod tests {
 
     fn mandated(name: &str, mandate: Mandate) -> Authority {
         Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate,
             scope: Scope::default(),
@@ -2521,6 +2533,7 @@ mod tests {
 
         fn authority(name: &str, ceiling: &str, scope: &[&str]) -> Authority {
             Authority {
+                except: Vec::new(),
                 name: AuthorityName::new(name),
                 mandate: Mandate {
                     reader_ceiling: Some(group(ceiling)),
@@ -2557,6 +2570,11 @@ mod tests {
         /// unscoped) read `legal`; `far` (authority, tag `unrelated`), `aside` (output, tag
         /// `unrelated`) and the `note` tool's delta read `press`.
         fn registry(confined_results: &[&str]) -> Registry {
+            registry_of(confined_results, authority("desk", "team", &["mail"]), &["mail"])
+        }
+
+        /// The gathering registry with `desk` and the tags `send` carries as given.
+        fn registry_of(confined_results: &[&str], desk: Authority, send_tags: &[&str]) -> Registry {
             let named = |name: &str| crate::audience::NamedAudience {
                 name: GroupName::new(name),
                 within: None,
@@ -2566,10 +2584,7 @@ mod tests {
                 }],
             };
             let config = RegistryConfig {
-                authorities: vec![
-                    authority("desk", "team", &["mail"]),
-                    authority("far", "press", &["unrelated"]),
-                ],
+                authorities: vec![desk, authority("far", "press", &["unrelated"])],
                 sanitizers: vec![
                     sanitizer("scrub", INPUT, "legal", &[]),
                     sanitizer("redact", OUTPUT, "legal", &[]),
@@ -2587,7 +2602,7 @@ mod tests {
                     ..crate::audience::AudienceConfig::default()
                 },
                 ..config(vec![
-                    tool("send", &["mail"], Delta::NONE),
+                    tool("send", send_tags, Delta::NONE),
                     tool(
                         "note",
                         &[],
@@ -2628,6 +2643,18 @@ mod tests {
             Gap::Includes {
                 recipients: group("team"),
             }
+        }
+
+        /// An authority that excepts one of the tool's tags rules on none of its label gaps, so
+        /// the block asks no directory for that authority's mandate.
+        #[test]
+        fn a_block_reads_no_authority_that_excepts_the_tool() {
+            let desk = Authority {
+                except: tags(&["kept"]),
+                ..authority("desk", "team", &["mail"])
+            };
+            let registry = registry_of(&[], desk, &["mail", "kept"]);
+            assert!(block_atoms(&registry, &send(&registry), &raw(vec![includes()], false)).is_empty());
         }
 
         #[test]
@@ -3354,6 +3381,7 @@ mod tests {
                 tool("reply", &[], vec![RecipientSpec::Placeholder("to".to_string())]),
             ],
             vec![Authority {
+                except: Vec::new(),
                 name: AuthorityName::new("desk"),
                 mandate: Mandate {
                     reader_ceiling: Some(alice()),
@@ -3450,6 +3478,7 @@ mod tests {
                 },
             ],
             vec![Authority {
+                except: Vec::new(),
                 name: AuthorityName::new("desk"),
                 mandate: Mandate {
                     reader_ceiling: Some(alice()),
@@ -3683,6 +3712,7 @@ mod tests {
             ..plain_tool("wire")
         };
         let officer = Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff")]),
@@ -3700,6 +3730,46 @@ mod tests {
             exec(&planned.plans[0]).steps,
             vec![RemedyStep::Authorize(AuthorityName::new("officer"))]
         );
+    }
+
+    /// An excepted tag takes a tool out of an authority's jurisdiction for its label gaps and
+    /// leaves the authority's attention routing alone.
+    #[test]
+    fn an_excepted_tag_leaves_a_label_gap_terminal_and_an_attention_gap_routed() {
+        let legacy = TagName::new("legacy");
+        let signoff = Requires {
+            attention: vec![MarkName::new("signoff")],
+            ..Requires::default()
+        };
+        let rollout = Authority {
+            except: vec![legacy.clone()],
+            ..mandated(
+                "rollout",
+                Mandate {
+                    trust_ceiling: Some(TRUSTED),
+                    attends: Attends::Named(vec![MarkName::new("signoff")]),
+                    ..Mandate::default()
+                },
+            )
+        };
+        let kept = ToolAnnotation {
+            tags: vec![legacy.clone()],
+            ..gated("send", floor(TRUSTED))
+        };
+        let marked = ToolAnnotation {
+            tags: vec![legacy],
+            ..requiring("wire", signoff)
+        };
+        let registry = registry(vec![kept, gated("post", floor(TRUSTED)), marked], vec![rollout], vec![]);
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
+        let steps = |tool: &str| {
+            let planned = plan_of(&registry, &log, &call(tool, json!({})));
+            planned.plans.first().map(|plan| exec(plan).steps.clone())
+        };
+        let authorized = Some(vec![RemedyStep::Authorize(AuthorityName::new("rollout"))]);
+        assert_eq!(steps("send"), None, "no authority covers the excepted tool's trust gap");
+        assert_eq!(steps("post"), authorized, "the same gap on an untagged tool is covered");
+        assert_eq!(steps("wire"), authorized, "an attention gap routes by its mark");
     }
 
     #[test]
@@ -3965,6 +4035,7 @@ mod tests {
             ],
         )
             .prop_map(move |(trust_ceiling, reader_ceiling, waivers, attends)| Authority {
+                except: Vec::new(),
                 name: name.clone(),
                 mandate: Mandate {
                     trust_ceiling,
@@ -4265,7 +4336,7 @@ mod tests {
             let parts = crate::label::TestContext::default();
 
             let competent = |authority: &Authority, gap: &Gap| -> bool {
-                let scoped = authority.scope.covers(&contract.tags);
+                let scoped = authority.in_scope(&contract.tags);
                 match gap {
                     Gap::TrustFloor { required, .. } =>
                         scoped && authority.mandate.trust_ceiling.is_some_and(|c| c >= *required),

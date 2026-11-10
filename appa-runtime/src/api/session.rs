@@ -346,6 +346,11 @@ const FAN_OUT_AHEAD: &str = "[appa] A return declared ahead covers a single suba
 /// Follows a notice on a block that offers plans.
 const APPLY_BELOW: &str = " Apply a plan below.";
 
+/// How many plans of stock `approve` rulings one proposal applies before its block stands. A
+/// plan can go stale between its block and its execution, and an approval can meet a label
+/// another dispatch moved; each round proposes again and reads the block that stands then.
+const STOCK_APPROVE_ROUNDS: usize = 3;
+
 impl Session {
     pub(super) fn attach(
         inner: Arc<Inner>,
@@ -765,7 +770,7 @@ impl Session {
         file_basis: Option<appa_engine::value::FileBasis>,
     ) -> Result<ToolCallDecision, EventError> {
         let decision = self
-            .propose_once(call.clone(), call_id.clone(), spawn, prompt.clone(), file_basis.clone())
+            .propose_resolving(call.clone(), call_id.clone(), spawn, prompt.clone(), file_basis.clone())
             .await?;
         let Some(held) = spawn.and_then(|_| self.inner.take_held_return(&self.root, &self.trajectory)) else {
             return Ok(decision);
@@ -816,13 +821,70 @@ impl Session {
         };
         // A declaration that cannot be applied leaves the spawn the block it already met.
         match self.on_remedy(offer, held.arguments, None, None).await {
-            Ok(RemedyDecision::Authorized { .. }) => self.propose_once(call, call_id, spawn, prompt, file_basis).await,
+            Ok(RemedyDecision::Authorized { .. }) => {
+                self.propose_resolving(call, call_id, spawn, prompt, file_basis).await
+            }
             Ok(_) => Ok(noted(UNFIT_AHEAD, apply)),
             Err(error) => {
                 tracing::debug!(trajectory = %self.trajectory.0, %error, "the declaration made ahead was not applied");
                 Ok(noted(UNFIT_AHEAD, apply))
             }
         }
+    }
+
+    /// Propose, and while the block offers a plan that asks only stock `approve` authorities,
+    /// apply that plan and propose again: the agent sees the call released, never the block.
+    /// The plan is read from the block that stands, never an earlier one, and every execution is
+    /// followed by a proposal, so the decision returned is never older than the last fact this
+    /// loop appended. An approval already recorded stays recorded, and the next proposal of the
+    /// call spends it. A stock `approve` authority never denies, so a plan that was not applied
+    /// lost a race: another dispatch moved its basis or took its subject. The next proposal
+    /// reads what stands after that, and the rounds bound how often it is tried.
+    async fn propose_resolving(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        spawn: Option<SpawnKind>,
+        prompt: Option<PromptKey>,
+        file_basis: Option<appa_engine::value::FileBasis>,
+    ) -> Result<ToolCallDecision, EventError> {
+        let propose = || self.propose_once(call.clone(), call_id.clone(), spawn, prompt.clone(), file_basis.clone());
+        let mut decision = propose().await?;
+        for _ in 0..STOCK_APPROVE_ROUNDS {
+            let ToolCallDecision::Deny { offers, .. } = &decision else {
+                return Ok(decision);
+            };
+            let Some(offer) = self.stock_approved_offer(offers)? else {
+                return Ok(decision);
+            };
+            let applied = self.on_remedy(offer, RemedyArguments::default(), None, None).await;
+            if !matches!(applied, Ok(RemedyDecision::Authorized { .. })) {
+                tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
+            }
+            decision = propose().await?;
+        }
+        Ok(decision)
+    }
+
+    /// The first offered plan that asks only stock `approve` authorities, if the block has one.
+    fn stock_approved_offer(&self, offers: &[appa_runtime_api::OfferedRemedy]) -> Result<Option<OfferId>, EventError> {
+        let deployment = self.deployment();
+        if offers.is_empty() || !deployment.externals.has_stock_approve() {
+            return Ok(None);
+        }
+        let log = self.inner.log(&self.root)?;
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        Ok(offers
+            .iter()
+            .filter_map(|offer| crate::engine::resolve_rendered(&log, &OfferId(offer.id.clone())))
+            .find(|offer| {
+                policy
+                    .engine()
+                    .offer_asks_only(&view, &self.trajectory, offer, |authority| {
+                        deployment.externals.is_stock_approve(authority)
+                    })
+            }))
     }
 
     async fn propose_once(
@@ -8411,6 +8473,159 @@ delta = {}
         let path = dir.join("appa.toml");
         std::fs::write(&path, text).expect("the fixture writes");
         Config::load(&path).expect("the fixture validates")
+    }
+
+    /// One stock `approve` authority covers every trust gate and the `irreversible` mark, except the
+    /// trust gate of the tool whose tag it excepts.
+    const STOCK_APPROVED: &str = r#"
+    [policy]
+    version = 2
+
+    [[policy.tool]]
+    name = "taint"
+    parameters = { type = "object", properties = { a = { type = "integer" } } }
+    delta = { trust = "suspicious" }
+
+    [[policy.tool]]
+    name = "send"
+    tags = ["kept"]
+    requires = { trust = "trusted" }
+    delta = {}
+
+    [[policy.tool]]
+    name = "post"
+    requires = { trust = "trusted" }
+    delta = {}
+
+    [[policy.tool]]
+    name = "wire"
+    parameters = { type = "object", properties = { amount = { type = "integer" } } }
+    requires = { attention = ["irreversible"] }
+    delta = {}
+
+    [[policy.tool]]
+    name = "import"
+    requires = { attention = ["irreversible"] }
+    delta = { trust = "suspicious" }
+
+    [[policy.authority]]
+    name = "rollout"
+    except_tags = ["kept"]
+    [policy.authority.permits]
+    trust_below = "trusted"
+    attention = ["irreversible"]
+
+    [policy.deployment]
+    context_control = true
+
+    [externals]
+    timeout_ms = 2000
+    max_body_bytes = 65536
+
+    [externals.authorities.rollout]
+    builtin = "approve"
+    "#;
+
+    fn bare(tool: &str) -> ProposedCall {
+        ProposedCall {
+            tool: tool.to_string(),
+            arguments: raw(serde_json::json!({})),
+            cwd: None,
+        }
+    }
+
+    /// A plan that asks only stock `approve` authorities is applied at the block: the call is
+    /// released without the agent executing anything, and the ruling is still recorded.
+    #[tokio::test]
+    async fn a_stock_approve_plan_is_applied_at_the_block() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let transcriber = Arc::new(Collected::default());
+        let session = runtime
+            .recording(transcriber.clone())
+            .create_session(root(), None)
+            .expect("a fresh id opens");
+
+        let decision = session
+            .on_tool_call_identified(wire(500), Some("host-call-1".to_string()), None, None)
+            .await
+            .expect("the call is judged");
+        assert!(matches!(decision, ToolCallDecision::Allow { .. }), "{decision:?}");
+
+        let [record] = transcriber.taken().try_into().expect("one ruling, one record");
+        assert_eq!(record.role, crate::api::ExternalRole::Authority);
+        assert_eq!(record.external_name, "rollout");
+        assert_eq!(record.backend, crate::api::ConsultBackend::Stock);
+        assert_eq!(record.request["artifact"]["tool"], "wire");
+        assert_eq!(record.outcome, crate::api::ExternalOutcome::Answered);
+        assert_eq!(record.answer, Some(serde_json::json!({"ruling": "approve"})));
+        assert_eq!(record.raw_response, None);
+        assert!(record.context.offer_id.is_some());
+
+        // The host asking again under the same call id is answered from the record: the one
+        // dispatch stands, and no authority is consulted a second time.
+        let repeated = session
+            .on_tool_call_identified(wire(500), Some("host-call-1".to_string()), None, None)
+            .await
+            .expect("the repeat is answered");
+        assert!(matches!(repeated, ToolCallDecision::Allow { .. }), "{repeated:?}");
+        assert!(transcriber.taken().is_empty());
+        assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+    }
+
+    /// A trust gate the authority covers is released on every call that meets it, since an approval
+    /// never raises the label. The tool whose tag the authority excepts stays blocked, with no plan.
+    #[tokio::test]
+    async fn an_excepted_tool_stays_blocked_beside_an_approved_one() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+        admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
+
+        let kept = session
+            .on_tool_call(bare("send"), false)
+            .await
+            .expect("the block is delivered");
+        assert!(
+            matches!(&kept, ToolCallDecision::Deny { offers, .. } if offers.is_empty()),
+            "{kept:?}"
+        );
+        for _ in 0..2 {
+            let released = session
+                .on_tool_call(bare("post"), false)
+                .await
+                .expect("the call is judged");
+            assert!(matches!(released, ToolCallDecision::Allow { .. }), "{released:?}");
+            let outcome = ToolOutcome::Success {
+                body: OutcomeBody::Available("data".to_string()),
+            };
+            let kept = session
+                .on_tool_result(bare("post"), outcome)
+                .await
+                .expect("the result is admitted");
+            assert_eq!(kept, ToolResultDecision::Keep);
+        }
+    }
+
+    /// A plan that also accepts a narrowing is the agent's to choose: accepting it changes what
+    /// the rest of the trajectory may do, so the block is delivered with its plans.
+    #[tokio::test]
+    async fn a_plan_that_accepts_a_narrowing_is_left_to_the_agent() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+
+        let decision = session
+            .on_tool_call(bare("import"), false)
+            .await
+            .expect("the block is delivered");
+        assert!(
+            matches!(&decision, ToolCallDecision::Deny { offers, .. } if !offers.is_empty()),
+            "{decision:?}"
+        );
     }
 
     #[tokio::test]

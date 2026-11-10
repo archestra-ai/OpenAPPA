@@ -196,6 +196,8 @@ pub(crate) struct RawAuthority {
     pub(crate) permits: RawPermits,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) except_tags: Vec<String>,
     pub(crate) implementation: Option<toml::Value>,
 }
 

@@ -982,6 +982,7 @@ mod tests {
 
     fn authority(name: &str, mandate: Mandate) -> Authority {
         Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate,
             scope: Scope::default(),

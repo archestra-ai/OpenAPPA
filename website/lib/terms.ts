@@ -125,6 +125,8 @@ const TERMS = {
     "On a [policy.audience.group.<name>]: the trusted policy assertion that the group sits within a built-in audience (self or internal).",
   excludes:
     "Blocks a call if a listed effect is already recorded or declared by another call that has been allowed but has not finished.",
+  except_tags:
+    "Tags of the tools an authority does not review for unmet audience, trust, or effects requirements. Attention approvals are not affected.",
   tags: "Names that connect tools to authorities and sanitizers. One matching tag is enough. Without tags, an authority or sanitizer is not limited to particular tools. Attention approvals use permits.attention instead.",
 
   /* Authorities */
@@ -146,7 +148,7 @@ const TERMS = {
   'builtin = "hitl"':
     "Asks a person to approve or deny the call through the agent integration.",
   'builtin = "approve"':
-    "Automatically approves every request within the authority's permits.",
+    "Automatically approves every request within the authority's permits. OpenAPPA applies a plan that needs only such authorities itself, so the agent does not see the block.",
   'builtin = "claude-code"':
     "Runs Claude Code locally to answer a component's request. Each request starts a new claude -p process with the policy instructions and request data. Requires Claude Code on the machine running OpenAPPA.",
   'builtin = "llm"':

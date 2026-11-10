@@ -536,6 +536,7 @@ pub(super) fn substituting_engine(trust: Trust) -> Engine {
             },
             annotators: vec![annotator("acl")],
             authorities: vec![crate::authority::Authority {
+                except: Vec::new(),
                 name: AuthorityName::new("officer"),
                 mandate: crate::authority::Mandate {
                     trust_ceiling: Some(TRUSTED),
@@ -722,6 +723,7 @@ pub(super) fn released_under_output_sanitizer(
 pub(super) fn two_officer_engine() -> Engine {
     use crate::authority::{Authority, Mandate};
     let officer = |name: &str| Authority {
+        except: Vec::new(),
         name: AuthorityName::new(name),
         mandate: Mandate {
             trust_ceiling: Some(TRUSTED),

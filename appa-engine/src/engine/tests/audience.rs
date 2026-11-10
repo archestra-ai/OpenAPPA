@@ -164,6 +164,7 @@ fn a_group_from_output_sanitizer_still_asks_for_exactly_the_members_its_derivati
 
 fn public_ceiling_officer() -> crate::authority::Authority {
     crate::authority::Authority {
+        except: Vec::new(),
         name: AuthorityName::new("officer"),
         mandate: crate::authority::Mandate {
             reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
@@ -647,6 +648,7 @@ fn a_produced_symbolic_delta_narrows_without_a_membership_read() {
 #[test]
 fn a_call_approval_extends_the_offered_calls_pins() {
     let officer = crate::authority::Authority {
+        except: Vec::new(),
         name: AuthorityName::new("officer"),
         mandate: crate::authority::Mandate {
             reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
@@ -706,6 +708,7 @@ fn a_call_approval_extends_the_offered_calls_pins() {
 #[test]
 fn replay_names_the_refusal_of_a_duplicated_pin() {
     let officer = crate::authority::Authority {
+        except: Vec::new(),
         name: AuthorityName::new("officer"),
         mandate: crate::authority::Mandate {
             reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
@@ -759,6 +762,7 @@ fn wide_as_reported() -> Vec<ReaderId> {
 /// approval's pins.
 fn spending_under_pins(fresh: crate::audience::AudienceEvidence) -> Result<EngineDecision, TransitionError> {
     let officer = crate::authority::Authority {
+        except: Vec::new(),
         name: AuthorityName::new("officer"),
         mandate: crate::authority::Mandate {
             reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
@@ -939,6 +943,7 @@ mod symbolic_audiences {
             ..Requires::default()
         };
         let officer = crate::authority::Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: crate::authority::Mandate {
                 reader_ceiling: Some(grouped(&[], &["board"])),
@@ -1006,6 +1011,7 @@ mod symbolic_audiences {
         use crate::route::{RouteDepth, RouteOutcome, RouteStep};
 
         let officer = crate::authority::Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: crate::authority::Mandate {
                 reader_ceiling: Some(grouped(&[], &["team"])),
@@ -1239,6 +1245,7 @@ mod symbolic_audiences {
     #[test]
     fn a_reader_ceiling_writing_a_group_is_read_when_the_block_is_planned() {
         let officer = crate::authority::Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: crate::authority::Mandate {
                 reader_ceiling: Some(grouped(&[], &["officers"])),

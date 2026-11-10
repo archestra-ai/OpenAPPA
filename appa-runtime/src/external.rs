@@ -197,9 +197,9 @@ enum Backend {
 }
 
 impl Backend {
-    /// The transport a consult record names, for a backend that leaves the process or asks
-    /// a person. The in-process answers — stock, an inline roster, the stand-in — are not
-    /// recorded.
+    /// The transport a consult record names, for a backend that leaves the process, asks a
+    /// person, or is a stock approving authority. The other in-process answers — a stock
+    /// sanitizer, an inline roster, the stand-in — are not recorded.
     fn recorded(&self) -> Option<ConsultBackend> {
         match self {
             Backend::Url(_) => Some(ConsultBackend::Url),
@@ -211,7 +211,8 @@ impl Backend {
             #[cfg(feature = "archestra")]
             Backend::Model(PromptModel::Archestra(_)) => Some(ConsultBackend::Archestra),
             Backend::Jev(_) => Some(ConsultBackend::Jev),
-            Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
+            Backend::Stock(Stock::Approve) => Some(ConsultBackend::Stock),
+            Backend::Stock(Stock::RedactEmail | Stock::RedactSecrets) | Backend::Readers(_) | Backend::StandIn => None,
         }
     }
 }
@@ -492,6 +493,26 @@ impl ExternalServices {
                 .and_then(|table| table.get(authority)),
             Some(Backend::Hitl)
         )
+    }
+
+    /// Whether this authority is the stock `approve` builtin — the one whose rulings the
+    /// runtime obtains at the block, without the agent executing the plan.
+    pub(crate) fn is_stock_approve(&self, authority: &str) -> bool {
+        matches!(
+            self.backends
+                .get(&ConsultKind::Authority)
+                .and_then(|table| table.get(authority)),
+            Some(Backend::Stock(Stock::Approve))
+        )
+    }
+
+    /// Whether any authority is the stock `approve` builtin.
+    pub(crate) fn has_stock_approve(&self) -> bool {
+        self.backends.get(&ConsultKind::Authority).is_some_and(|table| {
+            table
+                .values()
+                .any(|backend| matches!(backend, Backend::Stock(Stock::Approve)))
+        })
     }
 
     /// One consult of a registered component, dispatched on its configured
