@@ -3,7 +3,7 @@ title: OpenAPPA vs Agent Auto-Modes
 category: Comparison
 order: 10.8
 description: Comparing OpenAPPA's deterministic information-flow control with Claude Code's auto mode and Codex's auto-review.
-oversimplified: "Auto-modes ask a second model to guess whether a call is safe with some probability; OpenAPPA computes it from where the data came from, so there is 100% confidence in no data leaks."
+oversimplified: "Auto-modes ask a second model to guess whether a call is safe with some probability; OpenAPPA computes it from where the data came from, so a declared flow's decision does not depend on a model's guess."
 ---
 
 [Claude Code's auto mode](https://code.claude.com/docs/en/permission-modes#eliminate-prompts-with-auto-mode) and [Codex's auto-review](https://learn.chatgpt.com/docs/sandboxing/auto-review) are designed to reduce prompt fatigue by delegating boundary checks to a secondary model. In Claude Code, a background classifier evaluates shell commands and tool calls against heuristics and conversation boundaries. In Codex, an `auto_review` agent evaluates sandbox escalation requests against a Markdown policy prompt (`policy.md`).
@@ -17,7 +17,7 @@ Claude Code and Codex evaluate actions with an LLM:
 - **Claude Code auto mode** sends proposed commands to a secondary classifier model. To prevent hostile input from tricking the classifier, Claude Code strips tool outputs from classifier requests. As a result, the classifier cannot observe data provenance: it sees the command being run, but not the values earlier tools returned.
 - **Codex auto-review** routes sandbox-boundary crossings (such as network access or writes outside allowed roots) to a reviewer agent. The reviewer inspects the request and transcript against natural-language rules. When the reviewer denies an action, it instructs the agent to find a materially safer path or ask the user.
 
-OpenAPPA evaluates data flows algebraically. When an agent reads internal data, OpenAPPA labels the trajectory with that audience. When a later tool call proposes to send data to a public destination, OpenAPPA checks the target against the accumulated label and denies the flow. The decision is deterministic: prompt injections cannot persuade the engine to ignore an audience mismatch, and innocent-looking commands cannot exfiltrate restricted data.
+OpenAPPA evaluates data flows algebraically. When an agent reads internal data, OpenAPPA labels the trajectory with that audience. When a later tool call proposes to send data to a public destination, OpenAPPA checks the target against the accumulated label and denies the flow. The decision is deterministic: prompt injections cannot persuade the engine to ignore an audience mismatch. On Claude Code, a model Annotator writes the contract for each shell command, so a command it misjudges is outside this guarantee ([limits](/coding-agents#limits)).
 
 ## Recovery when an action is blocked
 
@@ -55,7 +55,7 @@ When the classifier denies a call that OpenAPPA allowed, Claude Code sends a `Pe
 | Author policies in natural language | ✓ | ✓ | ✕ |
 | Supports LLM-based evaluation | ✓ | ✓ | ✓ (bounded by contract) |
 | Tracks data provenance across turns | ✕ | ✕ | ✓ |
-| Invariant holds if model misjudges | ✕ | ✕ | ✓ |
+| Invariant holds if a downstream model misjudges | ✕ | ✕ | ✓ |
 | Returns structured remedy plans | ✕ | ✕ | ✓ |
 | Works across multiple agent runtimes | ✕ | ✕ | ✓ |
 

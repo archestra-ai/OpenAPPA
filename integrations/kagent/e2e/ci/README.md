@@ -60,11 +60,11 @@ structured model output are not prerequisites for this matrix.
 
 ## In CI
 
-The workflow job builds the four images, then runs these same three
-scripts. It runs only when a maintainer adds the `run-e2e` label to the pull
-request and the changed paths touch the stack. Fork pull requests never
-run it, because it needs `OPENROUTER_API_KEY`. Remove the label and add
-it again to re-run it after new commits. Every test gets three total
+The `kagent-a2a-e2e` job in `.github/workflows/ci.yml` builds the four
+images, then runs these same three scripts. It runs only on a manual
+dispatch of the CI workflow from `main`. No pull request runs it. The job
+reads `OPENROUTER_API_KEY` from GCP Secret Manager, and the identity that
+reads it trusts the workflow on `main` only. Every test gets three total
 attempts; a test that exhausts them fails the job. `run-a2a.sh` appends the
 model, the endpoint, the matrix size and the wall time to the job
 summary.

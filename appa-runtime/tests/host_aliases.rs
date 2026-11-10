@@ -19,34 +19,23 @@ use common::repo_root;
 
 const CONTROL_SPELLING: &str = "run_remedy";
 
-/// Every root rule names the host's tool; the `local` one is spelled under the
-/// battery's namespace and reaches the host through the same alias. The battery's file
-/// tools name the file-tracker, which a hosted root binds by URL; no call here reaches it.
+/// Every root rule names the host's tool; the `.env.local` one is spelled under the
+/// battery's namespace and reaches the host through the same alias.
 const RULES: &str = r#"
 [policy]
 version = 2
 
 [[policy.tool]]
-name = "host/archestra/FetchInboxMessage(message_id:known)"
+name = "host/archestra/Read(file_path:.env.example)"
 delta = {}
 
 [[policy.tool]]
-name = "host/claude-code/FetchInboxMessage(message_id:local)"
+name = "host/claude-code/Read(file_path:.env.local)"
 delta = {}
 
 [[policy.tool]]
-name = "host/archestra/FetchInboxMessage(message_id:internal)"
+name = "host/archestra/Read(file_path:.internal-notes)"
 delta = { audience = ["internal"] }
-
-[[policy.tool]]
-name = "host/archestra/FetchInboxMessage(message_id:private)"
-delta = { audience = ["self"] }
-
-[externals.annotators.file-tracker]
-url = "http://127.0.0.1:9/annotate"
-
-[externals.recorders.file-tracker]
-url = "http://127.0.0.1:9/record"
 "#;
 
 fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
@@ -150,15 +139,15 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall, id: &str)
     .await
 }
 
-async fn fetch(runtime: &Runtime, actor: &Actor, message: &str) -> HookDecision {
-    let call = proposed("FetchInboxMessage", serde_json::json!({ "message_id": message }));
-    propose(runtime, actor, call, &format!("fetch {message}")).await
+async fn read(runtime: &Runtime, actor: &Actor, path: &str) -> HookDecision {
+    let call = proposed("Read", serde_json::json!({ "file_path": path }));
+    propose(runtime, actor, call, &format!("read {path}")).await
 }
 
-/// A fetch whose result narrows the session: denied until the narrowing is accepted, then run.
-async fn narrow_by_fetching(runtime: &Runtime, actor: &Actor, message: &str, contents: &str) {
-    let HookDecision::DenyCall { offers, .. } = fetch(runtime, actor, message).await else {
-        panic!("the {message} message narrows the session");
+/// A read whose result narrows the session: denied until the narrowing is accepted, then run.
+async fn narrow_by_reading(runtime: &Runtime, actor: &Actor, path: &str, contents: &str) {
+    let HookDecision::DenyCall { offers, .. } = read(runtime, actor, path).await else {
+        panic!("the {path} read narrows the session");
     };
     let plan = serde_json::json!({ "offer_id": offers[0].id });
     let control = ProposedCall {
@@ -167,15 +156,15 @@ async fn narrow_by_fetching(runtime: &Runtime, actor: &Actor, message: &str, con
         cwd: None,
     };
     assert_eq!(
-        propose(runtime, actor, control, &format!("accept {message}")).await,
+        propose(runtime, actor, control, &format!("accept {path}")).await,
         HookDecision::PassControl
     );
     let accepted = runtime
         .execute_embedded_remedy(actor, serde_json::from_value(plan).expect("a plan"))
         .await;
     assert!(!matches!(accepted, RemedyOutcome::Refused { .. }), "{accepted:?}");
-    let call = proposed("FetchInboxMessage", serde_json::json!({ "message_id": message }));
-    let id = format!("fetch {message} accepted");
+    let call = proposed("Read", serde_json::json!({ "file_path": path }));
+    let id = format!("read {path} accepted");
     assert_eq!(
         propose(runtime, actor, call.clone(), &id).await,
         HookDecision::AllowCall { spawn: None }
@@ -195,47 +184,45 @@ async fn narrow_by_fetching(runtime: &Runtime, actor: &Actor, message: &str, con
 }
 
 #[tokio::test]
-async fn a_host_alias_routes_the_hosts_tools_through_the_batterys_rules_after_the_roots() {
+async fn a_host_alias_routes_the_hosts_reads_through_the_batterys_rules_after_the_roots() {
     let (runtime, actor) = session("[aliases]\nhost = { claude-code = [\"archestra\"] }\n").await;
 
-    let inbox = fetch(&runtime, &actor, "anyone").await;
+    let credential = read(&runtime, &actor, ".env").await;
     assert!(
-        matches!(&inbox, HookDecision::DenyCall { offers, .. } if !offers.is_empty()),
-        "the battery's rule lowers trust on an inbox message, and the narrowing waits for acceptance: {inbox:?}"
+        matches!(&credential, HookDecision::DenyCall { offers, .. } if !offers.is_empty()),
+        "the battery's credential rule narrows a .env read, and the narrowing waits for acceptance: {credential:?}"
     );
-    for (message, why) in [
-        ("known", "the root rule on the host's id precedes the battery's rule"),
+    for (path, why) in [
+        ("src/main.rs", "the battery's bare Read rule"),
         (
-            "local",
+            ".env.example",
+            "the root rule on the host's id precedes the battery's .env rule",
+        ),
+        (
+            ".env.local",
             "the root rule spelled under the battery's namespace is rebound too",
         ),
     ] {
         assert_eq!(
-            fetch(&runtime, &actor, message).await,
+            read(&runtime, &actor, path).await,
             HookDecision::AllowCall { spawn: None },
-            "{message}: {why}"
+            "{path}: {why}"
         );
     }
-    let glob = proposed("Glob", serde_json::json!({ "pattern": "*.rs" }));
-    assert_eq!(
-        propose(&runtime, &actor, glob, "glob").await,
-        HookDecision::AllowCall { spawn: None },
-        "the battery's session-local rule"
-    );
 }
 
 #[tokio::test]
 async fn without_the_alias_no_battery_rule_names_the_hosts_tools() {
     let (runtime, actor) = session("").await;
-    for message in ["anyone", "local"] {
-        let decision = fetch(&runtime, &actor, message).await;
+    for path in [".env", "src/main.rs"] {
+        let decision = read(&runtime, &actor, path).await;
         assert!(
             matches!(&decision, HookDecision::DenyCall { offers, .. } if offers.is_empty()),
-            "{message}: only the root's selected rule names host/archestra/FetchInboxMessage: {decision:?}"
+            "{path}: only the root's selected rule names host/archestra/Read: {decision:?}"
         );
     }
     assert_eq!(
-        fetch(&runtime, &actor, "known").await,
+        read(&runtime, &actor, ".env.example").await,
         HookDecision::AllowCall { spawn: None },
         "the root's own rule on the host's id applies without any alias"
     );
@@ -258,13 +245,13 @@ async fn an_aliased_send_to_a_socket_address_is_an_internal_sink() {
         HookDecision::AllowCall { spawn: None }
     );
 
-    narrow_by_fetching(&runtime, &actor, "internal", "TOKEN=internal").await;
+    narrow_by_reading(&runtime, &actor, ".internal-notes", "TOKEN=internal").await;
     assert_eq!(
         propose(&runtime, &actor, send(), "send while internal").await,
         HookDecision::AllowCall { spawn: None }
     );
 
-    narrow_by_fetching(&runtime, &actor, "private", "TOKEN=secret").await;
+    narrow_by_reading(&runtime, &actor, ".env", "TOKEN=secret").await;
     let narrowed = propose(&runtime, &actor, send(), "send while self").await;
     assert!(
         matches!(narrowed, HookDecision::DenyCall { .. }),

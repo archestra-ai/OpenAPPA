@@ -140,9 +140,12 @@ def test_preflight_checks_pins_without_requiring_a_credential() -> None:
 @pytest.mark.asyncio
 async def test_inspect_openai_transport_uses_numeric_timeout_leaves() -> None:
     """Catch OpenAI/httpx transport mismatches before an eval retries forever."""
-    from inspect_ai.model._openai import OpenAIAsyncHttpxClient
+    from inspect_ai.model import get_model
 
-    client = OpenAIAsyncHttpxClient()
+    # Exercise the provider's actual client through Inspect's public factory.
+    # Avoid coupling the check to Inspect's private HTTP client class.
+    model = get_model("openrouter/openai/gpt-5.6-terra", api_key="test-key")
+    client = model.api.http_client
     try:
         timeout = client.timeout
         for leaf in (timeout.connect, timeout.read, timeout.write, timeout.pool):

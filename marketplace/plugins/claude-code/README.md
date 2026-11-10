@@ -42,23 +42,6 @@ Native Edit is a known boundary gap: a Claude Code 2.1.268 probe returned a
 content-dependent match error before `PreToolUse`, with no APPA proposal.
 The plugin cannot prevent that observation by denying the later hook.
 
-### File labels and SafeBash
-
-The Claude Code battery routes `Read`, `Write` and `Edit` through the
-file-tracker, as both Annotator and recorder, and confines each shell command
-to the files and hosts it declares. The default policy binds the file-tracker
-to `appa file-tracker`, which the runtime executable serves. While the policy
-binds the `file-tracker` recorder, `clappa` loads a preload into Claude Code
-that adds `input_files`, `output_files` and `network_hosts` to `Bash` and
-confines each call in Claude Code's own sandbox. It first runs the preload's
-self-test; on a Claude Code release it was not checked against, or when a
-check fails, it disables `Bash` and registers the file-tracker's SafeBash,
-which needs Anthropic's sandbox runtime `srt` on `PATH`. Either way it starts
-Claude Code with `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` disabled;
-the battery also blocks those tools at the hook.
-The [coding-agents guide](../../../website/content/docs/coding-agents.md#files-that-keep-their-labels)
-describes the labels and the sandbox.
-
 ### Capabilities deferred to an inference proxy
 
 For requests actually routed through it, a proxy could:
@@ -237,9 +220,10 @@ status.
 Do not replace the installed command with an `APPA_GATE=1` alias. An alias
 cannot record the resumable session or load `clappa`'s session settings.
 
-Only sessions started with `APPA_GATE=1` are protected. The binary reads
-the variable from the Claude Code process environment, fixed at launch,
-so a session cannot turn the protection off mid-session. A plain
+Only sessions with `APPA_GATE=1` are protected. The binary reads the
+variable from the environment Claude Code gives its hooks. A Claude Code
+settings file that sets `APPA_GATE` overrides the launcher's value, including
+during a session, so keep it out of user and project settings. A plain
 `claude` session stays unprotected, and the binary prints nothing
 into it. Protection belongs to the process, not the saved conversation:
 resume a protected conversation with `clappa --resume`, not `claude --resume`.
