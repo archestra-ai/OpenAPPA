@@ -210,7 +210,10 @@ pub enum OfferConsult {
         tool: Option<crate::value::ToolName>,
     },
     Replay(OfferOutcome),
-    Stale,
+    /// Nothing executes: the offer's basis moved, or its subject holds no stage to settle.
+    Stale {
+        subject: crate::basis::SubjectKey,
+    },
 }
 
 /// What the runtime resolved for a selected offer. There is no "no answer" variant: a consult that
