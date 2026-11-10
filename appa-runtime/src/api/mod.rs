@@ -335,6 +335,8 @@ pub enum RemedyRefusal {
     /// The offer no longer stands (expired, already terminal, or recorded under an earlier
     /// policy revision), or is from another trajectory.
     UnknownOffer,
+    /// The session changed after the offer was made, so the call it remedies is checked anew.
+    Superseded,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,
     /// Runtime storage or execution failure.
@@ -346,6 +348,10 @@ impl RemedyRefusal {
         match self {
             Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
             Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
+            Self::Superseded => {
+                "[appa] This session changed after this offer was made, so the offer no longer applies. Call the \
+                 blocked tool again with the same arguments; it will be checked again."
+            }
             Self::UnvouchedDeclaration => {
                 "[appa] This declaration was not tied to your session, so nothing was declared. Call the subagent \
                  tool now, and apply the declaration plan its block offers."
@@ -409,6 +415,15 @@ pub enum OfferKind {
     Withhold,
     Authority { names: Vec<String> },
     Sanitizer { name: String },
+}
+
+/// Where a quoted offer stands: executable, outrun by a change to the session it was made in,
+/// or ended (or never this family's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OfferStanding {
+    Live(OfferKind),
+    Stale,
+    Ended,
 }
 
 /// One offer that still stands, with what reading it needs: the engine and view of the
@@ -3213,8 +3228,12 @@ impl Runtime {
                     if !matches!(self.live_holder(&claimed, Some(&root)), Ok(None)) {
                         return Err(refused(RemedyRefusal::Unvouched));
                     }
-                    if fresh && self.offer_kind_in(log, &quoted).is_none() {
-                        return Err(unknown());
+                    if fresh {
+                        match self.offer_standing_in(log, &quoted) {
+                            OfferStanding::Live(_) => {}
+                            OfferStanding::Stale => return Err(refused(RemedyRefusal::Superseded)),
+                            OfferStanding::Ended => return Err(unknown()),
+                        }
                     }
                     ruling
                 }
@@ -3305,15 +3324,21 @@ impl Runtime {
     /// offer that no longer stands.
     #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
-        self.offer_kind_in(&self.inner.log(root).ok()?, quoted)
+        match self.offer_standing_in(&self.inner.log(root).ok()?, quoted) {
+            OfferStanding::Live(kind) => Some(kind),
+            OfferStanding::Stale | OfferStanding::Ended => None,
+        }
     }
 
-    fn offer_kind_in(&self, log: &Log, quoted: &OfferId) -> Option<OfferKind> {
+    fn offer_standing_in(&self, log: &Log, quoted: &OfferId) -> OfferStanding {
         self.read_offer_in(log, quoted, |standing| {
-            standing
-                .engine
-                .offer_kind(standing.view, &standing.pursuer, &standing.offer)
+            Some(
+                standing
+                    .engine
+                    .offer_standing(standing.view, &standing.pursuer, &standing.offer),
+            )
         })
+        .unwrap_or(OfferStanding::Ended)
     }
 
     /// Read a quoted offer in this root's family under the policy the log resolves to, or

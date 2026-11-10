@@ -52,7 +52,7 @@ use appa_engine::fact::{
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::{AuthorityName, MarkName};
 use appa_engine::plan::{
-    ExecutableRemedyPlan, FloorStanding, ForkAdvice, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
+    ExecutableRemedyPlan, FloorStanding, ForkAdvice, OutputRemedy, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
 };
 use appa_engine::profile::{DeploymentName, PolicyFileKey as EnginePolicyFileKey};
 use appa_engine::projection::Views;
@@ -1072,23 +1072,30 @@ impl RuntimeEngine {
     }
 
     /// Whom taking this offer involves, read without taking it: nobody (the plain narrowing
-    /// acceptance), an authority, or a sanitizer. `None` for an offer that no longer stands.
+    /// acceptance), an authority, or a sanitizer — or why the offer no longer stands.
     /// `appa replay` reads it to take the offer a trace expects, the way the model would.
-    pub(crate) fn offer_kind(
+    pub(crate) fn offer_standing(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
-    ) -> Option<crate::api::OfferKind> {
-        let engine_offer = parse_offer(offer)?;
-        match self.engine.offer_consults(view, trajectory, &engine_offer).ok()? {
-            OfferConsult::Accept { sanitizer: None } => Some(crate::api::OfferKind::Accept),
-            OfferConsult::Withhold => Some(crate::api::OfferKind::Withhold),
+    ) -> crate::api::OfferStanding {
+        use crate::api::{OfferKind, OfferStanding};
+        let Some(consult) = parse_offer(offer)
+            .and_then(|engine_offer| self.engine.offer_consults(view, trajectory, &engine_offer).ok())
+        else {
+            return OfferStanding::Ended;
+        };
+        OfferStanding::Live(match consult {
+            OfferConsult::Stale => return OfferStanding::Stale,
+            OfferConsult::Replay(_) => return OfferStanding::Ended,
+            OfferConsult::Accept { sanitizer: None } => OfferKind::Accept,
+            OfferConsult::Withhold => OfferKind::Withhold,
             OfferConsult::Accept {
                 sanitizer: Some(sanitizer),
-            } => Some(crate::api::OfferKind::Sanitizer {
+            } => OfferKind::Sanitizer {
                 name: sanitizer.as_str().to_string(),
-            }),
+            },
             OfferConsult::Authorities { required, .. } => {
                 let mut names: Vec<String> = required
                     .iter()
@@ -1096,15 +1103,14 @@ impl RuntimeEngine {
                     .collect();
                 names.sort();
                 names.dedup();
-                Some(crate::api::OfferKind::Authority { names })
+                OfferKind::Authority { names }
             }
             OfferConsult::Rewrite { sanitizer, .. } | OfferConsult::Sanitizer { sanitizer, .. } => {
-                Some(crate::api::OfferKind::Sanitizer {
+                OfferKind::Sanitizer {
                     name: sanitizer.as_str().to_string(),
-                })
+                }
             }
-            OfferConsult::Stale | OfferConsult::Replay(_) => None,
-        }
+        })
     }
 
     /// Which trajectory pursues this offer.
@@ -4294,7 +4300,8 @@ struct ReturnSpelling {
     /// The floor at the lowest trust a return may carry, with this session's audience; `None`
     /// when that is this session's own trust.
     lowest_trust_floor: Option<String>,
-    ranks: String,
+    /// The trust ranks a return may carry, lowest first; `None` when only this session's own.
+    ranks: Option<String>,
 }
 
 impl ReturnSpelling {
@@ -4307,17 +4314,19 @@ impl ReturnSpelling {
             usize::from(label.trust.rank()) + 1
         };
         let lowest_rank = usize::from(lowest.rank());
+        let lowerable = lowest_rank + 1 < held;
         ReturnSpelling {
             floor: label_spelling(chain, label),
-            lowest_trust_floor: (lowest_rank + 1 < held)
-                .then(|| label_spelling(chain, &Label::new(*lowest, label.audience.clone()))),
-            ranks: chain
-                .names()
-                .skip(lowest_rank)
-                .take(held.saturating_sub(lowest_rank))
-                .map(|name| format!("\"{}\"", terminal_safe(name)))
-                .collect::<Vec<_>>()
-                .join(", "),
+            lowest_trust_floor: lowerable.then(|| label_spelling(chain, &Label::new(*lowest, label.audience.clone()))),
+            ranks: lowerable.then(|| {
+                chain
+                    .names()
+                    .skip(lowest_rank)
+                    .take(held - lowest_rank)
+                    .map(|name| format!("\"{}\"", terminal_safe(name)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }),
         }
     }
 }
@@ -4331,6 +4340,10 @@ fn return_instruction(
     include_display_plan: bool,
 ) -> String {
     let ReturnSpelling { floor, ranks, .. } = spelling;
+    let lowerable = match ranks {
+        Some(ranks) => format!("`trust` (one of {ranks}, lowest first) or `audience`"),
+        None => "`audience`".to_string(),
+    };
     let body = match route {
         ReturnRoute::Void => {
             let call = remedy_call(control, id, "", description, include_display_plan);
@@ -4351,9 +4364,8 @@ fn return_instruction(
             );
             format!(
                 "  - Declare this session's label as the floor of the subagent's return, then call the subagent tool \
-             again with the same arguments. Set `trust` (one of {ranks}, lowest first) or `audience` lower only when \
-             the subagent must read data below that label. A returned value can narrow this session to its \
-             floor.\n    {call}"
+             again with the same arguments. Set {lowerable} lower only when the subagent must read data below \
+             that label. A returned value can narrow this session to its floor.\n    {call}"
             )
         }
         ReturnRoute::Sanitized(name) if name.is_attest_schema() => {
@@ -4386,8 +4398,8 @@ fn return_instruction(
             );
             format!(
                 "  - Have sanitizer {} rewrite the subagent's return before this session receives it, and declare the \
-             floor. Set `trust` (one of {ranks}, lowest first) or `audience` lower only when the subagent must read \
-             data below this session's label on a dimension the sanitizer does not raise.\n    {call}",
+             floor. Set {lowerable} lower only when the subagent must read data below this session's label on a \
+             dimension the sanitizer does not raise.\n    {call}",
                 terminal_safe(name.as_str()),
             )
         }
@@ -4850,11 +4862,12 @@ fn block_feedback(
         && let Some(advice) = planned.fork_advice
     {
         let remedies_required = !planned.raw.requirement_gaps.is_empty();
+        let sanitizer_offered = output_sanitizer_offered(planned, offers);
         lines.push(String::new());
         lines.push(fork_heading(advice).to_string());
         lines.push(format!(
             "  {}",
-            fork_advice_text(advice, remedies_required).replace('\n', "\n  ")
+            fork_advice_text(advice, remedies_required, sanitizer_offered).replace('\n', "\n  ")
         ));
     }
     if let Some(yell) = &presentation.yell_tool {
@@ -4897,8 +4910,18 @@ fn fork_heading(advice: ForkAdvice) -> &'static str {
     }
 }
 
+/// Does this block offer an executable plan that admits the result through an output sanitizer?
+fn output_sanitizer_offered(planned: &PlannedBlock, offers: &[(OfferId, PlanId)]) -> bool {
+    planned
+        .plans
+        .iter()
+        .filter_map(RemedyPlan::executable)
+        .filter(|plan| offers.iter().any(|(_, offered)| *offered == plan.id))
+        .any(|plan| matches!(plan.output_remedy(), Some(OutputRemedy::Sanitize(_))))
+}
+
 /// Guidance text for delegating blocked work to a subagent.
-fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
+fn fork_advice_text(advice: ForkAdvice, remedies_required: bool, sanitizer_offered: bool) -> String {
     let ForkAdvice::Narrowing {
         standing,
         sanitized_return,
@@ -4920,6 +4943,12 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
                          every narrowing the delegated work needs. A sanitizer unbinds only the dimension it raises. \
                          Under a floor, an empty final message controls what crosses back; it does not relax what the \
                          child may read or accept.";
+    let raw_refused = if sanitizer_offered {
+        "The parent does not allow this session to admit the raw result. This restriction does not forbid an \
+         output sanitizer offered under Continue: execute that offer and retry the call."
+    } else {
+        "The parent does not allow this session to admit the raw result."
+    };
     let returned = "A final message the parent admits crosses to it and can narrow its label. When the task needs \
                     no return, end with an empty final message to leave the parent's label unchanged.";
     match (standing, sanitized_return) {
@@ -4945,23 +4974,17 @@ fn fork_advice_text(advice: ForkAdvice, remedies_required: bool) -> String {
              {returned}"
         ),
         (FloorStanding::Below, true) => format!(
-            "The parent does not allow this session to admit the raw result. This restriction does not forbid \
-             an output sanitizer offered under Continue: execute that offer and retry the call.\nWithout an \
-             output sanitizer, a further subagent under the bare floor cannot admit the raw result either. \
-             A subagent started \
-             here with a return sanitizer can: delegate {delegated} there, and declare that sanitizer when the \
-             spawn asks for the return declaration. When this session needs no answer from that work, a subagent \
-             declared with no return can do it too."
+            "{raw_refused}\nWithout an output sanitizer, a further subagent under the bare floor cannot admit the \
+             raw result either. A subagent started here with a return sanitizer can: delegate {delegated} there, \
+             and declare that sanitizer when the spawn asks for the return declaration. When this session needs no \
+             answer from that work, a subagent declared with no return can do it too."
         ),
-        (FloorStanding::Below, false) => {
-            "The parent does not allow this session to admit the raw result. This restriction does not forbid \
-             an output sanitizer offered under Continue: execute that offer and retry the call.\nIf no output \
-             sanitizer is offered and this session needs no answer from the work, delegate it to a further \
-             subagent declared with no return: nothing it holds crosses back. Otherwise finish without the raw \
-             result, because no registered return sanitizer carries the change back. Tell the parent that the work \
-             needs a child declared with a lower floor, a return sanitizer, or no return."
-                .to_string()
-        }
+        (FloorStanding::Below, false) => format!(
+            "{raw_refused}\nIf no output sanitizer is offered and this session needs no answer from the work, \
+             delegate it to a further subagent declared with no return: nothing it holds crosses back. Otherwise \
+             finish without the raw result, because no registered return sanitizer carries the change back. Tell \
+             the parent that the work needs a child declared with a lower floor, a return sanitizer, or no return."
+        ),
     }
 }
 
@@ -5039,19 +5062,43 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_floor_restricts_raw_results_not_offered_output_sanitizers() {
-        for sanitized_return in [false, true] {
-            let advice = super::ForkAdvice::Narrowing {
+    fn a_parent_floor_points_at_an_output_sanitizer_only_when_one_is_offered() {
+        use appa_engine::check::Narrowing;
+        use appa_engine::label::Label;
+
+        let below = |steps: Vec<RemedyStep>| PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: Some(Narrowing {
+                    from: Label::new(Trust::new(2), Audience::public()),
+                    to: Label::new(Trust::new(2), restricted(&["alice"])),
+                }),
+            },
+            plans: vec![RemedyPlan::Executable(ExecutableRemedyPlan {
+                id: PlanId::new(1),
+                steps,
+                required: vec![],
+            })],
+            fork_advice: Some(super::ForkAdvice::Narrowing {
                 standing: super::FloorStanding::Below,
-                sanitized_return,
+                sanitized_return: false,
                 preserving_output: false,
-            };
+            }),
+            narrowing_impact: None,
+        };
+        let offers = [(OfferId("0123456789abcdef".to_string()), PlanId::new(1))];
+        let sanitized = below(vec![RemedyStep::Sanitize(SanitizerName::new("strip"))]);
+        let withheld = below(vec![RemedyStep::Withhold]);
+
+        assert!(super::output_sanitizer_offered(&sanitized, &offers));
+        assert!(
+            !super::output_sanitizer_offered(&sanitized, &[]),
+            "an unoffered plan is not under Continue"
+        );
+        assert!(!super::output_sanitizer_offered(&withheld, &offers));
+        for block in [&sanitized, &withheld] {
+            let advice = block.fork_advice.expect("the block advises a fork");
             assert_eq!(super::fork_heading(advice), "Refused by the parent's declaration:");
-            let text = super::fork_advice_text(advice, false);
-            assert!(text.contains("does not allow this session to admit the raw result"));
-            assert!(text.contains("does not forbid an output sanitizer offered under Continue"));
-            assert!(text.contains("execute that offer and retry the call"));
-            assert!(!text.contains("Finish without this call"));
         }
     }
 
@@ -5589,7 +5636,7 @@ mod tests {
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
             lowest_trust_floor: None,
-            ranks: String::new(),
+            ranks: None,
         };
         assert_eq!(
             remedy_lines(
@@ -5653,7 +5700,7 @@ mod tests {
             &super::ReturnSpelling {
                 floor: "{}".to_string(),
                 lowest_trust_floor: None,
-                ranks: String::new(),
+                ranks: None,
             },
             BARE_CONTROL_TOOL,
             Some(policy.engine().registry()),
@@ -5688,7 +5735,7 @@ mod tests {
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
             lowest_trust_floor: None,
-            ranks: String::new(),
+            ranks: None,
         };
         let lines = |naming| {
             remedy_lines(
@@ -5745,7 +5792,7 @@ mod tests {
         let spelling = super::ReturnSpelling {
             floor: "{}".to_string(),
             lowest_trust_floor: None,
-            ranks: String::new(),
+            ranks: None,
         };
         let blocked = |naming| {
             remedy_lines(
@@ -5817,23 +5864,27 @@ mod tests {
         use appa_engine::label::{Audience, ChainAudience, Label};
         let chain = suspicious_trusted();
         let internal = audience_of(ChainAudience::Internal);
-        for (label, lowest, floor, lowest_trust_floor) in [
+        let both = Some("\"suspicious\", \"trusted\"");
+        for (label, lowest, floor, lowest_trust_floor, ranks) in [
             (
                 Label::top(),
                 Trust::new(0),
                 "{trust: \"trusted\", audience: [\"public\"]}",
                 Some("{trust: \"suspicious\", audience: [\"public\"]}"),
+                both,
             ),
             (
                 Label::new(Trust::new(1), internal.clone()),
                 Trust::new(0),
                 "{trust: \"trusted\", audience: [\"internal\"]}",
                 Some("{trust: \"suspicious\", audience: [\"internal\"]}"),
+                both,
             ),
             (
                 Label::new(Trust::new(1), Audience::public()),
                 Trust::new(1),
                 "{trust: \"trusted\", audience: [\"public\"]}",
+                None,
                 None,
             ),
             (
@@ -5841,11 +5892,13 @@ mod tests {
                 Trust::new(0),
                 "{trust: \"suspicious\", audience: [\"internal\"]}",
                 None,
+                None,
             ),
         ] {
             let spelling = super::ReturnSpelling::of(&chain, &ReturnBounds { label, lowest });
             assert_eq!(spelling.floor, floor);
             assert_eq!(spelling.lowest_trust_floor.as_deref(), lowest_trust_floor);
+            assert_eq!(spelling.ranks.as_deref(), ranks);
         }
     }
 
@@ -5861,7 +5914,7 @@ mod tests {
                 lowest: Trust::new(0),
             },
         );
-        assert_eq!(spelling.ranks, "\"suspicious\"");
+        assert_eq!(spelling.ranks, None, "a session at the lowest trust cannot lower it");
         let render = |plan: &ExecutableRemedyPlan, display: bool| {
             remedy_instruction(
                 plan,
