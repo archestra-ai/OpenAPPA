@@ -275,7 +275,8 @@ async fn two_spawns_on_two_replicas_take_one_declaration() {
         .filter(|call_id| state.assignment(&root(), call_id) == Some(Some(&host("r1"))))
         .count();
     assert_eq!(took, 1, "exactly one first record names the declaration");
-    assert!(settlements(a) <= 1);
+    assert_eq!(settlements(a), 1, "the released spawn's application settles it once");
+    assert_eq!(state.settlement(&root(), &host("r1")), Some(AheadOutcome::Applied));
 }
 
 #[tokio::test]
@@ -573,17 +574,15 @@ async fn a_duplicate_of_an_applied_spawn_re_proposes_without_settling_again() {
 async fn a_declaration_held_by_another_actor_is_not_replayed_to_this_one() {
     let replicas = replicas();
     let Replicas { a, .. } = &replicas;
-    declare(a, "seed", bare()).await;
-    a.inner
-        .append_host(&root(), &declared_as(a, &child(), host("op")))
-        .expect("the record lands");
+    declare(a, "op", bare()).await;
     assert!(matches!(
-        declare(a, "op", bare()).await,
+        a.declare_return_ahead(&child(), bare(), RemedyAttempt("op".to_string()))
+            .await,
         RemedyOutcome::Refused {
             reason: RemedyRefusal::ActorMismatch
         }
     ));
-    assert_eq!(declarations(a), 2, "nothing was written");
+    assert_eq!(declarations(a), 1, "nothing was written");
 }
 
 #[tokio::test]
