@@ -22,13 +22,12 @@ export function SongDeepLink() {
     // address bar does not start the song again.
     url.searchParams.delete(PARAM);
     window.history.replaceState(window.history.state, "", url);
-    let cancelled = false;
+    // No cancel on cleanup: with the parameter gone, a remount (Strict Mode
+    // runs every effect twice) finds nothing to do, so this first run is the
+    // only one that can show the fallback.
     void playSong().then((played) => {
-      if (!cancelled && !played) setBlocked(true);
+      if (!played) setBlocked(true);
     });
-    return () => {
-      cancelled = true;
-    };
   }, []);
 
   if (!blocked) return null;
