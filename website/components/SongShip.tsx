@@ -882,7 +882,7 @@ type Phase = "hidden" | "sailing" | "leaving";
 export function SongShip() {
   const [phase, setPhase] = useState<Phase>("hidden");
   // Whether the song is muted, for the mute button; null hides the button,
-  // which only a start from the `?song` link gets (lib/song).
+  // which only a start from the `/nfc` link gets (lib/song).
   const [muted, setMuted] = useState<boolean | null>(null);
   const stage = useRef<HTMLDivElement>(null);
 

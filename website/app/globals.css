@@ -3592,7 +3592,7 @@ samp {
   }
 }
 
-/* The mute button on the video, only for a start from the `?song` link
+/* The mute button on the video, only for a start from the `/nfc` link
    (SongShip). It sits on the sea in the scene's bottom-right corner and
    fades in and out with the video. While the song is muted it pulses, a
    mint ring growing out of it, so the way to the sound is found without a

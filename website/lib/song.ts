@@ -30,7 +30,7 @@ function audioElement(): HTMLMediaElement {
   if (!element) {
     // A <video>, not an Audio: with no user gesture yet, Chrome refuses
     // even a muted play of an audio element but allows a muted video, which
-    // is what lets the `?song` link start without a click. It plays the mp3
+    // is what lets the `/nfc` link start without a click. It plays the mp3
     // the same way and is never attached to the page.
     const video = document.createElement("video");
     video.playsInline = true;
@@ -48,7 +48,7 @@ function audioElement(): HTMLMediaElement {
 
 /** Starts the song from the top. Resolves false when the browser refused to play.
  *
- * `muted` is for a start without a user gesture (the `?song` link): browsers
+ * `muted` is for a start without a user gesture (the `/nfc` link): browsers
  * refuse sound before the visitor has interacted with the page but allow a
  * muted start, so the video plays at once and the sound comes on with the
  * visitor's first click or key press anywhere. `fromLink` marks a start
@@ -76,7 +76,7 @@ export function stopSong() {
   element.currentTime = 0;
 }
 
-/** Whether the song playing now was started by the `?song` link. */
+/** Whether the song playing now was started by the `/nfc` link. */
 export function songStartedFromLink(): boolean {
   return fromLink;
 }
