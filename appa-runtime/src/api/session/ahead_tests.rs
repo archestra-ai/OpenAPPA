@@ -391,6 +391,26 @@ async fn an_unidentified_spawn_reserves_and_applies_its_declaration() {
     assert_eq!(ahead(a).settlement(&root(), &host("r1")), Some(AheadOutcome::Applied));
 }
 
+/// A reload and another call's denial between the block and its application leave the block's
+/// offer stale while the declaration still fits: the retry is decided afresh and applies the
+/// declaration, rather than settling it unfit.
+#[tokio::test]
+async fn a_declaration_whose_offer_went_stale_applies_through_a_fresh_decision() {
+    let replicas = replicas();
+    let Replicas { a, .. } = &replicas;
+    declare(a, "r1", bare()).await;
+    reserved(a, "toolu-x").await;
+    replicas.reload(Revision::Unattesting);
+    let session = a.session(&root(), &root()).expect("the session reattaches");
+    assert!(matches!(
+        session.on_tool_call(call("taint"), false).await,
+        Ok(ToolCallDecision::Deny { .. })
+    ));
+    let retried = spawn(a, Some("toolu-x")).await;
+    assert!(released(&retried), "{retried:?}");
+    assert_eq!(ahead(a).settlement(&root(), &host("r1")), Some(AheadOutcome::Applied));
+}
+
 #[tokio::test]
 async fn a_housekeeping_end_leaves_the_declaration_live() {
     let replicas = replicas();

@@ -109,6 +109,9 @@ pub(super) enum Judgment {
         offer: OfferId,
         arguments: RemedyArguments,
     },
+    /// The block's fitting offer no longer stands, as any movement of the family, the
+    /// trajectory's flow or the policy leaves it: a fresh decision offers it again.
+    Stale,
 }
 
 /// A judged host write's failure: the deriver's own refusal, or the store's.
@@ -341,24 +344,31 @@ impl Decided<'_> {
             },
             None => appa_runtime_api::OfferedReturn::AsSpoken,
         };
-        let offer = claim
+        let fitting: Vec<(OfferId, crate::api::OfferStanding)> = claim
             .offers
             .iter()
             .filter(|offer| offer.returns.as_ref() == Some(&route))
             .filter_map(|offer| crate::engine::resolve_rendered(self.log, &OfferId(offer.id.clone())))
-            // An offer whose basis moved would be declined by every application round.
-            .filter(|offer| {
-                matches!(
-                    self.engine().offer_standing(self.view, trajectory, offer),
-                    crate::api::OfferStanding::Live(_)
-                )
+            .filter(|offer| self.engine().offer_declares_only(self.view, trajectory, offer))
+            .map(|offer| {
+                let standing = self.engine().offer_standing(self.view, trajectory, &offer);
+                (offer, standing)
             })
-            .find(|offer| self.engine().offer_declares_only(self.view, trajectory, offer));
-        Ok(match offer {
-            Some(offer) => Judgment::Apply {
-                offer,
+            .collect();
+        let live = fitting
+            .iter()
+            .find(|(_, standing)| matches!(standing, crate::api::OfferStanding::Live(_)));
+        Ok(match live {
+            Some((offer, _)) => Judgment::Apply {
+                offer: offer.clone(),
                 arguments: declared.arguments.clone(),
             },
+            None if fitting
+                .iter()
+                .any(|(_, standing)| matches!(standing, crate::api::OfferStanding::Stale)) =>
+            {
+                Judgment::Stale
+            }
             None => Judgment::Settled(AheadOutcome::Unfit),
         })
     }

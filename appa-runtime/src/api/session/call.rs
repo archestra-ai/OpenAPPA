@@ -111,35 +111,36 @@ impl Session {
     /// written where it commits, the first one wins, and a retry of the call reads it back.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
         let invocation = appa_eventlog::InvocationNonce(rand::random());
-        let decision = self.propose_once(&proposal, invocation).await?;
-        let (
-            Some(spawn),
-            ToolCallDecision::Deny {
-                feedback,
-                offers,
-                display,
-                review,
-            },
-        ) = (proposal.spawn, &decision)
-        else {
+        let mut decision = self.propose_once(&proposal, invocation).await?;
+        let (Some(spawn), ToolCallDecision::Deny { .. }) = (proposal.spawn, &decision) else {
             return Ok(decision);
         };
         let Some(attempt) = self.own_assignment(&proposal, invocation)? else {
             return Ok(decision);
         };
-        let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
-        let noted = |notice: &str| ToolCallDecision::Deny {
-            feedback: format!("{notice}{apply}\n\n{feedback}"),
-            offers: offers.clone(),
-            display: display.clone(),
-            review: review.clone(),
-        };
-        let claim = AheadClaim {
-            attempt: &attempt,
-            spawn,
-            offers,
-        };
         for _ in 0..AHEAD_ROUNDS {
+            let ToolCallDecision::Deny {
+                feedback,
+                offers,
+                display,
+                review,
+            } = &decision
+            else {
+                return Ok(decision);
+            };
+            let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
+            let noted = |notice: &str| ToolCallDecision::Deny {
+                feedback: format!("{notice}{apply}\n\n{feedback}"),
+                offers: offers.clone(),
+                display: display.clone(),
+                review: review.clone(),
+            };
+            let offers = offers.clone();
+            let claim = AheadClaim {
+                attempt: &attempt,
+                spawn,
+                offers: &offers,
+            };
             let (offer, arguments) = match self.settle_terminal(&claim)? {
                 Judgment::Settled(AheadOutcome::Applied) => return self.propose_once(&proposal, invocation).await,
                 Judgment::Settled(AheadOutcome::Ended) => return Ok(decision),
@@ -147,6 +148,10 @@ impl Session {
                 Judgment::Settled(AheadOutcome::Unfit) => return Ok(noted(UNFIT_AHEAD)),
                 Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(FAN_OUT_AHEAD)),
                 Judgment::Apply { offer, arguments } => (offer, arguments),
+                Judgment::Stale => {
+                    decision = self.propose_once(&proposal, invocation).await?;
+                    continue;
+                }
             };
             match self.apply_ahead(&offer, &claim, arguments).await {
                 Ok(RemedyDecision::Authorized { .. }) => return self.propose_once(&proposal, invocation).await,
