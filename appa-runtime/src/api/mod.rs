@@ -3588,6 +3588,7 @@ impl Runtime {
             &acting.root,
             &HostObservation::TurnEnded {
                 actor: host_actor(acting),
+                end_kind: appa_eventlog::EndKind::Boundary,
             },
         )
     }
@@ -6164,6 +6165,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             &root,
             &HostObservation::TurnEnded {
                 actor: host_actor(&actor),
+                end_kind: appa_eventlog::EndKind::Boundary,
             },
         );
         assert_eq!(

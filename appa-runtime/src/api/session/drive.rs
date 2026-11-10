@@ -191,6 +191,7 @@ impl Decided<'_> {
                     call_id: call_id.to_string(),
                     dispatch,
                     prompt: fan_out_prompt,
+                    ahead: None,
                 })
             }
             // A decided proposal batch that opens nothing denied the call: bind the host
@@ -202,6 +203,7 @@ impl Decided<'_> {
                         trajectory: self.session.trajectory.clone(),
                         call_id: call_id.to_string(),
                         batch: batch.as_str().to_string(),
+                        ahead: None,
                     })
                 }
                 _ => None,

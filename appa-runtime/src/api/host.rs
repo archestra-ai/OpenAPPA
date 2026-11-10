@@ -65,7 +65,10 @@ impl HostState {
                 | HostObservation::PeerAdmitted { .. }
                 | HostObservation::Launched { .. }
                 | HostObservation::LaunchMoved { .. }
-                | HostObservation::Aliased { .. } => {}
+                | HostObservation::Aliased { .. }
+                | HostObservation::AheadDeclared { .. }
+                | HostObservation::AheadReserved { .. }
+                | HostObservation::AheadSettled { .. } => {}
                 HostObservation::Vouched { actor, key, ruling } => {
                     let (Some(key), actor) = (recorded_key(key), actor_of(actor)) else {
                         continue;
@@ -97,7 +100,7 @@ impl HostState {
                     state.end(&actor, &key);
                     state.claims.insert(key, Claim { actor, until: *until });
                 }
-                HostObservation::TurnEnded { actor } => {
+                HostObservation::TurnEnded { actor, .. } => {
                     let ended = actor_of(actor);
                     state.vouches.retain(|_, holders| {
                         holders.retain(|holder| holder.actor != ended);
@@ -173,7 +176,7 @@ pub(crate) fn prompted(records: &[HostRecord], acting: &appa_engine::value::Traj
     let marks = |observation: &HostObservation| match observation {
         HostObservation::PromptSeen { actor }
         | HostObservation::PromptSettled { actor }
-        | HostObservation::TurnEnded { actor } => {
+        | HostObservation::TurnEnded { actor, .. } => {
             actor.child.as_ref().unwrap_or(&actor.root).as_str() == acting.as_str()
         }
         _ => false,

@@ -207,8 +207,14 @@ mod tests {
     use appa_engine::value::DispatchId;
     use appa_runtime_api::Ruling;
 
+    use appa_engine::label::{Audience, Label, Trust};
+    use appa_engine::registry::TrustChain;
+
     use super::*;
-    use crate::HostActor;
+    use crate::{
+        AheadAttempt, AheadOutcome, DeclaredArguments, EndKind, HostActor, InvocationNonce, LabelSpelling, SpentVouch,
+        StoredLabel,
+    };
     use crate::tests::{observed, punctuation, root};
 
     /// One observation of every kind, in declaration order, so a golden covers each wire tag.
@@ -228,6 +234,7 @@ mod tests {
                     7,
                 ),
                 prompt: Some("prompt-1".to_string()),
+                ahead: None,
             },
             HostObservation::CallSettled {
                 trajectory: root(),
@@ -237,6 +244,7 @@ mod tests {
                 trajectory: root(),
                 call_id: "toolu_2".to_string(),
                 batch: "cd".repeat(32),
+                ahead: None,
             },
             HostObservation::Vouched {
                 actor: actor.clone(),
@@ -259,8 +267,43 @@ mod tests {
                     child: None,
                 },
             },
-            HostObservation::TurnEnded { actor },
+            HostObservation::TurnEnded {
+                actor: actor.clone(),
+                end_kind: EndKind::Boundary,
+            },
+            HostObservation::AheadDeclared {
+                actor,
+                attempt: AheadAttempt::McpCall("toolu_3".to_string()),
+                arguments: DeclaredArguments {
+                    label: Some(LabelSpelling {
+                        trust: Some("trusted".to_string()),
+                        audience: None,
+                    }),
+                    return_schema: Some(serde_json::json!({ "type": "string" })),
+                },
+                label: stored_label(),
+                spends: Some(SpentVouch {
+                    key: "call:one".to_string(),
+                }),
+            },
+            HostObservation::AheadReserved {
+                trajectory: root(),
+                attempt: AheadAttempt::Vouch(4),
+                invocation: InvocationNonce(0xabc),
+            },
+            HostObservation::AheadSettled {
+                trajectory: root(),
+                attempt: AheadAttempt::Host("remedy:op".to_string()),
+                outcome: AheadOutcome::Applied,
+            },
         ]
+    }
+
+    fn stored_label() -> StoredLabel {
+        StoredLabel::named(
+            &Label::new(Trust::new(1), Audience::public()),
+            &TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()]),
+        )
     }
 
     /// The stored batch bytes are a persisted format: every host observation kind, the bare
@@ -279,6 +322,9 @@ mod tests {
             r#"{"kind":"prompt_seen","actor":{"root":"cc:root","child":"cc:child"}}"#,
             r#"{"kind":"prompt_settled","actor":{"root":"cc:root","child":null}}"#,
             r#"{"kind":"turn_ended","actor":{"root":"cc:root","child":"cc:child"}}"#,
+            r#"{"kind":"ahead_declared","actor":{"root":"cc:root","child":"cc:child"},"attempt":{"mcp_call":"toolu_3"},"arguments":{"label":{"trust":"trusted","audience":null},"return_schema":{"type":"string"}},"label":LABEL,"spends":{"key":"call:one"}}"#,
+            r#"{"kind":"ahead_reserved","trajectory":"cc:root","attempt":{"vouch":4},"invocation":"00000000000000000000000000000abc"}"#,
+            r#"{"kind":"ahead_settled","trajectory":"cc:root","attempt":{"host":"remedy:op"},"outcome":"applied"}"#,
         ];
         let observations = golden_observations();
         assert_eq!(observations.len(), hosts.len());
@@ -287,7 +333,10 @@ mod tests {
         assert_eq!(String::from_utf8(bare.clone()).unwrap(), facts);
         assert!(matches!(decode(0, &bare), Ok(Record { facts, host: None }) if facts == punctuation()));
 
+        let label = serde_json::to_string(&stored_label()).expect("a label serializes");
         for (observation, host) in observations.iter().zip(hosts) {
+            let host = host.replace("LABEL", &label);
+            let host = host.as_str();
             let with_facts = encode(&punctuation(), Some(observation));
             assert_eq!(
                 String::from_utf8(with_facts.clone()).unwrap(),
@@ -306,6 +355,130 @@ mod tests {
                 decode(0, &alone),
                 Ok(Record { facts, host: Some(decoded) }) if facts.is_empty() && &decoded == observation
             ));
+        }
+    }
+
+    /// The spellings the frozen goldens leave at their defaults: a housekeeping end, a first
+    /// record that took a declaration, a declaration that spent no vouch, and every attempt and
+    /// outcome. Each round-trips byte for byte.
+    #[test]
+    fn ahead_spellings_round_trip() {
+        let actor = HostActor {
+            root: root(),
+            child: None,
+        };
+        let dispatch = DispatchId::new(
+            root(),
+            serde_json::from_value(serde_json::json!("ab".repeat(32))).expect("a digest decodes"),
+            7,
+        );
+        let label = serde_json::to_string(&stored_label()).expect("a label serializes");
+        let mut cases = vec![
+            (
+                HostObservation::TurnEnded {
+                    actor: actor.clone(),
+                    end_kind: EndKind::Housekeeping,
+                },
+                r#"{"kind":"turn_ended","actor":{"root":"cc:root","child":null},"end_kind":"housekeeping"}"#.to_string(),
+            ),
+            (
+                HostObservation::CallBound {
+                    trajectory: root(),
+                    call_id: "toolu_1".to_string(),
+                    dispatch,
+                    prompt: None,
+                    ahead: Some(AheadAttempt::McpCall("toolu_0".to_string())),
+                },
+                format!(
+                    r#"{{"kind":"call_bound","trajectory":"cc:root","call_id":"toolu_1","dispatch":{{"trajectory":"cc:root","digest":"{}","occurrence":7}},"ahead":{{"mcp_call":"toolu_0"}}}}"#,
+                    "ab".repeat(32)
+                ),
+            ),
+            (
+                HostObservation::CallDenied {
+                    trajectory: root(),
+                    call_id: "toolu_2".to_string(),
+                    batch: "cd".to_string(),
+                    ahead: Some(AheadAttempt::Host("remedy:op".to_string())),
+                },
+                r#"{"kind":"call_denied","trajectory":"cc:root","call_id":"toolu_2","batch":"cd","ahead":{"host":"remedy:op"}}"#
+                    .to_string(),
+            ),
+            (
+                HostObservation::AheadDeclared {
+                    actor,
+                    attempt: AheadAttempt::Vouch(9),
+                    arguments: DeclaredArguments::default(),
+                    label: stored_label(),
+                    spends: None,
+                },
+                format!(
+                    r#"{{"kind":"ahead_declared","actor":{{"root":"cc:root","child":null}},"attempt":{{"vouch":9}},"arguments":{{"label":null,"return_schema":null}},"label":{label}}}"#
+                ),
+            ),
+        ];
+        for (outcome, spelled) in [
+            (AheadOutcome::Applied, "applied"),
+            (AheadOutcome::FanOut, "fan_out"),
+            (AheadOutcome::Lapsed, "lapsed"),
+            (AheadOutcome::Unfit, "unfit"),
+            (AheadOutcome::Ended, "ended"),
+        ] {
+            cases.push((
+                HostObservation::AheadSettled {
+                    trajectory: root(),
+                    attempt: AheadAttempt::Vouch(1),
+                    outcome,
+                },
+                format!(
+                    r#"{{"kind":"ahead_settled","trajectory":"cc:root","attempt":{{"vouch":1}},"outcome":"{spelled}"}}"#
+                ),
+            ));
+        }
+        for (observation, host) in cases {
+            let alone = encode(&[], Some(&observation));
+            assert_eq!(
+                String::from_utf8(alone.clone()).unwrap(),
+                format!(r#"{{"facts":[],"host":{host}}}"#)
+            );
+            assert!(matches!(
+                decode(0, &alone),
+                Ok(Record { host: Some(decoded), .. }) if decoded == observation
+            ));
+        }
+    }
+
+    /// A declaration names the key a retry of its attempt finds it by, and the records that
+    /// take or settle one name none.
+    #[test]
+    fn a_declaration_names_its_attempts_key() {
+        for (attempt, key) in [
+            (AheadAttempt::Host("remedy:op".to_string()), "ahead-attempt:host:remedy:op"),
+            (AheadAttempt::McpCall("toolu_3".to_string()), "ahead-attempt:mcp:toolu_3"),
+            (AheadAttempt::Vouch(4), "ahead-attempt:vouch:4"),
+        ] {
+            let declared = HostObservation::AheadDeclared {
+                actor: HostActor {
+                    root: root(),
+                    child: None,
+                },
+                attempt: attempt.clone(),
+                arguments: DeclaredArguments::default(),
+                label: stored_label(),
+                spends: None,
+            };
+            assert_eq!(declared.key().as_deref(), Some(key));
+            let settled = HostObservation::AheadSettled {
+                trajectory: root(),
+                attempt: attempt.clone(),
+                outcome: AheadOutcome::Ended,
+            };
+            let reserved = HostObservation::AheadReserved {
+                trajectory: root(),
+                attempt,
+                invocation: InvocationNonce(1),
+            };
+            assert_eq!((settled.key(), reserved.key()), (None, None));
         }
     }
 

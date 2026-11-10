@@ -61,7 +61,8 @@
 //! moves the head therefore orders against every such append: each stamped batch committed after
 //! it was decided at the revision it published, and a batch decided before it is refused as
 //! [`AppendError::PolicyMoved`] for its caller to decide again. A decided batch that names no
-//! revision is refused as [`AppendError::Unstamped`]; a host-only batch is not fenced.
+//! revision is refused as [`AppendError::Unstamped`]; a host-only batch is fenced only when its
+//! writer judged it under a revision ([`Step::append_host_fenced`]).
 //!
 //! A log whose opening names no deployment was opened before policy revisions. It is refused on
 //! read as [`ReadError::LegacyFamily`].
@@ -85,6 +86,7 @@ use appa_runtime_api::{
     AdapterName, LaunchToken, PeerAddress, PeerDigest, Ruling, SessionTitle, inventory::ToolInventory,
 };
 
+mod ahead;
 pub mod embedded;
 mod encoding;
 #[cfg(feature = "postgres")]
@@ -99,6 +101,7 @@ mod sqlite;
 use encoding::encode;
 use sqlite::Sqlite;
 
+pub use ahead::{AheadAttempt, AheadOutcome, DeclaredArguments, EndKind, InvocationNonce, LabelSpelling, SpentVouch};
 use embedded::{DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, ReadTake};
 pub use held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage};
 pub use label::StoredLabel;
@@ -148,6 +151,11 @@ struct FaultPoints {
     /// What the next foreign writer records rather than nothing, so a caller's re-derivation
     /// meets a changed state and not only a moved position.
     contending_record: std::sync::Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
+    /// The policy file a foreign publisher makes the next revision of the deployment before
+    /// the next append.
+    publishing: std::sync::Mutex<Option<(DeploymentName, Vec<u8>)>>,
+    /// The root whose next log reads fail, and how many of them.
+    failing_root_reads: std::sync::Mutex<Option<(TrajectoryId, u64)>>,
 }
 
 pub use appa_engine::profile::DeploymentName;
@@ -206,6 +214,9 @@ pub enum HostObservation {
         /// and no call, so this is what binds them to the spawn's fork.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// The declaration ahead this spawn took, on the call's first record only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ahead: Option<AheadAttempt>,
     },
     /// The host reported this bound call finished. A fan-out spawn's fork binds no new child
     /// after it.
@@ -218,6 +229,9 @@ pub enum HostObservation {
         trajectory: TrajectoryId,
         call_id: String,
         batch: String,
+        /// The declaration ahead this spawn reserved, on the call's first record only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ahead: Option<AheadAttempt>,
     },
     /// This actor stands behind this key, with the ruling its harness attached where it
     /// reviewed through a channel of its own.
@@ -239,8 +253,13 @@ pub enum HostObservation {
     PromptSeen { actor: HostActor },
     /// What the prompt left open is settled, and the actor's standing survives it.
     PromptSettled { actor: HostActor },
-    /// This actor's turn ended: its prompt mark and every vouch it still held are over.
-    TurnEnded { actor: HostActor },
+    /// This actor's turn ended: its prompt mark and every vouch it still held are over. Only a
+    /// boundary ends the return the actor declared ahead.
+    TurnEnded {
+        actor: HostActor,
+        #[serde(default, skip_serializing_if = "EndKind::is_boundary")]
+        end_kind: EndKind,
+    },
     /// This root receives peer messages at `address`.
     Addressed { address: PeerAddress },
     /// This root's host shows it under `title`.
@@ -261,6 +280,29 @@ pub enum HostObservation {
     LaunchMoved { launch: LaunchToken, to: TrajectoryId },
     /// The host continues this family under `host`, another of its own session ids.
     Aliased { host: TrajectoryId },
+    /// This actor declared ahead what its next single spawn's return may carry, checked at
+    /// `label`. A daemon declaration also spends the vouch its control hook recorded.
+    AheadDeclared {
+        actor: HostActor,
+        attempt: AheadAttempt,
+        arguments: DeclaredArguments,
+        label: StoredLabel,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spends: Option<SpentVouch>,
+    },
+    /// A spawn the host gave no call id took this trajectory's declaration, in the invocation
+    /// `invocation` names.
+    AheadReserved {
+        trajectory: TrajectoryId,
+        attempt: AheadAttempt,
+        invocation: InvocationNonce,
+    },
+    /// The declaration this trajectory made under `attempt` is settled.
+    AheadSettled {
+        trajectory: TrajectoryId,
+        attempt: AheadAttempt,
+        outcome: AheadOutcome,
+    },
 }
 
 impl HostObservation {
@@ -275,6 +317,7 @@ impl HostObservation {
             Self::PeerSent { digest, .. } => Some(peer_sent_key(digest)),
             Self::Launched { launch } => Some(launch_key(launch)),
             Self::Aliased { host } => Some(host_alias_key(host)),
+            Self::AheadDeclared { attempt, .. } => Some(attempt.key()),
             Self::Inventory { .. }
             | Self::CallBound { .. }
             | Self::CallSettled { .. }
@@ -283,7 +326,9 @@ impl HostObservation {
             | Self::PromptSettled { .. }
             | Self::TurnEnded { .. }
             | Self::PeerAdmitted { .. }
-            | Self::LaunchMoved { .. } => None,
+            | Self::LaunchMoved { .. }
+            | Self::AheadReserved { .. }
+            | Self::AheadSettled { .. } => None,
         }
     }
 }
@@ -418,6 +463,7 @@ impl Log {
                 call_id,
                 dispatch,
                 prompt,
+                ..
             } => Some(CallBinding {
                 trajectory,
                 call_id,
@@ -437,6 +483,7 @@ impl Log {
                 trajectory: owner,
                 call_id: id,
                 batch,
+                ..
             } if owner == trajectory && id == call_id => Some(batch.as_str()),
             _ => None,
         })
@@ -704,6 +751,26 @@ impl Step<'_> {
     /// [`LogStore::append_host`] within this step.
     pub fn append_host(self, based_on: &Log, observation: &HostObservation) -> Result<(), AppendError> {
         self.write(based_on, Batch::of(based_on, &[], Some(observation))?, None)
+    }
+
+    /// One host observation alone, fenced like a decided batch: it commits only while
+    /// `revision` is still the deployment's head, for a record judged under that revision. It
+    /// carries no stamp, so a reader still reads it as a host-only batch.
+    pub fn append_host_fenced(
+        self,
+        based_on: &Log,
+        observation: &HostObservation,
+        revision: PolicyRevision,
+    ) -> Result<(), AppendError> {
+        let batch = Batch {
+            bytes: encode(&[], Some(observation)),
+            key: observation.key(),
+            fence: Some(Fence {
+                deployment: &based_on.deployment,
+                revision,
+            }),
+        };
+        self.write(based_on, batch, None)
     }
 
     /// [`LogStore::append_holding_embedded_read`] within this step.
@@ -995,6 +1062,8 @@ impl LogStore {
     pub fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
         #[cfg(feature = "fault-injection")]
         self.read_refused()?;
+        #[cfg(feature = "fault-injection")]
+        self.read_of_refused(root)?;
         match &self.store {
             Store::Sqlite(sqlite) => sqlite.log(root),
             #[cfg(feature = "postgres")]
@@ -1055,6 +1124,8 @@ impl LogStore {
                 if self.contention_fires() {
                     self.contend(&mut appender, root)?;
                 }
+                #[cfg(feature = "fault-injection")]
+                self.publish_fires(&mut appender)?;
                 appender.append(root, basis, &batch, || {
                     #[cfg(feature = "fault-injection")]
                     if self.failure_fires() {
@@ -1522,6 +1593,25 @@ impl LogStore {
         self.contend_next_appends(1);
     }
 
+    /// Arm the publication point once: before the next append opens its transaction, a
+    /// foreign publisher makes `policy_file` the next revision of `deployment`, in a committed
+    /// transaction of its own, as another process's publish would. The append then meets a
+    /// head that moved after its caller judged. A PostgreSQL store never consults it.
+    pub fn publish_before_next_append(&self, deployment: &DeploymentName, policy_file: &[u8]) {
+        *self.faults.publishing.lock().expect("the injection mutex is never poisoned") =
+            Some((deployment.clone(), policy_file.to_vec()));
+    }
+
+    /// Arm the read fail point for one family: its next `count` log reads answer with a
+    /// failure, and every other family reads as stored.
+    pub fn fail_reads_of(&self, root: &TrajectoryId, count: u64) {
+        *self
+            .faults
+            .failing_root_reads
+            .lock()
+            .expect("the injection mutex is never poisoned") = Some((root.clone(), count));
+    }
+
     /// Forget every stored policy file, leaving each root's opening naming a
     /// file this database no longer holds. Damage stated in this
     /// crate's own vocabulary, so a caller can pin how it refuses without
@@ -1563,6 +1653,34 @@ impl LogStore {
     fn read_refused(&self) -> Result<(), ReadError> {
         match consume(&self.faults.failing_reads) {
             Some(_) => Err(ReadError::Injected),
+            None => Ok(()),
+        }
+    }
+
+    fn read_of_refused(&self, root: &TrajectoryId) -> Result<(), ReadError> {
+        let mut armed = self
+            .faults
+            .failing_root_reads
+            .lock()
+            .expect("the injection mutex is never poisoned");
+        match armed.as_mut() {
+            Some((failing, count)) if failing == root && *count > 0 => {
+                *count -= 1;
+                Err(ReadError::Injected)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn publish_fires(&self, appender: &mut sqlite::Appender<'_>) -> Result<(), AppendError> {
+        let armed = self
+            .faults
+            .publishing
+            .lock()
+            .expect("the injection mutex is never poisoned")
+            .take();
+        match armed {
+            Some((deployment, policy_file)) => appender.foreign_publish(&deployment, &policy_file),
             None => Ok(()),
         }
     }
@@ -1990,6 +2108,70 @@ mod tests {
         );
     }
 
+    /// A host record judged under the first revision, held in a step while `publisher` moves
+    /// `line` to the second: the fenced append writes nothing and the head stays moved. An
+    /// unfenced host record still lands, and so does one fenced at the new head.
+    fn fences_a_host_only_append(store: &LogStore, publisher: &LogStore, root: &TrajectoryId, line: &DeploymentName) {
+        let next = PolicyRevision::new(2);
+        let observation = observed(root.as_str(), "demo");
+        let step = store.step(root).expect("the step holds the family");
+        let read = step.log().expect("the step reads");
+        publisher
+            .publish(line, Some(PolicyRevision::FIRST), b"version = 2\n# next")
+            .expect("the publish commits while the step is open");
+        assert!(
+            matches!(
+                step.append_host_fenced(&read, &observation, PolicyRevision::FIRST),
+                Err(AppendError::PolicyMoved { head: Some(head) }) if head == next
+            ),
+            "a record judged at the previous head does not commit after the publish"
+        );
+        let log = store.log(root).expect("the log reads");
+        assert_eq!(
+            (log.basis(), log.host_records()),
+            (read.basis(), read.host_records()),
+            "the refused append wrote nothing"
+        );
+        assert_eq!(store.head(line).expect("the head reads").map(|head| head.revision), Some(next));
+        store
+            .append_host(&log, &observation)
+            .expect("an unfenced host record lands");
+        let log = store.log(root).expect("the log reads");
+        store
+            .step(root)
+            .expect("the step holds the family")
+            .append_host_fenced(&log, &observation, next)
+            .expect("a record judged at the new head lands");
+        let landed = store.log(root).expect("the log reads");
+        assert_eq!(landed.basis(), log.basis() + 1);
+        assert_eq!(landed.stamp(), log.stamp(), "a fenced host record carries no stamp");
+    }
+
+    #[test]
+    fn a_publish_fences_a_host_only_append_it_raced() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let open = || {
+            LogStore::open(Backend::Sqlite {
+                path: dir.path().join("log.db"),
+            })
+            .expect("the SQLite store opens")
+        };
+        let (store, publisher) = (open(), open());
+        create(&store, opening(&root())).expect("a fresh root opens");
+        fences_a_host_only_append(&store, &publisher, &root(), &deployment());
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_publish_fences_a_host_only_append_it_raced() {
+        let (store, publisher) = (postgres_store(2), postgres_store(1));
+        let root = postgres_root(&store, "fenced-host");
+        let line = DeploymentName::new(format!("line:{}", root.as_str()));
+        fences_a_host_only_append(&store, &publisher, &root, &line);
+        forget_postgres_roots(&store, vec![root]);
+    }
+
     /// A decided batch commits only while the revision that decided it is its deployment's
     /// head; a batch of host observations alone is not fenced and carries the stamp before it.
     #[test]
@@ -2157,6 +2339,7 @@ mod tests {
             call_id: "toolu_1".to_string(),
             dispatch: dispatch.clone(),
             prompt: None,
+            ahead: None,
         };
         store.append(&log, &decided(&punctuation()), Some(&bound)).unwrap();
 
@@ -2968,6 +3151,7 @@ mod tests {
                 0,
             ),
             prompt: None,
+            ahead: None,
         };
         let bindings = |log: &Log| {
             log.call_bindings()
