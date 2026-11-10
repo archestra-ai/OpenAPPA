@@ -877,6 +877,8 @@ impl Session {
         let view = policy.rebuild_view(&log).map_err(EventError::from)?;
         Ok(offers
             .iter()
+            // A plan that declares a return or rewrites arguments is never authorize-only.
+            .filter(|offer| offer.returns.is_none() && offer.input_sanitizer.is_none())
             .filter_map(|offer| crate::engine::resolve_rendered(&log, &OfferId(offer.id.clone())))
             .find(|offer| {
                 policy
