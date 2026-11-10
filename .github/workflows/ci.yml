@@ -44,7 +44,7 @@ jobs:
 
       - name: Check new Cargo dependency release ages
         if: github.event_name == 'pull_request' || github.event_name == 'push'
-        uses: archestra-ai/.github/actions/cargo-release-age@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
+        uses: archestra-ai/.github/actions/cargo-release-age@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
           lockfiles: |
