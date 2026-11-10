@@ -20,8 +20,8 @@ export function SongDeepLink() {
     // (Strict Mode runs every effect twice) finds nothing to do.
     url.searchParams.delete(PARAM);
     window.history.replaceState(window.history.state, "", url);
-    void playSong().then((played) => {
-      if (!played) void playSong({ muted: true });
+    void playSong({ fromLink: true }).then((played) => {
+      if (!played) void playSong({ muted: true, fromLink: true });
     });
   }, []);
 

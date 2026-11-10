@@ -3591,3 +3591,62 @@ samp {
     animation: none;
   }
 }
+
+/* The mute button on the video, only for a start from the `?song` link
+   (SongShip). It sits on the sea in the scene's bottom-right corner and
+   fades in and out with the video. While the song is muted it pulses, a
+   mint ring growing out of it, so the way to the sound is found without a
+   label. */
+.song-mute {
+  position: absolute;
+  bottom: 13%;
+  right: 13%;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 2px solid #f2e5c9;
+  background: #0d1a2b;
+  color: #f2e5c9;
+  cursor: pointer;
+  opacity: 0.75;
+  transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.song-mute:hover,
+.song-mute:focus-visible {
+  opacity: 1;
+  border-color: #7fd8a8;
+  color: #7fd8a8;
+}
+.song-mute:focus-visible {
+  outline: 2px solid #f2c94c;
+  outline-offset: 2px;
+}
+.song-mute[data-muted] {
+  opacity: 1;
+  border-color: #7fd8a8;
+  color: #7fd8a8;
+  animation: song-mute-pulse 1.4s ease-out infinite;
+}
+@keyframes song-mute-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgb(127 216 168 / 0.85);
+    transform: scale(1);
+  }
+  15% {
+    transform: scale(1.12);
+  }
+  30% {
+    transform: scale(1);
+  }
+  100% {
+    box-shadow: 0 0 0 16px rgb(127 216 168 / 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .song-mute[data-muted] {
+    animation: none;
+  }
+}

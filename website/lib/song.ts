@@ -17,6 +17,7 @@ type Listener = (audio: HTMLMediaElement | null) => void;
 
 let element: HTMLMediaElement | null = null;
 let playing: HTMLMediaElement | null = null;
+let fromLink = false;
 const listeners = new Set<Listener>();
 
 function publish(audio: HTMLMediaElement | null) {
@@ -50,10 +51,12 @@ function audioElement(): HTMLMediaElement {
  * `muted` is for a start without a user gesture (the `?song` link): browsers
  * refuse sound before the visitor has interacted with the page but allow a
  * muted start, so the video plays at once and the sound comes on with the
- * visitor's first click or key press anywhere. */
-export async function playSong(options: { muted?: boolean } = {}): Promise<boolean> {
+ * visitor's first click or key press anywhere. `fromLink` marks a start
+ * from that link, which gets a mute button on the video (SongShip). */
+export async function playSong(options: { muted?: boolean; fromLink?: boolean } = {}): Promise<boolean> {
   const audio = audioElement();
   stopWaitingForGesture();
+  fromLink = options.fromLink ?? false;
   audio.muted = options.muted ?? false;
   audio.currentTime = 0;
   try {
@@ -73,6 +76,18 @@ export function stopSong() {
   element.currentTime = 0;
 }
 
+/** Whether the song playing now was started by the `?song` link. */
+export function songStartedFromLink(): boolean {
+  return fromLink;
+}
+
+/** Mutes or unmutes the song; an unmute ends the wait for the first gesture. */
+export function setSongMuted(muted: boolean) {
+  if (!element) return;
+  stopWaitingForGesture();
+  element.muted = muted;
+}
+
 /** Calls `listener` with the playing element now and on every change. */
 export function subscribeSong(listener: Listener): () => void {
   listeners.add(listener);
@@ -85,12 +100,14 @@ export function subscribeSong(listener: Listener): () => void {
 /* Unmuting needs the user activation a click or key press grants.
    `click`, not `pointerdown`: SongShip dismisses the video on a pointerdown
    outside it unless the song is still muted, so the click that brings the
-   sound in leaves the video playing. */
+   sound in leaves the video playing. A gesture on the mute button is left
+   to the button, so its click toggles once rather than twice. */
 const GESTURES = ["click", "keydown"] as const;
-let unmuteOnGesture: (() => void) | null = null;
+let unmuteOnGesture: ((event: Event) => void) | null = null;
 
 function waitForGesture(audio: HTMLMediaElement) {
-  unmuteOnGesture = () => {
+  unmuteOnGesture = (event) => {
+    if (event.target instanceof Element && event.target.closest("[data-song-mute]")) return;
     audio.muted = false;
     stopWaitingForGesture();
   };
