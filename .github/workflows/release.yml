@@ -677,6 +677,25 @@ jobs:
           gh release edit "$TAG_NAME" --draft=false
           echo "Published release $TAG_NAME."
 
+  recheck-release-prs:
+    name: Re-check open release PRs
+    # The next release PR waits for this release (Previous Release Published).
+    # Re-check it now instead of at that workflow's next scheduled run: the
+    # release event this run's GITHUB_TOKEN publish caused starts no workflow,
+    # a workflow_dispatch does.
+    needs: [publish-release]
+    if: ${{ !cancelled() && !failure() && needs.publish-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # Start the Previous Release Published workflow.
+    steps:
+      - name: Start Previous Release Published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run previous-release-published.yml --ref main
+
   update-archestra:
     name: Propose Archestra runtime update
     needs: [release-please, publish-release]
