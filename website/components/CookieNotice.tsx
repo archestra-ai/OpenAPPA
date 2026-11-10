@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 
 import { readConsent, subscribeToConsent, writeConsent } from "@/lib/analytics-consent";
-import { readTrinketScan } from "@/lib/trinket";
 
 /* The one question this site asks about measurement. Until it is answered
    PostHog stays opted out (see `Analytics.tsx`), so the notice is a request
@@ -21,19 +20,11 @@ const APPEAR_DELAY_MS = 900;
 export function CookieNotice() {
   const [visible, setVisible] = useState(false);
   const [leaving, setLeaving] = useState(false);
-  /* A reader who came from a KubeCon trinket (lib/trinket) is told that the
-     tap itself was recorded, and, when it carried their email, that agreeing
-     also ties this visit to it. */
-  const [trinket, setTrinket] = useState<"none" | "anonymous" | "email">("none");
 
   useEffect(() => {
     if (readConsent() !== null) return;
 
-    const timer = setTimeout(() => {
-      const scan = readTrinketScan();
-      setTrinket(!scan ? "none" : scan.email ? "email" : "anonymous");
-      setVisible(true);
-    }, APPEAR_DELAY_MS);
+    const timer = setTimeout(() => setVisible(true), APPEAR_DELAY_MS);
     return () => clearTimeout(timer);
   }, []);
 
@@ -61,12 +52,8 @@ export function CookieNotice() {
       aria-label="Analytics consent"
     >
       <p className="cookie-notice-text">
-        {trinket === "none" &&
-          "This site uses analytics cookies to measure page usage. No analytics data is collected until you consent."}
-        {trinket === "anonymous" &&
-          "We counted your OpenAPPA trinket tap. This site also uses analytics cookies to measure page usage; nothing else is collected until you consent."}
-        {trinket === "email" &&
-          "We recorded your OpenAPPA trinket tap under the email you gave us at our KubeCon booth. This site also uses analytics cookies to measure page usage; accepting links this visit to that email, and nothing else is collected until you consent."}
+        This site uses analytics cookies to measure page usage. No analytics data is
+        collected until you consent.
       </p>
       <div className="cookie-notice-actions">
         <button type="button" className="cookie-notice-skip" onClick={() => answer("denied")}>
