@@ -1,4 +1,5 @@
 import { Header } from "@/components/Header";
+import { SongDeepLink } from "@/components/SongDeepLink";
 import { SongShip } from "@/components/SongShip";
 
 export default function SiteLayout({ children }: { children: React.ReactNode }) {
@@ -6,6 +7,7 @@ export default function SiteLayout({ children }: { children: React.ReactNode }) 
     <>
       <Header />
       <SongShip />
+      <SongDeepLink />
       {children}
       <footer className="site-footer">
         <span>© {new Date().getFullYear()} OpenAPPA</span>

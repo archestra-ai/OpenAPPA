@@ -182,6 +182,13 @@ impl Snapshot {
         if declared.is_empty() && includes.is_empty() {
             return Ok(None);
         }
+        // A bundle carries each included file under its own entry; a glob entry names a
+        // folder's files only when the configuration loads.
+        if let Some(glob) = includes.iter().find(|name| name.contains('*')) {
+            return Err(invalid(format!(
+                "a bundle carries each included file by name; list the files {glob:?} matches instead"
+            )));
+        }
         let base = installation.config.parent().expect("installation config has a parent");
         let declared_sources = declared
             .iter()
@@ -721,6 +728,10 @@ mod tests {
         assert!(Snapshot::capture(&installation, &text).is_err());
         fs::write(&path, "data").unwrap();
         assert!(Snapshot::capture(&installation, &format!("include=['data']\n{text}")).is_err());
+        assert!(matches!(
+            Snapshot::capture(&installation, &format!("include=['mcp/*.toml']\n{text}")),
+            Err(error) if error.to_string().contains("list the files \"mcp/*.toml\" matches instead")
+        ));
         let mut snapshot = Snapshot::capture(&installation, &text).unwrap().unwrap();
         let member = snapshot.manifest.files.remove("tree/data").unwrap();
         snapshot.manifest.files.insert("../escape".into(), member);

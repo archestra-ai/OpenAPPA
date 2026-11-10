@@ -29,6 +29,14 @@ allow-direct-references = true
 appa-agent-python = { path = "../../appa-agent-python", editable = true }
 appa-bench-concurrency = { path = "../concurrency" }
 
+[tool.uv]
+# The pinned Tau revision caps LiteLLM below 1.82.7. Override that cap to
+# include the security fixes through GHSA-g5ff-637f-6q2m (fixed in 1.95.0).
+override-dependencies = ["litellm>=1.95.0,<2"]
+# Earlier LiteLLM releases also cap filelock below its security fixes. Keep
+# that floor during resolution rather than silently reintroducing the alerts.
+constraint-dependencies = ["filelock>=4.2.1"]
+
 [tool.ruff]
 line-length = 120
 # The vendored Tau checkout and local run artifacts are not this package's code.

@@ -16,7 +16,7 @@ curl -fsSL https://openappa.com/install.sh | sh &&
   ~/.local/bin/appa plugin install claude-code
 ```
 
-The installer places `appa` in `~/.local/bin`.
+The installer places `appa` in `~/.local/bin`. It verifies the download against the release's `SHA256SUMS`. When the GitHub CLI (`gh`) is installed and signed in, it also verifies the build provenance: OpenAPPA's release workflow on `main` attested exactly those bytes. `APPA_VERIFY_PROVENANCE=require` refuses to install without that check. `APPA_VERIFY_PROVENANCE=skip` installs on the checksum alone.
 
 `appa plugin install claude-code` configures Claude Code's user environment:
 1. Deploys the runtime binary under APPA's data directory.
@@ -76,8 +76,7 @@ The refusal names the policy conflict and provides available remedies (such as r
 OpenAPPA intercepts Claude Code events through native lifecycle hooks:
 
 - **Lifecycle interception:** The integration hooks into Claude Code's native lifecycle events (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, and subagent events).
-- **Unified tool coverage:** Intercepts both built-in tools (`Read`, `Edit`, `Write`, `WebFetch`) and all external MCP tools transparently.
-- **Files keep their labels:** `Read`, `Write`, and `Edit` go through the [file-tracker](/coding-agents#files-that-keep-their-labels), so a file carries the label of the session that wrote it into later sessions. On a Claude Code release `clappa` has tested, it confines Claude Code's own `Bash` in Claude Code's built-in sandbox, one call at a time. On any other release, or when its startup self-test fails, `clappa` replaces `Bash` with [SafeBash](/coding-agents#safebash), which needs `srt`. Both confine each command to the files and hosts it declares ([per harness](/coding-agents#per-harness)).
+- **Unified tool coverage:** Intercepts both built-in commands (`Bash`, `Read`, `Edit`, `Write`) and all external MCP tools transparently.
 - **Pre-execution evaluation:** Before any tool runs, `PreToolUse` passes the call to the local APPA runtime, evaluating the flow against the session's accumulated labels (`audience × trust`).
 - **Fail-closed with remedies:** Allowed actions execute immediately. Disallowed flows are blocked before execution; OpenAPPA returns the policy conflict along with actionable remedies (such as sanitizer filters or operator approval). Unanswered hooks fail closed.
 - **Auto mode on top:** In [auto mode](/openappa-vs-auto-mode#running-both), OpenAPPA does not approve a call it allows. Claude Code's classifier still reviews that call and can deny it. A call OpenAPPA blocks stays blocked.

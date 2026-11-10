@@ -61,8 +61,8 @@ export function substituteKagentDevSnippets(content: string): string {
 
   // 1. Controller agentImage: remote registry -> local build Never
   result = result.replaceAll(
-    `  --set controller.agentImage.registry=europe-west1-docker.pkg.dev \\
-  --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \\
+    `  --set controller.agentImage.registry=ghcr.io \\
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \\
   --set-string controller.agentImage.tag="v$APPA_VERSION"`,
     `  --set controller.agentImage.registry=docker.io \\
   --set controller.agentImage.repository=library/appa-kagent-adk \\
@@ -73,7 +73,7 @@ export function substituteKagentDevSnippets(content: string): string {
   // 2. appa-kagent-demo: OCI pull -> local chart path with local image overrides
   result = result.replace(
     `helm upgrade --install appa-kagent-demo \\
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \\
+  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \\
   --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \\
   --set-string runtime.url="http://appa-runtime.$KAGENT_NAMESPACE.svc.cluster.local:18787" \\
   --set-string modelConfig.name=default-model-config \\
@@ -97,7 +97,7 @@ export function substituteKagentDevSnippets(content: string): string {
   // 3. appa-runtime quickstart: OCI pull -> local chart path with local image override
   result = result.replace(
     `helm upgrade --install appa-runtime \\
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \\
+  oci://ghcr.io/archestra-ai/charts/appa-runtime \\
   --version "$APPA_VERSION" -n "$KAGENT_NAMESPACE" \\
   --set persistence.enabled=false \\
   --set config.existingConfigMap=appa-kagent-demo-policy \\
@@ -116,7 +116,7 @@ export function substituteKagentDevSnippets(content: string): string {
   // 4. appa-runtime existing agents: OCI pull -> local chart path
   result = result.replaceAll(
     `helm upgrade --install appa-runtime \\
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \\
+  oci://ghcr.io/archestra-ai/charts/appa-runtime \\
   --version "$APPA_VERSION" -n "$RUNTIME_NAMESPACE" --create-namespace \\`,
     `helm upgrade --install appa-runtime \\
   ./charts/appa-runtime \\

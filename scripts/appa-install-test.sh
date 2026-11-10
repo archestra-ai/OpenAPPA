@@ -93,6 +93,25 @@ done
 [ -s "$work/port" ] || { echo "release server did not start within 10s" >&2; exit 1; }
 origin=http://127.0.0.1:$(cat "$work/port")
 
+# A stub gh: signed out unless FAKE_GH_AUTH=ok, and `attestation verify`
+# succeeds only when FAKE_GH_VERIFY=ok. It records its arguments. Every case
+# runs with it first on PATH, so a real, signed-in gh on this machine never
+# checks the stub release.
+mkdir "$work/bin"
+cat > "$work/bin/gh" <<'GH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_GH_LOG"
+case $1 in
+  auth) [ "${FAKE_GH_AUTH:-}" = ok ] ;;
+  attestation) [ "${FAKE_GH_VERIFY:-}" = ok ] || { echo "no attestations found" >&2; exit 1; } ;;
+  *) exit 2 ;;
+esac
+GH
+chmod 755 "$work/bin/gh"
+PATH=$work/bin:$PATH
+FAKE_GH_LOG=$work/gh.log
+export PATH FAKE_GH_LOG
+
 failures=0
 report() {
   printf '%s: %s\n' "$1" "$2" >&2
@@ -137,6 +156,22 @@ expect_refused() {
 
 expect_installed latest-redirect
 expect_installed pinned-version APPA_VERSION="$tag"
+
+# Build provenance: checked whenever gh is signed in, and a failed check
+# refuses the install.
+: > "$FAKE_GH_LOG"
+expect_installed provenance-verified FAKE_GH_AUTH=ok FAKE_GH_VERIFY=ok
+if grep -q -- '--repo archestra-ai/OpenAPPA --signer-workflow archestra-ai/OpenAPPA/.github/workflows/release.yml --source-ref refs/heads/main --deny-self-hosted-runners' "$FAKE_GH_LOG"; then
+  report PASS provenance-arguments
+else
+  cat "$FAKE_GH_LOG" >&2
+  report FAIL provenance-arguments
+fi
+expect_installed provenance-signed-out
+expect_installed provenance-skipped FAKE_GH_AUTH=ok APPA_VERIFY_PROVENANCE=skip
+expect_refused provenance-missing APPA_REPOSITORY_URL="$origin/good" FAKE_GH_AUTH=ok
+expect_refused provenance-required APPA_REPOSITORY_URL="$origin/good" APPA_VERIFY_PROVENANCE=require
+expect_refused provenance-invalid APPA_REPOSITORY_URL="$origin/good" APPA_VERIFY_PROVENANCE=maybe
 
 expect_refused invalid-version APPA_REPOSITORY_URL="$origin/good" APPA_VERSION='../main'
 expect_refused foreign-redirect APPA_REPOSITORY_URL="$origin/foreign"

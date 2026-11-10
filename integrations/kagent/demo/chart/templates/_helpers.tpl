@@ -1,6 +1,11 @@
-{{/* An image reference; an empty tag means v<appVersion>. */}}
+{{/* An image reference: the digest when set (release charts pin it), else
+the tag; an empty tag means v<appVersion>. */}}
 {{- define "appa-demo.image" -}}
+{{- if .image.digest -}}
+{{- printf "%s@%s" .image.repository .image.digest -}}
+{{- else -}}
 {{- printf "%s:%s" .image.repository (.image.tag | default (printf "v%s" .root.Chart.AppVersion)) -}}
+{{- end -}}
 {{- end -}}
 
 {{/* The existing shared runtime Service used by every demo Agent. */}}

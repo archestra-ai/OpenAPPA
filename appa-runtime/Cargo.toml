@@ -52,7 +52,7 @@ required-features = ["daemon"]
 
 [dependencies]
 tower = { version = "0.5", features = ["util"], optional = true }
-rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }
 appa-adapter-amp = { path = "../appa-adapter-amp" }
 appa-adapter-opencode = { path = "../appa-adapter-opencode" }
 appa-adapter-claude-code = { path = "../appa-adapter-claude-code" }
@@ -135,7 +135,7 @@ appa-eventlog = { workspace = true, features = ["fault-injection"] }
 # `start_paused`: a test that must exhaust a retry table should not spend the
 # table's backoff in real seconds.
 tokio = { workspace = true, features = ["test-util"] }
-jsonschema = { version = "0.58.6", default-features = false }
+jsonschema = { version = "0.60.2", default-features = false }
 # The elicitation round trip is only real with a real client on the
 # other end: these features exist for `tests/hitl_elicitation.rs` and
 # never ship in the binary.
