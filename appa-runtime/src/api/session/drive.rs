@@ -346,6 +346,13 @@ impl Decided<'_> {
             .iter()
             .filter(|offer| offer.returns.as_ref() == Some(&route))
             .filter_map(|offer| crate::engine::resolve_rendered(self.log, &OfferId(offer.id.clone())))
+            // An offer whose basis moved would be declined by every application round.
+            .filter(|offer| {
+                matches!(
+                    self.engine().offer_standing(self.view, trajectory, offer),
+                    crate::api::OfferStanding::Live(_)
+                )
+            })
             .find(|offer| self.engine().offer_declares_only(self.view, trajectory, offer));
         Ok(match offer {
             Some(offer) => Judgment::Apply {

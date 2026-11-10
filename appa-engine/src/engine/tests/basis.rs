@@ -85,9 +85,13 @@ fn a_later_revision_retires_every_offer_and_approval_an_earlier_one_recorded() {
         .expect("the read decides");
     let offer = acceptance(&blocked);
     log.push((1, appended_facts(blocked)));
-    assert_eq!(
-        second.offer_consults(&under_second(&log), &traj(), &offer),
-        Ok(crate::transition::OfferConsult::Stale),
+    assert!(
+        matches!(
+            second.offer_consults(&under_second(&log), &traj(), &offer),
+            Ok(crate::transition::OfferConsult::Stale {
+                subject: crate::basis::SubjectKey::Call { .. }
+            })
+        ),
         "no authority is consulted for an offer an earlier revision opened"
     );
     assert!(matches!(

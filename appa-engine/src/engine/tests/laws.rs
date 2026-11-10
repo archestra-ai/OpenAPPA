@@ -392,7 +392,7 @@ mod held_view_law {
                 prop_assert!(
                     matches!(
                         consult,
-                        Ok(crate::transition::OfferConsult::Stale | crate::transition::OfferConsult::Replay(_))
+                        Ok(crate::transition::OfferConsult::Stale { .. } | crate::transition::OfferConsult::Replay(_))
                             | Err(_)
                     ),
                     "an offer opened before the publish is current after it: {consult:?}"
