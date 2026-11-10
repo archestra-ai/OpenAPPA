@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.41.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.40.1...v0.41.0) (2026-11-10)
+
+
+### Features
+
+* **runtime:** include every policy file in a folder with a glob entry ([#799](https://github.com/archestra-ai/OpenAPPA/issues/799)) ([ab3252e](https://github.com/archestra-ai/OpenAPPA/commit/ab3252e323eb645f8a119ca1c2b211a9546d67de))
+
+
+### Bug Fixes
+
+* **ci:** read the kagent A2A E2E key from Secret Manager, on dispatch from main only ([#863](https://github.com/archestra-ai/OpenAPPA/issues/863)) ([950cb34](https://github.com/archestra-ai/OpenAPPA/commit/950cb345ccc878059a2ae684ed9ecc0440b58026))
+* **ci:** read the nightly canary's OpenRouter key from Secret Manager ([#862](https://github.com/archestra-ai/OpenAPPA/issues/862)) ([e5601b8](https://github.com/archestra-ai/OpenAPPA/commit/e5601b885231786c8c1f48fe34d3bbcb0c6f0370))
+* **deps:** patch security alerts and retire obsolete workarounds ([#859](https://github.com/archestra-ai/OpenAPPA/issues/859)) ([61f403e](https://github.com/archestra-ai/OpenAPPA/commit/61f403e783d19821e6ae2cf7ed8a36c745c42503))
+* **runtime:** name what a narrowing limits in plain review bullets ([#858](https://github.com/archestra-ai/OpenAPPA/issues/858)) ([5afd511](https://github.com/archestra-ai/OpenAPPA/commit/5afd511294e1b11e9b698f419c18f3a3c53b81be))
+
 ## [0.40.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.40.0...v0.40.1) (2026-11-09)
 
 
