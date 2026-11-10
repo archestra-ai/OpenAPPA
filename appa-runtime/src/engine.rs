@@ -122,6 +122,8 @@ pub struct Feedback {
 pub struct PendingReview {
     pub offer: OfferId,
     pub authority: String,
+    pub hint: Option<String>,
+    pub scope: Vec<appa_runtime_api::ReviewScopeItem>,
     pub text: String,
 }
 
@@ -2021,6 +2023,8 @@ impl RuntimeEngine {
                 Some(PendingReview {
                     offer: offer.clone(),
                     authority: requirement.authority.as_str().to_string(),
+                    hint: declaration.hint.clone(),
+                    scope: crate::elicit::review_scope(&artifact),
                     text: crate::elicit::review_text(requirement.authority.as_str(), &declaration, &artifact),
                 })
             })
