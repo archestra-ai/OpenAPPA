@@ -305,20 +305,11 @@ pub enum EngineEvent {
 
 /// What `execute_remedy_plan` carries beside the offer id: the floor the child's return may
 /// narrow the declaring trajectory to and, for an attesting plan, the schema the return must
-/// match. Read only when the offered plan declares a return; every other plan ignores them.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct RemedyArguments {
-    pub label: Option<LabelSpelling>,
-    pub return_schema: Option<serde_json::Value>,
-}
+/// match. Read only when the offered plan declares a return; every other plan ignores them. A
+/// declaration ahead of the spawn records them as they are.
+pub use appa_eventlog::DeclaredArguments as RemedyArguments;
 
-/// A label as the policy dialect spells a `delta`: a trust rank name and an audience list. An
-/// omitted dimension keeps the declaring trajectory's current value.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct LabelSpelling {
-    pub trust: Option<String>,
-    pub audience: Option<Vec<String>>,
-}
+pub use appa_eventlog::LabelSpelling;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Next {
