@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.42.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.41.0...v0.42.0) (2026-11-10)
+
+
+### Features
+
+* **website:** /nfc starts the song and its video ([#864](https://github.com/archestra-ai/OpenAPPA/issues/864)) ([a8165ce](https://github.com/archestra-ai/OpenAPPA/commit/a8165ceba2d3f4aeee5d9cee11865fa4a713f414))
+* **website:** offer KubeCon trinket visitors a demo booking ([#881](https://github.com/archestra-ai/OpenAPPA/issues/881)) ([446b278](https://github.com/archestra-ai/OpenAPPA/commit/446b27867f7023d7f5b20a43087d6bb5cb4329a5))
+* **website:** record KubeCon trinket taps in PostHog ([#867](https://github.com/archestra-ai/OpenAPPA/issues/867)) ([398abce](https://github.com/archestra-ai/OpenAPPA/commit/398abced4ebf44345283878abc619f92bd8dd219))
+
+
+### Bug Fixes
+
+* **runtime:** end empty child turns under the recorded return contract ([#807](https://github.com/archestra-ai/OpenAPPA/issues/807)) ([dc0b1f5](https://github.com/archestra-ai/OpenAPPA/commit/dc0b1f59bd7b13305b153e26aaae92fd12871784))
+* **website:** show the /nfc video on iOS when the browser refuses to play ([#866](https://github.com/archestra-ai/OpenAPPA/issues/866)) ([190134b](https://github.com/archestra-ai/OpenAPPA/commit/190134b59f60d61989d388a82ba6e2bb8a9059f6))
+* **website:** show the default cookie notice to trinket visitors ([#868](https://github.com/archestra-ai/OpenAPPA/issues/868)) ([79983b0](https://github.com/archestra-ai/OpenAPPA/commit/79983b05d6ed25e967e0424512c677360c9d6f4c))
+
 ## [0.41.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.40.1...v0.41.0) (2026-11-10)
 
 
