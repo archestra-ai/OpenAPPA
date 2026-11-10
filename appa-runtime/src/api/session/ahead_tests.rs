@@ -429,8 +429,10 @@ async fn an_apply_whose_commit_fails_settles_nothing_and_its_retry_applies() {
     assert_eq!(ahead(a).settlement(&root(), &host("r1")), Some(AheadOutcome::Applied));
 }
 
+/// The application's own replays run out first: the exhaustion is operational, so it is
+/// answered at once rather than spent on another round.
 #[tokio::test]
-async fn contention_through_every_round_refuses_and_settles_nothing() {
+async fn an_application_contended_past_its_replays_refuses_and_settles_nothing() {
     let replicas = replicas();
     let Replicas { a, .. } = &replicas;
     declare(a, "r1", bare()).await;
@@ -439,12 +441,38 @@ async fn contention_through_every_round_refuses_and_settles_nothing() {
     a.store().contend_next_appends(u64::MAX);
     assert!(matches!(
         spawn(a, Some("toolu-x")).await,
-        Err(EventError::Contended { .. })
+        Err(EventError::Contended {
+            attempts: super::drive::REPLAY_LIMIT
+        })
     ));
     assert_eq!(settlements(a), 0);
     a.store().contend_next_appends(0);
     assert!(released(&spawn(a, Some("toolu-x")).await));
     assert_eq!(ahead(a).settlement(&root(), &host("r1")), Some(AheadOutcome::Applied));
+}
+
+/// A turn end lands against the application, which then refuses as moved; the next round
+/// commits the settlement and answers with it.
+#[tokio::test]
+async fn a_settlement_a_round_commits_is_its_answer() {
+    let replicas = replicas();
+    let Replicas { a, .. } = &replicas;
+    declare(a, "r1", bare()).await;
+    reserved(a, "toolu-x").await;
+    a.store().contend_next_append_with(
+        &root(),
+        &root(),
+        &HostObservation::TurnEnded {
+            actor: host_actor(&acting()),
+            end_kind: EndKind::Boundary,
+        },
+    );
+    assert!(
+        blocked(&spawn(a, Some("toolu-x")).await),
+        "the plain block, not a refusal"
+    );
+    assert_eq!(ahead(a).settlement(&root(), &host("r1")), Some(AheadOutcome::Ended));
+    assert_eq!(settlements(a), 1);
 }
 
 fn schema_bound() -> RemedyArguments {

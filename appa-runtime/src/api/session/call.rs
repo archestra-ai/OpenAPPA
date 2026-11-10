@@ -140,20 +140,16 @@ impl Session {
             offers,
         };
         for _ in 0..AHEAD_ROUNDS {
-            let log = self.inner.log(&self.root)?;
-            let ahead = AheadState::fold(log.host_records());
-            match ahead.settlement(&self.trajectory, &attempt) {
-                Some(AheadOutcome::Applied) => return self.propose_once(&proposal, invocation).await,
-                Some(AheadOutcome::Ended) => return Ok(decision),
-                Some(AheadOutcome::Lapsed) => return Ok(noted(LAPSED_AHEAD)),
-                Some(AheadOutcome::Unfit) => return Ok(noted(UNFIT_AHEAD)),
-                Some(AheadOutcome::FanOut) => return Ok(noted(FAN_OUT_AHEAD)),
-                None => {}
-            }
-            let Judgment::Apply(offer) = self.settle_terminal(&claim)? else {
-                continue;
+            let offer = match self.settle_terminal(&claim)? {
+                Judgment::Settled(AheadOutcome::Applied) => return self.propose_once(&proposal, invocation).await,
+                Judgment::Settled(AheadOutcome::Ended) => return Ok(decision),
+                Judgment::Settled(AheadOutcome::Lapsed) => return Ok(noted(LAPSED_AHEAD)),
+                Judgment::Settled(AheadOutcome::Unfit) => return Ok(noted(UNFIT_AHEAD)),
+                Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(FAN_OUT_AHEAD)),
+                Judgment::Apply(offer) => offer,
             };
-            let arguments = ahead
+            let log = self.inner.log(&self.root)?;
+            let arguments = AheadState::fold(log.host_records())
                 .declared(&self.trajectory, &attempt)
                 .map(|declared| declared.arguments.clone())
                 .ok_or_else(|| EventError::EngineInvariant("a judged declaration has no record".to_string()))?;
