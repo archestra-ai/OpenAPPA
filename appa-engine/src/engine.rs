@@ -603,8 +603,11 @@ impl Engine {
         if let Some(end) = &recorded.end {
             return Ok(OfferConsult::Replay(replay_outcome(recorded, end)));
         }
+        let stale = || OfferConsult::Stale {
+            subject: recorded.subject.clone(),
+        };
         if recorded.basis != views.basis_for(&recorded.subject) {
-            return Ok(OfferConsult::Stale);
+            return Ok(stale());
         }
         match &recorded.subject {
             crate::basis::SubjectKey::Call { .. } => match recorded.plan.hop() {
@@ -625,7 +628,7 @@ impl Engine {
                 }),
             },
             // No stage stands on a return: it crosses at the child's stop or is refused there.
-            crate::basis::SubjectKey::Return(_) => Ok(OfferConsult::Stale),
+            crate::basis::SubjectKey::Return(_) => Ok(stale()),
             crate::basis::SubjectKey::ConfinedResult(dispatch) => match recorded.plan.hop() {
                 Some(sanitizer) => {
                     let DerivedCandidate::Result { value, .. } =
@@ -644,7 +647,7 @@ impl Engine {
                 }
                 None => Ok(OfferConsult::Accept { sanitizer: None }),
             },
-            crate::basis::SubjectKey::Approval(_) => Ok(OfferConsult::Stale),
+            crate::basis::SubjectKey::Approval(_) => Ok(stale()),
         }
     }
 

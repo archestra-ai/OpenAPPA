@@ -1080,37 +1080,9 @@ impl RuntimeEngine {
         trajectory: &TrajectoryId,
         offer: &OfferId,
     ) -> crate::api::OfferStanding {
-        use crate::api::{OfferKind, OfferStanding};
-        let Some(consult) = parse_offer(offer)
+        parse_offer(offer)
             .and_then(|engine_offer| self.engine.offer_consults(view, trajectory, &engine_offer).ok())
-        else {
-            return OfferStanding::Ended;
-        };
-        OfferStanding::Live(match consult {
-            OfferConsult::Stale => return OfferStanding::Stale,
-            OfferConsult::Replay(_) => return OfferStanding::Ended,
-            OfferConsult::Accept { sanitizer: None } => OfferKind::Accept,
-            OfferConsult::Withhold => OfferKind::Withhold,
-            OfferConsult::Accept {
-                sanitizer: Some(sanitizer),
-            } => OfferKind::Sanitizer {
-                name: sanitizer.as_str().to_string(),
-            },
-            OfferConsult::Authorities { required, .. } => {
-                let mut names: Vec<String> = required
-                    .iter()
-                    .map(|requirement| requirement.authority.as_str().to_string())
-                    .collect();
-                names.sort();
-                names.dedup();
-                OfferKind::Authority { names }
-            }
-            OfferConsult::Rewrite { sanitizer, .. } | OfferConsult::Sanitizer { sanitizer, .. } => {
-                OfferKind::Sanitizer {
-                    name: sanitizer.as_str().to_string(),
-                }
-            }
-        })
+            .map_or(crate::api::OfferStanding::Ended, offer_standing_of)
     }
 
     /// Which trajectory pursues this offer.
@@ -2163,7 +2135,7 @@ impl RuntimeEngine {
             .offer_consults(view, trajectory, &engine_offer)
             .map_err(offer_refusal)?
         {
-            OfferConsult::Stale => {
+            OfferConsult::Stale { .. } => {
                 return Ok(declined(
                     "[appa] this offer no longer stands; re-propose the call".to_string(),
                 ));
@@ -3658,6 +3630,37 @@ fn offer_id(offer: &EngineOfferId) -> OfferId {
     OfferId(hex)
 }
 
+fn offer_standing_of(consult: OfferConsult) -> crate::api::OfferStanding {
+    use crate::api::{OfferKind, OfferStanding};
+    OfferStanding::Live(match consult {
+        // Only a call can be proposed again; a stale result, return, or approval has nothing
+        // left for a re-proposal to revive.
+        OfferConsult::Stale {
+            subject: appa_engine::basis::SubjectKey::Call { .. },
+        } => return OfferStanding::Stale,
+        OfferConsult::Stale { .. } | OfferConsult::Replay(_) => return OfferStanding::Ended,
+        OfferConsult::Accept { sanitizer: None } => OfferKind::Accept,
+        OfferConsult::Withhold => OfferKind::Withhold,
+        OfferConsult::Accept {
+            sanitizer: Some(sanitizer),
+        } => OfferKind::Sanitizer {
+            name: sanitizer.as_str().to_string(),
+        },
+        OfferConsult::Authorities { required, .. } => {
+            let mut names: Vec<String> = required
+                .iter()
+                .map(|requirement| requirement.authority.as_str().to_string())
+                .collect();
+            names.sort();
+            names.dedup();
+            OfferKind::Authority { names }
+        }
+        OfferConsult::Rewrite { sanitizer, .. } | OfferConsult::Sanitizer { sanitizer, .. } => OfferKind::Sanitizer {
+            name: sanitizer.as_str().to_string(),
+        },
+    })
+}
+
 fn parse_offer(offer: &OfferId) -> Option<EngineOfferId> {
     EngineOfferId::from_hex(&offer.0).ok()
 }
@@ -5096,9 +5099,86 @@ mod tests {
             "an unoffered plan is not under Continue"
         );
         assert!(!super::output_sanitizer_offered(&withheld, &offers));
-        for block in [&sanitized, &withheld] {
+        for sanitized_return in [false, true] {
+            let advice = super::ForkAdvice::Narrowing {
+                standing: super::FloorStanding::Below,
+                sanitized_return,
+                preserving_output: false,
+            };
+            assert_ne!(
+                super::fork_advice_text(advice, false, true),
+                super::fork_advice_text(advice, false, false)
+            );
+        }
+
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let advice_in = |block: &PlannedBlock, sanitizer_offered: bool| {
             let advice = block.fork_advice.expect("the block advises a fork");
             assert_eq!(super::fork_heading(advice), "Refused by the parent's declaration:");
+            let text = block_feedback(
+                block,
+                &offers,
+                policy.engine().registry(),
+                &ReturnBounds {
+                    label: Label::top(),
+                    lowest: Trust::new(0),
+                },
+                ToolNaming::AsAuthored,
+                "read",
+                None,
+                &EmbeddedPresentationOptions::default(),
+            )
+            .text;
+            let advice = super::fork_advice_text(advice, false, sanitizer_offered);
+            text.contains(&format!("  {}", advice.replace('\n', "\n  ")))
+        };
+        for (block, offered) in [(&sanitized, true), (&withheld, false)] {
+            assert!(advice_in(block, offered), "the block carries its own fork advice");
+            assert!(!advice_in(block, !offered), "the block carries no other fork advice");
+        }
+    }
+
+    #[test]
+    fn only_a_stale_call_offer_is_superseded() {
+        use crate::api::OfferStanding;
+        use appa_engine::basis::SubjectKey;
+        use appa_engine::transition::{OfferConsult, ProposalBatchId};
+        use appa_engine::value::{ChildReturnId, DispatchId, OfferId as EngineOfferId};
+
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 2
+                [[tool]]
+                name = "fetch"
+                delta = {}
+            "#,
+        )
+        .expect("the policy compiles");
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
+        let call = engine
+            .engine
+            .resolve_call(ToolName::new("fetch"), b"{}")
+            .expect("the call resolves");
+        let trajectory = TrajectoryId::new("root");
+        let stale = |subject| super::offer_standing_of(OfferConsult::Stale { subject });
+        assert_eq!(
+            stale(SubjectKey::Call {
+                trajectory: trajectory.clone(),
+                batch: ProposalBatchId::new("batch"),
+                position: 0,
+            }),
+            OfferStanding::Stale
+        );
+        for subject in [
+            SubjectKey::ConfinedResult(DispatchId::new(trajectory.clone(), call.digest(), 1)),
+            SubjectKey::Return(ChildReturnId::new(trajectory.clone(), 1)),
+            SubjectKey::Approval(EngineOfferId::from_hex(&"07".repeat(32)).expect("a 32-byte hex id parses")),
+        ] {
+            assert_eq!(
+                stale(subject.clone()),
+                OfferStanding::Ended,
+                "{subject:?} has already run"
+            );
         }
     }
 
