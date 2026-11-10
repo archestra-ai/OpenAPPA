@@ -349,6 +349,40 @@ async fn a_declaration_ahead_that_no_offer_fits_is_dropped_and_the_block_says_so
     );
 }
 
+fn prompt(events: &[serde_json::Value]) -> serde_json::Value {
+    events
+        .iter()
+        .find(|event| event["hook_event_name"] == "UserPromptSubmit")
+        .expect("the fixture carries the root's prompt")
+        .clone()
+}
+
+/// Archestra's order: the prompt, the declaration, then the spawn, whose first call settles
+/// what the prompt left open. That settling is housekeeping, not the turn's end.
+#[tokio::test]
+async fn an_embedded_spawn_after_its_prompt_takes_the_declaration_made_in_the_turn() {
+    let runtime = deployment("delta = {}");
+    let events = events();
+    let spawn = hook(&events, "PreToolUse", "Agent", false);
+    let start = HookEvent::SessionStart {
+        root: actor_of(&spawn).root,
+        principal: None,
+        address: None,
+        title: None,
+        launch: None,
+        start: None,
+    };
+    hooks::handle_embedded(&runtime, start).await;
+    hooks::handle_embedded(&runtime, parsed(&prompt(&events))).await;
+    let declared = declare_ahead(&runtime, &actor_of(&spawn), ahead(this_label())).await;
+    assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
+    let decision = hooks::handle_embedded(&runtime, parsed(&spawn)).await.decision;
+    assert!(
+        matches!(decision, HookDecision::AllowCall { spawn: Some(_) }),
+        "{decision:?}"
+    );
+}
+
 fn lifecycle(events: &[serde_json::Value], name: &str) -> serde_json::Value {
     events
         .iter()
@@ -548,6 +582,29 @@ mod over_mcp {
             ),
             "the spawn meets no block for its return"
         );
+    }
+
+    /// Claude Code's order: a declaration over MCP, then the turn's `Stop`, then the next
+    /// prompt. The spawn in the next turn meets its plain block.
+    #[tokio::test]
+    async fn a_declaration_over_mcp_does_not_outlive_its_turn() {
+        let runtime = Arc::new(deployment("delta = {}"));
+        let url = served(Arc::clone(&runtime)).await;
+        let events = events();
+        let spawn = hook(&events, "PreToolUse", "Agent", false);
+        let (status, answer) = claude_hook(&runtime, &prompt(&events)).await;
+        assert_eq!(status, 200, "{answer}");
+        control_hook(&runtime, &spawn, serde_json::json!({})).await;
+        let (text, failed) = declare_over_mcp(&url, Some(DECLARING_CALL)).await;
+        assert!(!failed, "{text}");
+        for event in [stop(&events), prompt(&events)] {
+            let (status, answer) = claude_hook(&runtime, &event).await;
+            assert_eq!(status, 200, "{answer}");
+        }
+        assert!(matches!(
+            hooks::handle(&runtime, parsed(&spawn)).await,
+            HookDecision::DenyCall { .. }
+        ));
     }
 
     #[tokio::test]

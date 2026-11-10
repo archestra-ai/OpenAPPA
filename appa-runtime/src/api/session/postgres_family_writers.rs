@@ -29,20 +29,24 @@ fn fetch(a: i64) -> ProposedCall {
     }
 }
 
+fn postgres_store(connections: usize) -> Arc<LogStore> {
+    let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
+    Arc::new(
+        LogStore::open(Backend::Postgres {
+            url,
+            max_connections: std::num::NonZeroUsize::new(connections).expect("a pool holds a connection"),
+        })
+        .expect("the PostgreSQL store opens"),
+    )
+}
+
 /// A runtime over a pool of `connections`, and a fresh root opened in it.
 fn opened(connections: usize) -> (Arc<Runtime>, Arc<LogStore>, TrajectoryId) {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, POLICY).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
-    let url = std::env::var("OPENAPPA_TEST_DATABASE_URL").expect("test database URL");
-    let store = Arc::new(
-        LogStore::open(Backend::Postgres {
-            url,
-            max_connections: std::num::NonZeroUsize::new(connections).expect("a pool holds a connection"),
-        })
-        .expect("the PostgreSQL store opens"),
-    );
+    let store = postgres_store(connections);
     let root = TrajectoryId(format!("pg-writers:{}", dir.path().display()));
     // Each test serves a line of its own: the database is shared with every other test.
     let runtime = Arc::new(
@@ -216,5 +220,73 @@ async fn postgres_two_spawns_of_one_family_take_one_declaration() {
         }
     }
     assert_eq!(released, 1, "one spawn takes the declaration");
+    forget(&store, &root);
+}
+
+/// One MCP call delivered to two runtimes on one database at once, after its control hook
+/// vouched: one declaration spends the vouch, and both deliveries answer it.
+#[cfg(feature = "daemon")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+async fn postgres_concurrent_named_admission_declares_once() {
+    use crate::api::{ExecuteRemedyPlanArgs, LabelArgs, declaration_key};
+    let args = || ExecuteRemedyPlanArgs {
+        offer_id: None,
+        label: Some(LabelArgs {
+            trust: None,
+            audience: None,
+        }),
+        return_schema: None,
+    };
+    let (first, store, root) = opened(4);
+    let path = std::env::temp_dir().join(format!("appa-p2-{}.toml", std::process::id()));
+    std::fs::write(&path, POLICY).expect("the fixture writes");
+    let second = Arc::new(
+        Runtime::open_with_store_on(
+            Config::load(&path).expect("the fixture validates"),
+            postgres_store(4),
+            appa_eventlog::DeploymentName::new(root.0.clone()),
+        )
+        .expect("the second runtime opens"),
+    );
+    let acting = Actor {
+        root: root.clone(),
+        child: None,
+    };
+    first.vouch(&declaration_key(&args(), Some("c")), &acting, None);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let tasks: Vec<_> = [first.clone(), second]
+        .into_iter()
+        .map(|runtime| {
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                tokio::task::spawn_blocking(move || runtime.declare_vouched(args(), Some("c")))
+                    .await
+                    .expect("the admission joins")
+            })
+        })
+        .collect();
+    for task in tasks {
+        let outcome = task.await.expect("the task joins");
+        assert!(matches!(outcome, RemedyOutcome::Returned { .. }), "{outcome:?}");
+    }
+    let log = first.inner.log(&root).expect("the log reads");
+    let spending = log
+        .host_records()
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.observation,
+                appa_eventlog::HostObservation::AheadDeclared {
+                    attempt: appa_eventlog::AheadAttempt::McpCall(call),
+                    spends: Some(_),
+                    ..
+                } if call == "c"
+            )
+        })
+        .count();
+    assert_eq!(spending, 1, "one declaration spends the vouch");
+    let _ = std::fs::remove_file(&path);
     forget(&store, &root);
 }
