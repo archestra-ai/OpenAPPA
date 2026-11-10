@@ -887,6 +887,7 @@ export function SongShip() {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     let frame = 0;
     let leave: ReturnType<typeof setTimeout> | null = null;
+    let current: HTMLMediaElement | null = null;
     const stopLoop = () => {
       cancelAnimationFrame(frame);
       frame = 0;
@@ -901,11 +902,15 @@ export function SongShip() {
       leave = setTimeout(() => setPhase("hidden"), LEAVE_MS);
     };
     // A click anywhere but the frame dismisses the video and keeps the song.
+    // Not while the song is muted: that click is the one that brings the
+    // sound in (lib/song), and it should not also end the video.
     const onPointerDown = (event: PointerEvent) => {
+      if (current?.muted) return;
       if (event.target instanceof Node && stage.current?.contains(event.target)) return;
       sinkAway();
     };
     const unsubscribe = subscribeSong((audio) => {
+      current = audio;
       stopLoop();
       if (!audio) {
         sinkAway();

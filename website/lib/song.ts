@@ -13,31 +13,48 @@ const SONG_SRC = "/brand/openappa-check-the-flow.mp3";
    share a parent with them. The element is created on the first play, so a
    visitor who never clicks never downloads the clip. */
 
-type Listener = (audio: HTMLAudioElement | null) => void;
+type Listener = (audio: HTMLMediaElement | null) => void;
 
-let element: HTMLAudioElement | null = null;
-let playing: HTMLAudioElement | null = null;
+let element: HTMLMediaElement | null = null;
+let playing: HTMLMediaElement | null = null;
 const listeners = new Set<Listener>();
 
-function publish(audio: HTMLAudioElement | null) {
+function publish(audio: HTMLMediaElement | null) {
   if (audio === playing) return;
   playing = audio;
   for (const listener of listeners) listener(audio);
 }
 
-function audioElement(): HTMLAudioElement {
+function audioElement(): HTMLMediaElement {
   if (!element) {
-    element = new Audio(SONG_SRC);
-    element.preload = "none";
+    // A <video>, not an Audio: with no user gesture yet, Chrome refuses
+    // even a muted play of an audio element but allows a muted video, which
+    // is what lets the `?song` link start without a click. It plays the mp3
+    // the same way and is never attached to the page.
+    const video = document.createElement("video");
+    video.playsInline = true;
+    video.preload = "none";
+    video.src = SONG_SRC;
+    element = video;
     element.addEventListener("ended", () => publish(null));
-    element.addEventListener("pause", () => publish(null));
+    element.addEventListener("pause", () => {
+      stopWaitingForGesture();
+      publish(null);
+    });
   }
   return element;
 }
 
-/** Starts the song from the top. Resolves false when the browser refused to play. */
-export async function playSong(): Promise<boolean> {
+/** Starts the song from the top. Resolves false when the browser refused to play.
+ *
+ * `muted` is for a start without a user gesture (the `?song` link): browsers
+ * refuse sound before the visitor has interacted with the page but allow a
+ * muted start, so the video plays at once and the sound comes on with the
+ * visitor's first click or key press anywhere. */
+export async function playSong(options: { muted?: boolean } = {}): Promise<boolean> {
   const audio = audioElement();
+  stopWaitingForGesture();
+  audio.muted = options.muted ?? false;
   audio.currentTime = 0;
   try {
     await audio.play();
@@ -45,6 +62,7 @@ export async function playSong(): Promise<boolean> {
     // Nothing to recover from: no codec, or blocked media.
     return false;
   }
+  if (audio.muted) waitForGesture(audio);
   publish(audio);
   return true;
 }
@@ -62,6 +80,27 @@ export function subscribeSong(listener: Listener): () => void {
   return () => {
     listeners.delete(listener);
   };
+}
+
+/* Unmuting needs the user activation a click or key press grants.
+   `click`, not `pointerdown`: SongShip dismisses the video on a pointerdown
+   outside it unless the song is still muted, so the click that brings the
+   sound in leaves the video playing. */
+const GESTURES = ["click", "keydown"] as const;
+let unmuteOnGesture: (() => void) | null = null;
+
+function waitForGesture(audio: HTMLMediaElement) {
+  unmuteOnGesture = () => {
+    audio.muted = false;
+    stopWaitingForGesture();
+  };
+  for (const type of GESTURES) window.addEventListener(type, unmuteOnGesture, true);
+}
+
+function stopWaitingForGesture() {
+  if (!unmuteOnGesture) return;
+  for (const type of GESTURES) window.removeEventListener(type, unmuteOnGesture, true);
+  unmuteOnGesture = null;
 }
 
 export interface SongPosition {
