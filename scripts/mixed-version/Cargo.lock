@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "appa-engine"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "appa-runtime-api",
  "imbl",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "appa-eventlog"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "appa-engine",
  "appa-runtime-api",
@@ -49,7 +49,7 @@ dependencies = [
 
 [[package]]
 name = "appa-policy"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "appa-engine",
  "appa-runtime-api",
@@ -62,7 +62,7 @@ dependencies = [
 
 [[package]]
 name = "appa-runtime-api"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "serde",
  "serde_json",
