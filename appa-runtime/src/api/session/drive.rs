@@ -104,7 +104,11 @@ pub(super) struct Opening<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Judgment {
     Settled(appa_eventlog::AheadOutcome),
-    Apply(OfferId),
+    /// Apply the declaration through this offer, with the arguments it was recorded with.
+    Apply {
+        offer: OfferId,
+        arguments: RemedyArguments,
+    },
 }
 
 /// A judged host write's failure: the deriver's own refusal, or the store's.
@@ -344,7 +348,10 @@ impl Decided<'_> {
             .filter_map(|offer| crate::engine::resolve_rendered(self.log, &OfferId(offer.id.clone())))
             .find(|offer| self.engine().offer_declares_only(self.view, trajectory, offer));
         Ok(match offer {
-            Some(offer) => Judgment::Apply(offer),
+            Some(offer) => Judgment::Apply {
+                offer,
+                arguments: declared.arguments.clone(),
+            },
             None => Judgment::Settled(AheadOutcome::Unfit),
         })
     }

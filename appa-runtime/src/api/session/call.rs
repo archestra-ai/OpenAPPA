@@ -140,19 +140,14 @@ impl Session {
             offers,
         };
         for _ in 0..AHEAD_ROUNDS {
-            let offer = match self.settle_terminal(&claim)? {
+            let (offer, arguments) = match self.settle_terminal(&claim)? {
                 Judgment::Settled(AheadOutcome::Applied) => return self.propose_once(&proposal, invocation).await,
                 Judgment::Settled(AheadOutcome::Ended) => return Ok(decision),
                 Judgment::Settled(AheadOutcome::Lapsed) => return Ok(noted(LAPSED_AHEAD)),
                 Judgment::Settled(AheadOutcome::Unfit) => return Ok(noted(UNFIT_AHEAD)),
                 Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(FAN_OUT_AHEAD)),
-                Judgment::Apply(offer) => offer,
+                Judgment::Apply { offer, arguments } => (offer, arguments),
             };
-            let log = self.inner.log(&self.root)?;
-            let arguments = AheadState::fold(log.host_records())
-                .declared(&self.trajectory, &attempt)
-                .map(|declared| declared.arguments.clone())
-                .ok_or_else(|| EventError::EngineInvariant("a judged declaration has no record".to_string()))?;
             match self.apply_ahead(&offer, &claim, arguments).await {
                 Ok(RemedyDecision::Authorized { .. }) => return self.propose_once(&proposal, invocation).await,
                 Ok(_) => {}

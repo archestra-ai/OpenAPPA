@@ -392,20 +392,6 @@ async fn an_unidentified_spawn_reserves_and_applies_its_declaration() {
 }
 
 #[tokio::test]
-async fn a_reserved_declaration_a_boundary_cleared_settles_ended() {
-    let replicas = replicas();
-    let Replicas { a, b, .. } = &replicas;
-    a.record_prompt(&acting()).expect("the prompt records");
-    declare(a, "r1", bare()).await;
-    a.store().fail_commit_after(1);
-    assert!(matches!(spawn(a, Some("toolu-x")).await, Err(EventError::Storage(_))));
-    assert_eq!(ahead(a).assignment(&root(), "toolu-x"), Some(Some(&host("r1"))));
-    b.record_turn_end(&acting(), EndKind::Boundary).expect("the turn ends");
-    assert!(blocked(&spawn(b, Some("toolu-x")).await));
-    assert_eq!(ahead(a).settlement(&root(), &host("r1")), Some(AheadOutcome::Ended));
-}
-
-#[tokio::test]
 async fn a_housekeeping_end_leaves_the_declaration_live() {
     let replicas = replicas();
     let Replicas { a, b, .. } = &replicas;

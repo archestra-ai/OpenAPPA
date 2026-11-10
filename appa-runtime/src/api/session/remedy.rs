@@ -116,7 +116,10 @@ impl Session {
                     if let Occasion::AheadApply { claim, .. } = occasion {
                         let ahead = AheadState::fold(context.log.host_records());
                         if ahead.settlement(&trajectory, claim.attempt).is_some()
-                            || context.judge(&ahead, claim)? != Judgment::Apply(offer.clone())
+                            || !matches!(
+                                context.judge(&ahead, claim)?,
+                                Judgment::Apply { offer: judged, .. } if judged == *offer
+                            )
                         {
                             return Err(EventError::AheadMoved);
                         }
