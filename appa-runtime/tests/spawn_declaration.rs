@@ -6,7 +6,8 @@ use common::{claude_event, claude_hook, including_session_tool_rules, offers, re
 use std::path::Path;
 
 use appa_runtime::api::{
-    ExecuteRemedyPlanArgs, LabelArgs, LabelSpelling, OfferId, RemedyArguments, RemedyOutcome, Runtime,
+    EmbeddedPresentationOptions, ExecuteRemedyPlanArgs, LabelArgs, LabelSpelling, OfferId, RemedyArguments,
+    RemedyAttempt, RemedyOutcome, Runtime,
 };
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
@@ -109,6 +110,18 @@ fn ahead(label: LabelArgs) -> ExecuteRemedyPlanArgs {
     }
 }
 
+/// The embedding host's control call declaring ahead, under an attempt of its own.
+async fn declare_ahead(runtime: &Runtime, actor: &Actor, args: ExecuteRemedyPlanArgs) -> RemedyOutcome {
+    runtime
+        .execute_embedded_remedy_with_options(
+            actor,
+            args,
+            EmbeddedPresentationOptions::default(),
+            Some(RemedyAttempt::fresh()),
+        )
+        .await
+}
+
 fn this_label() -> LabelArgs {
     LabelArgs {
         trust: None,
@@ -168,9 +181,7 @@ async fn a_declaration_ahead_releases_the_next_spawn_without_a_block_and_only_th
     let runtime = deployment("delta = {}");
     let spawn = hook(&events(), "PreToolUse", "Agent", false);
     control_hook(&runtime, &spawn, serde_json::json!({})).await;
-    let declared = runtime
-        .execute_embedded_remedy(&actor_of(&spawn), ahead(this_label()))
-        .await;
+    let declared = declare_ahead(&runtime, &actor_of(&spawn), ahead(this_label())).await;
     let RemedyOutcome::Returned { value } = declared else {
         panic!("the declaration is taken, got {declared:?}");
     };
@@ -194,15 +205,15 @@ async fn a_declaration_ahead_with_an_unknown_rank_is_refused() {
     let runtime = deployment("delta = {}");
     let spawn = hook(&events(), "PreToolUse", "Agent", false);
     control_hook(&runtime, &spawn, serde_json::json!({})).await;
-    let declared = runtime
-        .execute_embedded_remedy(
-            &actor_of(&spawn),
-            ahead(LabelArgs {
-                trust: Some("no-such-rank".to_string()),
-                audience: None,
-            }),
-        )
-        .await;
+    let declared = declare_ahead(
+        &runtime,
+        &actor_of(&spawn),
+        ahead(LabelArgs {
+            trust: Some("no-such-rank".to_string()),
+            audience: None,
+        }),
+    )
+    .await;
     assert!(matches!(declared, RemedyOutcome::Refused { .. }), "{declared:?}");
     assert!(
         matches!(
@@ -219,9 +230,7 @@ async fn a_declaration_ahead_lapses_when_a_read_narrows_the_session_and_the_bloc
     let events = events();
     let spawn = hook(&events, "PreToolUse", "Agent", false);
     control_hook(&runtime, &spawn, serde_json::json!({})).await;
-    let declared = runtime
-        .execute_embedded_remedy(&actor_of(&spawn), ahead(this_label()))
-        .await;
+    let declared = declare_ahead(&runtime, &actor_of(&spawn), ahead(this_label())).await;
     assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
 
     // The parent runs a read that lowers its trust before it spawns.
@@ -278,9 +287,7 @@ async fn a_declaration_ahead_does_not_outlive_its_turn() {
     let events = events();
     let spawn = hook(&events, "PreToolUse", "Agent", false);
     control_hook(&runtime, &spawn, serde_json::json!({})).await;
-    let declared = runtime
-        .execute_embedded_remedy(&actor_of(&spawn), ahead(this_label()))
-        .await;
+    let declared = declare_ahead(&runtime, &actor_of(&spawn), ahead(this_label())).await;
     assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
     let (status, answer) = claude_hook(&runtime, &stop(&events)).await;
     assert_eq!(status, 200, "{answer}");
@@ -322,13 +329,15 @@ async fn a_declaration_ahead_that_no_offer_fits_is_dropped_and_the_block_says_so
         .await;
     assert!(matches!(declared, RemedyOutcome::Authorized { .. }), "{declared:?}");
 
-    // The declaration stands, so the retry is planned on the review alone.
+    // The declaration stands, so the same call is planned on the review alone. A call first
+    // recorded with no declaration never takes one, so the host's next delivery of it under a
+    // new call id takes the declaration made ahead.
     control_hook(&runtime, &spawn, serde_json::json!({})).await;
-    let ahead = runtime
-        .execute_embedded_remedy(&actor_of(&spawn), ahead(this_label()))
-        .await;
+    let ahead = declare_ahead(&runtime, &actor_of(&spawn), ahead(this_label())).await;
     assert!(matches!(ahead, RemedyOutcome::Returned { .. }), "{ahead:?}");
-    let HookDecision::DenyCall { feedback, offers, .. } = hooks::handle(&runtime, parsed(&spawn)).await else {
+    let mut retried = spawn.clone();
+    retried["tool_use_id"] = serde_json::json!("toolu_test_retried_spawn");
+    let HookDecision::DenyCall { feedback, offers, .. } = hooks::handle(&runtime, parsed(&retried)).await else {
         panic!("the review still blocks the spawn");
     };
     assert!(!offers.is_empty(), "the review is offered");
@@ -370,18 +379,19 @@ async fn a_lower_trust_floor_declared_ahead_lets_a_subagent_whose_trust_drops_re
         serde_json::json!({ "trust": "suspicious", "audience": ["public"] }),
     )
     .await;
-    let declared = runtime
-        .execute_embedded_remedy(
-            &actor_of(&spawn),
-            ahead(LabelArgs {
-                trust: Some("suspicious".to_string()),
-                audience: Some(vec!["public".to_string()]),
-            }),
-        )
-        .await;
+    let declared = declare_ahead(
+        &runtime,
+        &actor_of(&spawn),
+        ahead(LabelArgs {
+            trust: Some("suspicious".to_string()),
+            audience: Some(vec!["public".to_string()]),
+        }),
+    )
+    .await;
     assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
+    // The blocked call took no declaration, so the next subagent call takes it.
     assert!(matches!(
-        hooks::handle(&runtime, parsed(&spawn)).await,
+        hooks::handle(&runtime, parsed(&another(&spawn))).await,
         HookDecision::AllowCall { spawn: Some(_) }
     ));
 
@@ -431,9 +441,7 @@ async fn a_fan_out_spawn_drops_a_declaration_ahead_and_declares_at_its_block() {
     let runtime = deployment("delta = {}");
     let workflow = hook(&workflow_events(), "PreToolUse", "Workflow", false);
     control_hook(&runtime, &workflow, serde_json::json!({})).await;
-    let declared = runtime
-        .execute_embedded_remedy(&actor_of(&workflow), ahead(this_label()))
-        .await;
+    let declared = declare_ahead(&runtime, &actor_of(&workflow), ahead(this_label())).await;
     assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
 
     let HookDecision::DenyCall { feedback, offers, .. } = hooks::handle(&runtime, parsed(&workflow)).await else {

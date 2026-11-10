@@ -87,12 +87,36 @@ pub(super) fn child_runs_on<'a>(
 
 pub(super) const REPLAY_LIMIT: u32 = 8;
 
-/// What a proposal's append binds beside its facts: the host's call id, and the prompt a
-/// fan-out spawn it releases is keyed by.
+/// What an append binds beside its facts: a proposal's host call id, the prompt a fan-out
+/// spawn it releases is keyed by, the spawn it is and the invocation it runs in, which take a
+/// declaration ahead; or the declaration an approved remedy applies.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Opening<'a> {
     call_id: Option<&'a str>,
     prompt: Option<&'a PromptKey>,
+    spawn: Option<SpawnKind>,
+    invocation: Option<appa_eventlog::InvocationNonce>,
+    applies: Option<&'a AheadClaim<'a>>,
+}
+
+/// What a spawn's block does with the declaration it took, judged at the position and under
+/// the revision the judgment commits at.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Judgment {
+    Settled(appa_eventlog::AheadOutcome),
+    Apply(OfferId),
+}
+
+/// A judged host write's failure: the deriver's own refusal, or the store's.
+enum Judged<Refusal> {
+    Refused(Refusal),
+    Failed(EventError),
+}
+
+impl<Refusal> From<EventError> for Judged<Refusal> {
+    fn from(error: EventError) -> Self {
+        Judged::Failed(error)
+    }
 }
 
 /// The most external-resolution rounds one invocation runs before refusing operationally.
@@ -114,8 +138,8 @@ pub(super) const PUBLISHES_FOLLOWED: u32 = 4;
 pub(crate) struct Decided<'a> {
     session: &'a Session,
     pub(super) policy: &'a crate::engine::PolicyEngine<'a>,
-    pub(super) view: &'a EngineView,
-    pub(super) log: &'a appa_eventlog::Log,
+    pub(in crate::api) view: &'a EngineView,
+    pub(in crate::api) log: &'a appa_eventlog::Log,
 }
 
 impl Session {
@@ -135,6 +159,48 @@ impl Session {
             view: &view,
             log: &log,
         })
+    }
+
+    /// Record one host observation judged at the position it is written at and under the
+    /// policy revision it commits at: the derivation runs inside the compare-and-swap on the
+    /// view of that revision, and the write is fenced at it. A publish between the judgment
+    /// and the write writes nothing; when this view now serves the head the judgment is made
+    /// again there, and otherwise the operational [`EventError::PolicyMoved`] reaches the host.
+    pub(crate) fn append_host_judged<Refusal: From<EventError>, Answer>(
+        &self,
+        derive: impl Fn(&Decided<'_>) -> Result<(Option<appa_eventlog::HostObservation>, Answer), Refusal>,
+    ) -> Result<Answer, Refusal> {
+        for _ in 0..PUBLISHES_FOLLOWED {
+            let deployment = self.deployment();
+            let written = self.inner.write_host::<Judged<Refusal>, Answer>(&self.root, |log| {
+                let policy = self.inner.resolve_policy(&deployment, log)?;
+                let view = policy.rebuild_view(log).map_err(EventError::from)?;
+                let revision = appa_engine::profile::PolicyRevision::new(deployment.serving_revision()?);
+                let (observation, answer) = derive(&Decided {
+                    session: self,
+                    policy: &policy,
+                    view: &view,
+                    log,
+                })
+                .map_err(Judged::Refused)?;
+                Ok((
+                    observation.map(|observation| crate::api::HostWrite::judged(observation, revision)),
+                    answer,
+                ))
+            });
+            match written {
+                Err(Judged::Failed(EventError::PolicyMoved { .. })) if self.follow_head(&deployment) => {
+                    tracing::debug!(root = %self.root.0, "a publish moved the head under the judgment: judging again at the head");
+                }
+                Ok(answer) => return Ok(answer),
+                Err(Judged::Refused(refusal)) => return Err(refusal),
+                Err(Judged::Failed(error)) => return Err(error.into()),
+            }
+        }
+        Err(EventError::Contended {
+            attempts: PUBLISHES_FOLLOWED,
+        }
+        .into())
     }
 }
 
@@ -169,6 +235,11 @@ impl Decided<'_> {
 
     /// The host's record of this decision: the call id the dispatch it opens is bound to, or
     /// the batch a denied proposal is answered from.
+    ///
+    /// A spawn's first decision also takes the declaration ahead its trajectory has live, in
+    /// the same batch, so the declaration has one owner and commits with that decision or not
+    /// at all. A call's later decisions take nothing; a spawn without a call id reserves the
+    /// declaration for its invocation instead.
     fn host_record(
         &self,
         facts: &[appa_engine::fact::Fact],
@@ -176,6 +247,12 @@ impl Decided<'_> {
         opens_dispatch: Option<appa_engine::value::DispatchId>,
         fan_out_prompt: Option<String>,
     ) -> Result<Option<appa_eventlog::HostObservation>, EventError> {
+        let trajectory = &self.session.trajectory;
+        let ahead = AheadState::fold(self.log.host_records());
+        let takes = |call_id: &str| match (opening.spawn, ahead.assignment(trajectory, call_id)) {
+            (Some(_), None) => ahead.live(trajectory).cloned(),
+            _ => None,
+        };
         Ok(match (opening.call_id, opens_dispatch) {
             (Some(call_id), Some(dispatch)) => {
                 if call_id.is_empty()
@@ -191,7 +268,7 @@ impl Decided<'_> {
                     call_id: call_id.to_string(),
                     dispatch,
                     prompt: fan_out_prompt,
-                    ahead: None,
+                    ahead: takes(call_id),
                 })
             }
             // A decided proposal batch that opens nothing denied the call: bind the host
@@ -203,16 +280,63 @@ impl Decided<'_> {
                         trajectory: self.session.trajectory.clone(),
                         call_id: call_id.to_string(),
                         batch: batch.as_str().to_string(),
-                        ahead: None,
+                        ahead: takes(call_id),
                     })
                 }
                 _ => None,
             }),
+            (None, _) => match (opening.spawn, opening.invocation) {
+                (Some(_), Some(invocation)) if ahead.reservation_of(trajectory, invocation).is_none() => ahead
+                    .live(trajectory)
+                    .map(|attempt| appa_eventlog::HostObservation::AheadReserved {
+                        trajectory: trajectory.clone(),
+                        attempt: attempt.clone(),
+                        invocation,
+                    }),
+                _ => None,
+            },
             _ => None,
         })
     }
 
-    pub(super) fn engine(&self) -> &crate::engine::RuntimeEngine {
+    /// The declaration a blocked spawn took, judged: a fan-out spawn, a changed label, a turn
+    /// boundary since the declaration, and no offer of the block that fits it each settle it;
+    /// otherwise the block's fitting declaration offer applies it.
+    pub(super) fn judge(&self, ahead: &AheadState, claim: &AheadClaim<'_>) -> Result<Judgment, EventError> {
+        use appa_eventlog::AheadOutcome;
+        let trajectory = &self.session.trajectory;
+        let declared = ahead.declared(trajectory, claim.attempt).ok_or_else(|| {
+            EventError::EngineInvariant("a spawn took a declaration its family never recorded".to_string())
+        })?;
+        if claim.spawn == SpawnKind::FanOut {
+            return Ok(Judgment::Settled(AheadOutcome::FanOut));
+        }
+        let label = declared.label.under(self.engine().registry().trust_chain());
+        if self.engine().label_of(self.view, trajectory) != Some(label) {
+            return Ok(Judgment::Settled(AheadOutcome::Lapsed));
+        }
+        if ahead.cleared(trajectory, declared) {
+            return Ok(Judgment::Settled(AheadOutcome::Ended));
+        }
+        let route = match declared.arguments.return_schema {
+            Some(_) => appa_runtime_api::OfferedReturn::Sanitized {
+                sanitizer: appa_engine::names::SanitizerName::ATTEST_SCHEMA.to_string(),
+            },
+            None => appa_runtime_api::OfferedReturn::AsSpoken,
+        };
+        let offer = claim
+            .offers
+            .iter()
+            .filter(|offer| offer.returns.as_ref() == Some(&route))
+            .filter_map(|offer| crate::engine::resolve_rendered(self.log, &OfferId(offer.id.clone())))
+            .find(|offer| self.engine().offer_declares_only(self.view, trajectory, offer));
+        Ok(match offer {
+            Some(offer) => Judgment::Apply(offer),
+            None => Judgment::Settled(AheadOutcome::Unfit),
+        })
+    }
+
+    pub(in crate::api) fn engine(&self) -> &crate::engine::RuntimeEngine {
         self.policy.engine()
     }
 
@@ -495,7 +619,22 @@ impl Session {
         occasion: Occasion<'_>,
     ) -> Result<EngineDecision, EventError> {
         let opening = match occasion {
-            Occasion::Proposal { call_id, prompt } => Opening { call_id, prompt },
+            Occasion::Proposal {
+                call_id,
+                prompt,
+                spawn,
+                invocation,
+            } => Opening {
+                call_id,
+                prompt,
+                spawn,
+                invocation: Some(invocation),
+                applies: None,
+            },
+            Occasion::AheadApply { claim, .. } => Opening {
+                applies: Some(claim),
+                ..Opening::default()
+            },
             Occasion::Report { .. } | Occasion::Remedy { .. } | Occasion::Other => Opening::default(),
         };
         let opened = self.inner.log(&self.root)?;
@@ -630,7 +769,17 @@ impl Session {
                 }
             }
             let fan_out_prompt = context.fan_out_gate(facts, opens_dispatch.is_some(), opening)?;
-            let host_record = context.host_record(facts, opening, opens_dispatch, fan_out_prompt)?;
+            // An approved application of a declaration ahead settles it in the remedy's own
+            // batch, which is stamped, so the settlement is fenced with the approval.
+            let host_record = match (opening.applies, &decision.then) {
+                (Some(claim), Next::Approved { .. }) => Some(appa_eventlog::HostObservation::AheadSettled {
+                    trajectory: self.trajectory.clone(),
+                    attempt: claim.attempt.clone(),
+                    outcome: appa_eventlog::AheadOutcome::Applied,
+                }),
+                (Some(_), _) => None,
+                (None, _) => context.host_record(facts, opening, opens_dispatch, fan_out_prompt)?,
+            };
             let binds_read = facts.iter().any(|fact| {
                 matches!(
                     fact,

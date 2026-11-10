@@ -52,9 +52,11 @@ use crate::external::{ConsultGates, ExternalServices};
 #[cfg(feature = "daemon")]
 use crate::yell;
 use appa_engine::label::ReaderId;
-use appa_eventlog::{Backend, DeploymentName, HostObservation, Log, LogStore};
+use appa_eventlog::{
+    AheadAttempt, Backend, DeclaredArguments, DeploymentName, EndKind, HostObservation, Log, LogStore, StoredLabel,
+};
 use appa_runtime_api::Adapter;
-use host::{HostState, host_actor, inventory_at};
+use host::{AheadState, Declared, HostState, host_actor, inventory_at};
 
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -330,6 +332,13 @@ pub enum RemedyRefusal {
     /// No preceding control hook vouched for this declaration ahead of the spawn, under the
     /// call the request names.
     UnvouchedDeclaration,
+    /// The attempt already declared, with other arguments.
+    AttemptReused,
+    /// A declaration ahead of the spawn names no host attempt, so a retry could not be told
+    /// from a second declaration.
+    UnidentifiedDeclaration,
+    /// More than one actor declared under this attempt, and the request does not say which.
+    AmbiguousReplay,
     /// The offer belongs to a different session or actor.
     ActorMismatch,
     /// The offer no longer stands (expired, already terminal, or recorded under an earlier
@@ -350,6 +359,9 @@ impl RemedyRefusal {
                 "[appa] This declaration was not tied to your session, so nothing was declared. Call the subagent \
                  tool now, and apply the declaration plan its block offers."
             }
+            Self::AttemptReused => "this attempt already declared a different return",
+            Self::UnidentifiedDeclaration => "a declaration ahead of the spawn needs the host attempt it is made under",
+            Self::AmbiguousReplay => "more than one session declared under this attempt",
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
             Self::Runtime { detail } => detail,
@@ -357,12 +369,16 @@ impl RemedyRefusal {
     }
 }
 
-/// A return declaration made ahead of the spawn: the arguments the control call passed, and
-/// the label it was checked at. A spawn proposed at any other label finds it lapsed.
-#[derive(Clone, Debug)]
-struct HeldReturn {
-    arguments: RemedyArguments,
-    label: appa_engine::label::Label,
+/// The host operation an embedding host executes a declaration ahead of the spawn under. A
+/// retry of the operation replays the declaration it made, and one operation declares once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemedyAttempt(pub String);
+
+impl RemedyAttempt {
+    /// An attempt no other operation shares, for a host that does not retry its own calls.
+    pub fn fresh() -> RemedyAttempt {
+        RemedyAttempt(format!("{:032x}", rand::random::<u128>()))
+    }
 }
 
 /// What one whole `execute_remedy_plan` act produced: the engine's
@@ -586,6 +602,10 @@ pub(crate) enum EventError {
     OutcomeMismatch,
     #[error("no live offer with this id exists")]
     UnknownOffer,
+    /// The declaration ahead an application was for was settled, or no longer applies through
+    /// this offer, where the application would commit. Nothing is appended.
+    #[error("the return declared ahead was settled or changed while it was applied")]
+    AheadMoved,
     #[error("only a child trajectory submits a return")]
     NotAChild,
     #[error("the spawn did not take: no prepared fork to open this child")]
@@ -691,7 +711,9 @@ impl EventError {
                 RefusalClass::Trajectory
             }
             EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
-            EventError::UnknownOffer | EventError::RemedyArguments { .. } => RefusalClass::Remedy,
+            EventError::UnknownOffer | EventError::AheadMoved | EventError::RemedyArguments { .. } => {
+                RefusalClass::Remedy
+            }
             EventError::SpawnNotTaken => RefusalClass::SpawnNotTaken,
             EventError::NotAChild
             | EventError::FanOutUnkeyed
@@ -738,6 +760,7 @@ impl EventError {
             | EventError::UnknownDispatch
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
+            | EventError::AheadMoved
             | EventError::NotAChild
             | EventError::SpawnNotTaken
             | EventError::SpawnAmbiguous
@@ -1192,7 +1215,6 @@ impl Prepared {
                     gates: self.gates,
                     naming: self.naming,
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
-                    held_returns: std::sync::Mutex::new(std::collections::HashMap::new()),
                     spawn_holds: spawn_hold::SpawnHolds::default(),
                 }),
                 store,
@@ -1310,12 +1332,6 @@ struct Shared {
     /// not a call's, so a remedy's rewritten call is annotated in it too. In this process
     /// only; after a restart the next proposal reports it again.
     working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
-    /// Return declarations made ahead of a spawn, by the root and trajectory that made them.
-    /// The trajectory's next marked spawn takes one, and a single spawn applies it through its
-    /// block's own declaration offer; the trajectory's turn end drops one it left. In this
-    /// process only: after a restart, or on another replica, the spawn meets that block and
-    /// declares there.
-    held_returns: std::sync::Mutex<std::collections::HashMap<(TrajectoryId, TrajectoryId), HeldReturn>>,
     spawn_holds: spawn_hold::SpawnHolds,
 }
 
@@ -1640,22 +1656,6 @@ impl Inner {
         }
     }
 
-    fn hold_return(&self, root: &TrajectoryId, trajectory: &TrajectoryId, held: HeldReturn) {
-        self.shared
-            .held_returns
-            .lock()
-            .expect("the held-return mutex is never poisoned: no panic runs while it is held")
-            .insert((root.clone(), trajectory.clone()), held);
-    }
-
-    fn take_held_return(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<HeldReturn> {
-        self.shared
-            .held_returns
-            .lock()
-            .expect("the held-return mutex is never poisoned: no panic runs while it is held")
-            .remove(&(root.clone(), trajectory.clone()))
-    }
-
     fn working_directory(&self, root: &TrajectoryId) -> Option<String> {
         self.shared
             .working_directories
@@ -1902,6 +1902,18 @@ impl Inner {
         self.append_host_with(root, |_| Ok((Some(observation.clone()), ())))
     }
 
+    /// [`Inner::write_host`] for a record no policy revision judged, which no publish fences.
+    fn append_host_with<Refusal: From<EventError>, Answer>(
+        &self,
+        root: &TrajectoryId,
+        derive: impl Fn(&Log) -> Result<(Option<HostObservation>, Answer), Refusal>,
+    ) -> Result<Answer, Refusal> {
+        self.write_host(root, |log| {
+            let (observation, answer) = derive(log)?;
+            Ok((observation.map(HostWrite::unfenced), answer))
+        })
+    }
+
     /// Record one host observation derived from the very position it will be written at, so
     /// a writer that loses the compare-and-swap decides again against what won rather than
     /// replaying a decision the log has moved past. `None` means there is nothing left to
@@ -1918,21 +1930,36 @@ impl Inner {
     /// Read, derive, append; on a lost compare-and-swap, read again and derive again. The
     /// answer handed back is the one the derivation that landed produced, so a caller learns
     /// what was true where its record went and not what an earlier read showed it.
-    fn append_host_with<Refusal: From<EventError>, Answer>(
+    ///
+    /// A write judged under a policy revision commits only while that revision is the head: a
+    /// publish between the judgment and the append writes nothing and answers
+    /// [`EventError::PolicyMoved`].
+    pub(super) fn write_host<Refusal: From<EventError>, Answer>(
         &self,
         root: &TrajectoryId,
-        derive: impl Fn(&Log) -> Result<(Option<HostObservation>, Answer), Refusal>,
+        derive: impl Fn(&Log) -> Result<(Option<HostWrite>, Answer), Refusal>,
     ) -> Result<Answer, Refusal> {
         for _ in 0..HOST_ATTEMPTS {
             let step = self.step(root)?;
             let log = self.step_log(&step, root)?;
-            let (observation, answer) = derive(&log)?;
-            let Some(observation) = observation else {
+            let (write, answer) = derive(&log)?;
+            let Some(HostWrite { observation, fence }) = write else {
                 return Ok(answer);
             };
-            match step.append_host(&log, &observation) {
+            let appended = match fence {
+                None => step.append_host(&log, &observation),
+                Some(revision) => step.append_host_fenced(&log, &observation, revision),
+            };
+            match appended {
                 Ok(()) => return Ok(answer),
                 Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
+                Err(appa_eventlog::AppendError::PolicyMoved { head }) => {
+                    return Err(EventError::PolicyMoved {
+                        deployment: self.line().to_string(),
+                        head: head.map_or_else(|| "none".to_string(), |head| head.to_string()),
+                    }
+                    .into());
+                }
                 Err(error) => {
                     self.note_store_error(Some(root), crate::events::StoreOperation::Append, &error);
                     return Err(EventError::Storage(error.to_string()).into());
@@ -1946,6 +1973,29 @@ impl Inner {
     }
 }
 
+/// One host record on its way to the log, and the policy revision it was judged under where
+/// a revision judged it.
+pub(super) struct HostWrite {
+    observation: HostObservation,
+    fence: Option<appa_engine::profile::PolicyRevision>,
+}
+
+impl HostWrite {
+    fn unfenced(observation: HostObservation) -> HostWrite {
+        HostWrite {
+            observation,
+            fence: None,
+        }
+    }
+
+    pub(super) fn judged(observation: HostObservation, revision: appa_engine::profile::PolicyRevision) -> HostWrite {
+        HostWrite {
+            observation,
+            fence: Some(revision),
+        }
+    }
+}
+
 /// How many times a host write re-derives against a position another writer took before it
 /// gives up. Every contender records one observation, so a family loses this many races only
 /// when it is being written by far more than it has actors.
@@ -1956,6 +2006,20 @@ const HOST_ATTEMPTS: u32 = 8;
 /// moment it was taken at.
 fn reduced(log: &Log) -> HostState {
     HostState::fold(log.host_records(), std::time::SystemTime::now())
+}
+
+/// The one live vouch this family holds behind `key`.
+#[cfg(any(test, feature = "daemon"))]
+fn standing_in(log: &Log, key: &PermitKey) -> Result<host::LiveVouch, Unvouched> {
+    reduced(log).standing(key)
+}
+
+/// Which family stands behind a key, as a read that may not fail quietly answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Holder {
+    One(TrajectoryId),
+    Nobody,
+    Ambiguous,
 }
 
 /// Why [`Runtime::open_root_fork`] opened no independent conversation-root fork.
@@ -2852,28 +2916,51 @@ impl Runtime {
 
     /// Declare, for an authenticated actor, what its next single subagent call's return may
     /// carry: the call that quotes no offer. The spawn applies it through its block's own
-    /// declaration offer.
-    pub async fn declare_return_ahead(&self, acting: &Actor, arguments: RemedyArguments) -> RemedyOutcome {
-        self.declare_ahead(acting, arguments, EmbeddedPresentationOptions::default())
-            .await
+    /// declaration offer. A retry under the same `attempt` answers from the declaration it
+    /// made.
+    pub async fn declare_return_ahead(
+        &self,
+        acting: &Actor,
+        arguments: RemedyArguments,
+        attempt: RemedyAttempt,
+    ) -> RemedyOutcome {
+        self.declare_ahead(
+            &acting.root,
+            Authority::Embedded {
+                actor: acting,
+                attempt: AheadAttempt::Host(attempt.0),
+            },
+            &arguments,
+            EmbeddedPresentationOptions::default(),
+        )
     }
 
-    /// Executes an embedded remedy plan for an authenticated actor.
+    /// Executes an embedded remedy plan for an authenticated actor. It names no attempt, so
+    /// a plan that declares ahead of the spawn is refused.
     /// Returns a structured `RemedyOutcome`.
     pub async fn execute_embedded_remedy(&self, actor: &Actor, args: ExecuteRemedyPlanArgs) -> RemedyOutcome {
-        self.execute_embedded_remedy_with_options(actor, args, EmbeddedPresentationOptions::default())
+        self.execute_embedded_remedy_with_options(actor, args, EmbeddedPresentationOptions::default(), None)
             .await
     }
 
-    /// Executes one admitted embedded remedy with request-scoped display capabilities.
+    /// Executes one admitted embedded remedy with request-scoped display capabilities. A
+    /// declaration ahead of the spawn needs the host `attempt` it is made under.
     pub async fn execute_embedded_remedy_with_options(
         &self,
         actor: &Actor,
         args: ExecuteRemedyPlanArgs,
         presentation: EmbeddedPresentationOptions,
+        attempt: Option<RemedyAttempt>,
     ) -> RemedyOutcome {
-        self.execute_remedy_outcome(args, RemedyCaller::Embedded { actor, presentation })
-            .await
+        self.execute_remedy_outcome(
+            args,
+            RemedyCaller::Embedded {
+                actor,
+                presentation,
+                attempt,
+            },
+        )
+        .await
     }
 
     /// Executes a remedy plan for the MCP daemon, returning an MCP tool reply. `call` is the
@@ -2893,26 +2980,17 @@ impl Runtime {
 
     #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
     async fn execute_remedy_outcome(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
-        let (call, elicitation, expected_actor, presentation, strict_freshness) = match caller {
-            RemedyCaller::Embedded { actor, presentation } => (None, None, Some(actor), presentation, true),
-            #[cfg(feature = "daemon")]
-            RemedyCaller::Daemon { call, elicitation } => {
-                (call, elicitation, None, EmbeddedPresentationOptions::default(), false)
-            }
-        };
         let Some(offer_id) = args.offer_id.clone() else {
-            // An embedded host authenticated its actor; the daemon spends the vouch the
-            // control hook recorded for the declaration.
-            let acting = match (expected_actor, strict_freshness) {
-                (Some(actor), true) => actor.clone(),
-                _ => match self.declaration_vouch(&args, call, expected_actor) {
-                    Ok(actor) => actor,
-                    Err(reason) => return RemedyOutcome::Refused { reason },
-                },
-            };
-            return self
-                .declare_ahead(&acting, RemedyArguments::from(args), presentation)
-                .await;
+            return self.declare(args, caller);
+        };
+        let (elicitation, expected_actor, presentation, strict_freshness) = match caller {
+            RemedyCaller::Embedded {
+                actor, presentation, ..
+            } => (None, Some(actor), presentation, true),
+            #[cfg(feature = "daemon")]
+            RemedyCaller::Daemon { elicitation, .. } => {
+                (elicitation, None, EmbeddedPresentationOptions::default(), false)
+            }
         };
         let quoted = match OfferId::parse(&offer_id) {
             Ok(quoted) => quoted,
@@ -3004,6 +3082,7 @@ enum RemedyCaller<'a> {
     Embedded {
         actor: &'a Actor,
         presentation: EmbeddedPresentationOptions,
+        attempt: Option<RemedyAttempt>,
     },
     #[cfg(feature = "daemon")]
     Daemon {
@@ -3084,6 +3163,15 @@ pub struct LabelArgs {
     pub audience: Option<Vec<String>>,
 }
 
+impl From<&RemedyArguments> for DeclaredArguments {
+    fn from(arguments: &RemedyArguments) -> DeclaredArguments {
+        DeclaredArguments {
+            label: arguments.label.clone(),
+            return_schema: arguments.return_schema.clone(),
+        }
+    }
+}
+
 impl From<ExecuteRemedyPlanArgs> for RemedyArguments {
     fn from(args: ExecuteRemedyPlanArgs) -> RemedyArguments {
         RemedyArguments {
@@ -3105,62 +3193,253 @@ pub struct RemedyReply {
     pub is_error: bool,
 }
 
-impl Runtime {
-    /// The actor a daemon's declaration ahead of the spawn acts for: the one its control hook
-    /// vouched under the declaration's key, held to the actor the connection names. With no
-    /// vouch nothing is declared, whether or not the connection names an actor, as an offer
-    /// with no vouch is not executed.
+/// What authorizes a declaration ahead of the spawn: an embedding host's authenticated actor
+/// and the attempt it names, or the vouch the daemon's control hook recorded under the
+/// declaration's key, with the call the host's MCP client named where it named one.
+enum Authority<'a> {
+    Embedded {
+        actor: &'a Actor,
+        attempt: AheadAttempt,
+    },
     #[cfg(feature = "daemon")]
-    fn declaration_vouch(
-        &self,
-        args: &ExecuteRemedyPlanArgs,
-        call: Option<&str>,
-        expected: Option<&Actor>,
-    ) -> Result<Actor, RemedyRefusal> {
-        match (self.take_vouched(&declaration_key(args, call)), expected) {
-            (Ok((vouched, _)), Some(expected)) if vouched != *expected => Err(RemedyRefusal::ActorMismatch),
-            (Ok((vouched, _)), _) => Ok(vouched),
-            (Err(_), _) => Err(RemedyRefusal::UnvouchedDeclaration),
+    Vouch {
+        key: &'a PermitKey,
+        call: Option<&'a str>,
+    },
+}
+
+impl Authority<'_> {
+    /// The attempt the caller names before anything is read, which a replay matches.
+    fn named(&self) -> Option<AheadAttempt> {
+        match self {
+            Authority::Embedded { attempt, .. } => Some(attempt.clone()),
+            #[cfg(feature = "daemon")]
+            Authority::Vouch { call, .. } => call.map(|call| AheadAttempt::McpCall(call.to_string())),
         }
     }
 
-    /// Without the daemon no control hook vouches: only an authenticated embedded actor declares.
-    #[cfg(not(feature = "daemon"))]
-    fn declaration_vouch(
-        &self,
-        _: &ExecuteRemedyPlanArgs,
-        _: Option<&str>,
-        _: Option<&Actor>,
-    ) -> Result<Actor, RemedyRefusal> {
-        Err(RemedyRefusal::UnvouchedDeclaration)
+    /// The actor the caller authenticated, which a replay must belong to.
+    fn expected(&self) -> Option<&Actor> {
+        match self {
+            Authority::Embedded { actor, .. } => Some(actor),
+            #[cfg(feature = "daemon")]
+            Authority::Vouch { .. } => None,
+        }
+    }
+}
+
+/// Where a daemon declaration's holder discovery left it: no family holds the vouch, so only
+/// a declaration another delivery of the named call made answers it; or one family holds it.
+#[cfg(feature = "daemon")]
+pub(crate) enum Scan {
+    NoHolder { call: String },
+    Holder { root: TrajectoryId, call: Option<String> },
+}
+
+/// What a declaration already made under the attempt answers, if any was made: the
+/// declaration itself to a retry with its arguments, and a refusal to anything else. Matches
+/// for another actor only are another actor's declaration.
+fn replayed<'a>(
+    matches: impl IntoIterator<Item = &'a Declared>,
+    expected: Option<&Actor>,
+    arguments: &DeclaredArguments,
+) -> Option<RemedyOutcome> {
+    let matches: Vec<&Declared> = matches.into_iter().collect();
+    if matches.is_empty() {
+        return None;
+    }
+    let kept: Vec<&Declared> = matches
+        .into_iter()
+        .filter(|declared| expected.is_none_or(|actor| declared.actor == *actor))
+        .collect();
+    let refused = |reason| RemedyOutcome::Refused { reason };
+    Some(match kept.as_slice() {
+        [] => refused(RemedyRefusal::ActorMismatch),
+        [only] if only.arguments == *arguments => declared_ahead(),
+        [_] => refused(RemedyRefusal::AttemptReused),
+        _ => refused(RemedyRefusal::AmbiguousReplay),
+    })
+}
+
+fn declared_ahead() -> RemedyOutcome {
+    RemedyOutcome::Returned {
+        value: DECLARED_AHEAD.to_string(),
+    }
+}
+
+impl Runtime {
+    /// A control call that quotes no offer declares ahead of the spawn: under the attempt an
+    /// embedding host names, or under the vouch the daemon's control hook recorded.
+    fn declare(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
+        match caller {
+            RemedyCaller::Embedded { attempt: None, .. } => RemedyOutcome::Refused {
+                reason: RemedyRefusal::UnidentifiedDeclaration,
+            },
+            RemedyCaller::Embedded {
+                actor,
+                presentation,
+                attempt: Some(attempt),
+            } => self.declare_ahead(
+                &actor.root,
+                Authority::Embedded {
+                    actor,
+                    attempt: AheadAttempt::Host(attempt.0),
+                },
+                &RemedyArguments::from(args),
+                presentation,
+            ),
+            #[cfg(feature = "daemon")]
+            RemedyCaller::Daemon { call, .. } => self.declare_vouched(args, call),
+        }
     }
 
-    /// A return declaration ahead of the spawn: checked at the acting trajectory's label and
-    /// held for its next marked single spawn, which applies it through its block's own
-    /// declaration offer.
-    async fn declare_ahead(
+    /// A daemon declaration: replayed where another delivery of its call already declared,
+    /// else declared on the one family that holds its vouch. A read that fails answers
+    /// operationally and spends nothing; only a discovery that read every family answers
+    /// that nothing vouched.
+    #[cfg(feature = "daemon")]
+    fn declare_vouched(&self, args: ExecuteRemedyPlanArgs, call: Option<&str>) -> RemedyOutcome {
+        let key = declaration_key(&args, call);
+        let arguments = RemedyArguments::from(args);
+        if let Some(call) = call {
+            match self.replay_named(call, &arguments) {
+                Ok(Some(replayed)) => return replayed,
+                Ok(None) => {}
+                Err(error) => return error.into(),
+            }
+        }
+        let scan = match (self.discover_holder(&key), call) {
+            (Err(error), _) => return error.into(),
+            (Ok(Holder::One(root)), call) => Scan::Holder {
+                root,
+                call: call.map(str::to_string),
+            },
+            (Ok(Holder::Nobody), Some(call)) => Scan::NoHolder { call: call.to_string() },
+            (Ok(Holder::Nobody | Holder::Ambiguous), _) => {
+                return RemedyOutcome::Refused {
+                    reason: RemedyRefusal::UnvouchedDeclaration,
+                };
+            }
+        };
+        self.admit(scan, &key, &arguments)
+    }
+
+    /// What a declaration another delivery of `call` made answers, across every family that
+    /// recorded one: a retry whose vouch that declaration spent still finds its result.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn replay_named(
         &self,
-        acting: &Actor,
-        arguments: RemedyArguments,
+        call: &str,
+        arguments: &RemedyArguments,
+    ) -> Result<Option<RemedyOutcome>, EventError> {
+        let attempt = AheadAttempt::McpCall(call.to_string());
+        let roots = self.inner.store.roots_mentioning(&attempt.key()).map_err(|error| {
+            self.inner
+                .note_store_error(None, crate::events::StoreOperation::Read, &error);
+            read_refused(error)
+        })?;
+        let mut matches = Vec::new();
+        for root in roots {
+            let log = self.inner.log(&root)?;
+            let ahead = AheadState::fold(log.host_records());
+            matches.extend(ahead.declared_by_attempt(&attempt).into_iter().cloned());
+        }
+        Ok(replayed(&matches, None, &DeclaredArguments::from(arguments)))
+    }
+
+    /// The family that holds the vouch behind a declaration's key, read strictly.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn discover_holder(&self, key: &PermitKey) -> Result<Holder, EventError> {
+        self.holders_strict(key, None)
+    }
+
+    /// A daemon declaration from where its discovery left it.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn admit(&self, scan: Scan, key: &PermitKey, arguments: &RemedyArguments) -> RemedyOutcome {
+        match scan {
+            Scan::NoHolder { call } => match self.replay_named(&call, arguments) {
+                Ok(Some(replayed)) => replayed,
+                Ok(None) => RemedyOutcome::Refused {
+                    reason: RemedyRefusal::UnvouchedDeclaration,
+                },
+                Err(error) => error.into(),
+            },
+            Scan::Holder { root, call } => self.declare_ahead(
+                &root,
+                Authority::Vouch {
+                    key,
+                    call: call.as_deref(),
+                },
+                arguments,
+                EmbeddedPresentationOptions::default(),
+            ),
+        }
+    }
+
+    /// A return declaration ahead of the spawn, judged and written in one fenced step on the
+    /// family's log: a replay of its attempt answers from the record; otherwise it is
+    /// authorized, checked at the acting trajectory's label under the revision it commits at,
+    /// and recorded, spending the daemon's vouch in the same record. A refusal or a failure
+    /// writes nothing and spends nothing.
+    fn declare_ahead(
+        &self,
+        root: &TrajectoryId,
+        authority: Authority<'_>,
+        arguments: &RemedyArguments,
         presentation: EmbeddedPresentationOptions,
     ) -> RemedyOutcome {
-        let trajectory = acting_trajectory(acting);
-        let declared = self
-            .session_with_presentation(&acting.root, trajectory, presentation)
-            .and_then(|session| session.declare_return_ahead(&arguments));
-        match declared {
-            Ok(label) => {
-                self.inner
-                    .hold_return(&acting.root, trajectory, HeldReturn { arguments, label });
-                RemedyOutcome::Returned {
-                    value: DECLARED_AHEAD.to_string(),
-                }
+        let session = match self.session_with_presentation(root, root, presentation) {
+            Ok(session) => session,
+            Err(error) => return error.into(),
+        };
+        let declared = DeclaredArguments::from(arguments);
+        let named = authority.named();
+        let written = session.append_host_judged(|context| {
+            let ahead = AheadState::fold(context.log.host_records());
+            if let Some(replayed) = named
+                .as_ref()
+                .and_then(|attempt| replayed(ahead.declared_by_attempt(attempt), authority.expected(), &declared))
+            {
+                return Ok((None, replayed));
             }
-            Err(error) => RemedyOutcome::Refused {
-                reason: RemedyRefusal::Runtime {
-                    detail: error.to_string(),
-                },
-            },
+            let (actor, attempt, spends) = match &authority {
+                Authority::Embedded { actor, attempt } => ((*actor).clone(), attempt.clone(), None),
+                #[cfg(feature = "daemon")]
+                Authority::Vouch { key, call } => {
+                    let unvouched = || RemedyOutcome::Refused {
+                        reason: RemedyRefusal::UnvouchedDeclaration,
+                    };
+                    let Ok(standing) = standing_in(context.log, key) else {
+                        return Err(unvouched());
+                    };
+                    // The sibling re-check `take_vouched` makes: the compare-and-swap is this
+                    // root's alone, so a sibling that vouched since is read, not swapped on.
+                    if self.holders_strict(key, Some(root))? != Holder::Nobody {
+                        return Err(unvouched());
+                    }
+                    let attempt = match call {
+                        Some(call) => AheadAttempt::McpCall(call.to_string()),
+                        None => AheadAttempt::Vouch(standing.seq),
+                    };
+                    let spent = appa_eventlog::SpentVouch { key: key.wire() };
+                    (standing.actor, attempt, Some(spent))
+                }
+            };
+            let label = context
+                .engine()
+                .declare_ahead(context.view, acting_trajectory(&actor), arguments)
+                .map_err(|detail| RemedyOutcome::from(EventError::RemedyArguments { detail }))?;
+            let declaration = HostObservation::AheadDeclared {
+                actor: host_actor(&actor),
+                attempt,
+                arguments: declared.clone(),
+                label: StoredLabel::named(&label, context.engine().registry().trust_chain()),
+                spends,
+            };
+            Ok((Some(declaration), declared_ahead()))
+        });
+        match written {
+            Ok(outcome) | Err(outcome) => outcome,
         }
     }
 
@@ -3401,16 +3680,27 @@ impl Runtime {
     /// A standing that does not land is no standing: the tool then finds nothing vouched
     /// and says so, which is the same answer a hook that never ran would leave.
     pub(crate) fn vouch(&self, key: &PermitKey, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
-        if let Err(error) = self.inner.append_host(
+        if let Err(error) = self.record_vouch(key, acting, ruling) {
+            tracing::warn!(root = %acting.root.0, %error, "this trajectory's standing was not recorded");
+        }
+    }
+
+    /// [`Runtime::vouch`] for a standing whose loss the caller must report: a declaration's
+    /// vouch that did not land would make its execution answer as one no hook vouched.
+    pub(crate) fn record_vouch(
+        &self,
+        key: &PermitKey,
+        acting: &Actor,
+        ruling: Option<appa_runtime_api::Ruling>,
+    ) -> Result<(), EventError> {
+        self.inner.append_host(
             &acting.root,
             &HostObservation::Vouched {
                 actor: host_actor(acting),
                 key: key.wire(),
                 ruling,
             },
-        ) {
-            tracing::warn!(root = %acting.root.0, %error, "this trajectory's standing was not recorded");
-        }
+        )
     }
 
     /// The trajectory vouched for this key, taken once, with the ruling its harness
@@ -3471,7 +3761,7 @@ impl Runtime {
             // The loop already read this root at the position it writes at, so the re-read
             // is the siblings only — and where the key names no sibling, which is every
             // offer and every ticket only one session quoted, there is nothing to read.
-            let (actor, ruling) = reduced(log).vouched(key)?;
+            let host::LiveVouch { actor, ruling, .. } = standing_in(log, key)?;
             if self.live_holder(key, Some(&root))?.is_some() {
                 return Err(Unvouched::Ambiguous);
             }
@@ -3502,33 +3792,39 @@ impl Runtime {
     /// partial view cannot tell a lone holder from one of two and would answer the ambiguous
     /// case with one session's standing.
     fn live_holder(&self, key: &PermitKey, folded: Option<&TrajectoryId>) -> Result<Option<TrajectoryId>, Unvouched> {
-        let candidates = match self.inner.store.roots_mentioning(&key.wire()) {
-            Ok(candidates) => candidates,
+        match self.holders_strict(key, folded) {
+            Ok(Holder::One(root)) => Ok(Some(root)),
+            Ok(Holder::Nobody) => Ok(None),
+            Ok(Holder::Ambiguous) => Err(Unvouched::Ambiguous),
             Err(error) => {
                 tracing::warn!(%error, "the families standing behind this key did not read, so nothing stands");
-                self.inner
-                    .note_store_error(None, crate::events::StoreOperation::Read, &error);
-                return Err(Unvouched::Nobody);
+                Err(Unvouched::Nobody)
             }
-        };
-        let mut held: Option<TrajectoryId> = None;
+        }
+    }
+
+    /// [`Runtime::live_holder`] with its failures kept: a read that fails is the store's
+    /// failure, never a family that holds nothing. A declaration answers it operationally,
+    /// so its retry is not refused as one nothing vouched for.
+    fn holders_strict(&self, key: &PermitKey, folded: Option<&TrajectoryId>) -> Result<Holder, EventError> {
+        let candidates = self.inner.store.roots_mentioning(&key.wire()).map_err(|error| {
+            self.inner
+                .note_store_error(None, crate::events::StoreOperation::Read, &error);
+            read_refused(error)
+        })?;
+        let mut held = Holder::Nobody;
         for root in candidates {
             if folded == Some(&root) {
                 continue;
             }
             // Every host record, not the rows that name the key: a turn's end releases
             // every standing its actor held and says so without naming one.
-            let log = match self.inner.log(&root) {
-                Ok(log) => log,
-                Err(error) => {
-                    tracing::warn!(root = %root.0, %error, "this family's records did not read, so nothing stands");
-                    return Err(Unvouched::Nobody);
-                }
-            };
-            match reduced(&log).vouched(key) {
-                Ok(_) if held.is_none() => held = Some(root),
-                Ok(_) | Err(Unvouched::Ambiguous) => return Err(Unvouched::Ambiguous),
-                Err(Unvouched::Nobody) => {}
+            let log = self.inner.log(&root)?;
+            let first = held == Holder::Nobody;
+            match (reduced(&log).vouched(key), first) {
+                (Ok(_), true) => held = Holder::One(root),
+                (Ok(_), false) | (Err(Unvouched::Ambiguous), _) => return Ok(Holder::Ambiguous),
+                (Err(Unvouched::Nobody), _) => {}
             }
         }
         Ok(held)
@@ -3576,19 +3872,18 @@ impl Runtime {
         )
     }
 
-    /// This actor's turn is over: its prompt mark, every vouch it still held, and any return it
-    /// declared ahead end here.
+    /// This actor's turn is over: its prompt mark and every vouch it still held end here, and
+    /// at a boundary so does the return it declared ahead.
     /// A vouch is recorded when the actor quotes an offer at the control tool's hook and
     /// taken when the tool itself runs, both inside one turn. One still standing at the
     /// turn's end was never spent — the harness declined the call, or the tool never ran —
     /// and nothing later can spend it.
-    pub(crate) fn record_turn_end(&self, acting: &Actor) -> Result<(), EventError> {
-        self.inner.take_held_return(&acting.root, acting_trajectory(acting));
+    pub(crate) fn record_turn_end(&self, acting: &Actor, end_kind: EndKind) -> Result<(), EventError> {
         self.inner.append_host(
             &acting.root,
             &HostObservation::TurnEnded {
                 actor: host_actor(acting),
-                end_kind: appa_eventlog::EndKind::Boundary,
+                end_kind,
             },
         )
     }
@@ -6289,7 +6584,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             runtime.vouch(&PermitKey::Call("deadbeef".to_string()), &parent, None);
         }
         runtime.record_prompt(&child).expect("the child's mark records");
-        runtime.record_turn_end(&child).expect("the child's turn ends");
+        runtime
+            .record_turn_end(&child, EndKind::Boundary)
+            .expect("the child's turn ends");
         assert!(
             runtime.prompted(&parent),
             "another actor's prompt and turn end say nothing about this one"
@@ -6299,7 +6596,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         runtime.record_prompt_settled(&parent).expect("the mark settles");
         assert!(!runtime.prompted(&parent));
         runtime.record_prompt(&parent).expect("a second prompt arrives");
-        runtime.record_turn_end(&parent).expect("and its turn ends");
+        runtime
+            .record_turn_end(&parent, EndKind::Boundary)
+            .expect("and its turn ends");
         assert!(!runtime.prompted(&parent), "the turn's end is the last word");
     }
 

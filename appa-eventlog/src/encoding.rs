@@ -211,11 +211,11 @@ mod tests {
     use appa_engine::registry::TrustChain;
 
     use super::*;
+    use crate::tests::{observed, punctuation, root};
     use crate::{
         AheadAttempt, AheadOutcome, DeclaredArguments, EndKind, HostActor, InvocationNonce, LabelSpelling, SpentVouch,
         StoredLabel,
     };
-    use crate::tests::{observed, punctuation, root};
 
     /// One observation of every kind, in declaration order, so a golden covers each wire tag.
     fn golden_observations() -> Vec<HostObservation> {
@@ -453,8 +453,14 @@ mod tests {
     #[test]
     fn a_declaration_names_its_attempts_key() {
         for (attempt, key) in [
-            (AheadAttempt::Host("remedy:op".to_string()), "ahead-attempt:host:remedy:op"),
-            (AheadAttempt::McpCall("toolu_3".to_string()), "ahead-attempt:mcp:toolu_3"),
+            (
+                AheadAttempt::Host("remedy:op".to_string()),
+                "ahead-attempt:host:remedy:op",
+            ),
+            (
+                AheadAttempt::McpCall("toolu_3".to_string()),
+                "ahead-attempt:mcp:toolu_3",
+            ),
             (AheadAttempt::Vouch(4), "ahead-attempt:vouch:4"),
         ] {
             let declared = HostObservation::AheadDeclared {

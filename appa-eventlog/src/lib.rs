@@ -1598,8 +1598,11 @@ impl LogStore {
     /// transaction of its own, as another process's publish would. The append then meets a
     /// head that moved after its caller judged. A PostgreSQL store never consults it.
     pub fn publish_before_next_append(&self, deployment: &DeploymentName, policy_file: &[u8]) {
-        *self.faults.publishing.lock().expect("the injection mutex is never poisoned") =
-            Some((deployment.clone(), policy_file.to_vec()));
+        *self
+            .faults
+            .publishing
+            .lock()
+            .expect("the injection mutex is never poisoned") = Some((deployment.clone(), policy_file.to_vec()));
     }
 
     /// Arm the read fail point for one family: its next `count` log reads answer with a
@@ -2132,7 +2135,10 @@ mod tests {
             (read.basis(), read.host_records()),
             "the refused append wrote nothing"
         );
-        assert_eq!(store.head(line).expect("the head reads").map(|head| head.revision), Some(next));
+        assert_eq!(
+            store.head(line).expect("the head reads").map(|head| head.revision),
+            Some(next)
+        );
         store
             .append_host(&log, &observation)
             .expect("an unfenced host record lands");

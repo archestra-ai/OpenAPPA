@@ -75,12 +75,51 @@ impl Session {
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
     ) -> Result<RemedyDecision, EventError> {
+        self.on_remedy_at(
+            &offer,
+            arguments,
+            elicitation,
+            ruling,
+            Occasion::Remedy { offer: &offer },
+        )
+        .await
+    }
+
+    /// Apply the declaration a blocked spawn took through its block's offer. The application
+    /// is judged again where it commits, so one the family settled or moved meanwhile is
+    /// refused rather than applied.
+    pub(super) async fn apply_ahead(
+        &self,
+        offer: &OfferId,
+        claim: &AheadClaim<'_>,
+        arguments: RemedyArguments,
+    ) -> Result<RemedyDecision, EventError> {
+        self.on_remedy_at(offer, arguments, None, None, Occasion::AheadApply { offer, claim })
+            .await
+    }
+
+    async fn on_remedy_at(
+        &self,
+        offer: &OfferId,
+        arguments: RemedyArguments,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+        occasion: Occasion<'_>,
+    ) -> Result<RemedyDecision, EventError> {
         let trajectory = self.trajectory.clone();
         let decision = self
             .drive_with_evidence(
                 |context, evidence| {
-                    if context.offer_pursuer(&offer).as_ref() != Some(&trajectory) {
+                    if context.offer_pursuer(offer).as_ref() != Some(&trajectory) {
                         return Err(EventError::UnknownOffer);
+                    }
+                    if let Occasion::AheadApply { claim, .. } = occasion {
+                        let ahead = AheadState::fold(context.log.host_records());
+                        if ahead.settlement(&trajectory, claim.attempt).is_some()
+                            || context.judge(&ahead, claim)? != Judgment::Apply(offer.clone())
+                        {
+                            return Err(EventError::AheadMoved);
+                        }
                     }
                     Ok(EngineEvent::ExecuteOffer {
                         trajectory: trajectory.clone(),
@@ -93,7 +132,7 @@ impl Session {
                 },
                 elicitation,
                 ruling,
-                Occasion::Remedy { offer: &offer },
+                occasion,
             )
             .await?;
 

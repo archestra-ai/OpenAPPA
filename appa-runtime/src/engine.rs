@@ -310,13 +310,7 @@ pub struct RemedyArguments {
     pub return_schema: Option<serde_json::Value>,
 }
 
-/// A label as the policy dialect spells a `delta`: a trust rank name and an audience list. An
-/// omitted dimension keeps the declaring trajectory's current value.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct LabelSpelling {
-    pub trust: Option<String>,
-    pub audience: Option<Vec<String>>,
-}
+pub use appa_eventlog::LabelSpelling;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Next {

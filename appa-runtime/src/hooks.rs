@@ -15,6 +15,7 @@ use crate::api::{
     OfferId, RemedyPresentation, Runtime, Session, SpawnResultDecision, ToolCallDecision, ToolResultDecision,
     is_control_tool,
 };
+use appa_eventlog::EndKind;
 
 fn wire(decision: &HookDecision) -> serde_json::Value {
     serde_json::to_value(WireDecision::of(decision)).expect("a wire decision serializes")
@@ -759,7 +760,7 @@ impl Dispatcher<'_> {
         {
             tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
         }
-        if let Err(error) = self.runtime.record_turn_end(&actor) {
+        if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
             tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
         }
         HookDecision::Ack
@@ -796,7 +797,9 @@ impl Dispatcher<'_> {
             {
                 return fold(error, Refusal::Deny);
             }
-            if let Err(error) = self.runtime.record_turn_end(&actor) {
+            // A housekeeping end: it settles what the interrupted turn left open, and leaves
+            // the return this turn declared ahead to the spawn it was declared for.
+            if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Housekeeping) {
                 return fold(error, Refusal::Deny);
             }
         }
@@ -984,7 +987,7 @@ impl Dispatcher<'_> {
                     root,
                     child: Some(child),
                 };
-                if let Err(error) = self.runtime.record_turn_end(&actor) {
+                if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
                     tracing::warn!(%error, "the empty child turn's end was not recorded");
                 }
                 return_decision(None, decision)
@@ -1020,7 +1023,7 @@ impl Dispatcher<'_> {
                         root: root.clone(),
                         child: Some(child.clone()),
                     };
-                    if let Err(error) = self.runtime.record_turn_end(&actor) {
+                    if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
                         tracing::warn!(root = %root.0, child = %child.0, %error, "the child's end was not recorded");
                     }
                 }
@@ -1159,7 +1162,11 @@ fn control_call(
                 {
                     return fold(error, Refusal::Deny);
                 }
-                runtime.vouch(&crate::api::declaration_key(&args, named), actor, ruling);
+                // Unlike an offer's vouch, a declaration's that did not land is reported: its
+                // execution would otherwise answer as one no hook vouched for.
+                if let Err(error) = runtime.record_vouch(&crate::api::declaration_key(&args, named), actor, ruling) {
+                    return fold(error, Refusal::Deny);
+                }
             }
             tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
             return HookDecision::PassControl;
