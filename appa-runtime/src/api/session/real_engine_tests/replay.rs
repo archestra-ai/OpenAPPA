@@ -802,6 +802,68 @@ async fn a_spent_embedded_offer_answers_no_other_attempt() {
 }
 
 #[tokio::test]
+async fn a_sibling_offer_outrun_by_an_admitted_narrowing_is_superseded() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let actor = crate::api::Actor {
+        root: root(),
+        child: None,
+    };
+    let mut blocked = Vec::new();
+    for a in [1, 2] {
+        let denied = session
+            .on_tool_call(taint(serde_json::json!({ "a": a })), false)
+            .await
+            .expect("the block is delivered");
+        let ToolCallDecision::Deny { ref offers, .. } = denied else {
+            panic!("the narrowing call blocks: {denied:?}");
+        };
+        blocked.push(OfferId(offers[0].id.clone()));
+    }
+    let execute = |quoted: &OfferId| {
+        runtime.vouch(&crate::api::PermitKey::offer(quoted), &actor, None);
+        runtime.execute_embedded_remedy(
+            &actor,
+            crate::api::ExecuteRemedyPlanArgs {
+                offer_id: Some(quoted.0.clone()),
+                label: None,
+                return_schema: None,
+            },
+        )
+    };
+
+    let RemedyOutcome::Authorized { call } = execute(&blocked[0]).await else {
+        panic!("the first acceptance executes");
+    };
+    assert!(matches!(
+        session
+            .on_tool_call(call.clone(), false)
+            .await
+            .expect("the re-proposal is decided"),
+        ToolCallDecision::Allow { spawn: None, .. }
+    ));
+    let kept = session
+        .on_tool_result(
+            call,
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("data".to_string()),
+            },
+        )
+        .await
+        .expect("the result is admitted");
+    assert_eq!(kept, ToolResultDecision::Keep);
+    assert_eq!(
+        execute(&blocked[1]).await,
+        RemedyOutcome::Refused {
+            reason: RemedyRefusal::Superseded
+        },
+        "the sibling's offer was made before the session narrowed"
+    );
+}
+
+#[tokio::test]
 async fn a_taken_claim_is_neither_renewed_nor_released_by_its_former_holder() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let runtime =
