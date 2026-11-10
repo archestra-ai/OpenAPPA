@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { setSongMuted, songPosition, songStartedFromLink, subscribeSong } from "@/lib/song";
+import { setSongMuted, SONG_SECONDS, songPosition, subscribeSong, subscribeSongMuted } from "@/lib/song";
 
 /* The "Check the Flow" music video, playing in the middle of the page while
    the song does: a pixel ship at night with a crew of appas in hats dancing
@@ -865,8 +865,6 @@ function render(frame: HTMLElement, t: number) {
   set("black", "opacity", Math.max(1 - seg(t, 0, 0.5), seg(t, 124.9, 125.9)).toFixed(3));
 }
 
-/* The video's own length, until the browser reports the clip's. */
-const SONG_SECONDS = 126;
 const FADE_IN = 1.2;
 const FADE_OUT = 2.5;
 /* How long the leaving animation (globals.css) runs before the scene unmounts. */
@@ -890,8 +888,7 @@ export function SongShip() {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     let frame = 0;
     let leave: ReturnType<typeof setTimeout> | null = null;
-    let current: HTMLMediaElement | null = null;
-    const onVolumeChange = () => setMuted(current ? current.muted : null);
+    let isMuted = false;
     const stopLoop = () => {
       cancelAnimationFrame(frame);
       frame = 0;
@@ -910,21 +907,17 @@ export function SongShip() {
     // sound in (lib/song), and it should not also end the video.
     // Nor on the mute button, which belongs to the video.
     const onPointerDown = (event: PointerEvent) => {
-      if (current?.muted) return;
+      if (isMuted) return;
       if (event.target instanceof Element && event.target.closest("[data-song-mute]")) return;
       if (event.target instanceof Node && stage.current?.contains(event.target)) return;
       sinkAway();
     };
+    const unsubscribeMuted = subscribeSongMuted((value) => {
+      isMuted = value === true;
+      setMuted(value);
+    });
     const unsubscribe = subscribeSong((audio) => {
-      current?.removeEventListener("volumechange", onVolumeChange);
-      current = audio;
       stopLoop();
-      if (audio && songStartedFromLink()) {
-        audio.addEventListener("volumechange", onVolumeChange);
-        setMuted(audio.muted);
-      } else {
-        setMuted(null);
-      }
       if (!audio) {
         sinkAway();
         return;
@@ -944,7 +937,7 @@ export function SongShip() {
     });
     return () => {
       unsubscribe();
-      current?.removeEventListener("volumechange", onVolumeChange);
+      unsubscribeMuted();
       stopLoop();
     };
   }, []);

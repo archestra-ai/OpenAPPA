@@ -13,51 +13,58 @@ const SONG_SRC = "/brand/openappa-check-the-flow.mp3";
    share a parent with them. The element is created on the first play, so a
    visitor who never clicks never downloads the clip. */
 
-type Listener = (audio: HTMLMediaElement | null) => void;
-
-let element: HTMLMediaElement | null = null;
-let playing: HTMLMediaElement | null = null;
-let fromLink = false;
-const listeners = new Set<Listener>();
-
-function publish(audio: HTMLMediaElement | null) {
-  if (audio === playing) return;
-  playing = audio;
-  for (const listener of listeners) listener(audio);
+/** What the video and the dancing mascot follow: the song's clock. */
+export interface SongPlayback {
+  readonly currentTime: number;
+  readonly duration: number;
 }
 
-function audioElement(): HTMLMediaElement {
+/** The song's length, until the browser reports the clip's. */
+export const SONG_SECONDS = 126;
+
+type Listener = (playback: SongPlayback | null) => void;
+type MutedListener = (muted: boolean | null) => void;
+
+let element: HTMLAudioElement | null = null;
+let playing: SongPlayback | null = null;
+const listeners = new Set<Listener>();
+/* Whether a start from the `/nfc` link is muted; null for any other start,
+   which has no mute button. */
+let linkMuted: boolean | null = null;
+const mutedListeners = new Set<MutedListener>();
+
+function publish(playback: SongPlayback | null) {
+  if (playback === null) setLinkMuted(null);
+  if (playback === playing) return;
+  playing = playback;
+  for (const listener of listeners) listener(playback);
+}
+
+function setLinkMuted(muted: boolean | null) {
+  if (muted === linkMuted) return;
+  linkMuted = muted;
+  for (const listener of mutedListeners) listener(muted);
+}
+
+function audioElement(): HTMLAudioElement {
   if (!element) {
-    // A <video>, not an Audio: with no user gesture yet, Chrome refuses
-    // even a muted play of an audio element but allows a muted video, which
-    // is what lets the `/nfc` link start without a click. It plays the mp3
-    // the same way and is never attached to the page.
-    const video = document.createElement("video");
-    video.playsInline = true;
-    video.preload = "none";
-    video.src = SONG_SRC;
-    element = video;
+    element = new Audio(SONG_SRC);
+    element.preload = "none";
     element.addEventListener("ended", () => publish(null));
     element.addEventListener("pause", () => {
-      stopWaitingForGesture();
-      publish(null);
+      // A pause while the silent clock runs is the clock taking over, not
+      // the song ending.
+      if (!silent) publish(null);
     });
   }
   return element;
 }
 
-/** Starts the song from the top. Resolves false when the browser refused to play.
- *
- * `muted` is for a start without a user gesture (the `/nfc` link): browsers
- * refuse sound before the visitor has interacted with the page but allow a
- * muted start, so the video plays at once and the sound comes on with the
- * visitor's first click or key press anywhere. `fromLink` marks a start
- * from that link, which gets a mute button on the video (SongShip). */
-export async function playSong(options: { muted?: boolean; fromLink?: boolean } = {}): Promise<boolean> {
+/** Starts the song from the top. Resolves false when the browser refused to play. */
+export async function playSong(): Promise<boolean> {
+  stopSilent();
   const audio = audioElement();
-  stopWaitingForGesture();
-  fromLink = options.fromLink ?? false;
-  audio.muted = options.muted ?? false;
+  audio.muted = false;
   audio.currentTime = 0;
   try {
     await audio.play();
@@ -65,30 +72,52 @@ export async function playSong(options: { muted?: boolean; fromLink?: boolean } 
     // Nothing to recover from: no codec, or blocked media.
     return false;
   }
-  if (audio.muted) waitForGesture(audio);
   publish(audio);
   return true;
 }
 
+/**
+ * Starts the song for a visitor who arrived on the `/nfc` link, with a mute
+ * button on the video. Browsers refuse sound before the visitor has
+ * interacted with the page, and some refuse even a muted play of media that
+ * is not on screen (iOS Safari, or any browser in Low Power Mode). So when
+ * the play with sound is refused, the video runs on a silent clock instead
+ * of the audio, and the visitor's first tap, click or key press, or the
+ * mute button, starts the audio at the clock's time.
+ */
+export async function playSongFromLink(): Promise<void> {
+  if (await playSong()) {
+    setLinkMuted(false);
+    return;
+  }
+  startSilent();
+}
+
 export function stopSong() {
+  if (silent) {
+    stopSilent();
+    publish(null);
+    return;
+  }
   if (!element) return;
   element.pause();
   element.currentTime = 0;
 }
 
-/** Whether the song playing now was started by the `/nfc` link. */
-export function songStartedFromLink(): boolean {
-  return fromLink;
-}
-
-/** Mutes or unmutes the song; an unmute ends the wait for the first gesture. */
+/** Mutes or unmutes a song started from the `/nfc` link. Call it from a
+ * click handler: the unmute that starts the audio needs the gesture. */
 export function setSongMuted(muted: boolean) {
+  if (linkMuted === null) return;
+  if (!muted && silent) {
+    startAudioFromSilent();
+    return;
+  }
   if (!element) return;
-  stopWaitingForGesture();
   element.muted = muted;
+  setLinkMuted(muted);
 }
 
-/** Calls `listener` with the playing element now and on every change. */
+/** Calls `listener` with the playing song now and on every change. */
 export function subscribeSong(listener: Listener): () => void {
   listeners.add(listener);
   listener(playing);
@@ -97,19 +126,93 @@ export function subscribeSong(listener: Listener): () => void {
   };
 }
 
-/* Unmuting needs the user activation a click or key press grants.
-   `click`, not `pointerdown`: SongShip dismisses the video on a pointerdown
-   outside it unless the song is still muted, so the click that brings the
-   sound in leaves the video playing. A gesture on the mute button is left
-   to the button, so its click toggles once rather than twice. */
-const GESTURES = ["click", "keydown"] as const;
+/** Calls `listener` with whether a `/nfc` start is muted (null for any
+ * other start, or none) now and on every change. */
+export function subscribeSongMuted(listener: MutedListener): () => void {
+  mutedListeners.add(listener);
+  listener(linkMuted);
+  return () => {
+    mutedListeners.delete(listener);
+  };
+}
+
+/* ---------- the silent clock ---------- */
+
+/* The video's clock while the audio is not allowed to play: wall time since
+   the start. It ends with the song, as the audio would. */
+let silent: { start: number; end: ReturnType<typeof setTimeout> } | null = null;
+let starting = false;
+
+const silentPlayback: SongPlayback = {
+  get currentTime() {
+    return silent ? (performance.now() - silent.start) / 1000 : 0;
+  },
+  duration: SONG_SECONDS,
+};
+
+function startSilent() {
+  stopSilent();
+  silent = {
+    start: performance.now(),
+    end: setTimeout(() => {
+      stopSilent();
+      publish(null);
+    }, SONG_SECONDS * 1000),
+  };
+  publish(silentPlayback);
+  setLinkMuted(true);
+  waitForGesture();
+}
+
+function stopSilent() {
+  stopWaitingForGesture();
+  if (!silent) return;
+  clearTimeout(silent.end);
+  silent = null;
+}
+
+/* Called inside a gesture's handler, synchronously: iOS only lets a play
+   start with sound from there. The audio takes over the clock once it
+   plays; if the play is refused, the clock keeps running and the next
+   gesture tries again. */
+function startAudioFromSilent() {
+  if (starting) return;
+  starting = true;
+  stopWaitingForGesture();
+  const audio = audioElement();
+  audio.muted = false;
+  audio.currentTime = silentPlayback.currentTime;
+  setLinkMuted(false);
+  audio.play().then(
+    () => {
+      starting = false;
+      // Browsers that ignore a seek before the clip has loaded start at 0.
+      const at = silentPlayback.currentTime;
+      if (Math.abs(audio.currentTime - at) > 0.25) audio.currentTime = at;
+      stopSilent();
+      publish(audio);
+    },
+    () => {
+      starting = false;
+      if (!silent) return;
+      setLinkMuted(true);
+      waitForGesture();
+    },
+  );
+}
+
+/* Gestures that let the audio start. `touchend` for iOS, which sends no
+   click for a tap on most of the page. A gesture on the mute button is left
+   to the button. SongShip keeps the video on a gesture while the song is
+   muted, so the tap that brings the sound in does not also dismiss it. */
+const GESTURES = ["click", "touchend", "keydown"] as const;
 let unmuteOnGesture: ((event: Event) => void) | null = null;
 
-function waitForGesture(audio: HTMLMediaElement) {
+function waitForGesture() {
+  stopWaitingForGesture();
   unmuteOnGesture = (event) => {
     if (event.target instanceof Element && event.target.closest("[data-song-mute]")) return;
-    audio.muted = false;
-    stopWaitingForGesture();
+    startAudioFromSilent();
   };
   for (const type of GESTURES) window.addEventListener(type, unmuteOnGesture, true);
 }
