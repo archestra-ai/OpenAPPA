@@ -332,10 +332,11 @@ pub enum RemedyRefusal {
     UnvouchedDeclaration,
     /// The offer belongs to a different session or actor.
     ActorMismatch,
-    /// The offer no longer stands (expired, already terminal, or recorded under an earlier
-    /// policy revision), or is from another trajectory.
+    /// The offer no longer stands (expired, or already terminal, or a stale offer on a result,
+    /// return, or approval), or is from another trajectory.
     UnknownOffer,
-    /// The session changed after the offer was made, so the call it remedies is checked anew.
+    /// The session or its policy changed after this offer on a call was made, so the call is
+    /// checked anew when proposed again.
     Superseded,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,
@@ -349,8 +350,8 @@ impl RemedyRefusal {
             Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
             Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
             Self::Superseded => {
-                "[appa] This session changed after this offer was made, so the offer no longer applies. Call the \
-                 blocked tool again with the same arguments; it will be checked again."
+                "[appa] This session or its policy changed after this offer was made, so the offer no longer \
+                 applies. Call the blocked tool again with the same arguments; it will be checked again."
             }
             Self::UnvouchedDeclaration => {
                 "[appa] This declaration was not tied to your session, so nothing was declared. Call the subagent \
