@@ -4,7 +4,7 @@ Shared OpenAPPA runtime for a Kubernetes cluster. One replica. Agents
 that set `APPA_RUNTIME_URL` to this Service, with `APPA_ENABLED=true`,
 are gated by the policy in the ConfigMap.
 
-The image of this chart version is `ghcr.io/archestra-ai/appa-runtime:v0.40.1`. # x-release-please-version
+The image of this chart version is `ghcr.io/archestra-ai/appa-runtime:v0.41.0`. # x-release-please-version
 
 OpenAPPA publishes its images to `ghcr.io/archestra-ai/<image>` and its charts to `ghcr.io/archestra-ai/charts/<chart>`. A `v<version>` image tag never moves. `latest` names the newest stable release. Each chart pulls its images by the digest released with it. `ghcr.io/archestra-ai/ci/<image>` holds unreleased builds of `main`.
 
