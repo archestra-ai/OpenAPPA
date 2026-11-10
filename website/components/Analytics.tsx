@@ -4,6 +4,7 @@ import { usePathname, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
 import { readConsent, subscribeToConsent } from "@/lib/analytics-consent";
+import { clearTrinketScan, readTrinketScan } from "@/lib/trinket";
 
 /* PostHog, started only once the reader has said yes.
 
@@ -137,6 +138,25 @@ function AnalyticsInner({ apiKey }: { apiKey: string }) {
       .then((ph) => {
         if (!ph.has_opted_in_capturing()) ph.opt_in_capturing();
       })
+      .catch(ignore);
+  }, [granted, apiKey]);
+
+  /* A reader who arrived from a KubeCon trinket with an email (lib/trinket)
+     is identified by it once they consent, so this visit's pageviews and
+     session replay sit under the same person as the trinket tap the server
+     already reported. */
+  useEffect(() => {
+    if (!granted) return;
+    const scan = readTrinketScan();
+    if (!scan) return;
+    /* Cleared before the import resolves, so the second Strict Mode run of
+       this effect finds nothing to do. */
+    clearTrinketScan();
+    const email = scan.email;
+    if (!email) return;
+
+    startPostHog(apiKey)
+      .then((ph) => ph.identify(email, { email }))
       .catch(ignore);
   }, [granted, apiKey]);
 
