@@ -48,6 +48,14 @@ enum Revision {
     Plain,
     Attesting(u8),
     Unattesting,
+    /// Only `fetch`, under a trust chain with or without the intermediate `suspicious` rank.
+    Ranked(Ranks),
+}
+
+#[derive(Clone, Copy)]
+enum Ranks {
+    WithIntermediate,
+    WithoutIntermediate,
 }
 
 impl Revision {
@@ -56,6 +64,17 @@ impl Revision {
             Revision::Plain => format!("{TOOLS}{DEPLOYMENT}"),
             Revision::Attesting(tag) => format!("# revision {tag}\n{TOOLS}{ATTEST}{DEPLOYMENT}"),
             Revision::Unattesting => format!("# unattesting\n{TOOLS}{DEPLOYMENT}"),
+            Revision::Ranked(ranks) => {
+                let chain = match ranks {
+                    Ranks::WithIntermediate => r#"["untrusted", "suspicious", "trusted"]"#,
+                    Ranks::WithoutIntermediate => r#"["untrusted", "trusted"]"#,
+                };
+                format!(
+                    "[policy]\nversion = 2\ntrust_chain = {chain}\n\n[[policy.tool]]\nname = \"fetch\"\n\
+                     parameters = {{ type = \"object\", properties = {{ a = {{ type = \"integer\" }} }} }}\n\
+                     delta = {{}}\n{DEPLOYMENT}"
+                )
+            }
         }
     }
 }
@@ -220,12 +239,30 @@ async fn narrow(runtime: &Runtime) {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_spawns_on_two_replicas_take_one_declaration() {
     let replicas = replicas();
     let Replicas { a, b, .. } = &replicas;
     assert!(matches!(declare(a, "r1", bare()).await, RemedyOutcome::Returned { .. }));
-    let (x, y) = tokio::join!(spawn(a, Some("toolu-x")), spawn(b, Some("toolu-y")));
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let tasks: Vec<_> = [(a, "toolu-x"), (b, "toolu-y")]
+        .into_iter()
+        .map(|(runtime, call_id)| {
+            let session = runtime.session(&root(), &root()).expect("the session reattaches");
+            let barrier = std::sync::Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                session
+                    .on_tool_call_identified(call("fetch"), Some(call_id.to_string()), Some(SpawnKind::Single), None)
+                    .await
+            })
+        })
+        .collect();
+    let mut decisions = Vec::new();
+    for task in tasks {
+        decisions.push(task.await.expect("the task joins"));
+    }
+    let [x, y] = <[_; 2]>::try_from(decisions).expect("two spawns were decided");
     assert_eq!(
         [&x, &y].into_iter().filter(|decision| released(decision)).count(),
         1,
@@ -543,6 +580,27 @@ async fn an_unfit_settlement_is_read_back_by_its_retry_on_another_replica() {
         blocked(&spawn(a, Some("toolu-y")).await),
         "a new spawn gets its plain block"
     );
+}
+
+/// The route still stands, but the declared floor names a rank the new policy dropped: the
+/// declaration is unfit rather than applied and refused round after round.
+#[tokio::test]
+async fn a_declaration_whose_floor_the_new_policy_cannot_read_settles_unfit() {
+    let replicas = replicas_serving(Revision::Ranked(Ranks::WithIntermediate));
+    let Replicas { a, b, .. } = &replicas;
+    let floored = RemedyArguments {
+        label: Some(LabelSpelling {
+            trust: Some("suspicious".to_string()),
+            audience: None,
+        }),
+        return_schema: None,
+    };
+    let declared = declare(a, "r1", floored).await;
+    assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
+    replicas.reload(Revision::Ranked(Ranks::WithoutIntermediate));
+    let decision = spawn(b, Some("toolu-x")).await;
+    assert!(blocked(&decision), "the ordinary block: {decision:?}");
+    assert_eq!(ahead(a).settlement(&root(), &host("r1")), Some(AheadOutcome::Unfit));
 }
 
 #[tokio::test]

@@ -248,10 +248,14 @@ impl Decided<'_> {
         fan_out_prompt: Option<String>,
     ) -> Result<Option<appa_eventlog::HostObservation>, EventError> {
         let trajectory = &self.session.trajectory;
-        let ahead = AheadState::fold(self.log.host_records());
-        let takes = |call_id: &str| match (opening.spawn, ahead.assignment(trajectory, call_id)) {
-            (Some(_), None) => ahead.live(trajectory).cloned(),
-            _ => None,
+        // Only a spawn takes a declaration, so only a spawn's decision reads them.
+        let ahead = opening.spawn.map(|_| AheadState::fold(self.log.host_records()));
+        let takes = |call_id: &str| {
+            let ahead = ahead.as_ref()?;
+            match ahead.assignment(trajectory, call_id) {
+                None => ahead.live(trajectory).cloned(),
+                Some(_) => None,
+            }
         };
         Ok(match (opening.call_id, opens_dispatch) {
             (Some(call_id), Some(dispatch)) => {
@@ -285,8 +289,8 @@ impl Decided<'_> {
                 }
                 _ => None,
             }),
-            (None, _) => match (opening.spawn, opening.invocation) {
-                (Some(_), Some(invocation)) if ahead.reservation_of(trajectory, invocation).is_none() => ahead
+            (None, _) => match (&ahead, opening.invocation) {
+                (Some(ahead), Some(invocation)) if ahead.reservation_of(trajectory, invocation).is_none() => ahead
                     .live(trajectory)
                     .map(|attempt| appa_eventlog::HostObservation::AheadReserved {
                         trajectory: trajectory.clone(),
@@ -317,6 +321,15 @@ impl Decided<'_> {
         }
         if ahead.cleared(trajectory, declared) {
             return Ok(Judgment::Settled(AheadOutcome::Ended));
+        }
+        // Arguments the committing policy no longer accepts would be refused by every
+        // application round.
+        if self
+            .engine()
+            .declare_ahead(self.view, trajectory, &declared.arguments)
+            .is_err()
+        {
+            return Ok(Judgment::Settled(AheadOutcome::Unfit));
         }
         let route = match declared.arguments.return_schema {
             Some(_) => appa_runtime_api::OfferedReturn::Sanitized {
