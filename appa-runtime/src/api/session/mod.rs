@@ -287,6 +287,10 @@ pub(crate) fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> 
 #[cfg(test)]
 mod real_engine_tests;
 
+/// Returns declared ahead across the replicas of one store.
+#[cfg(test)]
+mod ahead_tests;
+
 /// Writers of one family on PostgreSQL, each driving its own event at the same moment
 /// through the runtime's shared store: the steps take turns on the family's row, so none
 /// loses its append, and no connection is held past its step.

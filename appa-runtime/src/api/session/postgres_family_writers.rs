@@ -1,6 +1,6 @@
 use super::super::{OutcomeBody, Runtime};
 use super::*;
-use crate::api::{ToolCallDecision, ToolOutcome, ToolResultDecision};
+use crate::api::{Actor, RemedyAttempt, RemedyOutcome, ToolCallDecision, ToolOutcome, ToolResultDecision};
 use crate::config::Config;
 use appa_eventlog::{Backend, LogStore};
 
@@ -12,6 +12,9 @@ version = 2
 name = "fetch"
 parameters = { type = "object", properties = { a = { type = "integer" } } }
 delta = {}
+
+[policy.deployment]
+context_control = true
 
 [externals]
 timeout_ms = 2000
@@ -167,5 +170,51 @@ async fn postgres_one_call_from_many_drivers_opens_one_dispatch() {
         );
     }
     assert_eq!(runtime.open_dispatches(&root, &root).len(), 1);
+    forget(&store, &root);
+}
+
+/// Two spawns of one family proposed at once, after one declaration ahead: exactly one takes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+async fn postgres_two_spawns_of_one_family_take_one_declaration() {
+    let (runtime, store, root) = opened(4);
+    let acting = Actor {
+        root: root.clone(),
+        child: None,
+    };
+    let declared = runtime
+        .declare_return_ahead(
+            &acting,
+            RemedyArguments {
+                label: Some(crate::engine::LabelSpelling::default()),
+                return_schema: None,
+            },
+            RemedyAttempt("r1".to_string()),
+        )
+        .await;
+    assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let tasks: Vec<_> = ["toolu-x", "toolu-y"]
+        .into_iter()
+        .map(|call_id| {
+            let (runtime, root, barrier) = (Arc::clone(&runtime), root.clone(), Arc::clone(&barrier));
+            tokio::spawn(async move {
+                let session = runtime.session(&root, &root).expect("the session reattaches");
+                barrier.wait().await;
+                session
+                    .on_tool_call_identified(fetch(1), Some(call_id.to_string()), Some(SpawnKind::Single), None)
+                    .await
+            })
+        })
+        .collect();
+    let mut released = 0;
+    for task in tasks {
+        match task.await.expect("the task joins") {
+            Ok(ToolCallDecision::Allow { spawn: Some(_), .. }) => released += 1,
+            Ok(ToolCallDecision::Deny { .. }) => {}
+            other => panic!("each spawn is decided: {other:?}"),
+        }
+    }
+    assert_eq!(released, 1, "one spawn takes the declaration");
     forget(&store, &root);
 }
