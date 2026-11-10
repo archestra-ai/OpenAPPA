@@ -42,9 +42,56 @@ export function takeTrinketParams(search: string): string {
   }
 
   reportTrinketScan(scan);
+  rememberTrinketVisit({ email, dismissed: false });
 
   const rest = params.toString();
   return rest ? `?${rest}` : "";
+}
+
+/* The booking page for the demo the booth offers. */
+const DEMO_URL = "https://calendly.com/joey-archestra/kubecon-slc-2026-openappa-archestra-demo";
+const VISIT_EVENT = "openappa-trinket-visit";
+
+/** The page load that arrived from a trinket, for the demo banner
+    (TrinketDemoBanner). Held in memory only: it lasts while the reader moves
+    around the site, and a reload or a later visit to openappa.com starts
+    without it, so only a scan shows the banner. */
+export type TrinketVisit = { email: string | null; dismissed: boolean };
+
+let currentVisit: TrinketVisit | null = null;
+
+export function readTrinketVisit(): TrinketVisit | null {
+  return currentVisit;
+}
+
+export function dismissTrinketVisit(): void {
+  if (currentVisit) rememberTrinketVisit({ ...currentVisit, dismissed: true });
+}
+
+/** Calls `onChange` when this tab records or dismisses a trinket visit. */
+export function onTrinketVisitChange(onChange: () => void): () => void {
+  window.addEventListener(VISIT_EVENT, onChange);
+  return () => window.removeEventListener(VISIT_EVENT, onChange);
+}
+
+/** The demo booking page, with the email from the trinket filled in when it
+    carried one. */
+export function demoBookingUrl(email: string | null): string {
+  const url = new URL(DEMO_URL);
+  if (email) {
+    url.searchParams.set("email", email);
+    // The booking form also wants a name; the email stands in for it, so
+    // there is nothing left to type.
+    url.searchParams.set("name", email);
+  }
+  url.searchParams.set("utm_source", "openappa.com");
+  url.searchParams.set("utm_campaign", "kubecon-slc-2026");
+  return url.toString();
+}
+
+function rememberTrinketVisit(visit: TrinketVisit): void {
+  currentVisit = visit;
+  window.dispatchEvent(new Event(VISIT_EVENT));
 }
 
 /* Sends the tap to `/api/trinket-scan`. `keepalive` lets the request finish if

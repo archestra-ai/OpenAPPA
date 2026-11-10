@@ -122,12 +122,13 @@ In an HTTP integration, the hook checks this request through `POST /hook`. A `pa
 
 ### Subagent results pass through APPA too
 
-Each child has a `child_id`. Three additional events connect its work to the parent:
+Each child has a `child_id`. These events connect its work to the parent:
 
 | Event | What APPA checks | What the integration does |
 |---|---|---|
 | `child_start` | The child belongs to an approved launching call, linked by `spawn_binding`. | Starts on `ack`, supplies returned text on `context`, or stops on `refuse`. |
 | `child_end` | The child's proposed answer. | Keeps the answer on `ack`, uses the replacement on `child_return`, or withholds on `block`. |
+| `child_turn_end` | The child finishes a turn with no answer. | Ends a child with a void return contract; keeps a child with a crossing return contract available for follow-ups. |
 | `spawn_result` | Delivery of that answer into the parent's context. | Delivers on `ack`, uses `deliver_value` or `replace_output`, or withholds on `block`. |
 
 The [runtime API reference](https://github.com/archestra-ai/OpenAPPA/tree/main/appa-runtime-api) defines the full event payloads and responses.

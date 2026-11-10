@@ -1491,9 +1491,17 @@ async fn a_void_child_narrows_freely_and_leaves_the_parent_unchanged() {
         crate::api::ChildReturnDecision::Blocked { .. }
     ));
     assert_eq!(
-        child.on_child_end(None).await.expect("the empty stop ends the child"),
+        child
+            .on_child_turn_end()
+            .await
+            .expect("the empty stop ends the void child"),
         crate::api::ChildReturnDecision::NoValue
     );
+    assert_eq!(child.on_child_turn_end().await.unwrap(), ChildReturnDecision::NoValue);
+    assert!(matches!(
+        child.on_tool_call(fetch(serde_json::json!({})), false).await,
+        Err(EventError::TrajectoryEnded)
+    ));
     session
         .on_tool_result(
             spawn,
@@ -6240,3 +6248,25 @@ async fn a_panicking_transcriber_leaves_the_consult_outcome_standing() {
 /// appended twice, no offer or binding is re-minted, and a repeat that disagrees with
 /// the record is refused without reaching the model.
 mod replay;
+
+#[tokio::test]
+async fn an_empty_crossing_child_turn_stays_open_and_a_root_cannot_end_as_a_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).unwrap();
+    let mut parent = runtime.create_session(root(), None).unwrap();
+    assert!(matches!(parent.on_child_turn_end().await, Err(EventError::NotAChild)));
+    let child = open_child(
+        &mut parent,
+        fetch(serde_json::json!({"a": 1})),
+        TrajectoryId("cc:child".into()),
+    )
+    .await;
+    assert_eq!(child.on_child_turn_end().await.unwrap(), ChildReturnDecision::NoValue);
+    assert_eq!(child.on_child_turn_end().await.unwrap(), ChildReturnDecision::NoValue);
+    assert!(
+        child
+            .on_tool_call(fetch(serde_json::json!({"a": 2})), false)
+            .await
+            .is_ok()
+    );
+}
