@@ -22,6 +22,11 @@ pub(super) const APPLY_BELOW: &str = " Apply a plan below.";
 /// family another writer changed under it.
 const AHEAD_ROUNDS: u32 = 3;
 
+/// How many plans of stock `approve` rulings one proposal applies before its block stands. A
+/// plan can go stale between its block and its execution, and an approval can meet a label
+/// another dispatch moved; each round proposes again and reads the block that stands then.
+const STOCK_APPROVE_ROUNDS: usize = 3;
+
 /// One proposed tool call and what came with it: the host's call id, the spawn it starts, the
 /// prompt a fan-out spawn is keyed by, and the held peer message a held read delivers.
 struct Proposal {
@@ -111,7 +116,7 @@ impl Session {
     /// written where it commits, the first one wins, and a retry of the call reads it back.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
         let invocation = appa_eventlog::InvocationNonce(rand::random());
-        let (mut decision, took) = self.propose_once(&proposal, invocation).await?;
+        let (mut decision, took) = self.propose_resolving(&proposal, invocation).await?;
         let (Some(spawn), ToolCallDecision::Deny { .. }, Some(attempt)) = (proposal.spawn, &decision, took) else {
             return Ok(decision);
         };
@@ -140,7 +145,7 @@ impl Session {
             };
             let (offer, arguments) = match self.settle_terminal(&claim)? {
                 Judgment::Settled(AheadOutcome::Applied) => {
-                    return Ok(self.propose_once(&proposal, invocation).await?.0);
+                    return Ok(self.propose_resolving(&proposal, invocation).await?.0);
                 }
                 Judgment::Settled(AheadOutcome::Ended) => return Ok(decision),
                 Judgment::Settled(AheadOutcome::Lapsed) => return Ok(noted(LAPSED_AHEAD)),
@@ -148,13 +153,13 @@ impl Session {
                 Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(FAN_OUT_AHEAD)),
                 Judgment::Apply { offer, arguments } => (offer, arguments),
                 Judgment::Stale => {
-                    decision = self.propose_once(&proposal, invocation).await?.0;
+                    decision = self.propose_resolving(&proposal, invocation).await?.0;
                     continue;
                 }
             };
             match self.apply_ahead(&offer, &claim, arguments).await {
                 Ok(RemedyDecision::Authorized { .. }) => {
-                    return Ok(self.propose_once(&proposal, invocation).await?.0);
+                    return Ok(self.propose_resolving(&proposal, invocation).await?.0);
                 }
                 Ok(_) => {}
                 Err(error) if error.is_operational() => return Err(error),
@@ -165,6 +170,60 @@ impl Session {
             }
         }
         Err(EventError::Contended { attempts: AHEAD_ROUNDS })
+    }
+
+    /// Propose, and while the block offers a plan that asks only stock `approve` authorities,
+    /// apply that plan and propose again: the agent sees the call released, never the block.
+    /// The plan is read from the block that stands, never an earlier one, and every execution is
+    /// followed by a proposal, so the decision returned is never older than the last fact this
+    /// loop appended. An approval already recorded stays recorded, and the next proposal of the
+    /// call spends it. A stock `approve` authority never denies, so a plan that was not applied
+    /// lost a race: another dispatch moved its basis or took its subject. The next proposal
+    /// reads what stands after that, and the rounds bound how often it is tried. Only the
+    /// first proposal takes a declaration made ahead: when it took none, the later ones run
+    /// outside the invocation, so a declaration made meanwhile waits for the next spawn.
+    async fn propose_resolving(
+        &self,
+        proposal: &Proposal,
+        invocation: appa_eventlog::InvocationNonce,
+    ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
+        let (mut decision, took) = self.propose_once(proposal, Some(invocation)).await?;
+        for _ in 0..STOCK_APPROVE_ROUNDS {
+            let ToolCallDecision::Deny { offers, .. } = &decision else {
+                break;
+            };
+            let Some(offer) = self.stock_approved_offer(offers)? else {
+                break;
+            };
+            let applied = self.on_remedy(offer, RemedyArguments::default(), None, None).await;
+            if !matches!(applied, Ok(RemedyDecision::Authorized { .. })) {
+                tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
+            }
+            decision = self.propose_once(proposal, took.as_ref().map(|_| invocation)).await?.0;
+        }
+        Ok((decision, took))
+    }
+
+    /// The first offered plan that asks only stock `approve` authorities, if the block has one.
+    fn stock_approved_offer(&self, offers: &[appa_runtime_api::OfferedRemedy]) -> Result<Option<OfferId>, EventError> {
+        let deployment = self.deployment();
+        if offers.is_empty() || !deployment.externals.has_stock_approve() {
+            return Ok(None);
+        }
+        self.with_view(|context| {
+            Ok(offers
+                .iter()
+                // A plan that declares a return or rewrites arguments is never authorize-only.
+                .filter(|offer| offer.returns.is_none() && offer.input_sanitizer.is_none())
+                .filter_map(|offer| crate::engine::resolve_rendered(context.log, &OfferId(offer.id.clone())))
+                .find(|offer| {
+                    context
+                        .engine()
+                        .offer_asks_only(context.view, &self.trajectory, offer, |authority| {
+                            deployment.externals.is_stock_approve(authority)
+                        })
+                }))
+        })
     }
 
     /// Settle the declaration a blocked spawn took where its judgment is terminal, in one
@@ -193,7 +252,7 @@ impl Session {
     async fn propose_once(
         &self,
         proposal: &Proposal,
-        invocation: appa_eventlog::InvocationNonce,
+        invocation: Option<appa_eventlog::InvocationNonce>,
     ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
         let took = Took::default();
         let Proposal {

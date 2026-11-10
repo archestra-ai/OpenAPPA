@@ -706,6 +706,10 @@ pub enum LoadError {
     DuplicateSanitizer(String),
     #[error("authority {0} has an empty mandate (covers nothing)")]
     EmptyMandate(String),
+    #[error(
+        "authority {authority} excepts tag {tag:?}, which no tool carries or which its own `tags` name — the exception would cover nothing"
+    )]
+    ExceptedTag { authority: String, tag: String },
     #[error("authority {0} permits `blocked`, the reserved mark no authority may attend")]
     ReservedMark(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
@@ -946,13 +950,13 @@ fn worst_case_plan_alternatives(
     let trust_cap_competent = || {
         authorities
             .iter()
-            .filter(|authority| authority.scope.covers(tags) && authority.mandate.trust_ceiling.is_some())
+            .filter(|authority| authority.in_scope(tags) && authority.mandate.trust_ceiling.is_some())
             .count()
     };
     let reader_cap_competent = || {
         authorities
             .iter()
-            .filter(|authority| authority.scope.covers(tags) && authority.mandate.reader_ceiling.is_some())
+            .filter(|authority| authority.in_scope(tags) && authority.mandate.reader_ceiling.is_some())
             .count()
     };
     // A static `includes` is decided at load wherever the derivability calculus settles it.
@@ -963,7 +967,7 @@ fn worst_case_plan_alternatives(
         authorities
             .iter()
             .filter(|authority| {
-                if authority.mandate.reader_ceiling.is_none() || !authority.scope.covers(tags) {
+                if authority.mandate.reader_ceiling.is_none() || !authority.in_scope(tags) {
                     return false;
                 }
                 let gap = Gap::Includes {
@@ -1283,6 +1287,11 @@ impl Registry {
             }
         }
 
+        let carried_tags: BTreeSet<TagName> = config
+            .tools
+            .iter()
+            .flat_map(|declaration| declaration.tags().iter().cloned())
+            .collect();
         let mut tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>> = BTreeMap::new();
         let mut tool_order = Vec::new();
         let mut provider_run: BTreeMap<ToolName, ToolAnnotation> = BTreeMap::new();
@@ -1443,6 +1452,17 @@ impl Registry {
             }
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
+            }
+            // An excepted tag no tool carries excepts nothing: a misspelt one would leave the
+            // authority covering the very tools the deployer meant to keep from it.
+            for tag in &authority.except {
+                let excepted = || LoadError::ExceptedTag {
+                    authority: authority.name.as_str().to_string(),
+                    tag: tag.as_str().to_string(),
+                };
+                if authority.scope.tags.contains(tag) || !carried_tags.contains(tag) {
+                    return Err(excepted());
+                }
             }
         }
 
@@ -2320,6 +2340,7 @@ mod tests {
 
     fn attends_authority(name: &str) -> Authority {
         Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff")]),
@@ -2354,6 +2375,7 @@ mod tests {
         let mut cfg = base();
         cfg.tools = declared(vec![review, denied]);
         cfg.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("anyone"),
             mandate: Mandate {
                 attends: Attends::Any,
@@ -2381,6 +2403,7 @@ mod tests {
     fn an_authority_naming_the_reserved_denial_is_refused() {
         let mut cfg = base();
         cfg.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("overreach"),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff"), MarkName::new(MarkName::BLOCKED)]),
@@ -2470,6 +2493,7 @@ mod tests {
 
         let mut ceiling = base();
         ceiling.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 reader_ceiling: Some(DeclaredAudience::literal(named.clone())),
@@ -2601,6 +2625,7 @@ mod tests {
     fn public_and_the_empty_set_stay_loadable_audiences() {
         let mut public_ceiling = base();
         public_ceiling.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
@@ -2806,6 +2831,7 @@ mod tests {
             )]))),
         ];
         let officer = Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 reader_ceiling: Some(DeclaredAudience::restricted([ReaderId::new("auditor")])),
@@ -3282,6 +3308,7 @@ mod tests {
     fn refuses_empty_mandate() {
         let mut cfg = base();
         cfg.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("noop"),
             mandate: Mandate::default(),
             scope: Scope::default(),
@@ -3291,6 +3318,39 @@ mod tests {
             Registry::build_covered(cfg),
             Err(LoadError::EmptyMandate(name)) if name == "noop"
         ));
+    }
+
+    /// An exception that excepts nothing is refused: a misspelt tag would leave the authority
+    /// covering the tools the deployer meant to keep from it.
+    #[test]
+    fn refuses_an_excepted_tag_no_tool_carries_or_the_scope_names() {
+        let excepting = |scope: &[&str], except: &str| {
+            let mut cfg = base();
+            cfg.tools = declared(vec![ToolAnnotation {
+                tags: vec![TagName::new("legacy")],
+                ..tool("send")
+            }]);
+            cfg.authorities = vec![Authority {
+                except: vec![TagName::new(except)],
+                name: AuthorityName::new("rollout"),
+                mandate: Mandate {
+                    trust_ceiling: Some(Trust::new(1)),
+                    ..Mandate::default()
+                },
+                scope: Scope {
+                    tags: scope.iter().map(|tag| TagName::new(*tag)).collect(),
+                },
+                hint: None,
+            }];
+            Registry::build_covered(cfg).map(|_| ())
+        };
+        assert_eq!(excepting(&[], "legacy"), Ok(()));
+        for (scope, except) in [(&[][..], "legasy"), (&["legacy"][..], "legacy")] {
+            assert!(matches!(
+                excepting(scope, except),
+                Err(LoadError::ExceptedTag { authority, tag }) if authority == "rollout" && tag == except
+            ));
+        }
     }
 
     #[test]
@@ -3633,6 +3693,7 @@ mod tests {
             ..Requires::default()
         };
         let attester = |name: String| Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("m1"), MarkName::new("m2")]),
@@ -3690,6 +3751,7 @@ mod tests {
     fn an_annotated_declaration_takes_the_worst_case_on_every_mandate_dimension() {
         let wide = |n: usize| {
             let officer = |name: String| Authority {
+                except: Vec::new(),
                 name: AuthorityName::new(name),
                 mandate: Mandate {
                     trust_ceiling: Some(Trust::new(1)),
@@ -3726,6 +3788,7 @@ mod tests {
         ))];
         cfg.tools = declared(vec![emit]);
         let capped_at = |name: &str, ceiling: DeclaredAudience| Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 reader_ceiling: Some(ceiling),
@@ -3983,6 +4046,7 @@ mod tests {
         bystander.emits = EffectSet::new([EffectKind::new("other")]).unwrap();
         tools.push(bystander);
         let officer = |name: String| Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 trust_ceiling: Some(Trust::new(1)),

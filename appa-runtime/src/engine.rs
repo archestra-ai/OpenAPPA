@@ -2452,6 +2452,19 @@ impl RuntimeEngine {
             .is_some_and(|plan| plan.declares_only())
     }
 
+    /// Whether this offer's plan is rulings alone, each by an authority `rules` accepts.
+    pub(crate) fn offer_asks_only(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &OfferId,
+        rules: impl Fn(&str) -> bool,
+    ) -> bool {
+        parse_offer(offer)
+            .and_then(|offer| self.engine.offer_plan(view, trajectory, &offer))
+            .is_some_and(|plan| plan.asks_only(|authority| rules(authority.as_str())))
+    }
+
     fn return_policy_of_route(
         &self,
         views: &Views,

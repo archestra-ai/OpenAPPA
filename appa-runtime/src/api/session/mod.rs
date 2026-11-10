@@ -62,7 +62,9 @@ enum Occasion<'a> {
         call_id: Option<&'a str>,
         prompt: Option<&'a PromptKey>,
         spawn: Option<SpawnKind>,
-        invocation: appa_eventlog::InvocationNonce,
+        /// `None` once this invocation's first decision took no declaration: only that
+        /// decision takes one.
+        invocation: Option<appa_eventlog::InvocationNonce>,
         took: &'a Took,
     },
     Report {
