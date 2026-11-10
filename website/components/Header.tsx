@@ -8,11 +8,12 @@ import { Logo } from "@/components/Logo";
 import { MobileNavToggle } from "@/components/MobileNav";
 import { SearchIcon, useSearch } from "@/components/SearchProvider";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { TrinketDemoBanner } from "@/components/TrinketDemoBanner";
 import { useMascotDance } from "@/components/useMascotDance";
 
 export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
   const search = useSearch();
-  const headerRef = useRef<HTMLElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
   const wordmarkRef = useRef<HTMLAnchorElement>(null);
   useMascotDance(wordmarkRef);
 
@@ -37,7 +38,11 @@ export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
       {/* Site pages align the header's contents to the centered reading
           column; an app screen (the chat) spans the viewport, so its header
           keeps edge padding to match. */}
-      <header className={fullBleed ? "site-header site-header-full" : "site-header"} ref={headerRef}>
+      {/* The fixed bar is the header plus, for a KubeCon trinket visit, the
+          demo strip above it; --header-h measures both. */}
+      <div className="site-header-shell" ref={headerRef}>
+      <TrinketDemoBanner />
+      <header className={fullBleed ? "site-header site-header-full" : "site-header"}>
         <MobileNavToggle />
         <Link href="/" className="wordmark" ref={wordmarkRef}>
           <Logo height={15} />
@@ -72,6 +77,7 @@ export function Header({ fullBleed = false }: { fullBleed?: boolean }) {
           <ThemeToggle />
         </nav>
       </header>
+      </div>
     </>
   );
 }

@@ -994,9 +994,9 @@ async fn a_harness_ruling_for_an_offer_from_an_earlier_revision_authorizes_nothi
     assert_eq!(
         vouch(deployment.offer.clone()).await,
         appa_runtime::api::RemedyOutcome::Refused {
-            reason: appa_runtime::api::RemedyRefusal::UnknownOffer
+            reason: appa_runtime::api::RemedyRefusal::Superseded
         },
-        "the offer no longer stands, so the ruling is never spent"
+        "the offer was made under the earlier policy, so the ruling is never spent"
     );
 
     let blocked = hooks::handle(

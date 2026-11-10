@@ -247,12 +247,15 @@ samp {
    toolbar collapses and the page coasts, and the content shows above it for a
    frame at a time. A fixed bar never moves, so it never lags. The body pads
    by the bar's height, which every other offset already reads. */
-.site-header {
+.site-header-shell {
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
   z-index: 10;
+}
+
+.site-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -261,6 +264,44 @@ samp {
   padding: 20px max(24px, calc((100% - var(--site-max)) / 2));
   background: var(--bg);
   border-bottom: 1px solid var(--border-weak);
+}
+
+/* The KubeCon trinket demo strip (TrinketDemoBanner), above the header. */
+.trinket-banner {
+  position: relative;
+  padding: 7px 44px;
+  background: var(--accent-bg);
+  border-bottom: 1px solid var(--accent-border);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.trinket-banner a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.trinket-banner a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+.trinket-banner-close {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  color: var(--text-weak, var(--text));
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 /* An app screen (the chat) spans the viewport; its header contents keep edge
