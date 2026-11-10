@@ -97,6 +97,22 @@ pub(super) struct Opening<'a> {
     spawn: Option<SpawnKind>,
     invocation: Option<appa_eventlog::InvocationNonce>,
     applies: Option<&'a AheadClaim<'a>>,
+    took: Option<&'a Took>,
+}
+
+/// Where a spawn's proposal leaves the declaration its call or invocation durably took, as the
+/// commit that decided it (or the record a replay answered from) says.
+pub(super) type Took = std::sync::Mutex<Option<appa_eventlog::AheadAttempt>>;
+
+impl Opening<'_> {
+    /// What this proposal's call already took, or its invocation reserved.
+    fn recorded(&self, ahead: &AheadState, trajectory: &TrajectoryId) -> Option<appa_eventlog::AheadAttempt> {
+        match (self.call_id, self.invocation) {
+            (Some(call_id), _) => ahead.assignment(trajectory, call_id).flatten().cloned(),
+            (None, Some(invocation)) => ahead.reservation_of(trajectory, invocation).cloned(),
+            (None, None) => None,
+        }
+    }
 }
 
 /// What a spawn's block does with the declaration it took, judged at the position and under
@@ -253,12 +269,45 @@ impl Decided<'_> {
         opening: Opening<'_>,
         opens_dispatch: Option<appa_engine::value::DispatchId>,
         fan_out_prompt: Option<String>,
-    ) -> Result<Option<appa_eventlog::HostObservation>, EventError> {
+    ) -> Result<
+        (
+            Option<appa_eventlog::HostObservation>,
+            Option<appa_eventlog::AheadAttempt>,
+        ),
+        EventError,
+    > {
         let trajectory = &self.session.trajectory;
         // Only a spawn takes a declaration, so only a spawn's decision reads them.
         let ahead = opening.spawn.map(|_| AheadState::fold(self.log.host_records()));
+        let observation = self.host_observation(facts, opening, opens_dispatch, fan_out_prompt, ahead.as_ref())?;
+        let took = ahead
+            .as_ref()
+            .and_then(|ahead| match (&observation, opening.recorded(ahead, trajectory)) {
+                (_, Some(recorded)) => Some(recorded),
+                (
+                    Some(
+                        appa_eventlog::HostObservation::CallBound { ahead: taken, .. }
+                        | appa_eventlog::HostObservation::CallDenied { ahead: taken, .. },
+                    ),
+                    None,
+                ) => taken.clone(),
+                (Some(appa_eventlog::HostObservation::AheadReserved { attempt, .. }), None) => Some(attempt.clone()),
+                _ => None,
+            });
+        Ok((observation, took))
+    }
+
+    fn host_observation(
+        &self,
+        facts: &[appa_engine::fact::Fact],
+        opening: Opening<'_>,
+        opens_dispatch: Option<appa_engine::value::DispatchId>,
+        fan_out_prompt: Option<String>,
+        ahead: Option<&AheadState>,
+    ) -> Result<Option<appa_eventlog::HostObservation>, EventError> {
+        let trajectory = &self.session.trajectory;
         let takes = |call_id: &str| {
-            let ahead = ahead.as_ref()?;
+            let ahead = ahead?;
             match ahead.assignment(trajectory, call_id) {
                 None => ahead.live(trajectory).cloned(),
                 Some(_) => None,
@@ -296,7 +345,7 @@ impl Decided<'_> {
                 }
                 _ => None,
             }),
-            (None, _) => match (&ahead, opening.invocation) {
+            (None, _) => match (ahead, opening.invocation) {
                 (Some(ahead), Some(invocation)) if ahead.reservation_of(trajectory, invocation).is_none() => ahead
                     .live(trajectory)
                     .map(|attempt| appa_eventlog::HostObservation::AheadReserved {
@@ -661,12 +710,14 @@ impl Session {
                 prompt,
                 spawn,
                 invocation,
+                took,
             } => Opening {
                 call_id,
                 prompt,
                 spawn,
                 invocation: Some(invocation),
                 applies: None,
+                took: Some(took),
             },
             Occasion::AheadApply { claim, .. } => Opening {
                 applies: Some(claim),
@@ -772,6 +823,11 @@ impl Session {
                 .map_err(EventError::from)?;
 
             let Some(facts) = decision.append.as_ref() else {
+                if let (Some(took), Some(_)) = (opening.took, opening.spawn) {
+                    let ahead = AheadState::fold(log.host_records());
+                    *took.lock().expect("the slot's lock is never poisoned") =
+                        opening.recorded(&ahead, &self.trajectory);
+                }
                 return Ok(decision);
             };
             let opens_dispatch = facts.iter().find_map(|fact| match fact {
@@ -808,13 +864,16 @@ impl Session {
             let fan_out_prompt = context.fan_out_gate(facts, opens_dispatch.is_some(), opening)?;
             // An approved application of a declaration ahead settles it in the remedy's own
             // batch, which is stamped, so the settlement is fenced with the approval.
-            let host_record = match (opening.applies, &decision.then) {
-                (Some(claim), Next::Approved { .. }) => Some(appa_eventlog::HostObservation::AheadSettled {
-                    trajectory: self.trajectory.clone(),
-                    attempt: claim.attempt.clone(),
-                    outcome: appa_eventlog::AheadOutcome::Applied,
-                }),
-                (Some(_), _) => None,
+            let (host_record, took) = match (opening.applies, &decision.then) {
+                (Some(claim), Next::Approved { .. }) => (
+                    Some(appa_eventlog::HostObservation::AheadSettled {
+                        trajectory: self.trajectory.clone(),
+                        attempt: claim.attempt.clone(),
+                        outcome: appa_eventlog::AheadOutcome::Applied,
+                    }),
+                    None,
+                ),
+                (Some(_), _) => (None, None),
                 (None, _) => context.host_record(facts, opening, opens_dispatch, fan_out_prompt)?,
             };
             let binds_read = facts.iter().any(|fact| {
@@ -848,6 +907,9 @@ impl Session {
                 Ok(()) => {
                     self.inner.shared.spawn_holds.appended();
                     self.inner.deliver_records(&self.root);
+                    if let Some(slot) = opening.took {
+                        *slot.lock().expect("the slot's lock is never poisoned") = took;
+                    }
                     return Ok(decision);
                 }
                 Err(appa_eventlog::AppendError::ReadClaimLost) => {

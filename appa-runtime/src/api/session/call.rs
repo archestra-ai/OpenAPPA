@@ -111,11 +111,8 @@ impl Session {
     /// written where it commits, the first one wins, and a retry of the call reads it back.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
         let invocation = appa_eventlog::InvocationNonce(rand::random());
-        let mut decision = self.propose_once(&proposal, invocation).await?;
-        let (Some(spawn), ToolCallDecision::Deny { .. }) = (proposal.spawn, &decision) else {
-            return Ok(decision);
-        };
-        let Some(attempt) = self.own_assignment(&proposal, invocation)? else {
+        let (mut decision, took) = self.propose_once(&proposal, invocation).await?;
+        let (Some(spawn), ToolCallDecision::Deny { .. }, Some(attempt)) = (proposal.spawn, &decision, took) else {
             return Ok(decision);
         };
         for _ in 0..AHEAD_ROUNDS {
@@ -142,19 +139,23 @@ impl Session {
                 offers: &offers,
             };
             let (offer, arguments) = match self.settle_terminal(&claim)? {
-                Judgment::Settled(AheadOutcome::Applied) => return self.propose_once(&proposal, invocation).await,
+                Judgment::Settled(AheadOutcome::Applied) => {
+                    return Ok(self.propose_once(&proposal, invocation).await?.0);
+                }
                 Judgment::Settled(AheadOutcome::Ended) => return Ok(decision),
                 Judgment::Settled(AheadOutcome::Lapsed) => return Ok(noted(LAPSED_AHEAD)),
                 Judgment::Settled(AheadOutcome::Unfit) => return Ok(noted(UNFIT_AHEAD)),
                 Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(FAN_OUT_AHEAD)),
                 Judgment::Apply { offer, arguments } => (offer, arguments),
                 Judgment::Stale => {
-                    decision = self.propose_once(&proposal, invocation).await?;
+                    decision = self.propose_once(&proposal, invocation).await?.0;
                     continue;
                 }
             };
             match self.apply_ahead(&offer, &claim, arguments).await {
-                Ok(RemedyDecision::Authorized { .. }) => return self.propose_once(&proposal, invocation).await,
+                Ok(RemedyDecision::Authorized { .. }) => {
+                    return Ok(self.propose_once(&proposal, invocation).await?.0);
+                }
                 Ok(_) => {}
                 Err(error) if error.is_operational() => return Err(error),
                 // The next round's commit decides what an application the engine refused means.
@@ -164,21 +165,6 @@ impl Session {
             }
         }
         Err(EventError::Contended { attempts: AHEAD_ROUNDS })
-    }
-
-    /// The declaration this proposal's spawn took: its call's first record names it, or for a
-    /// spawn without a call id, this invocation's reservation.
-    fn own_assignment(
-        &self,
-        proposal: &Proposal,
-        invocation: appa_eventlog::InvocationNonce,
-    ) -> Result<Option<appa_eventlog::AheadAttempt>, EventError> {
-        let log = self.inner.log(&self.root)?;
-        let ahead = AheadState::fold(log.host_records());
-        Ok(match &proposal.call_id {
-            Some(call_id) => ahead.assignment(&self.trajectory, call_id).flatten().cloned(),
-            None => ahead.reservation_of(&self.trajectory, invocation).cloned(),
-        })
     }
 
     /// Settle the declaration a blocked spawn took where its judgment is terminal, in one
@@ -208,7 +194,8 @@ impl Session {
         &self,
         proposal: &Proposal,
         invocation: appa_eventlog::InvocationNonce,
-    ) -> Result<ToolCallDecision, EventError> {
+    ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
+        let took = Took::default();
         let Proposal {
             call,
             call_id,
@@ -250,11 +237,13 @@ impl Session {
                     prompt: prompt.as_ref(),
                     spawn,
                     invocation,
+                    took: &took,
                 },
             )
             .await?;
+        let took = took.into_inner().expect("the slot's lock is never poisoned");
 
-        match decision.then {
+        let decision = match decision.then {
             Next::ModelResponse { invocations, feedback } => match (invocations.as_slice(), feedback.as_slice()) {
                 ([released], []) => {
                     tracing::debug!(
@@ -280,7 +269,8 @@ impl Session {
                 _ => Err(EventError::UnexpectedDecision),
             },
             _ => Err(EventError::UnexpectedDecision),
-        }
+        };
+        decision.map(|decision| (decision, took))
     }
 
     /// Whether the serving policy writes a contract for this tool's exact name — the

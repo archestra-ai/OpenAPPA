@@ -63,6 +63,7 @@ enum Occasion<'a> {
         prompt: Option<&'a PromptKey>,
         spawn: Option<SpawnKind>,
         invocation: appa_eventlog::InvocationNonce,
+        took: &'a Took,
     },
     Report {
         call_id: Option<&'a str>,
