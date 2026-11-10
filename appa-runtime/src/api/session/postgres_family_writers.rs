@@ -177,6 +177,38 @@ async fn postgres_one_call_from_many_drivers_opens_one_dispatch() {
     forget(&store, &root);
 }
 
+/// A family on a pool of one connection declares ahead and applies the declaration: no
+/// judged write waits on a second connection while its step holds the only one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+async fn postgres_a_declaration_ahead_lands_on_a_single_connection_pool() {
+    let (runtime, store, root) = opened(1);
+    let acting = Actor {
+        root: root.clone(),
+        child: None,
+    };
+    let declared = runtime
+        .declare_return_ahead(
+            &acting,
+            RemedyArguments {
+                label: Some(crate::engine::LabelSpelling::default()),
+                return_schema: None,
+            },
+            RemedyAttempt("r1".to_string()),
+        )
+        .await;
+    assert!(matches!(declared, RemedyOutcome::Returned { .. }), "{declared:?}");
+    let session = runtime.session(&root, &root).expect("the session reattaches");
+    let decision = session
+        .on_tool_call_identified(fetch(1), Some("toolu-x".to_string()), Some(SpawnKind::Single), None)
+        .await;
+    assert!(
+        matches!(decision, Ok(ToolCallDecision::Allow { spawn: Some(_), .. })),
+        "{decision:?}"
+    );
+    forget(&store, &root);
+}
+
 /// Two spawns of one family proposed at once, after one declaration ahead: exactly one takes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]

@@ -195,8 +195,10 @@ impl Session {
     ) -> Result<Answer, Refusal> {
         for _ in 0..PUBLISHES_FOLLOWED {
             let deployment = self.deployment();
+            // Resolved before the step, as a decision's drive does: resolving may read through
+            // a connection of its own, which a step holding one must not wait on.
+            let policy = self.inner.resolve_policy(&deployment, &self.inner.log(&self.root)?)?;
             let written = self.inner.write_host::<Judged<Refusal>, Answer>(&self.root, |log| {
-                let policy = self.inner.resolve_policy(&deployment, log)?;
                 let view = policy.rebuild_view(log).map_err(EventError::from)?;
                 let revision = appa_engine::profile::PolicyRevision::new(deployment.serving_revision()?);
                 let (observation, answer) = derive(&Decided {
