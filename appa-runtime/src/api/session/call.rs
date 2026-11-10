@@ -216,6 +216,8 @@ impl Session {
         self.with_view(|context| {
             Ok(offers
                 .iter()
+                // A plan that declares a return or rewrites arguments is never authorize-only.
+                .filter(|offer| offer.returns.is_none() && offer.input_sanitizer.is_none())
                 .filter_map(|offer| crate::engine::resolve_rendered(context.log, &OfferId(offer.id.clone())))
                 .find(|offer| {
                     context
