@@ -156,6 +156,7 @@ fn the_runtime_prefixes_the_trajectory_ids_the_plugin_leaves_bare() {
             HookEvent::SessionStart { root, .. }
             | HookEvent::ChildStart { root, .. }
             | HookEvent::ChildEnd { root, .. }
+            | HookEvent::ChildTurnEnd { root, .. }
             | HookEvent::ChildReturn { root, .. } => root.0.clone(),
             HookEvent::Prompt { actor, .. }
             | HookEvent::TurnEnd { actor }

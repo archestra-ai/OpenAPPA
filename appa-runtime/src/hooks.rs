@@ -221,6 +221,10 @@ fn continued(
             child: id(child),
             spawn,
         },
+        HookEvent::ChildTurnEnd { root, child } => HookEvent::ChildTurnEnd {
+            root: id(root),
+            child: id(child),
+        },
         HookEvent::ChildEnd { root, child, value } => HookEvent::ChildEnd {
             root: id(root),
             child: id(child),
@@ -371,9 +375,10 @@ fn bare_hook(
 fn hook_root(event: &HookEvent) -> &TrajectoryId {
     match event {
         HookEvent::SessionStart { root, .. } => root,
-        HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } | HookEvent::ChildReturn { root, .. } => {
-            root
-        }
+        HookEvent::ChildStart { root, .. }
+        | HookEvent::ChildEnd { root, .. }
+        | HookEvent::ChildTurnEnd { root, .. }
+        | HookEvent::ChildReturn { root, .. } => root,
         HookEvent::Prompt { actor, .. }
         | HookEvent::TurnEnd { actor }
         | HookEvent::ToolCall { actor, .. }
@@ -530,7 +535,7 @@ fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
         HookEvent::SpawnResume { call, .. } => (HookKind::SpawnResume, Some(call.tool.clone())),
         HookEvent::ToolResult { call, .. } => (HookKind::ToolResult, Some(call.tool.clone())),
         HookEvent::ChildStart { .. } => (HookKind::ChildStart, None),
-        HookEvent::ChildEnd { .. } => (HookKind::ChildEnd, None),
+        HookEvent::ChildEnd { .. } | HookEvent::ChildTurnEnd { .. } => (HookKind::ChildEnd, None),
         HookEvent::ChildReturn { .. } => (HookKind::ChildReturn, None),
         HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
     }
@@ -620,6 +625,7 @@ async fn dispatch_event(
         }
         HookEvent::ChildStart { root, child, spawn } => dispatcher.child_start(root, child, spawn),
         HookEvent::ChildEnd { root, child, value } => dispatcher.child_end(root, child, value).await,
+        HookEvent::ChildTurnEnd { root, child } => dispatcher.child_turn_end(root, child).await,
         HookEvent::ChildReturn { root, child, value } => dispatcher.child_return(root, child, value).await,
     }
 }
@@ -958,6 +964,31 @@ impl Dispatcher<'_> {
         match root.start_child(child, spawn) {
             Ok((_, Some(text))) => HookDecision::Context { text },
             Ok((_, None)) => HookDecision::Ack,
+            Err(error) => refuse(error),
+        }
+    }
+
+    async fn child_turn_end(&mut self, root: TrajectoryId, child: TrajectoryId) -> HookDecision {
+        match on_child(
+            self.runtime,
+            &root,
+            &child,
+            MissingStart::Refuse,
+            self.options,
+            |session| async move { session.on_child_turn_end().await },
+        )
+        .await
+        {
+            Ok(decision) => {
+                let actor = Actor {
+                    root,
+                    child: Some(child),
+                };
+                if let Err(error) = self.runtime.record_turn_end(&actor) {
+                    tracing::warn!(%error, "the empty child turn's end was not recorded");
+                }
+                return_decision(None, decision)
+            }
             Err(error) => refuse(error),
         }
     }
