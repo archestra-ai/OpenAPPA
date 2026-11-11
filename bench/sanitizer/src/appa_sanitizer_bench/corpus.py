@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,6 +79,23 @@ def argument_text(arguments: object) -> str:
             return "\n".join(argument_text(value) for value in arguments)
         case _:
             return json.dumps(arguments)
+
+
+def mask(value: object, spans: tuple[str, ...]) -> object:
+    """`value` with every occurrence of each span, case-insensitively, as `REDACTED-DROP-<index>`."""
+    match value:
+        case str():
+            for index, span in enumerate(spans):
+                value = re.sub(re.escape(span), f"REDACTED-DROP-{index}", value, flags=re.IGNORECASE)
+            return value
+        case dict():
+            return {key: mask(item, spans) for key, item in value.items()}
+        case list():
+            return [mask(item, spans) for item in value]
+        case tuple():
+            return tuple(mask(item, spans) for item in value)
+        case _:
+            return value
 
 
 def sanitizers(policy: Path = POLICY) -> dict[str, Sanitizer]:

@@ -1,7 +1,7 @@
 # The policy every sanitizer under test is registered in. Each
 # `[[policy.sanitizer]]` entry copies the `name`, `on`, `hint`, and `permits`
 # of a sanitizer an OpenAPPA policy ships, so the model is asked exactly what
-# a deployment asks it (`tests/test_corpus.py` holds them equal to their
+# a deployment asks it (`tests/test_bench.py` holds them equal to their
 # sources). The tools exist only to give each sanitizer an application point:
 # no tool runs. The harness appends the `[externals]` that bind every
 # sanitizer to the backend under test.
@@ -25,22 +25,22 @@ delta = { trust = "suspicious" }
 name = "read_secret"
 delta = { audience = ["ops"] }
 
-# Claude Code: calls whose arguments leave for public readers.
+# Claude Code: calls whose arguments leave for public readers. Like the
+# `coding` battery's declarations these tools alias, they declare no
+# `parameters`, so a rewrite is checked against the same open schema and the
+# sanitizer is shown the same one (`tests/test_bench.py` holds them equal).
 [[policy.tool]]
 name = "host/claude-code/WebSearch"
-parameters = { type = "object", properties = { query = { type = "string", minLength = 2 } }, required = ["query"], additionalProperties = false }
 requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "host/claude-code/WebFetch"
-parameters = { type = "object", properties = { url = { type = "string" }, prompt = { type = "string" } }, required = ["url", "prompt"], additionalProperties = false }
 requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "host/claude-code/Bash"
-parameters = { type = "object", properties = { command = { type = "string" }, description = { type = "string" } }, required = ["command"], additionalProperties = false }
 requires = { audience = { contains = ["public"] } }
 delta = {}
 

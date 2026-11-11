@@ -32,7 +32,7 @@ PROVIDER_TOKEN_RE = re.compile(rb"(?<![A-Za-z0-9_-])sk-(?:ant-|or-)?[A-Za-z0-9_-
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
     rb"(?:OPENROUTER_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|"
     rb"api[_-]?key|access[_-]?token)[\"']?\s*[:=]\s*[\"']?"
-    rb"(?!null\b|none\b|redacted\b|unset\b|<redacted>)[^\s\"',}]{8,}",
+    rb"(?!null\b|none\b|\[?redacted\b|unset\b|<redacted>)[^\s\"',}]{8,}",
     re.IGNORECASE,
 )
 LOCAL_PATH_RE = re.compile(

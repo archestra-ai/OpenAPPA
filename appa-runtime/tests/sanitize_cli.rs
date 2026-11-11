@@ -140,3 +140,29 @@ fn a_value_is_asked_once_per_repeat() {
         .collect();
     assert_eq!(repeats, [0, 1]);
 }
+
+/// An answer that cannot be written fails the run: a reader that closed its end gets no
+/// successful exit over a partial set of answers.
+#[test]
+fn an_unwritable_answer_fails_the_run() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(dir.path().join("appa.toml"), POLICY).expect("the policy is written");
+    std::fs::write(dir.path().join("redactor.sh"), REDACTOR).expect("the sanitizer is written");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["runtime", "sanitize", "--config"])
+        .arg(dir.path().join("appa.toml"))
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("appa starts");
+    drop(child.stdout.take());
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(VALUES.as_bytes())
+        .expect("the values are written");
+    assert!(!child.wait().expect("appa exits").success());
+}

@@ -21,7 +21,7 @@ import statistics
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 
-from .corpus import Case, Sanitizer, argument_text
+from .corpus import Case, Sanitizer, argument_text, mask
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ def score(case: Case, row: dict) -> Scored:
         if case.on == "tool_input":
             text = argument_text(json.loads(body))
         else:
-            wrapped = _wrapped(body)
+            wrapped = _wrapped(body, case)
         folded = text.casefold()
         survived = tuple(span for span in case.drop if span.casefold() in folded)
         lost = tuple(span for span in case.keep if span.casefold() not in folded)
@@ -79,12 +79,26 @@ def score(case: Case, row: dict) -> Scored:
     )
 
 
-def _wrapped(body: str) -> bool:
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(parsed, dict) and "body" in parsed
+def _wrapped(body: str, case: Case) -> bool:
+    """Whether the derivation is the consult's artifact object re-serialized: exactly the keys the
+    artifact has (`body`, and `tool` when the value has a producer), with the producer unchanged.
+    The body inside may itself be rewritten, so it is not compared. A value that was already
+    such an object is never counted."""
+
+    def envelope(text: str) -> bool:
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return False
+        keys = {"body"} | ({"tool"} if case.tool is not None else set())
+        return (
+            isinstance(parsed, dict)
+            and set(parsed) == keys
+            and isinstance(parsed["body"], str)
+            and parsed.get("tool") == case.tool
+        )
+
+    return envelope(body) and not envelope(case.text())
 
 
 def _reason_class(reason: str | None) -> str | None:
@@ -199,6 +213,22 @@ def _by_size(rows: list[Scored]) -> dict:
     }
 
 
+def incomplete(cases: list[Case], rows: list[dict], repeat: int) -> list[str]:
+    """Why `rows` is not exactly one answer per case and repeat; empty when it is."""
+    expected = {(case.id, index) for case in cases for index in range(repeat)}
+    seen: dict[tuple[str, int], int] = defaultdict(int)
+    for row in rows:
+        seen[(row.get("id"), row.get("repeat"))] += 1
+    problems = []
+    if missing := sorted(expected - set(seen)):
+        problems.append(f"{len(missing)} missing, first {missing[0]}")
+    if unknown := sorted(set(seen) - expected, key=str):
+        problems.append(f"{len(unknown)} unexpected, first {unknown[0]}")
+    if duplicated := sorted(key for key, count in seen.items() if count > 1 and key in expected):
+        problems.append(f"{len(duplicated)} answered more than once, first {duplicated[0]}")
+    return problems
+
+
 def summarize(cases: list[Case], rows: list[dict], registered: dict[str, Sanitizer]) -> dict:
     by_id = {case.id: case for case in cases}
     scored = [score(by_id[row["id"]], row) for row in rows]
@@ -223,8 +253,11 @@ def summarize(cases: list[Case], rows: list[dict], registered: dict[str, Sanitiz
         else:
             entry["redaction"] = _audience(members)
         summary[name] = entry
+    # A row names the spans it scored; the drop spans are synthetic secrets, masked as in the
+    # archived answers.
+    recorded = [mask(asdict(row), by_id[row.case].drop) for row in scored]
     return {
         "sanitizers": summary,
-        "unresolved": [asdict(row) for row in scored if row.status == "unresolved"],
-        "rows": [asdict(row) for row in scored],
+        "unresolved": [entry for entry in recorded if entry["status"] == "unresolved"],
+        "rows": recorded,
     }

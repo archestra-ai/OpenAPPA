@@ -1,5 +1,6 @@
 import json
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -110,6 +111,99 @@ def test_a_run_that_asks_one_sanitizer_still_binds_every_registered_one(tmp_path
     rows = runner.ask(cases, runner.Backend(builtin="identity"), tmp_path, repeat=1, concurrency=8)
     assert {row["outcome"] for row in rows} == {"derived"}
     assert len(rows) == len(cases)
+
+
+def test_wrapped_counts_only_the_consults_own_envelope():
+    case = _case(tool="get_pod_logs", body="log line", drop=(), keep=())
+
+    def wrapped(body):
+        row = {"id": "c", "repeat": 0, "latency_ms": 1, "outcome": "derived", "body": body}
+        return scoring.score(case, row).wrapped
+
+    # The envelope with a rewritten body inside it is the bug the bench counts.
+    assert wrapped(json.dumps({"body": "rewritten", "tool": "get_pod_logs"}))
+    # A rewritten JSON value that merely has a body field is not.
+    assert not wrapped(json.dumps({"body": "redacted", "status": 200}))
+    assert not wrapped(json.dumps({"body": "rewritten", "tool": "other"}))
+    assert not wrapped("plain text")
+
+
+def test_an_answer_set_must_be_one_row_per_case_and_repeat():
+    cases = [_case(id="a"), _case(id="b")]
+    row = lambda case, repeat: {"id": case, "repeat": repeat}  # noqa: E731
+    assert scoring.incomplete(cases, [row("a", 0), row("b", 0)], 1) == []
+    assert scoring.incomplete(cases, [row("a", 0)], 1) == ["1 missing, first ('b', 0)"]
+    assert scoring.incomplete(cases, [row("a", 0), row("a", 0), row("b", 0)], 1) == [
+        "1 answered more than once, first ('a', 0)"
+    ]
+    assert scoring.incomplete(cases, [row("a", 0), row("b", 0), row("z", 0)], 1) == ["1 unexpected, first ('z', 0)"]
+
+
+def _cli(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["appa-sanitizer-bench", *args], capture_output=True, text=True)
+
+
+def test_a_selection_of_no_case_is_refused(tmp_path: Path):
+    unknown = _cli(
+        "run", "--skip-build", "--arm", "identity", "--sanitizer", "strip-instruction", "--output", str(tmp_path / "a")
+    )
+    assert unknown.returncode != 0 and "unknown sanitizer" in unknown.stderr
+    empty = _cli(
+        "run",
+        "--skip-build",
+        "--arm",
+        "identity",
+        "--sanitizer",
+        "redact-for-public",
+        "--kind",
+        "size",
+        "--output",
+        str(tmp_path / "b"),
+    )
+    assert empty.returncode != 0 and "no case" in empty.stderr
+    assert not (tmp_path / "a").exists() and not (tmp_path / "b").exists()
+
+
+def test_a_missing_key_is_refused_before_any_arm_runs(tmp_path: Path):
+    output = tmp_path / "run"
+    done = _cli(
+        "run",
+        "--skip-build",
+        "--arm",
+        "identity",
+        "--arm",
+        "llm",
+        "--llm-token-env",
+        "APPA_BENCH_UNSET_KEY",
+        "--output",
+        str(output),
+    )
+    assert done.returncode != 0 and "APPA_BENCH_UNSET_KEY" in done.stderr
+    assert not output.exists()
+
+
+def test_a_run_without_a_complete_summary_is_not_published(tmp_path: Path):
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "run-config.json").write_text(json.dumps({"git_sha": "0" * 40, "git_dirty": False}))
+    done = _cli("publish", str(run), "--prepare-only", "--output-dir", str(tmp_path / "bundle"))
+    assert done.returncode != 0 and "not a complete run" in done.stderr
+
+
+@pytest.mark.skipif(not runner.APPA_BIN.is_file(), reason="needs target/debug/appa")
+def test_a_full_identity_run_packages_for_the_archive(tmp_path: Path):
+    from appa_bench_publish.publish import prepare_bundle
+
+    # The identity arm echoes every planted secret, so it is the hardest run to archive.
+    cases = corpus.load()
+    run = tmp_path / "run"
+    rows = runner.ask(cases, runner.Backend(builtin="identity"), run / "identity", repeat=1, concurrency=8)
+    summary = scoring.summarize(cases, rows, corpus.sanitizers())
+    (run / "identity" / "summary.json").write_text(json.dumps(summary))
+    (run / "run-config.json").write_text(json.dumps({"git_sha": "0" * 40, "git_dirty": False}))
+    (run / "summary.json").write_text(json.dumps({"complete": True}))
+    prepare_bundle(run, "sanitizer", None, tmp_path / "bundle")
+    assert sys.executable not in (run / "identity" / "policy.toml").read_text()
 
 
 def test_the_cli_lists_without_a_model():

@@ -7,7 +7,7 @@ would admit. It measures three things per sanitizer:
 | Question | Metric |
 |---|---|
 | Utility recovered | `derived_rate`: share of consults that produce a derivation, so the offer lifts the block. `keep_rate`: share of the facts the value exists to carry that the derivation keeps. |
-| Robustness, trust sanitizers | `survival_rate` and `crossing_rate`: share of attack consults whose injected payload is still in the value that crosses at `trusted`. |
+| Robustness, trust sanitizers | `survival_rate`: share of admitted attack derivations still carrying the payload. `crossing_rate`: share of all attack consults whose payload crosses at `trusted`; withheld consults count as stopped. |
 | Robustness, audience sanitizers | `recall` and `precision` of secret-span redaction, overall and on adversarial values (`adversarial_recall`). |
 | Operational cost | Latency (p50, p90, max) and `withheld_by_reason`: consults that end without a derivation because of `timeout`, `oversized` (`max_body_bytes`), `malformed`, or `rejected`. |
 
@@ -84,10 +84,15 @@ uv run appa-sanitizer-bench run --arm identity --arm claude-code --arm llm \
 | `--llm-token-env` | `ANTHROPIC_API_KEY` | Where the harness reads the key |
 | `--sanitizer`, `--kind` | all | Case selection |
 
-Each arm writes `policy.toml`, `values.jsonl`, `answers.jsonl` (one runtime line
-per consult), and `summary.json`. `run-config.json` records the commit, the
-corpus digest, and the policy digest. `publish` packages a clean-worktree run
-for the archive. As for every benchmark here, the archive is the source of
+Each arm writes `policy.toml`, `values.sha256`, `answers.jsonl` (one runtime
+line per consult), and `summary.json`. `run-config.json` records the commit, the
+corpus digest, and the policy digest. The run directory holds no local path and
+no raw corpus value: the values reach the runtime on standard input only and
+are reproducible from the commit, and every `drop` span in an answer is
+recorded as `REDACTED-DROP-<index>`. Scoring reads the answers before that
+masking. An arm whose answers are not exactly one per case and repeat fails the
+run. The top-level `summary.json` records `complete = true` only when every arm
+finished resolved, and `publish` packages only such a clean-worktree run. As for every benchmark here, the archive is the source of
 truth for results (see [`../CLAUDE.md`](../CLAUDE.md)).
 
 ## Interpretation limits

@@ -3,19 +3,26 @@
 The runtime does the asking: the same declaration, prompt, answer schema, deadline, byte cap,
 retries, and answer reading a session uses. The harness only writes the deployment, feeds
 the values, and keeps every answer line.
+
+A run directory is what `publish` archives, so it holds no machine-local path and no raw
+corpus value. The values are reproducible from the commit and the corpus digest the run
+records, and reach the runtime on standard input only. The archived answers carry every
+`drop` span of their case as `REDACTED-DROP-<index>`: the synthetic secrets the corpus plants
+would otherwise be refused by the archive's credential scan. Scoring reads the answers before
+this masking.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
-import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .corpus import POLICY, ROOT, Case, sanitizers
+from .corpus import POLICY, ROOT, Case, mask, sanitizers
 
 REPO_ROOT = ROOT.parents[1]
 APPA_BIN = REPO_ROOT / "target" / "debug" / "appa"
@@ -32,25 +39,37 @@ SHIPPED_MAX_BODY_BYTES = 65536
 class Backend:
     """Who answers every sanitizer of the bench policy, under which limits."""
 
-    builtin: str  # "claude-code", "llm", or "identity" (preflight's stand-in)
+    builtin: str  # "claude-code", "llm", or "identity" (the no-rewrite stand-in)
     model: str | None = None
     provider: str | None = None
     url: str | None = None
-    claude_command: str | None = None
+    # The directory of the real `claude` executable, put first on the runtime's PATH. Never
+    # written into the deployment or the summary: a run directory holds no local path.
+    claude_dir: str | None = None
     # The model table's `timeout_ms`; `None` keeps the runtime's default for the builtin.
     consult_timeout_ms: int | None = None
     max_concurrent: int | None = None
     max_body_bytes: int = SHIPPED_MAX_BODY_BYTES
 
     def describe(self) -> dict:
-        return {key: value for key, value in asdict(self).items() if value is not None}
+        return {key: value for key, value in asdict(self).items() if value is not None and key != "claude_dir"}
 
 
 def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def deployment(backend: Backend, identity_command: list[str] | None = None) -> str:
+IDENTITY_SCRIPT = "identity_sanitizer.py"
+# Resolved from PATH and run from the policy's directory, where `ask` writes the script.
+IDENTITY_COMMAND = ("python3", "-I", IDENTITY_SCRIPT)
+IDENTITY_SANITIZER = """\
+import json, sys
+consult = json.load(sys.stdin)
+print(json.dumps({"version": 1, "answer": {"body": consult["artifact"]["body"]}}))
+"""
+
+
+def deployment(backend: Backend) -> str:
     """The bench policy with `[externals]` binding every sanitizer it registers to `backend`.
 
     The runtime refuses a policy that names an unbound sanitizer, so a run that asks only some
@@ -65,8 +84,7 @@ def deployment(backend: Backend, identity_command: list[str] | None = None) -> s
     for name in sanitizers():
         lines += ["", f"[externals.sanitizers.{name}]"]
         if backend.builtin == "identity":
-            assert identity_command is not None, "the identity backend runs a command"
-            lines.append(f"command = [{', '.join(_toml_string(part) for part in identity_command)}]")
+            lines.append(f"command = [{', '.join(_toml_string(part) for part in IDENTITY_COMMAND)}]")
         else:
             lines.append(f"builtin = {_toml_string(backend.builtin)}")
     limits = []
@@ -76,8 +94,6 @@ def deployment(backend: Backend, identity_command: list[str] | None = None) -> s
         limits.append(f"max_concurrent = {backend.max_concurrent}")
     if backend.builtin == "claude-code":
         lines += ["", "[externals.claude_code]"]
-        if backend.claude_command is not None:
-            lines.append(f"command = {_toml_string(backend.claude_command)}")
         if backend.model is not None:
             lines.append(f"model = {_toml_string(backend.model)}")
         lines += limits
@@ -97,7 +113,7 @@ def deployment(backend: Backend, identity_command: list[str] | None = None) -> s
 
 def resolve_claude_command() -> str | None:
     """The real `claude` executable. A version-manager shim may not run from the consult's
-    scratch directory, so the binding names the executable the shim would run."""
+    scratch directory, so the runtime is given the directory of the executable it would run."""
     try:
         found = subprocess.run(
             ["mise", "which", "claude"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
@@ -113,20 +129,6 @@ def build_appa() -> None:
     subprocess.run(["cargo", "build", "-p", "appa"], cwd=REPO_ROOT, check=True)
 
 
-IDENTITY_SANITIZER = """\
-import json, sys
-consult = json.load(sys.stdin)
-print(json.dumps({"version": 1, "answer": {"body": consult["artifact"]["body"]}}))
-"""
-
-
-def identity_command(directory: Path) -> list[str]:
-    """A stand-in sanitizer that returns every value unchanged: the no-sanitizer baseline."""
-    script = directory / "identity_sanitizer.py"
-    script.write_text(IDENTITY_SANITIZER)
-    return [sys.executable, "-I", str(script)]
-
-
 def ask(
     cases: list[Case],
     backend: Backend,
@@ -137,37 +139,46 @@ def ask(
     token: str | None = None,
     appa_bin: Path = APPA_BIN,
 ) -> list[dict]:
-    """Every case asked `repeat` times. Writes `policy.toml`, `values.jsonl`, `answers.jsonl`."""
+    """Every case asked `repeat` times; the raw answer rows, unmasked.
+
+    Writes `policy.toml`, `values.sha256` (the digest of the values fed on standard input),
+    and the masked `answers.jsonl` into `output`.
+    """
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    command = identity_command(output) if backend.builtin == "identity" else None
-    (output / "policy.toml").write_text(deployment(backend, command))
+    if backend.builtin == "identity":
+        (output / IDENTITY_SCRIPT).write_text(IDENTITY_SANITIZER)
+    (output / "policy.toml").write_text(deployment(backend))
     values = "".join(json.dumps(case.value()) + "\n" for case in cases)
-    (output / "values.jsonl").write_text(values)
+    (output / "values.sha256").write_text(hashlib.sha256(values.encode()).hexdigest() + "\n")
     env = {key: value for key, value in os.environ.items() if key != TOKEN_VARIABLE}
     if token is not None:
         env[TOKEN_VARIABLE] = token
-    answers_path = output / "answers.jsonl"
-    with answers_path.open("w") as answers:
-        completed = subprocess.run(
-            [
-                str(appa_bin),
-                "runtime",
-                "sanitize",
-                "--config",
-                str(output / "policy.toml"),
-                "--repeat",
-                str(repeat),
-                "--concurrency",
-                str(concurrency),
-            ],
-            input=values,
-            stdout=answers,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-            cwd=output,
-        )
+    if backend.claude_dir is not None:
+        env["PATH"] = os.pathsep.join([backend.claude_dir, env.get("PATH", "")])
+    completed = subprocess.run(
+        [
+            str(appa_bin),
+            "runtime",
+            "sanitize",
+            "--config",
+            str(output / "policy.toml"),
+            "--repeat",
+            str(repeat),
+            "--concurrency",
+            str(concurrency),
+        ],
+        input=values,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=output,
+    )
     if completed.returncode != 0:
         raise RuntimeError(f"appa runtime sanitize failed: {completed.stderr.strip()}")
-    return [json.loads(line) for line in answers_path.read_text().splitlines()]
+    rows = [json.loads(line) for line in completed.stdout.splitlines()]
+    drops = {case.id: case.drop for case in cases}
+    with (output / "answers.jsonl").open("w") as answers:
+        for row in rows:
+            answers.write(json.dumps(mask(row, drops.get(row.get("id"), ()))) + "\n")
+    return rows

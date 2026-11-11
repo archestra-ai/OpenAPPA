@@ -31,10 +31,11 @@ def _backend(args: argparse.Namespace, arm: str) -> runner.Backend:
         case "identity":
             return runner.Backend(builtin="identity", max_body_bytes=args.max_body_bytes)
         case "claude-code":
+            command = args.claude_command or runner.resolve_claude_command()
             return runner.Backend(
                 builtin="claude-code",
                 model=args.claude_model,
-                claude_command=args.claude_command or runner.resolve_claude_command(),
+                claude_dir=str(Path(command).parent) if command else None,
                 consult_timeout_ms=args.consult_timeout_ms,
                 max_concurrent=args.concurrency,
                 max_body_bytes=args.max_body_bytes,
@@ -53,21 +54,40 @@ def _backend(args: argparse.Namespace, arm: str) -> runner.Backend:
 
 
 def _selected(args: argparse.Namespace) -> list[corpus.Case]:
+    """The cases the filters select. An unknown sanitizer or an empty selection is an error: a
+    run that asks nothing must not read as a completed benchmark."""
+    registered = corpus.sanitizers()
+    unknown = sorted(set(args.sanitizer or ()) - set(registered))
+    if unknown:
+        raise ValueError(f"unknown sanitizer {unknown}; the bench policy registers {sorted(registered)}")
     cases = corpus.load()
     if args.sanitizer:
         cases = [case for case in cases if case.sanitizer in args.sanitizer]
     if args.kind:
         cases = [case for case in cases if case.kind in args.kind]
+    if not cases:
+        raise ValueError("the filters select no case")
     return cases
+
+
+def _missing_prerequisites(args: argparse.Namespace, arms: list[str]) -> list[str]:
+    """What a selected arm needs and does not have, checked before any arm runs."""
+    missing = []
+    if "llm" in arms and not os.environ.get(args.llm_token_env):
+        missing.append(f"the llm arm reads its key from {args.llm_token_env}, which is not set")
+    if "claude-code" in arms and _backend(args, "claude-code").claude_dir is None:
+        missing.append("the claude-code arm found no claude executable; pass --claude-command")
+    return missing
 
 
 def _run_arm(args, arm: str, cases: list[corpus.Case], output: Path) -> dict:
     backend = _backend(args, arm)
     token = os.environ.get(args.llm_token_env) if arm == "llm" else None
-    if arm == "llm" and not token:
-        sys.exit(f"the llm arm reads its key from {args.llm_token_env}, which is not set")
     started = time.time()
     rows = runner.ask(cases, backend, output / arm, repeat=args.repeat, concurrency=args.concurrency, token=token)
+    problems = scoring.incomplete(cases, rows, args.repeat)
+    if problems:
+        sys.exit(f"the {arm} arm's answers are not one per case and repeat: {'; '.join(problems)}")
     summary = scoring.summarize(cases, rows, corpus.sanitizers())
     summary["arm"] = arm
     summary["backend"] = backend.describe()
@@ -88,6 +108,14 @@ def _headline(summary: dict) -> dict:
         },
         "by_size": {name: entry["by_size"] for name, entry in summary["sanitizers"].items()},
     }
+
+
+def _complete(run_dir: Path) -> bool:
+    """Whether every arm of the run finished with a full, resolved answer set."""
+    try:
+        return json.loads((run_dir / "summary.json").read_text()).get("complete") is True
+    except (OSError, json.JSONDecodeError):
+        return False
 
 
 def main() -> None:
@@ -120,6 +148,8 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "publish":
+        if not _complete(args.run_dir):
+            parser.error(f"{args.run_dir} is not a complete run: its summary.json does not record complete = true")
         publish_from_args(args, "sanitizer")
         return
 
@@ -139,9 +169,19 @@ def main() -> None:
         return
     if min(args.repeat, args.concurrency) <= 0:
         parser.error("repeat and concurrency must be positive")
+    try:
+        cases = _selected(args)
+    except ValueError as error:
+        parser.error(str(error))
+    arms = ["identity"] if args.command == "preflight" else args.arm or ["identity", "claude-code"]
+    if args.command == "run":
+        if args.output.exists():
+            parser.error(f"output exists: {args.output}; runs are never overwritten")
+        missing = _missing_prerequisites(args, arms)
+        if missing:
+            parser.error("; ".join(missing))
     if not args.skip_build:
         runner.build_appa()
-    cases = _selected(args)
 
     if args.command == "preflight":
         output = args.output or Path("/tmp") / f"appa-sanitizer-preflight-{os.getpid()}"
@@ -151,10 +191,7 @@ def main() -> None:
             sys.exit("preflight: the identity arm should derive every value")
         return
 
-    if args.output.exists():
-        parser.error(f"output exists: {args.output}; runs are never overwritten")
     args.output.mkdir(parents=True)
-    arms = args.arm or ["identity", "claude-code"]
     config = {
         **_provenance(),
         "arms": arms,
@@ -166,10 +203,12 @@ def main() -> None:
     }
     (args.output / "run-config.json").write_text(json.dumps(config, indent=2) + "\n")
     summaries = [_headline(_run_arm(args, arm, cases, args.output)) for arm in arms]
-    result = {"config": config, "arms": summaries}
+    complete = not any(summary["unresolved"] for summary in summaries)
+    # Written only once every arm returned a full answer set: `publish` requires it.
+    result = {"config": config, "complete": complete, "arms": summaries}
     (args.output / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
-    if any(summary["unresolved"] for summary in summaries):
+    if not complete:
         sys.exit("some values were unresolved: a harness error, see summary.json")
 
 
