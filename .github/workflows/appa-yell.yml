@@ -59,7 +59,7 @@ jobs:
           fetch-depth: 1
 
       - name: Authenticate to Google Cloud
-        uses: archestra-ai/.github/actions/google-auth@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
+        uses: archestra-ai/.github/actions/google-auth@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
         with:
           service_account: appa-yell-deploy@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
