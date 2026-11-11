@@ -37,6 +37,19 @@ export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$gcp_credentials"
 EOF
 fi
 
+# Every orb size has the same 60 GB disk, and a few feature sets of test builds
+# fill it: incremental state and test debug info are most of `target/`. CI drops
+# test debug info the same way. The cost is a slower rebuild after an edit.
+cargo_profile_marker="# OpenAPPA cargo disk budget"
+if ! grep -Fqx "$cargo_profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  cat >> "$HOME/.bash_profile" <<EOF
+
+$cargo_profile_marker
+export CARGO_INCREMENTAL=0
+export CARGO_PROFILE_TEST_DEBUG=0
+EOF
+fi
+
 "$mise_bin" trust "$repo_root/mise.toml"
 echo "==> Installing pinned toolchains"
 toolchain_start=$SECONDS
