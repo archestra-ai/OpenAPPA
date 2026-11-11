@@ -153,6 +153,8 @@ pub(crate) fn stamp_of(facts: &[Fact]) -> Option<PolicyRevision> {
     }
 }
 
+/// A root's log decoded onto the policy file its opening names: refused unless `policy_file`
+/// still hashes to that key.
 pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
     let mut batches = batches.into_iter();
     let Some(first) = batches.next() else {
@@ -161,6 +163,11 @@ pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: V
         });
     };
     let (record, opening) = opening(root, &first)?;
+    if PolicyFileKey::of(&policy_file) != opening.policy_file_key {
+        return Err(ReadError::PolicyFileMismatch {
+            key: opening.policy_file_key.as_str().to_string(),
+        });
+    }
     let mut log = Log {
         root: root.clone(),
         deployment: opening.deployment,
@@ -526,7 +533,7 @@ mod tests {
             b"not json at all".to_vec(),
         ];
         assert!(matches!(
-            decoded(&root(), batches, Vec::new()),
+            decoded(&root(), batches, crate::tests::POLICY.as_bytes().to_vec()),
             Err(ReadError::Undecodable { seq: 2, .. })
         ));
     }
