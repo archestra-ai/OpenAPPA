@@ -1,0 +1,27 @@
+[package]
+name = "appa-dogwood"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "OpenAPPA's Dogwood plugin: the Annotator and recorder that decide a tool call with Dogwood (and so Cedar) policies over the history of the calls it recorded."
+
+# Its own executable, not an `appa` subcommand: Dogwood brings the Cedar toolchain with it, and
+# the runtime binary does not carry that for deployments that never use it.
+[[bin]]
+name = "appa-dogwood"
+path = "src/main.rs"
+
+[dependencies]
+dogwood-language = "=1.1.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+appa-runtime = { workspace = true }
+appa-runtime-api = { path = "../appa-runtime-api" }
+tempfile = "3"
+tokio = { workspace = true }
+
+[lints]
+workspace = true
