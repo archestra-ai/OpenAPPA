@@ -1,0 +1,368 @@
+[
+  {
+    "TrajectoryOpened": {
+      "trajectory": "t",
+      "profile": {
+        "starting_label": {
+          "trust": 1,
+          "audience": []
+        },
+        "context_control": true,
+        "dispatch": "enforced",
+        "executor_exceptions": {
+          "taint": "provider_run"
+        },
+        "confined_results": [
+          "fetch"
+        ],
+        "provider_surfaces": {},
+        "binding": "harness"
+      },
+      "policy_file_key": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "deployment": "default",
+      "revision": 1
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "b1"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "b1",
+      "proposals": [
+        {
+          "tool": "fetch",
+          "arguments": "{}",
+          "annotation": null,
+          "file_basis": {
+            "Read": {
+              "version": "v1",
+              "digest": "content",
+              "label": {
+                "trust": 1,
+                "audience": [
+                  {
+                    "readers": [
+                      "insider"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "spawn": null,
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "1c59ddfeacf113ff49a3f4c2fecb0486955932df22416a512ad43f63dc5bd0c2",
+      "block": "af279d919a01512036feb8df984ffb624928018bf747712cf117fd7d2ecbc424",
+      "act": {
+        "Proposals": "b1"
+      },
+      "call": "309fc23bad184c1e275697f55d8fd7515e1b303a832a513e53c16709ef208cc9",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "b1",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Accept": {
+              "from": {
+                "trust": 1,
+                "audience": []
+              },
+              "to": {
+                "trust": 0,
+                "audience": [
+                  {
+                    "readers": [
+                      "insider"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "f526dc80bba00526a3f2401e4bea7549796092c3c6d95b681b6b3ea8db652907",
+      "block": "af279d919a01512036feb8df984ffb624928018bf747712cf117fd7d2ecbc424",
+      "act": {
+        "Proposals": "b1"
+      },
+      "call": "309fc23bad184c1e275697f55d8fd7515e1b303a832a513e53c16709ef208cc9",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "b1",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 1,
+        "steps": [
+          {
+            "Sanitize": "redactor"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Offer": "f526dc80bba00526a3f2401e4bea7549796092c3c6d95b681b6b3ea8db652907"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "t",
+              "batch": "b1",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "t",
+      "offer": "f526dc80bba00526a3f2401e4bea7549796092c3c6d95b681b6b3ea8db652907"
+    }
+  },
+  {
+    "OfferInvalidated": {
+      "trajectory": "t",
+      "offer": "1c59ddfeacf113ff49a3f4c2fecb0486955932df22416a512ad43f63dc5bd0c2"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "t",
+      "offer": "f526dc80bba00526a3f2401e4bea7549796092c3c6d95b681b6b3ea8db652907",
+      "call": {
+        "tool": "fetch",
+        "arguments": "{}",
+        "annotation": null,
+        "file_basis": {
+          "Read": {
+            "version": "v1",
+            "digest": "content",
+            "label": {
+              "trust": 1,
+              "audience": [
+                {
+                  "readers": [
+                    "insider"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "plan": 1,
+      "acceptance": null,
+      "rulings": [],
+      "output": {
+        "Sanitize": "redactor"
+      },
+      "return_policy": null,
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "b2"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "f526dc80bba00526a3f2401e4bea7549796092c3c6d95b681b6b3ea8db652907"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "b2",
+      "proposals": [
+        {
+          "tool": "fetch",
+          "arguments": "{}",
+          "annotation": null,
+          "file_basis": {
+            "Read": {
+              "version": "v1",
+              "digest": "content",
+              "label": {
+                "trust": 1,
+                "audience": [
+                  {
+                    "readers": [
+                      "insider"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "spawn": null,
+      "released": [
+        {
+          "trajectory": "t",
+          "digest": "309fc23bad184c1e275697f55d8fd7515e1b303a832a513e53c16709ef208cc9",
+          "occurrence": 0
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "t",
+      "offer": "f526dc80bba00526a3f2401e4bea7549796092c3c6d95b681b6b3ea8db652907",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "309fc23bad184c1e275697f55d8fd7515e1b303a832a513e53c16709ef208cc9",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "OutputSanitizerBound": {
+      "trajectory": "t",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "309fc23bad184c1e275697f55d8fd7515e1b303a832a513e53c16709ef208cc9",
+        "occurrence": 0
+      },
+      "plan": 1,
+      "sanitizer": "redactor",
+      "contribution": {
+        "trust": 1,
+        "audience": [
+          {
+            "readers": [
+              "insider"
+            ]
+          }
+        ]
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "t",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "309fc23bad184c1e275697f55d8fd7515e1b303a832a513e53c16709ef208cc9",
+        "occurrence": 0
+      },
+      "tool": "fetch",
+      "arguments": "{}",
+      "proposed_label": {
+        "trust": 0,
+        "audience": [
+          {
+            "readers": [
+              "insider"
+            ]
+          }
+        ]
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "file_basis": {
+        "Read": {
+          "version": "v1",
+          "digest": "content",
+          "label": {
+            "trust": 1,
+            "audience": [
+              {
+                "readers": [
+                  "insider"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "b2",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": 0,
+          "audience": null
+        }
+      }
+    }
+  }
+]
