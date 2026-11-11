@@ -123,11 +123,12 @@ Implementation bindings live in `[externals]`: one
 or membership resolver, and per annotator that names no `builtin` on
 its declaration — bound to a `url` or a `command`, or, for authorities
 and sanitizers, a `builtin` (stock, a model transport, or a module from
-`--modules-dir`). An annotator names a model transport on its own
-`[[policy.annotator]]` declaration with `builtin = "claude-code"` or
-`builtin = "llm"`; a bound entry for a builtin annotator refuses to
-start. An authority may stay unbound and then returns no answer; every
-other registered name needs its entry. An entry no declaration
+`--modules-dir`). An annotator or a sanitizer can instead name a model
+transport on its own declaration with `builtin = "claude-code"` or
+`builtin = "llm"` (and `builtin = "archestra"` in an Archestra build); a
+bound entry for a declaration that names a builtin refuses to start.
+An authority may stay unbound and then returns no answer; every other
+registered name needs its entry. An entry no declaration
 registers refuses to start, except a sanitizer entry: it stays idle, so a
 root can bind the sanitizers of a battery it may install later.
 
