@@ -887,6 +887,72 @@ OpenAPPA uses the annotation only for the call it classified. Changing the call 
 
 If the annotator fails or returns an invalid answer, the call does not run. The agent can propose it again. OpenAPPA checks that the answer uses permitted values; the annotator is responsible for classifying the call correctly.
 
+### Test an annotator
+
+`appa runtime annotate` asks a policy's annotators about a list of tool calls. It uses the same consult path as a session: the same declaration, request, implementation, and permits check. It opens no trajectory and runs no tool. Use it to compare an annotator's answers with the answers you expect.
+
+```sh
+appa runtime [--config <path>] [--batteries-dir <dir>] annotate [--repeat <n>] [--concurrency <n>] < calls.jsonl
+```
+
+Standard input contains one JSON object per line. Each object is one call:
+
+| Field | Description |
+|---|---|
+| `id` | Identifies the call in the output. |
+| `tool` | The tool name as the policy writes it. |
+| `arguments` | The call's arguments. |
+| `cwd` | Optional. The directory the harness runs the call in. OpenAPPA sends it to the [context providers](#context-providers), not to the annotator. |
+
+Standard output contains one JSON object per answer, in the order the answers arrive. This order can differ from the input order. Use `id` and `repeat` to match an answer to its call. Each object has the call's `id`, `repeat` (the attempt, from 0), `latency_ms`, and `outcome`:
+
+| `outcome` | Meaning | Other fields |
+|---|---|---|
+| `answer` | The annotator answered within its permits. | `annotator`, `answer` |
+| `outside_mandate` | The answer does not follow the [annotator protocol](#annotator-protocol), or it uses values outside the permits. A session refuses the call. | `annotator`, `answer` |
+| `no_answer` | The annotator gave no answer. A session refuses the call. | `annotator`, `reason` |
+| `static` | The tool has a static contract. No annotator is asked. | |
+| `unresolved` | The policy declares no such tool, or the arguments do not match the tool. | `reason` |
+
+`answer` is the `answer` object of the [annotator protocol](#annotator-protocol). `reason` is a diagnostic string.
+
+`--repeat <n>` asks each call `n` times, to measure a model annotator's consistency. Default: 1. `--concurrency <n>` limits the calls in flight. Default: 4. `--config` and `--batteries-dir` select the configuration as for `appa runtime`.
+
+In the example below, a root config includes the Google Workspace battery. It declares no `[externals]`, so the [shared settings](#externals) take their defaults:
+
+```toml
+# appa.toml
+include = ["batteries/google-workspace/appa.toml"]
+
+[policy]
+version = 2
+
+[policy.audience]
+self = ["google-workspace:viewer"]
+internal = ["google-workspace:full-members"]
+```
+
+```sh
+cat > calls.jsonl <<'EOF'
+{"id":"org","tool":"mcp/claude_ai_Google_Drive/create_file","arguments":{"title":"t","textContent":"x","parentId":"<org-wide folder id>"}}
+{"id":"read","tool":"mcp/claude_ai_Google_Drive/read_file_content","arguments":{"fileId":"<file id>"}}
+EOF
+APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN=... appa runtime --config appa.toml annotate < calls.jsonl
+```
+
+```json
+{"id":"read","repeat":0,"latency_ms":0,"outcome":"static"}
+{"id":"org","repeat":0,"latency_ms":387,"outcome":"answer","annotator":"google-workspace.drive-readers","answer":{"delta":{},"emits":["google-workspace.changed"],"requires":{"attention":[],"audience":{"contains":["internal"]},"history":[],"trust":"trusted"}}}
+```
+
+Without the token, the `org` line is a `no_answer` with the program's error:
+
+```json
+{"id":"org","repeat":0,"latency_ms":67,"outcome":"no_answer","annotator":"google-workspace.drive-readers","reason":"non_success status=1 detail=\"google-workspace.drive-readers: APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN is not set\""}
+```
+
+The command exits with status 0 after it asks every call, whatever the outcomes. It exits with a nonzero status, and asks no annotator, when the configuration does not load or an input line is not a call.
+
 ## Recorders
 
 A recorder stores what a released call publishes, so that a later call can read it. For example, a file tracker records the label of each file a `Write` call writes. When a later `Read` call reads that file, the file tracker's annotator returns the stored label as the read's `delta`.
@@ -1466,7 +1532,7 @@ url = "https://approver.corp/rule"
 token_env = "APPA_APPROVER_TOKEN"
 ```
 
-`timeout_ms` limits the time an endpoint or command has to answer one request. `max_body_bytes` limits the accepted response size. These settings apply to the whole deployment. Each [model implementation](#model-implementations) and [Jev](#jev) has its own `timeout_ms` and `max_concurrent` in its own section. `max_concurrent` limits the requests of one implementation across the whole runtime, all sessions included. A reload that OpenAPPA accepts applies a changed value to later requests of every session. Requests that already run or wait finish under the previous limit.
+`timeout_ms` limits the time an endpoint or command has to answer one request. Default: 5,000 ms. `max_body_bytes` limits the accepted response size. Default: 65,536 bytes. `review_timeout_ms` limits the time a human review stays open. Default: 600,000 ms. These settings apply to the whole deployment. The `[externals]` section is optional. Each [model implementation](#model-implementations) and [Jev](#jev) has its own `timeout_ms` and `max_concurrent` in its own section. `max_concurrent` limits the requests of one implementation across the whole runtime, all sessions included. A reload that OpenAPPA accepts applies a changed value to later requests of every session. Requests that already run or wait finish under the previous limit.
 
 The available settings depend on the component's role:
 

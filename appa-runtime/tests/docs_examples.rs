@@ -84,6 +84,30 @@ fn as_policy(mut table: toml::Table) -> Option<String> {
     Some(toml::to_string(&policy).unwrap())
 }
 
+fn shipped_batteries() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crate sits one level under the repository root")
+        .join("marketplace/batteries")
+}
+
+/// A root config example whose every include is `batteries/<name>/appa.toml` loads whole,
+/// with its batteries composed from the marketplace; an unknown battery fails the load.
+fn includes_only_shipped_batteries(table: &toml::Table) -> bool {
+    table
+        .get("include")
+        .and_then(toml::Value::as_array)
+        .is_some_and(|includes| {
+            includes.iter().all(|include| {
+                include
+                    .as_str()
+                    .and_then(|include| include.strip_prefix("batteries/"))
+                    .and_then(|rest| rest.strip_suffix("/appa.toml"))
+                    .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+            })
+        })
+}
+
 #[test]
 fn every_toml_fence_in_the_policy_reference_loads() {
     let reference = policy_reference();
@@ -93,6 +117,15 @@ fn every_toml_fence_in_the_policy_reference_loads() {
         let table: toml::Table = fence
             .parse()
             .unwrap_or_else(|error| panic!("a fence is not valid TOML: {error}\n{fence}"));
+        if includes_only_shipped_batteries(&table) {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let path = dir.path().join("appa.toml");
+            std::fs::write(&path, fence).expect("the example is written");
+            if let Err(error) = appa_runtime::config::Config::load_from(&path, &[shipped_batteries()]) {
+                panic!("a root config example does not load: {error}\n{fence}");
+            }
+            continue;
+        }
         let sources = appa_runtime::config::source_registrations_of(&toml::Value::Table(table.clone()))
             .unwrap_or_else(|error| panic!("a fence declares its audience sources badly: {error}\n{fence}"));
         let Some(policy) = as_policy(table) else { continue };

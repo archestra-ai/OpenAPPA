@@ -19,7 +19,7 @@ mod validate;
 pub use bundled::{BundledBattery, BundledFile, bundled_batteries};
 pub use digest::{TreeDigest, TreeDigestParseError};
 pub use manifest::{ManifestError, SCHEMA};
-pub use marketplace::{Marketplace, OwnershipError, PackageEntry, check_ownership};
+pub use marketplace::{CATALOG_FILE, CatalogError, Marketplace, OwnershipError, PackageEntry, check_ownership};
 pub use names::{
     CredentialPrefix, ExecutableName, Host, NameError, Namespace, NamespaceError, PackageKind, PackageName,
     RelativePath, RelativePathError,

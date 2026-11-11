@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -12,6 +12,8 @@ use crate::digest::TreeDigest;
 use crate::manifest::{ManifestError, SCHEMA};
 use crate::names::{CredentialPrefix, Namespace, PackageKind, PackageName, RelativePath};
 use crate::package::{Battery, Package, Role};
+use crate::tree::TreeDigestError;
+use crate::validate::PackageError;
 
 /// One listed package: where it lives and what its tree must digest to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +105,83 @@ impl Marketplace {
         }
 
         Ok(Self { name, packages })
+    }
+}
+
+/// The catalog file a marketplace tree carries at its root.
+pub const CATALOG_FILE: &str = "marketplace.toml";
+
+/// Why a marketplace tree has no catalog.
+#[derive(Debug, Error)]
+pub enum CatalogError {
+    #[error("cannot read {}: {source}", path.display())]
+    Read { path: PathBuf, source: std::io::Error },
+    #[error("{}: {source}", path.display())]
+    Package { path: PathBuf, source: Box<PackageError> },
+    #[error("{} must be a {kind} package named after its directory", path.display())]
+    Misplaced { path: PathBuf, kind: PackageKind },
+    #[error("{}: {source}", path.display())]
+    Digest { path: PathBuf, source: TreeDigestError },
+    #[error(transparent)]
+    Ownership(#[from] OwnershipError),
+}
+
+impl Marketplace {
+    /// The catalog of the marketplace tree at `root`: every package directory
+    /// under `plugins/` and `batteries/`, validated, with the digest of its
+    /// tree. The catalog is derived from the packages, never stored beside
+    /// them, so no recorded digest can disagree with the tree it names.
+    pub fn render(root: &Path) -> Result<String, CatalogError> {
+        let mut listed: BTreeMap<PackageKind, BTreeMap<PackageName, (String, TreeDigest)>> = BTreeMap::new();
+        let mut packages = Vec::new();
+        for (directory, kind) in [("plugins", PackageKind::Plugin), ("batteries", PackageKind::Battery)] {
+            let parent = root.join(directory);
+            let entries = fs::read_dir(&parent).map_err(|source| CatalogError::Read {
+                path: parent.clone(),
+                source,
+            })?;
+            for entry in entries {
+                let path = entry
+                    .map_err(|source| CatalogError::Read {
+                        path: parent.clone(),
+                        source,
+                    })?
+                    .path();
+                if !path.join(crate::MANIFEST_FILE).exists() {
+                    continue;
+                }
+                let package = crate::validate_package(&path).map_err(|source| CatalogError::Package {
+                    path: path.clone(),
+                    source: Box::new(source),
+                })?;
+                let actual = match package.role {
+                    Role::Plugin(_) => PackageKind::Plugin,
+                    Role::Battery(_) => PackageKind::Battery,
+                };
+                if actual != kind || path.file_name().and_then(|name| name.to_str()) != Some(package.name.as_str()) {
+                    return Err(CatalogError::Misplaced { path, kind });
+                }
+                let digest = TreeDigest::of_tree(&path).map_err(|source| CatalogError::Digest {
+                    path: path.clone(),
+                    source,
+                })?;
+                listed
+                    .entry(kind)
+                    .or_default()
+                    .insert(package.name.clone(), (format!("{directory}/{}", package.name), digest));
+                packages.push(package);
+            }
+        }
+        check_ownership(&packages)?;
+        let mut text = format!("schema = {SCHEMA}\nname = \"appa\"\n");
+        for (kind, entries) in listed {
+            for (name, (path, digest)) in entries {
+                text.push_str(&format!(
+                    "\n[packages.{kind}.{name}]\npath = \"{path}\"\ndigest = \"{digest}\"\n"
+                ));
+            }
+        }
+        Ok(text)
     }
 }
 
@@ -253,6 +332,56 @@ mod tests {
              [packages.plugin.claude-code]\npath = \"plugins/claude-code\"\ndigest = \"{DIGEST}\"\n\n\
              [packages.battery.github]\npath = \"batteries/github\"\ndigest = \"{DIGEST}\"\n"
         )
+    }
+
+    fn package_dir(root: &Path, directory: &str, name: &str) {
+        let path = root.join("batteries").join(directory);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join(crate::MANIFEST_FILE),
+            format!("schema = 1\nname = {name:?}\ndescription = \"test\"\n[battery]\npolicy = \"appa.toml\"\nhosts = [\"kagent\"]\n"),
+        )
+        .unwrap();
+        fs::write(path.join("appa.toml"), "[policy]\nversion = 2\n").unwrap();
+    }
+
+    /// The catalog lists every package directory with the digest of its tree,
+    /// and a change to one package changes that package's digest only.
+    #[test]
+    fn a_rendered_catalog_names_each_package_with_its_tree_digest() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("plugins")).unwrap();
+        package_dir(root.path(), "slack", "slack");
+        package_dir(root.path(), "github", "github");
+        let first = Marketplace::render(root.path()).unwrap();
+        assert_eq!(first, Marketplace::render(root.path()).unwrap());
+        let parsed = manifest(&first).unwrap();
+        assert_eq!(
+            parsed.packages.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            ["github", "slack"]
+        );
+        for entry in &parsed.packages {
+            assert_eq!(
+                entry.digest,
+                TreeDigest::of_tree(&root.path().join(entry.path.as_path())).unwrap()
+            );
+        }
+
+        fs::write(root.path().join("batteries/github/README.md"), "new package content").unwrap();
+        let updated = manifest(&Marketplace::render(root.path()).unwrap()).unwrap();
+        assert_ne!(parsed.packages[0].digest, updated.packages[0].digest);
+        assert_eq!(parsed.packages[1].digest, updated.packages[1].digest);
+    }
+
+    #[test]
+    fn rendering_refuses_a_directory_with_a_different_package_identity() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("plugins")).unwrap();
+        package_dir(root.path(), "github", "slack");
+        assert!(matches!(
+            Marketplace::render(root.path()),
+            Err(CatalogError::Misplaced { .. })
+        ));
     }
 
     #[test]

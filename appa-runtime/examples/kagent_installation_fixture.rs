@@ -63,6 +63,8 @@ fn build(
         .expect("crate belongs to the repository");
     let marketplace = stage.path().join("marketplace");
     snapshot_tree(&repository.join("marketplace"), &marketplace)?;
+    let catalog = appa_package::Marketplace::render(&marketplace)?;
+    fs::write(marketplace.join(appa_package::CATALOG_FILE), &catalog)?;
     let marketplace_archive = stage.path().join("marketplace.tar.gz");
     let mut tar = tar::Builder::new(flate2::write::GzEncoder::new(
         File::create_new(&marketplace_archive)?,
@@ -70,7 +72,7 @@ fn build(
     ));
     tar.append_dir_all(".", &marketplace)?;
     tar.into_inner()?.finish()?.sync_all()?;
-    descriptor["catalog"] = serde_json::to_value(digest(&marketplace.join("marketplace.toml"))?)?;
+    descriptor["catalog"] = serde_json::to_value(ArtifactDigest::of_bytes(catalog.as_bytes()))?;
     descriptor["marketplace"] = serde_json::to_value(digest(&marketplace_archive)?)?;
     let descriptor = serde_json::to_vec(&descriptor)?;
     let generation = Generation::parse(&descriptor)?;

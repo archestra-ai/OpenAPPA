@@ -11,6 +11,18 @@ fn opencode_installs_roundtrips_offline_preserves_settings_and_removes_only_owne
     use appa_package::generation::ArtifactDigest;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
+    // A build with uncommitted battery changes carries no commit, and the
+    // installer refuses a build it cannot name (build.rs). CI builds a clean
+    // checkout, so there a missing commit fails below instead of skipping.
+    let identity = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .arg("build-info")
+        .output()
+        .unwrap();
+    let identity: serde_json::Value = serde_json::from_slice(&identity.stdout).unwrap();
+    if identity["commit"].is_null() && std::env::var_os("CI").is_none() {
+        eprintln!("skipped: this build has uncommitted battery changes; commit them and rerun to install it");
+        return;
+    }
     let source = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
     let port = || {

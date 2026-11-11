@@ -1184,9 +1184,9 @@ mod tests {
         );
     }
 
-    /// The repository's marketplace as `scripts/appa-marketplace.sh` digests it:
-    /// the files Git lists, so what a test run leaves behind (a battery helper's
-    /// `__pycache__`) is not taken for package content.
+    /// The repository's marketplace as a release ships it: the files Git lists,
+    /// so what a test run leaves behind (a battery helper's `__pycache__`) is
+    /// not taken for package content, with the catalog derived from them.
     pub(super) fn shipped_marketplace() -> tempfile::TempDir {
         let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let output = std::process::Command::new("git")
@@ -1215,19 +1215,12 @@ mod tests {
             fs::create_dir_all(target.parent().unwrap()).unwrap();
             fs::copy(&source, &target).unwrap();
         }
-        // A stale catalog otherwise surfaces far from its cause, as an
-        // install refusing a package's catalog identity.
         let marketplace = copy.path().join("marketplace");
-        for entry in Marketplace::read(&marketplace.join("marketplace.toml"))
-            .unwrap()
-            .packages
-        {
-            assert!(
-                TreeDigest::of_tree(&marketplace.join(entry.path.as_path())).unwrap() == entry.digest,
-                "marketplace/marketplace.toml is stale for package {}: run `bash scripts/appa-marketplace.sh`",
-                entry.name
-            );
-        }
+        fs::write(
+            marketplace.join(appa_package::CATALOG_FILE),
+            Marketplace::render(&marketplace).unwrap(),
+        )
+        .unwrap();
         copy
     }
 
@@ -1257,8 +1250,9 @@ mod tests {
     #[test]
     fn each_shipped_plugin_requires_batteries_its_version_ships_for_its_host() {
         use std::collections::BTreeMap;
-        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
-        let catalog = Marketplace::read(&source.join("marketplace.toml")).unwrap();
+        let shipped = shipped_marketplace();
+        let source = shipped.path().join("marketplace");
+        let catalog = read_catalog(&source).unwrap();
         let mut required = BTreeMap::new();
         for entry in catalog
             .packages
