@@ -421,12 +421,8 @@ pub fn setup(args: Setup) -> ExitCode {
 
 async fn operator(binary: &Path, config: &Path, project: &Path, marketplace: &Path) -> Result<u8, InstallError> {
     let temporary = tempfile::tempdir().map_err(invalid)?;
-    let root = marketplace.join("plugins/opencode/guide");
-    let guide = ["SKILL.md", "references/core.md", "references/opencode.md"]
-        .into_iter()
-        .map(|path| fs::read_to_string(root.join(path)).map_err(invalid))
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n\n");
+    // The guide is this binary's own, as the contract reference below is.
+    let guide = [crate::guide::ROUTER, crate::guide::CORE, crate::guide::OPENCODE].join("\n\n");
     let guide_path = fs::canonicalize(temporary.path()).map_err(invalid)?.join("guide.md");
     fs::write(&guide_path, &guide).map_err(invalid)?;
     let mut permissions = fs::metadata(&guide_path).map_err(invalid)?.permissions();
