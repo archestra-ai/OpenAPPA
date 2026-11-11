@@ -20,14 +20,24 @@ meeting notes carry what outside participants said, so `notion-search`,
 A query's input must be sharable with `internal` too.
 
 *Writes inside the workspace* — creating and updating pages, databases,
-folders, views, comments, and file uploads need trusted data that
-`internal` may see, and record `notion.changed`.
+folders, views, comments, and file uploads need data that `internal` may
+see, and record `notion.changed`. They are content people read, so they
+need no trusted session.
 
 *Reviewed changes* — moving pages, changing or trashing a data source,
 turning a page into an agent Skill, and spawning, stopping, or messaging
 a custom Agent session need the `notion-review` mark and record
 `notion.sensitive`. Creating an attachment from a URL makes Notion fetch
 that URL, so its input must be public and reviewed.
+
+*Trusted session* — `notion-convert-page-to-skill`,
+`notion-spawn-session`, and `notion-send-message-to-session` also need a
+trusted session. Each writes instructions that an agent later follows
+without a person reading them first: a Skill that agents load, or the
+prompt or message of a running custom Agent session. Outside text the
+session read cannot become those instructions. Every other write is
+bounded by its `audience` requirement and, where it has one, the
+`notion-review` mark.
 
 The Claude Code and kagent plugin defaults ship a human authority
 permitting every mark (`attention = ["*"]`), so `notion-review` needs no

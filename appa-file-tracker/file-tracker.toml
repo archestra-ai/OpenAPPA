@@ -319,6 +319,44 @@ write_trust = "trusted"
 pattern = "*/Library/LaunchAgents/*"
 write_trust = "trusted"
 
+# Other harnesses read these as instructions, and CI runs its workflows, without a
+# person reading them first.
+[[path]]
+pattern = "*GEMINI.md"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.cursorrules"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.cursor/rules/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.github/copilot-instructions.md"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.github/instructions/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.clinerules*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.windsurfrules"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.github/workflows/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.gitlab-ci.yml"
+write_trust = "trusted"
+
 # Amp reads a repository's skills as instructions and runs an orb's setup and resume
 # scripts as code when the orb starts.
 [[path]]

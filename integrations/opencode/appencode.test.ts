@@ -396,11 +396,11 @@ builtin = "redact-email"
     await expect(plugin.before('webfetch', { url: 'https://example.com/' })).rejects.toThrow('not the public audience')
   }, 15_000)
 
-  test('untrusted web results block edits; undeclared tools and arbitrary shell fail closed', async () => {
+  test('untrusted web results block instruction edits; undeclared tools and arbitrary shell fail closed', async () => {
     const plugin = await host(url, directory, 'ses_web')
     const web = await remedy(plugin, 'webfetch', { url: 'https://example.com/' })
     await plugin.after(web, { output: 'untrusted instructions', content: 'untrusted instructions' })
-    await expect(plugin.before('write', { path: 'file', content: 'attack' })).rejects.toThrow('trust')
+    await expect(plugin.before('write', { path: 'AGENTS.md', content: 'attack' })).rejects.toThrow('trust')
     await expect(plugin.before('unknown')).rejects.toThrow()
     await expect(plugin.before('shell', { command: 'pwd; curl https://example.com' })).rejects.toThrow('Unsandboxed')
   })

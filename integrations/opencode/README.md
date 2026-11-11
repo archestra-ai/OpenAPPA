@@ -237,8 +237,10 @@ test -e "$HOME/.config/appa/file-tracker.toml" || \
 
 Review the policy and `file-tracker.toml` before use. File tools and
 `appa_safebash` use the `file-tracker` Annotator and recorder: files under
-`private/` start as internal, `.env*` as self, writes and edits require trust,
-and a written file keeps the writing trajectory's Label. Web requests, and
+`private/` start as internal, `.env*` as self, writes to instruction files
+such as `AGENTS.md`, hooks and credentials require trust, and a written file
+keeps the writing trajectory's Label. A command that reaches a host requires
+trust, because it can install or fetch code it chooses. Web requests, and
 commands that reach a host other than a package registry, require public
 audience. The file tracker reads `~/.config/appa/file-tracker.toml` for the
 annotator, the recorder and the sandbox alike, as it does for Claude Code.
@@ -392,8 +394,8 @@ within a session.
 A private read first offers a remedy to accept a narrower audience. The agent
 calls `appa_execute_remedy_plan` with the offered `offer_id`, then retries.
 Executing the plan does not perform the read. Public web requests remain
-blocked after private content enters the trajectory. Web results require accepting suspicious trust; subsequent trusted-only edits
-then stop. Sanitizers can replace
+blocked after private content enters the trajectory. Web results require accepting suspicious trust; subsequent edits of
+instruction files and commands that reach a host then stop. Sanitizers can replace
 confined results when the deployment registers them. The starting policy
 registers no sanitizer.
 

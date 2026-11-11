@@ -30,16 +30,22 @@ private conversation the token can see, so its result stays with the
 viewer (`self`) until a person widens it.
 
 *Writes nobody else reads yet* — adding a reaction, saving a draft to
-your own Drafts. Trusted data, no approval.
+your own Drafts. No requirement, no approval.
 
 *Writes other people read* — sending or scheduling a message needs
-trusted data that every member of the target conversation may see
+data that every member of the target conversation may see
 (`audience = { contains = ["@slack:channel/$channel_id"] }`): a summary
 of #eng can go back to #eng, or to a DM with someone in #eng, and not to
 #all-hands. Creating or updating a canvas and creating a channel carry
-no conversation id and need trusted data that reaches `internal`. Agents
+no conversation id and need data that reaches `internal`. Agents
 post autonomously without human interruption, while requester secrets
 (`self`) are strictly prevented from entering channels.
+
+No Slack tool requires a trusted session. A message, draft, reaction,
+canvas, or channel is content people read; it leaves no instructions or
+code behind for a later session or run. A session that read a Slack
+Connect conversation can still post a summary where its readers may
+see it.
 
 **`audience-source.py`** — the `slack` audience source. It answers
 these selectors over the Slack Web API:

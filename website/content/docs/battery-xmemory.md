@@ -16,10 +16,12 @@ Schema migrations and instance deletion ask an Authority. The Claude Code and ka
 ## Tool behavior
 
 - Reads, write status, schema and migration reads, schema suggestions, and admin reads of clusters and instances return `internal` data and keep the session's trust. Trust follows who can write the text: the organisation's members and agents write memory, and only from trusted data.
+- Memory, its schema, and an instance's owner instructions are what later agent sessions load and follow without a person reading them first. So every call that writes them requires a trusted session.
 - Writes, with `text` or with `structured_mutations`, need trusted input that `internal` may see, so suspicious text cannot enter memory and come back trusted. They record `xmemory.changed`.
 - Recording schema decisions needs trusted input.
-- Creating an instance and changing its metadata need trusted input; the returned instance keeps the session's trust.
-- Applying a schema migration and deleting an instance need trusted input and review, and record `xmemory.schema` or `xmemory.deleted`.
+- Creating an instance and changing its metadata need trusted input, because metadata carries the owner instructions every connected agent receives. The returned instance keeps the session's trust.
+- Applying a schema migration needs trusted input and review, and records `xmemory.schema`.
+- Deleting an instance needs input that `internal` may see and review, but no trusted session. It records `xmemory.deleted`.
 
 ## Limit
 

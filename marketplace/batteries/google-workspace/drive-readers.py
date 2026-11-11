@@ -7,7 +7,9 @@ Drive gives a file the sharing of its folder, so a write reaches
 everyone who can read the file or folder it lands in. Before
 `create_file`, `copy_file`, or `update_file` runs, this script asks the
 Drive API who can read that target and answers what the write
-requires: trusted data that those readers may see.
+requires: data that those readers may see. A write is content people
+read, so it needs no trusted session, except one that grants access
+(`writersCanShare: true`, below).
 
   self       only the viewer can read the target, as in the viewer's
              own My Drive root, which cannot be shared
@@ -25,7 +27,7 @@ its content reaches the target only when the target's readers do.
 its parent's readers, so it is checked as a move into that parent, and
 a parent the token cannot see could be read by anyone. With
 `writersCanShare: true` any writer may share the file with anyone, so
-it needs public data, as `share_file` does. An argument this script
+it needs public data and a trusted session, as `share_file` does. An argument this script
 does not read, such as the snake_case `parent_id` the connector also
 accepts, refuses the call. A published or metadata view counts among a
 target's readers but reads no content, so it never widens what a
@@ -268,6 +270,7 @@ def written(readers):
 def answer(drive, tool, arguments):
     """What a write into Drive requires, and what it forwards."""
     forwards = None
+    grants = False
     unknown = set(arguments) - ARGUMENTS.get(tool, set())
     if tool in ARGUMENTS and unknown:
         # A name this script does not read may change where the write lands.
@@ -294,13 +297,16 @@ def answer(drive, tool, arguments):
             if flag(arguments, "writersCanShare"):
                 # Any writer may then share the file with anyone, as share_file does.
                 target = PUBLIC
+                grants = True
         case _:
             raise ValueError(f"{tool!r} is not a write this annotator labels")
     result = {
         "delta": {},
-        "requires": {"trust": "trusted", "audience": {"contains": written(target)}, "history": [], "attention": []},
+        "requires": {"audience": {"contains": written(target)}, "history": [], "attention": []},
         "emits": [CHANGED],
     }
+    if grants:
+        result["requires"]["trust"] = "trusted"
     if forwards is not None:
         result["forwards"] = {"audience": written(forwards)}
     return result

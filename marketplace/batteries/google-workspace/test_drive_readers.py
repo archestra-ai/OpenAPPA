@@ -64,7 +64,7 @@ class TargetTests(unittest.TestCase):
             {"title": "diff", "textContent": "...", "parentId": "F"},
         )
         self.assertEqual(required(answer), "public")
-        self.assertEqual(answer["requires"]["trust"], "trusted")
+        self.assertNotIn("trust", answer["requires"], "a new file is content people read")
         self.assertEqual(answer["emits"], ["google-workspace.changed"])
         self.assertNotIn("forwards", answer)
 
@@ -263,8 +263,8 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(required(answer), ["self"])
         self.assertNotIn("forwards", answer)
 
-    def test_letting_writers_share_needs_public_data(self):
-        for value, expected in [(True, "public"), (False, ["self"])]:
+    def test_letting_writers_share_needs_public_data_and_a_trusted_session(self):
+        for value, expected, trust in [(True, "public", "trusted"), (False, ["self"], None)]:
             with self.subTest(writersCanShare=value):
                 answer = ANNOTATOR.answer(
                     drive(permissions("D", user("alice@corp.com"))),
@@ -272,6 +272,7 @@ class UpdateTests(unittest.TestCase):
                     {"fileId": "D", "writersCanShare": value},
                 )
                 self.assertEqual(required(answer), expected)
+                self.assertEqual(answer["requires"].get("trust"), trust)
 
     def test_an_unknown_argument_or_a_non_boolean_flag_refuses_the_call(self):
         for arguments in [

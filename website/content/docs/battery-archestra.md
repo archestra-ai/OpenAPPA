@@ -28,10 +28,17 @@ The battery declares no rule for these tools:
 
 ## Writes
 
-- A write that removes or controls a shared resource requires `trusted` data. This covers deletes and unassigns, guardrails policy and validation publishes, policy repository connection and sync, credential bindings, schedule controls, team changes, limits, and tool assignments.
-- A write that other members read or run also requires data sharable with `internal`. This covers agents, MCP gateways and servers, hooks, skills, plugins, apps, scheduled tasks, posts to a run's messaging thread, credential transfers, and tuner suggestions (`propose_tuner_suggestion`), whose policy change an admin may apply.
-- A write to persistent files, which a project or app can share and a later read returns as trusted, requires `trusted` data sharable with `internal`. So does an app spec or a knowledge base update; a personal agent, plugin or knowledge base create requires `trusted`.
-- `run_command` routes to the `archestra.run-command` Annotator. An Archestra root answers it with its own model (`builtin = "archestra"`).
+A write requires a trusted session only when it leaves instructions, code, or access behind that act later without a person reading them first. Then text from outside the organization cannot choose it:
+
+- Instructions an agent or model later loads: agents and their system prompts, skills, plugins, MCP server descriptions, knowledge bases, app specs, and a project's `instructions.md`, which `save_file`, `edit_file`, and `download_file` can write.
+- Code or automation that runs later or elsewhere: scheduled tasks, including enabling one or running it now, hooks, MCP server configurations and deploys, apps and their tools, and knowledge connectors, which sync on their own.
+- Access and protection: credential creates, updates, bindings, and transfers, shares and grants, team changes, tool and knowledge assignments and unassigns, the agent skill policy, guardrails policy and validation publishes, policy repository connection and sync, hook deletes, app locks, and limits. Proposed policy changes, tuner suggestions (`propose_tuner_suggestion`) and MCP server rules changes (`propose_guardrails_server_rules_change`), count too: an admin may apply them.
+
+A write that other members read or run also requires data sharable with `internal`. A personal agent, plugin, knowledge base, or MCP server create requires only `trusted`.
+
+Every other write needs no trusted session. Posts to a run's messaging thread and `copy_file` require data sharable with `internal`. Disabling or deleting a schedule and deleting a workspace, credential, knowledge base, connector, plugin, file, or app require nothing.
+
+`run_command` routes to the `archestra.run-command` Annotator. An Archestra root answers it with its own model (`builtin = "archestra"`).
 
 ## Sharing
 
@@ -53,7 +60,7 @@ A run and its workspace are one container the organization may read, because adm
 - `get_agent_run`, `read_workspace_file`, and a `transfer_workspace_file` download bring the run's data into the session. They add `internal` and keep the session's trust.
 - `cancel_agent_run` returns only the run's state. It adds no label and requires nothing.
 - `list_agent_runs` adds `internal`, because it names the organization's agents, requesters, and channels.
-- `post_agent_run_message` and `post_agent_run_file` post to the run's messaging thread. They require `trusted` data sharable with `internal`.
+- `post_agent_run_message` and `post_agent_run_file` post to the run's messaging thread, which people read. They require data sharable with `internal`.
 
 ## Audiences
 

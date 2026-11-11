@@ -278,11 +278,11 @@ class AnswerTests(unittest.TestCase):
             ANNOTATOR.Repository("internal", fork=True),
         )
 
-    def test_a_write_needs_trusted_data_everyone_the_repository_reaches_may_see(self):
+    def test_a_write_needs_data_everyone_the_repository_reaches_may_see(self):
         write = ANNOTATOR.Call("add_issue_comment", 7, None)
         self.assertEqual(
             ANNOTATOR.annotation(ANNOTATOR.READERS, write, PUBLIC, "acme", "api")["requires"],
-            {"trust": "trusted", "audience": {"contains": "public"}, "history": [], "attention": []},
+            {"audience": {"contains": "public"}, "history": [], "attention": []},
         )
         self.assertEqual(
             ANNOTATOR.annotation(ANNOTATOR.READERS, write, PRIVATE, "acme", "api")["requires"]["audience"],
@@ -370,8 +370,51 @@ class WriteResultTests(unittest.TestCase):
         call = sub_issue_write(None)
         self.assertEqual(
             ANNOTATOR.annotation(ANNOTATOR.READERS, call, PRIVATE, "acme", "api")["requires"],
-            {"trust": "trusted", "audience": {"contains": [COLLABORATORS]}, "history": [], "attention": []},
+            {"audience": {"contains": [COLLABORATORS]}, "history": [], "attention": []},
         )
+
+
+def required_trust(tool, **arguments):
+    call = write(tool, None, **arguments)
+    return ANNOTATOR.annotation(ANNOTATOR.READERS, call, PUBLIC, "acme", "api")["requires"].get("trust")
+
+
+class WriteTrustTests(unittest.TestCase):
+    """A write needs a trusted session only when it leaves instructions or
+    code behind that something later takes without a person reading it."""
+
+    def test_content_people_read_needs_no_trusted_session(self):
+        for tool, arguments in [
+            ("issue_write", {"method": "create", "title": "x", "body": "y"}),
+            ("add_issue_comment", {"issue_number": 7, "body": "y"}),
+            ("create_pull_request", {"title": "x", "head": "fix", "base": "main"}),
+            ("create_branch", {"branch": "fix-retry"}),
+            ("create_or_update_file", {"path": "src/retry.rs", "branch": "fix-retry", "content": "x", "message": "m"}),
+            ("delete_file", {"path": "docs/old.md", "branch": "fix-retry", "message": "m"}),
+            ("push_files", {"branch": "fix-retry", "files": [{"path": "src/a.rs", "content": "x"}], "message": "m"}),
+            ("pull_request_review_write", {"method": "create", "pullNumber": 3, "event": "COMMENT", "body": "y"}),
+            # A branch whose name only starts like a release branch is a feature branch.
+            ("create_or_update_file", {"path": "a.md", "branch": "mainline-fix", "content": "x", "message": "m"}),
+        ]:
+            self.assertIsNone(required_trust(tool, **arguments), (tool, arguments))
+
+    def test_instructions_code_and_releases_need_a_trusted_session(self):
+        for tool, arguments in [
+            # An instruction file deep in the tree is loaded for that directory.
+            ("create_or_update_file", {"path": "packages/api/AGENTS.md", "branch": "fix", "content": "x", "message": "m"}),
+            ("delete_file", {"path": ".github/workflows/ci.yml", "branch": "fix", "message": "m"}),
+            ("create_or_update_file", {"path": "src/a.rs", "branch": "release-2.1", "content": "x", "message": "m"}),
+            # No branch named writes to the default branch.
+            ("create_or_update_file", {"path": "src/a.rs", "content": "x", "message": "m"}),
+            # One instruction file among ordinary ones gates the whole push.
+            ("push_files", {"branch": "fix", "files": [{"path": "src/a.rs", "content": "x"}, {"path": ".cursor/rules/x.mdc", "content": "y"}], "message": "m"}),
+            ("push_files", {"branch": "main", "files": [{"path": "src/a.rs", "content": "x"}], "message": "m"}),
+            ("push_files", {"branch": "fix", "files": "src/a.rs", "message": "m"}),
+            ("create_branch", {"branch": "gh-pages"}),
+            ("merge_pull_request", {"pullNumber": 3}),
+            ("pull_request_review_write", {"method": "create", "pullNumber": 3, "event": "APPROVE"}),
+        ]:
+            self.assertEqual(required_trust(tool, **arguments), "trusted", (tool, arguments))
 
 
 class MandateTests(unittest.TestCase):

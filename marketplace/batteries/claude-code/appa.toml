@@ -156,6 +156,16 @@ delta = {}
 name = "host/claude-code/SendUserFile"
 delta = {}
 
+# A skill returns instructions the agent follows, so its trust is its
+# author's. A plugin's skill, named `plugin:skill`, comes from whoever
+# published the plugin and enters `suspicious`: the session can still send
+# and edit, but cannot write its own instructions or choose code to run until
+# a root rule for that plugin's skills says the operator vouches for them.
+# User and project skills keep the session's trust.
+[[policy.tool]]
+name = "host/claude-code/Skill(skill:*:*)"
+delta = { trust = "suspicious" }
+
 [[policy.tool]]
 name = "host/claude-code/Skill"
 delta = {}

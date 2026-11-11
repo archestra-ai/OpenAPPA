@@ -18,11 +18,12 @@
 # audience that already reads the source file. Re-enabling a folder's
 # inherited sharing is checked as a move into its parent, and letting
 # writers share a file needs public data. Writes record
-# `google-workspace.changed`; trashing is a write that needs trusted
-# `internal` data, since a trashed file can be restored. Sharing a file
-# exposes its whole content, which is not a value the policy tracks, so
-# `share_file` needs public input and the `google-workspace-review` mark,
-# and records `google-workspace.sensitive`.
+# `google-workspace.changed`; trashing is a write that needs `internal`
+# data, since a trashed file can be restored, and no trusted session, since
+# it leaves no instructions or code behind. Sharing a file grants access
+# and exposes its whole content, which is not a value the policy tracks, so
+# `share_file` needs a trusted session, public input and the
+# `google-workspace-review` mark, and records `google-workspace.sensitive`.
 # The root config supplies an authority permitting the mark.
 #
 # Gmail and Calendar connector tools are not named here, so they stay
@@ -78,7 +79,8 @@ name = "mcp/claude_ai_Google_Drive/list_recent_files"
 delta = { trust = "suspicious", audience = ["self"] }
 tags = ["google-workspace"]
 
-# What a write into Drive needs: trusted data its target's readers may see.
+# What a write into Drive needs: data its target's readers may see, and a
+# trusted session only for a write that lets every writer share the file.
 [[policy.annotator]]
 name = "google-workspace.drive-readers"
 ranks = ["trusted"]
@@ -90,7 +92,7 @@ effects = ["google-workspace.changed"]
 command = ["python3", "drive-readers.py"]
 token_env = "APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN"
 
-# --- writes: trusted data the target's readers may see ---
+# --- writes: data the target's readers may see ---
 
 [[policy.tool]]
 name = "mcp/claude_ai_Google_Drive/create_file"
@@ -107,10 +109,10 @@ annotator = "google-workspace.drive-readers"
 [[policy.tool]]
 name = "mcp/claude_ai_Google_Drive/trash_file"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["google-workspace.changed"]
 
-# --- sharing: public input, reviewed ---
+# --- sharing: grants access; a trusted session, public input, reviewed ---
 
 [[policy.tool]]
 name = "mcp/claude_ai_Google_Drive/share_file"

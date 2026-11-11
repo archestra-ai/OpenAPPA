@@ -94,8 +94,10 @@ idea once, when it first matters, with one of their own tools as the example:
 2. Reading private data narrows who the session may share with: `self` is
    the operator, `internal` their organization, `public` anyone.
 3. Reading text strangers can write makes the session `suspicious`, which
-   blocks calls that need `trusted` data. Neither change is undone later in
-   the session.
+   blocks calls that need `trusted` data: calls that leave instructions or
+   code behind, such as writing an `AGENTS.md`, a skill or a CI workflow.
+   Messages and documents still go out within their audience. Neither change
+   is undone later in the session.
 4. A battery is a maintained set of rules for one service. A call the rules
    do not allow is blocked before it runs, with the ways forward the policy
    configures, such as approving that one call.
@@ -199,10 +201,18 @@ Apply these rules:
   A destination that stays private to the requester until they share it
   themselves reaches `self` and needs no `requires`.
 - A tool that communicates within the organization (e.g. posting internal Slack
-  messages or workspace items) requires trusted data that includes `internal`:
-  `requires = { trust = "trusted", audience = { contains = ["internal"] } }`. This
-  keeps autonomous agent flow unblocked for public or internal data while preventing
-  requester secrets (`self`) from leaking.
+  messages or workspace items) requires data that includes `internal`:
+  `requires = { audience = { contains = ["internal"] } }`. This keeps autonomous
+  agent flow unblocked for public or internal data while preventing requester
+  secrets (`self`) from leaking.
+- `requires.trust = "trusted"` is for a tool that leaves instructions or code
+  behind, chooses code to run, or grants access: it writes a skill, an agent's
+  prompt or instructions, or an instruction file such as `AGENTS.md`; it writes
+  or schedules code, an automation, a CI workflow or a hook; it changes which
+  code paths production runs, such as a feature flag; it installs or runs code
+  the call selects; or it writes credentials, sharing, membership or
+  permissions. Messages, comments, documents, issues and other content people
+  read need no trust floor: `requires.audience` bounds what they disclose.
 - A clearly public read or a tool whose result carries no data uses
   `delta = {}`.
 - Every new tool entry needs `delta`, including entries with `requires`. Never

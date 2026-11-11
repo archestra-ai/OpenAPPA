@@ -18,8 +18,9 @@ Writes need `posthog-review`. The Claude Code and kagent plugin defaults permit 
 - Analytics queries, insights, dashboards, error tracking, experiment results, survey statistics, LLM analytics, and event and property definitions hold what the customer's end users produced. They return untrusted `internal` data.
 - The query tools read only: `query-run` accepts a trends, funnel, or HogQL node and posts it to PostHog's query endpoint.
 - `docs-search` returns public PostHog documentation and sends its query to Inkeep, so its input must be public.
-- Creating or updating an insight, a dashboard, or a survey requires trusted internal data and review, and records `posthog.changed`.
+- Creating or updating an insight, a dashboard, or a survey requires internal data and review, and records `posthog.changed`.
 - Feature flag and experiment writes record `posthog.sensitive`: a flag gates production behaviour, and an experiment owns the flag it launches. Every deletion records `posthog.sensitive` too.
+- Flag writes, including deletion, and creating or updating an experiment also require a trusted session: they change which code paths run in production without a person reading the change first. Other writes change content people read, which their audience requirement and review bound.
 
 ## Sanitizers
 

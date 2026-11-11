@@ -227,7 +227,7 @@ builtin = "redact-email"
       if (user === 'child:inherit-audience') return last?.role === 'tool' ? completion(`Inherited audience: ${output}`)
         : completion(null, [{ name: 'webfetch', input: { url: 'https://example.invalid/' } }])
       if (user === 'child:inherit-trust') return last?.role === 'tool' ? completion(`Inherited trust: ${output}`)
-        : completion(null, [{ name: 'write', input: { path: `${directory}/unchecked.txt`, content: 'Unchecked write' } }])
+        : completion(null, [{ name: 'write', input: { path: `${directory}/AGENTS.md`, content: 'Unchecked instructions' } }])
       if (user === 'child:failure' || user === 'child:bg-failure') return last?.role === 'tool'
         ? Response.json({ error: { message: 'RAW-CHILD-ERROR', type: 'invalid_request_error' } }, { status: 400 })
         : completion('EARLIER-CHILD-ANSWER', [{ name: 'read', input: { path: 'suspicious.txt' } }])
@@ -394,7 +394,7 @@ test('a child inherits audience and trust before its first tool call', async () 
   expect(hooks.some(hook => hook.event.root_id === suspicious.session.id && hook.event.child_id &&
     hook.event.tool === 'write' && hook.reply.decision === 'deny_call')).toBe(true)
   expect(JSON.stringify(suspicious.history)).toContain('Inherited trust:')
-  expect(await Bun.file(`${directory}/unchecked.txt`).exists()).toBe(false)
+  expect(await Bun.file(`${directory}/AGENTS.md`).exists()).toBe(false)
 }, 45_000)
 
 test('a failed child cannot return earlier prose or raw error details', async () => {
@@ -1036,9 +1036,8 @@ selectors = [{ template = "members", feeds = "internal" }]
     expect(calls.length).toBe(beforePublish)
     const publicReader = await create()
     expect(await call(publicReader.id, 'codehub_get_file_contents', { owner: 'acme', repo: 'public', path: 'README.md' })).toContain('codehub/get_file_contents result')
-    const beforeUntrustedWrite = calls.length
-    await call(publicReader.id, 'notes_notion-update-page', { page_id: 'page-1', content: 'untrusted public text' }, false)
-    expect(calls.length).toBe(beforeUntrustedWrite)
+    // A page is content people read: an untrusted read bounds it by audience, not by trust.
+    expect(await call(publicReader.id, 'notes_notion-update-page', { page_id: 'page-1', content: 'untrusted public text' })).toContain('notes/notion-update-page result')
     expect(apiReads).toContain('/repos/acme/private')
     expect(apiReads).toContain('/repos/acme/public')
     expect(apiReads).toContain('/repos/acme/private/collaborators')

@@ -24,16 +24,19 @@ trust. Internal, like the meetings.
 *Links* — `resolve_urls` turns ids into URLs. No restriction.
 
 *Writes inside the workspace* — creating clips, stories, and
-collections, adding to them, tagging meetings. These are read back as
-meeting content, at `suspicious`, so they need only `internal` data, not
-trusted data: a session that read a transcript can still cut a clip from
-it. Creating a smart topic needs trusted data, because it is read back
-with the settings. No approval step.
+collections, adding to them, tagging meetings. These are ordinary
+content that people read, read back as meeting content at `suspicious`.
+They need only `internal` data and no trusted session: a session that
+read a transcript can still cut a clip from it. Creating a smart topic
+requires a trusted session. It is a definition Grain's model applies to
+later recordings, and it is read back with the settings at the
+session's trust. No approval step.
 
 *Sharing outward and administration* — making a collection visible to
 anyone with the link, inviting people, assigning or removing paid
 seats, moving people between teams, changing user, team, or workspace
-settings. Each one needs a person to approve.
+settings. Each one grants access: the settings hold the default sharing
+of recordings. Each requires a trusted session and a person to approve.
 
 ## Change the behaviour
 

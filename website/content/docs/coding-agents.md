@@ -54,7 +54,7 @@ Every Claude Code install includes the `file-tracker` battery, which the [Claude
 The `coding` battery gives the canonical shell and file tools of other harnesses these contracts:
 
 - **Reading credentials narrows the trajectory.** Read, search, or shell calls that contain configured credential-path spellings narrow the audience to `self`.
-- **Writing where another process looks requires trust.** Writes to credential and control paths require a `trusted` trajectory. After suspicious input, the exact call requires human review.
+- **Writing where another process looks requires trust.** Writes to credential paths and to files a later process reads as instructions or runs as code require a `trusted` trajectory: `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`, other harnesses' rules files, skills, agent and command definitions, git hooks, CI workflows, and shell startup files. After suspicious input, the exact call requires human review.
 - **Changing the controls requires review.** Writes to harness settings or OpenAPPA policy always ask the person running the session.
 - **Shell commands are classified per call.** [Annotators](/how-it-works#annotators) determine the required trust and audience for each shell command. The GitHub battery can supply repository visibility and authorship context for `git push` and `gh` commands.
 

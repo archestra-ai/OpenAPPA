@@ -27,9 +27,15 @@ tools are from the source at that commit.
 ## Rules
 
 Trust follows who can write the text. The organisation's members and
-agents write memory, and every write needs trusted data, so reads and
-write results keep the session's trust: suspicious text cannot enter
-memory and come back trusted.
+agents write memory, so reads and write results keep the session's
+trust. Memory, the schema that shapes it, and an instance's owner
+instructions are what later agent sessions load and follow without a
+person reading them first. So every call that writes them needs a
+trusted session: memory writes, schema decisions and migrations,
+creating an instance, and changing its metadata. Suspicious text cannot
+enter memory and come back trusted. Deleting an instance writes nothing
+an agent later follows, so its `audience` requirement and the
+`xmemory-review` mark bound it.
 
 *Instance reads* — `read`, `write_status`, `get_instance_id`,
 `get_instance_schema`, `get_setup_instructions`, `review_suggestions`,
@@ -78,8 +84,9 @@ run without an authority from a trusted trajectory.
 
 *Instance deletion* — `admin_delete_instance` and
 `admin_delete_instance_by_id` delete an instance and its data. They need
-trusted data and the `xmemory-review` mark, return the deleted instance
-as `internal` content, and record `xmemory.deleted`.
+data that `internal` may see and the `xmemory-review` mark, but no
+trusted session. They return the deleted instance as `internal` content
+and record `xmemory.deleted`.
 
 ## Root config
 

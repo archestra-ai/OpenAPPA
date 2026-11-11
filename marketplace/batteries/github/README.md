@@ -26,8 +26,9 @@ over it, whose rules run first.
 
 - **base alone** — no helper and no lookup: a read of one repository
   enters `suspicious` and stays with the viewer (`self`), and a write
-  into one needs trusted data everyone may see. The parent issue
-  `sub_issue_write` returns is labelled as such a read is.
+  into one needs data everyone may see. Every file write, delete,
+  push, branch creation, merge and review requires a trusted session. The parent
+  issue `sub_issue_write` returns is labelled as such a read is.
 
 ## Files
 
@@ -72,14 +73,37 @@ query.
 *Writes into one repository* — every tool that creates, edits, comments,
 pushes, merges, or deletes in a named repository. The
 `github.repository-readers` annotator asks GitHub for the repository's
-visibility: a write into a public repository runs only with trusted data
-that may be seen by everyone, a write into a private repository with
-trusted data its collaborators may see. An Enterprise `internal`
-repository is read by every enterprise member, a collection this source
-cannot list, so a write into it needs data everyone may see; a root rule
-mapping the enterprise's members can relax that. A summary of a private
+visibility: a write into a public repository runs only with data that
+may be seen by everyone, a write into a private repository with data its
+collaborators may see. An Enterprise `internal` repository is read by
+every enterprise member, a collection this source cannot list, so a
+write into it needs data everyone may see; a root rule mapping the
+enterprise's members can relax that. A summary of a private
 repository's issues can go back into that repository's issues and not
 into a public one.
+
+Trust is a separate question. The agent reads outside text as data; the
+risk is text that lands where a later agent session obeys it, or code a
+later run executes. Issues, comments, reviews, pull requests, and
+commits to a feature branch are read by people before anything takes
+them, so they need no trusted session. These writes require one, because
+they leave instructions or code behind, or change who must approve code:
+
+| Write | Why |
+| --- | --- |
+| `create_or_update_file`, `delete_file` or `push_files` touching an instruction file: `AGENTS.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `SKILL.md`, `.claude/`, `.agents/`, `.cursor/`, rules files, `.mcp.json`, `.github/copilot-instructions.md`, `.github/instructions/`, `.github/prompts/`, `.github/agents/` | a later agent session loads it as instructions |
+| the same tools on CI configuration or hooks: `.github/workflows/`, `.github/actions/`, `.gitlab-ci.yml`, `.husky/` | a pipeline or a hook runs it without review |
+| the same tools on `CODEOWNERS` | it decides who must review a change |
+| the same tools on branch `main`, `master`, `trunk`, `develop`, `gh-pages` or `release*`, or with no branch named; `create_branch` of `gh-pages` or `release*` | builds, deploys and installs take these branches without review |
+| `merge_pull_request` | it releases the change into its base branch |
+| `pull_request_review_write` with `event` `APPROVE` | an approval can satisfy a branch's required review |
+
+Under a target policy, the `github.repository-readers` annotator answers
+each write's whole requirement and applies this table to the call's
+`path`, `branch`, `event` and `files` arguments. A repository whose
+default branch has another name is not matched by name. `appa.toml`
+alone reads no arguments, so every file write, delete, push, branch
+creation, merge and review requires a trusted session there.
 
 A write's result is labelled only when it returns stored text beyond
 the call's own arguments. `sub_issue_write` returns the parent issue its
@@ -92,7 +116,7 @@ identifiers, URLs, SHAs, or a fixed message, and its `delta` is empty.
 The annotator's mandate admits `suspicious` for this.
 
 *Writes that name no existing repository* — `create_repository` runs
-with trusted public data.
+with public data.
 
 A repository the token cannot see gets no answer from either annotator,
 and the call is refused; nothing is guessed public.

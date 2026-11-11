@@ -17,8 +17,10 @@ connection reaches. Anyone, inside or outside the organization, can
 share a file with the viewer or comment on one, so the text is
 untrusted.
 
-*Writes* — `create_file`, `copy_file`, `update_file` need trusted data
-that the target's readers may see. Drive gives a file the sharing of
+*Writes* — `create_file`, `copy_file`, `update_file` need data that the
+target's readers may see. A file is content people read, so a write needs
+no trusted session, except `update_file` with `writersCanShare: true`,
+which lets every writer share the file and so grants access. Drive gives a file the sharing of
 its folder, so the `google-workspace.drive-readers` annotator lists the
 permissions of the folder a file is created or copied into, and of the
 file that `update_file` renames or moves:
@@ -49,13 +51,15 @@ lets readers copy the content out. A published or metadata view counts
 among a target's readers but reads no content, so it never widens what
 a copy or a move forwards.
 
-`trash_file` needs trusted data that `internal` may see. A trashed file
-can be restored, so trashing needs no review. Every write records
+`trash_file` needs data that `internal` may see. A trashed file can be
+restored, so trashing needs no review, and it leaves no instructions or
+code behind, so it needs no trusted session. Every write records
 `google-workspace.changed`.
 
-*Sharing* — `share_file` exposes the whole file, which is not a value
-the policy tracks. It needs public input and the
-`google-workspace-review` mark, and records `google-workspace.sensitive`.
+*Sharing* — `share_file` grants access and exposes the whole file,
+which is not a value the policy tracks. It needs a trusted session,
+public input, and the `google-workspace-review` mark, and records
+`google-workspace.sensitive`.
 
 The Claude Code plugin default ships a human authority permitting every
 mark (`attention = ["*"]`), so `google-workspace-review` needs no wiring

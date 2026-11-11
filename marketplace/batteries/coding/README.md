@@ -80,8 +80,11 @@ rules here decide a call.
   such a file is not matched; only the path as written is.
 - **write_file, edit_file** — Writing into one of the same paths, or into a
   file a later process reads as instructions or runs as code (`CLAUDE.md`,
-  `.claude/skills/`, `.claude/agents/`, `.claude/commands/`, `.git/hooks/`,
-  shell startup files, `Library/LaunchAgents/`), requires a `trusted`
+  `AGENTS.md`, `GEMINI.md`, `.cursorrules`, `.cursor/rules/`,
+  `.github/copilot-instructions.md`, `.github/instructions/`, `.clinerules`,
+  `.windsurfrules`, `.claude/skills/`, `.agents/skills/`, `.claude/agents/`,
+  `.claude/commands/`, `.git/hooks/`, `.husky/`, `.github/workflows/`,
+  `.gitlab-ci.yml`, shell startup files, `Library/LaunchAgents/`), requires a `trusted`
   session: content that arrived at `suspicious` lands there only when the
   person running the session approves the exact call. Writing a file that can
   turn the protection off asks that person every time: the harness's settings

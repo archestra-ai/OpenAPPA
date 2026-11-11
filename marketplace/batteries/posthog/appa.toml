@@ -21,7 +21,7 @@
 # `docs-search` sends its `query` to Inkeep and returns public PostHog
 # documentation, so its input must be sharable with `public`.
 #
-# Every write needs trusted data that `internal` may see and the
+# Every write needs data that `internal` may see and the
 # `posthog-review` mark. Feature flags gate production behaviour, so
 # creating or changing one records `posthog.sensitive`; so does every
 # experiment write, because an experiment owns a feature flag
@@ -29,6 +29,12 @@
 # anything records `posthog.sensitive` too. Insight, dashboard, and
 # survey writes record `posthog.changed`. The root config supplies an
 # authority permitting `posthog-review`.
+#
+# Flag and experiment writes also need a trusted session: they change which
+# code paths run in production, and that takes effect without a person
+# reading the change first. Deleting a flag changes the code path too.
+# Insights, dashboards, surveys, and deleting an experiment or another
+# artefact change content people read and need no trusted session.
 
 [policy]
 version = 2
@@ -205,58 +211,60 @@ delta = { trust = "suspicious" }
 requires = { audience = { contains = ["public"] } }
 tags = ["posthog"]
 
-# --- analysis artefacts: trusted internal data, reviewed ---
+# --- analysis artefacts: internal data, reviewed ---
 
 [[policy.tool]]
 name = "mcp/posthog/insight-create-from-query"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.changed"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/insight-update"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.changed"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/dashboard-create"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.changed"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/dashboard-update"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.changed"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/add-insight-to-dashboard"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.changed"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/survey-create"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.changed"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/survey-update"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.changed"]
 tags = ["posthog"]
 
 # --- feature flags, experiments, and deletions: reviewed, sensitive ---
+# Flag and experiment writes, except deleting an experiment, require trusted
+# input.
 
 [[policy.tool]]
 name = "mcp/posthog/create-feature-flag"
@@ -296,28 +304,28 @@ tags = ["posthog"]
 [[policy.tool]]
 name = "mcp/posthog/experiment-delete"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.sensitive"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/insight-delete"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.sensitive"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/dashboard-delete"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.sensitive"]
 tags = ["posthog"]
 
 [[policy.tool]]
 name = "mcp/posthog/survey-delete"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["posthog-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["posthog-review"] }
 effects = ["posthog.sensitive"]
 tags = ["posthog"]
 

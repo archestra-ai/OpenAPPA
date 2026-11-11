@@ -1005,8 +1005,11 @@ async fn the_coding_battery_covers_grep_write_and_edit_of_the_requesters_secrets
     assert!(review[0].text.contains(".env"), "the review shows the exact call");
     for (tool, path) in [
         ("host/claude-code/Edit", "/repo/CLAUDE.md"),
+        ("host/claude-code/Edit", "/repo/packages/api/AGENTS.md"),
+        ("host/claude-code/Write", "/repo/.cursor/rules/style.mdc"),
         ("host/claude-code/Write", ".claude/skills/review/SKILL.md"),
         ("host/claude-code/Write", "/repo/.git/hooks/pre-commit"),
+        ("host/claude-code/Write", "/repo/.github/workflows/release.yml"),
         ("host/claude-code/Edit", "/home/me/.zshrc"),
         ("host/claude-code/Write", "/home/me/Library/LaunchAgents/agent.plist"),
     ] {

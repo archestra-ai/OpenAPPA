@@ -17,8 +17,9 @@ Structural and agent-session changes need `notion-review`. The Claude Code and k
 
 - Fetch, data-source queries, comments, users, teams, Skills, and the read side of custom Agent sessions return `internal` data and keep the session's trust: workspace members write pages, databases, and comments, and a member published each form or connected each synced source.
 - `notion-search`, `notion-ai-search`, and `notion-query-meeting-notes` return untrusted `internal` data: search also reaches connected sources such as mail, and AI meeting notes carry what outside participants said.
-- Creating and updating pages, databases, folders, views, comments, and uploads require trusted internal data and record `notion.changed`.
+- Creating and updating pages, databases, folders, views, comments, and uploads require data that `internal` may see and record `notion.changed`. They are content people read, so they need no trusted session.
 - Moving pages, changing or trashing a data source, turning a page into a Skill, and driving Agent sessions require review and record `notion.sensitive`.
+- Turning a page into a Skill, starting an Agent session, and sending a message into one also require a trusted session. Each writes instructions that an agent later follows without a person reading them first.
 - Creating an attachment from a URL makes Notion fetch it, so its input must be public and reviewed.
 
 ## Sanitizers

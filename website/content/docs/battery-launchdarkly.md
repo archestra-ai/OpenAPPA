@@ -16,8 +16,9 @@ Writes need `launchdarkly-review`. The Claude Code and kagent plugin defaults pe
 ## Tool behavior
 
 - Flags, AI Configs, environments, code references, and audit log entries return untrusted `internal` data. Engineers author the configuration, but the same reads carry context keys and attribute values that identify end users, source lines around each flag reference, and free-text audit comments.
-- Creating or updating a flag or an AI Config changes what the application serves in production. It requires trusted internal data and review, and records `launchdarkly.changed`.
-- Deleting a flag, an AI Config, or an AI Config variation records `launchdarkly.sensitive`.
+- Every write changes what the application runs in production without a person reading the change first. A flag, its targeting and its rollout choose which code paths run. An AI Config holds the prompts and model that the application's model later loads. So every write requires a trusted session, data that `internal` may see, and review.
+- Creating or updating a flag or an AI Config records `launchdarkly.changed`.
+- Deleting a flag, an AI Config, or an AI Config variation makes the application fall back to its default code path or configuration, so it is a write like the others. It records `launchdarkly.sensitive`.
 
 ## Sanitizers
 

@@ -23,8 +23,9 @@ name = "host/opencode/appa_cancel"
 # session to write instructions and hooks, before any call touches them. The
 # person running the session adds rules in `~/.config/appa/file-tracker.toml`,
 # which AppenCode's sandbox reads too. The plugin's root policy binds the
-# file-tracker to `appa file-tracker`. Writes, edits and commands also require
-# trusted data, so web results cannot drive changes to the workspace.
+# file-tracker to `appa file-tracker`. Those path rules decide which writes need
+# a trusted session: a write to an ordinary file needs none, because nothing
+# later obeys or runs it before a person reads it.
 [[policy.annotator]]
 name = "file-tracker"
 
@@ -37,13 +38,11 @@ recorder = "file-tracker"
 name = "host/opencode/write"
 annotator = "file-tracker"
 recorder = "file-tracker"
-requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "host/opencode/edit"
 annotator = "file-tracker"
 recorder = "file-tracker"
-requires = { trust = "trusted" }
 
 # A shell command declares the files it reads and writes and the hosts it
 # reaches. AppenCode runs appa_safebash with `appa file-tracker run`, which
@@ -63,6 +62,9 @@ requires = { trust = "trusted" }
 # registry's runs as a call without hosts does. A selector matches a list when
 # every entry matches one of its `|` alternatives. `upload.pypi.org`, where
 # packages are published, is not one of them and takes the rule for any host.
+# A command that names a host can install or fetch code it chooses, so it
+# requires a trusted session; one that names none runs only what is already on
+# this machine, and the file-tracker's path rules gate what it writes.
 [[policy.tool]]
 name = "host/opencode/appa_safebash(network_hosts:registry.npmjs.org)"
 annotator = "file-tracker"
@@ -104,7 +106,6 @@ delta = { trust = "suspicious" }
 name = "host/opencode/appa_safebash"
 annotator = "file-tracker"
 recorder = "file-tracker"
-requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "host/opencode/webfetch"

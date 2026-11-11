@@ -9,13 +9,27 @@
 # Archestra's configuration, rosters, runs and files are the organization's,
 # so a read of them adds `internal`. A read that returns text strangers can
 # write, such as synced mail and tickets, a server's logs or a run's tool
-# results, also adds `suspicious`. A write that changes what other people's
-# agents run or read, or that removes or controls a shared resource,
-# requires `trusted` data, so an injected instruction cannot choose it. A
-# write that other members read also needs data the organization may read:
-# `internal`. A write that a later read returns as trusted, such as a
-# persistent file, a prompt, an app spec or a knowledge base description,
-# requires `trusted` too, so suspicious text cannot come back trusted.
+# results, also adds `suspicious`.
+#
+# A call requires a trusted session only when it leaves instructions,
+# code or access behind that act later without a person reading them
+# first, so an injected instruction cannot choose it:
+#
+# - it writes instructions an agent or model later loads: an agent's
+#   system prompt, a skill or plugin, an MCP server's description, a
+#   knowledge base, a project's `instructions.md`, an app spec;
+# - it writes, schedules or runs code or automation: a scheduled task, a
+#   hook, an MCP server's configuration or deployment, an app's HTML and
+#   tools, a knowledge connector's sync;
+# - it grants or revokes access, or changes a protection: credentials,
+#   shares and grants, team membership, tool and knowledge assignments,
+#   the guardrails policy and its repository, a hook that can block tool
+#   calls, an app lock, usage limits.
+#
+# Other writes, such as a post to a run's messaging thread, a copied
+# file, or a delete of a resource that grants nothing, need no trusted
+# session. A write that other members read, these posts and copies
+# among them, needs data the organization may read: `internal`.
 #
 # A share names who may read: the organization is `internal`, a team is
 # `@archestra:team/<team>`, a member is `@archestra:user/<user>`. A tool
@@ -235,7 +249,6 @@ requires = { trust = "trusted" }
 [[policy.tool]]
 name = "mcp/archestra/delete_runtime_credential"
 delta = {}
-requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/transfer_credential(transferModes:link)"
@@ -330,12 +343,12 @@ delta = {}
 [[policy.tool]]
 name = "mcp/archestra/post_run_message"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/post_run_file"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 # --- run posts and workspaces: a post reaches a messaging thread, and a
 # workspace delete discards a run's files ---
@@ -343,17 +356,16 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/archestra/post_agent_run_message"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/post_agent_run_file"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/delete_workspace"
 delta = {}
-requires = { trust = "trusted" }
 
 # --- scheduled tasks: a schedule's message runs later, unattended, as its
 # actor. A run's transcript quotes every tool result the run read ---
@@ -396,7 +408,6 @@ requires = { trust = "trusted" }
 [[policy.tool]]
 name = "mcp/archestra/disable_schedule_trigger"
 delta = {}
-requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/run_schedule_trigger_now"
@@ -406,7 +417,6 @@ requires = { trust = "trusted" }
 [[policy.tool]]
 name = "mcp/archestra/delete_schedule_trigger"
 delta = {}
-requires = { trust = "trusted" }
 
 # --- agents, MCP gateways and hooks: a system prompt, a tool assignment or
 # a hook script runs in other members' sessions ---
@@ -711,7 +721,6 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/archestra/delete_knowledge_base"
 delta = {}
-requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/create_knowledge_connector"
@@ -721,7 +730,6 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/archestra/delete_knowledge_connector"
 delta = {}
-requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/assign_knowledge_connector_to_knowledge_base"
@@ -837,10 +845,12 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/archestra/delete_plugin"
 delta = {}
-requires = { trust = "trusted" }
 
 # --- projects and files: a project's or app's files may be shared with
-# teams or the organization ---
+# teams or the organization. `save_file`, `edit_file` and `download_file`
+# can write a project's `instructions.md`, which steers every chat in the
+# project, so they require a trusted session; `copy_file` and
+# `delete_file` cannot touch that file ---
 
 [[policy.tool]]
 name = "mcp/archestra/list_projects"
@@ -892,12 +902,11 @@ requires = { trust = "trusted", audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/archestra/copy_file"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/delete_file"
 delta = {}
-requires = { trust = "trusted" }
 
 # --- apps: an app's HTML and tools run for everyone it is shared with, with
 # their own credentials ---
@@ -969,7 +978,6 @@ requires = { trust = "trusted" }
 [[policy.tool]]
 name = "mcp/archestra/delete_app"
 delta = {}
-requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/publish_app(scope:org)"

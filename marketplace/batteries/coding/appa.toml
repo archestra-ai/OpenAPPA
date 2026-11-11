@@ -2247,7 +2247,8 @@ delta = {}
 # --- write_file and edit_file: the requester's secrets and the harness are sinks ---
 
 # Writing into a credential path, or into a file a later process reads as
-# instructions or runs as code (CLAUDE.md, skills, agents, commands, git hooks,
+# instructions or runs as code (CLAUDE.md, AGENTS.md, GEMINI.md, other
+# harnesses' rules files, skills, agents, commands, git hooks, CI workflows,
 # shell startup files, launch agents), requires a `trusted` session: content
 # that arrived at `suspicious`, from a web page or an unvetted command, lands
 # there only when the person running the session approves the exact call. The
@@ -2906,6 +2907,12 @@ name = "tool/coding/write_file(file_path:*/Library/LaunchAgents/*)"
 requires = { trust = "trusted" }
 delta = {}
 
+# Other harnesses' instructions and skills, CI, and what an orb runs at start.
+[[policy.tool]]
+name = "tool/coding/write_file(file_path:*AGENTS.md|*GEMINI.md|*.cursorrules|*.cursor/rules/*|*.github/copilot-instructions.md|*.github/instructions/*|*.clinerules*|*.windsurfrules|*.agents/skills/*|*.github/workflows/*|*.gitlab-ci.yml|*.husky/*|*.agents/setup|*.agents/resume)"
+requires = { trust = "trusted" }
+delta = {}
+
 [[policy.tool]]
 name = "tool/coding/write_file"
 description = "Writes a file."
@@ -2978,6 +2985,12 @@ delta = {}
 
 [[policy.tool]]
 name = "tool/coding/edit_file(file_path:*/Library/LaunchAgents/*)"
+requires = { trust = "trusted" }
+delta = {}
+
+# Other harnesses' instructions and skills, CI, and what an orb runs at start.
+[[policy.tool]]
+name = "tool/coding/edit_file(file_path:*AGENTS.md|*GEMINI.md|*.cursorrules|*.cursor/rules/*|*.github/copilot-instructions.md|*.github/instructions/*|*.clinerules*|*.windsurfrules|*.agents/skills/*|*.github/workflows/*|*.gitlab-ci.yml|*.husky/*|*.agents/setup|*.agents/resume)"
 requires = { trust = "trusted" }
 delta = {}
 
