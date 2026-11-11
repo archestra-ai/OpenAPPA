@@ -676,8 +676,8 @@ jobs:
         run: |
           cargo test --locked --package appa --lib -- init:: installation::
           cargo test --locked --package appa \
-            --test integration -- \
-            init_cli:: marketplace_cli:: hook_client:: settings_hooks:: child_process::
+            --test child_process --test integration -- \
+            init_cli:: marketplace_cli:: hook_client:: settings_hooks::
 
   windows-deployment-checks:
     name: Windows Deployment Checks

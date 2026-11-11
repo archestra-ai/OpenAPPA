@@ -1,8 +1,9 @@
 //! The `appa` integration suites, linked into one test binary. Every
 //! separate test binary links the whole runtime again, so one binary holds
 //! the link time and the `target/` size of the suites to one copy. A suite
-//! that sets the process environment keeps its own binary (see the package
-//! manifest), because the variables it sets would reach every suite here.
+//! that sets the process environment or counts what the process spawns
+//! keeps its own binary (see the package manifest), because every suite here
+//! would reach what it sets or add to what it counts.
 
 mod common;
 
@@ -16,7 +17,6 @@ mod audience;
 mod audit_read;
 mod batteries;
 mod builtin_modules;
-mod child_process;
 mod claude_code_bash;
 mod claude_code_redaction;
 mod claude_code_subagent;

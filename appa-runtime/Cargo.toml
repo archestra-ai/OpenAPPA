@@ -35,14 +35,18 @@ archestra = ["appa-policy/archestra"]
 
 # Each test binary links the whole runtime, so the suites share one:
 # `tests/main.rs` declares every suite as a module. A suite that sets the
-# process environment keeps a binary of its own, because what it sets would
-# reach the suites running beside it in one process.
+# process environment, or counts what the process spawns, keeps a binary of
+# its own, because the suites running beside it in one process would reach
+# what it sets or add to what it counts.
 [[test]]
 name = "integration"
 path = "tests/main.rs"
 
 [[test]]
 name = "annotators"
+
+[[test]]
+name = "child_process"
 
 [[test]]
 name = "databricks_policy"
