@@ -454,7 +454,8 @@ jobs:
       # also composes into the hosts it declares. No catalog is committed, so
       # no recorded digest can drift from its package.
       - name: Marketplace against the packages it describes
-        run: cargo test -p appa --locked --test integration -- marketplace::
+        run: |
+          cargo test -p appa --locked --test integration -- marketplace::
 
       # A package ships the externals its policy binds, and their tests sit
       # beside them.
