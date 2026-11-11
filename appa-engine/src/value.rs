@@ -18,6 +18,39 @@ pub struct HeldMessage {
     pub label: Label,
 }
 
+/// The held message a record pins. A log written before a held message had a record of its
+/// own pins it under `file_basis` as a file read whose version is the held id. That is the same
+/// message, and any other file basis is refused as undecodable.
+pub(crate) fn recorded_held<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<HeldMessage>, D::Error> {
+    #[derive(Deserialize)]
+    struct FileRead {
+        version: String,
+        digest: String,
+        label: Label,
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Recorded {
+        Held(HeldMessage),
+        FileRead {
+            #[serde(rename = "Read")]
+            read: FileRead,
+        },
+    }
+    Ok(
+        Option::<Recorded>::deserialize(deserializer)?.map(|recorded| match recorded {
+            Recorded::Held(held) => held,
+            Recorded::FileRead { read } => HeldMessage {
+                id: read.version,
+                digest: read.digest,
+                label: read.label,
+            },
+        }),
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ToolName(String);
 
@@ -462,7 +495,7 @@ impl<'de> Deserialize<'de> for ResolvedCall {
             tool: ToolName,
             arguments: CanonicalArguments,
             annotation: Option<PinnedAnnotation>,
-            #[serde(default)]
+            #[serde(default, alias = "file_basis", deserialize_with = "recorded_held")]
             held: Option<HeldMessage>,
         }
 

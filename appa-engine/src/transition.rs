@@ -1497,8 +1497,8 @@ impl<'a> Sequence<'a> {
         if proposed_label != &current.combine(&call.output_label(&checked)) || receiving != &current {
             return Err(TransitionRefusal::ForgedLabel);
         }
-        // The terms a release pins are the contract it was checked under, exactly.
-        if terms != &crate::fact::ReleaseTerms::of(&checked) {
+        // The terms a release pins are the contract it was checked under.
+        if !terms.release(&checked) {
             return Err(TransitionRefusal::ForgedLabel);
         }
         Ok(())
