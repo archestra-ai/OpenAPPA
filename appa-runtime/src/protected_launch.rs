@@ -106,7 +106,7 @@ const UNMEDIATED_TOOLS: &str = "PowerShell,Monitor,Grep,NotebookEdit";
 
 /// The Claude Code releases whose internals the preload has been checked against. A release
 /// outside this list runs SafeBash, even when the self-test would pass.
-const NATIVE_BASH_RELEASES: &[&str] = &["2.1.266"];
+const NATIVE_BASH_RELEASES: &[&str] = &["2.1.266", "2.1.319"];
 
 /// How long the preload's self-test may take before the session falls back to SafeBash.
 const SELF_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -150,7 +150,7 @@ impl Shell {
     fn environment(&self) -> Vec<(&'static str, OsString)> {
         match self {
             Shell::Native { preload, .. } => vec![
-                ("BUN_OPTIONS", format!("--preload {}", preload.display()).into()),
+                ("BUN_OPTIONS", bun_options(preload)),
                 ("APPA_FILE_TRACKER", executable().into()),
             ],
             Shell::Untracked | Shell::SafeBash => Vec::new(),
@@ -162,6 +162,17 @@ impl Shell {
             let _ = fs::remove_file(settings);
         }
     }
+}
+
+/// Bun's options for Claude Code: the preload, ahead of any the person set, so another tool's
+/// preload still loads beside it.
+fn bun_options(preload: &Path) -> OsString {
+    let mut options = OsString::from(format!("--preload {}", preload.display()));
+    if let Some(own) = std::env::var_os("BUN_OPTIONS").filter(|own| !own.is_empty()) {
+        options.push(" ");
+        options.push(own);
+    }
+    options
 }
 
 /// Whether the deployment's policy binds the `file-tracker` recorder. A config that does not
@@ -191,6 +202,9 @@ fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Shell {
         Ok(shell) => shell,
         Err(reason) => {
             eprintln!("clappa: shell commands run as SafeBash: {reason}");
+            if let Some(missing) = appa_file_tracker::sandbox_missing() {
+                eprintln!("clappa: {missing}. Until then, every shell command is refused.");
+            }
             Shell::SafeBash
         }
     }

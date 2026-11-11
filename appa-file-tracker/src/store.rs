@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::label::{Label, Ranks};
+use crate::paths::{covers, tree};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
@@ -104,11 +105,15 @@ impl Locked {
 }
 
 impl Store {
-    /// The reservation holding `path`, if any call holds it.
+    /// The reservation holding `path`, if any call holds it: one that reserved the path, a
+    /// directory above it, or anything under it.
     pub fn holder(&self, path: &Path) -> Option<&Reservation> {
-        self.reservations
-            .iter()
-            .find(|reservation| reservation.writes.contains_key(path))
+        self.reservations.iter().find(|reservation| {
+            reservation
+                .writes
+                .keys()
+                .any(|held| covers(held, path) || covers(path, held))
+        })
     }
 
     /// Drop every reservation no record will settle: annotated longer than `timeout` ago,
@@ -124,9 +129,13 @@ impl Store {
         });
     }
 
-    /// The label `path` carries from its recorded writes, if any call wrote it.
-    pub fn recorded(&self, path: &Path) -> Option<&Label> {
-        self.files.get(path).map(|recorded| &recorded.label)
+    /// The labels `path` carries from recorded writes: of the path itself, of every recorded
+    /// directory above it, and of every recorded file under it.
+    pub fn recorded(&self, path: &Path) -> impl Iterator<Item = &Label> {
+        self.files
+            .iter()
+            .filter(move |(recorded, _)| covers(recorded, path) || covers(path, recorded))
+            .map(|(_, recorded)| &recorded.label)
     }
 
     /// Settle one released call's outcome on the files it reserved. A success replaces the
@@ -156,11 +165,39 @@ impl Store {
     }
 }
 
-/// A file's version: the digest of its content, or `absent`.
+/// A file's version: the digest of its content, or `absent`. A directory's is the digest of
+/// what it holds: each entry's path, kind, size and modification time. A socket or another
+/// special file has no content to version.
 pub fn version(path: &Path) -> String {
-    match std::fs::read(path) {
-        Ok(bytes) => format!("sha256:{}", hex(&Sha256::digest(&bytes))),
-        Err(_) => "absent".to_string(),
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {
+            let Ok(entries) = tree(path) else {
+                return "unknown".to_string();
+            };
+            let mut lines: Vec<String> = entries
+                .iter()
+                .map(|(entry, metadata)| {
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .map_or(0, |elapsed| elapsed.as_nanos());
+                    format!(
+                        "{}\t{:?}\t{}\t{modified}",
+                        entry.display(),
+                        metadata.file_type(),
+                        metadata.len()
+                    )
+                })
+                .collect();
+            lines.sort();
+            digest_lines(&lines)
+        }
+        Ok(metadata) if !metadata.is_file() => "special".to_string(),
+        _ => match std::fs::read(path) {
+            Ok(bytes) => format!("sha256:{}", hex(&Sha256::digest(&bytes))),
+            Err(_) => "absent".to_string(),
+        },
     }
 }
 

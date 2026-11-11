@@ -353,3 +353,110 @@ async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_b
     .await;
     assert_eq!(recorded(&store, &notes)["audience"], serde_json::json!([["self"]]));
 }
+
+/// A directory a command reads carries the labels of the files it holds, and a directory a
+/// command writes passes the call's label to every file the command leaves in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_carries_the_labels_of_what_it_holds_and_of_what_wrote_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap().join("work");
+    let build = work.join("build");
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join(".env"), "TOKEN=hunter2\n").unwrap();
+    std::fs::write(work.join("src/main.go"), "package main\n").unwrap();
+    let store = dir.path().join("file-tracker.json");
+    let tracker_config = dir.path().join("file-tracker.toml");
+    std::fs::write(&tracker_config, format!("store = {:?}\n", store.display().to_string())).unwrap();
+    let config_path = dir.path().join("appa.toml");
+    std::fs::write(&config_path, policy(&tracker_config)).unwrap();
+    let runtime =
+        Arc::new(Runtime::open(Config::load(&config_path).unwrap(), dir.path().join("appa.db"), None).unwrap());
+    let safebash = |inputs: serde_json::Value, outputs: serde_json::Value| {
+        call(
+            "mcp/file-tracker/SafeBash",
+            serde_json::json!({ "command": "make", "input_files": inputs, "output_files": outputs, "network_hosts": [] }),
+        )
+    };
+
+    // Session A reads only `src/`: no credential is under it, and the session stays public.
+    // It builds into `build/`, which takes the session's label.
+    start(&runtime, "a").await;
+    std::fs::create_dir(&build).unwrap();
+    run(
+        &runtime,
+        "a",
+        safebash(
+            serde_json::json!([work.join("src")]),
+            serde_json::json!([format!("{}/", build.display())]),
+        ),
+        "built",
+    )
+    .await;
+    assert_eq!(recorded(&store, &build)["audience"], serde_json::Value::Null);
+
+    // Reading the whole project reads `.env`, so it narrows the session to self; a build into
+    // `build/` then leaves `build/app` self data.
+    let project = || {
+        safebash(
+            serde_json::json!([work]),
+            serde_json::json!([format!("{}/", build.display())]),
+        )
+    };
+    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, "a", project()).await else {
+        panic!("a directory holding .env narrows the session first")
+    };
+    assert!(feedback.contains("public -> self"), "{feedback}");
+    std::fs::write(build.join("app"), "binary\n").unwrap();
+    run(&runtime, "a", project(), "built").await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while recorded(&store, &build)["audience"] != serde_json::json!([["self"]]) {
+        assert!(Instant::now() < deadline, "the recorder never relabeled build/");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Session B reads one file the build left: it carries the directory's label.
+    start(&runtime, "b").await;
+    let HookDecision::DenyCall { feedback, .. } = propose(
+        &runtime,
+        "b",
+        call(
+            "host/claude-code/Read",
+            serde_json::json!({ "file_path": build.join("app") }),
+        ),
+    )
+    .await
+    else {
+        panic!("a file under a self directory narrows the session first")
+    };
+    assert!(feedback.contains("public -> self"), "{feedback}");
+}
+
+/// A container daemon reaches every file, so a command that declares its socket narrows the
+/// session as reading the strictest of them would; an SSH agent's socket does not.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_container_socket_narrows_the_session_and_an_agent_socket_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let docker = root.join("docker.sock");
+    let agent = root.join("agent.1234");
+    let _sockets = [&docker, &agent].map(|path| std::os::unix::net::UnixListener::bind(path).unwrap());
+    let store = root.join("file-tracker.json");
+    let tracker_config = root.join("file-tracker.toml");
+    std::fs::write(&tracker_config, format!("store = {:?}\n", store.display().to_string())).unwrap();
+    let config_path = root.join("appa.toml");
+    std::fs::write(&config_path, policy(&tracker_config)).unwrap();
+    let runtime = Arc::new(Runtime::open(Config::load(&config_path).unwrap(), root.join("appa.db"), None).unwrap());
+    let reaching = |socket: &Path| {
+        call(
+            "mcp/file-tracker/SafeBash",
+            serde_json::json!({ "command": "true", "input_files": [socket], "output_files": [], "network_hosts": [] }),
+        )
+    };
+    start(&runtime, "s").await;
+    run(&runtime, "s", reaching(&agent), "ok").await;
+    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, "s", reaching(&docker)).await else {
+        panic!("a container socket narrows the session first")
+    };
+    assert!(feedback.contains("public -> self"), "{feedback}");
+}

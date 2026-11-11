@@ -81,17 +81,29 @@ pub enum Role {
     Run,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct Sandbox {
     /// The sandbox runtime and its arguments; SafeBash appends `--settings <file> -c <command>`.
     pub command: Vec<String>,
     /// Paths a command may read besides its inputs and the system: toolchains under the home
-    /// directory or in another hidden top-level directory, such as `/opt`.
-    #[serde(default)]
+    /// directory or in another hidden top-level directory, such as `/opt/homebrew`. Each is
+    /// assumed to hold no credentials: a path rule hides no file under it.
     pub readable: Vec<PathBuf>,
     /// Seconds a command may run.
     pub timeout_secs: u64,
+}
+
+/// A `[sandbox]` table as written: a deployment's `readable` adds to the built-in one, and
+/// each setting it names replaces the built-in one.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSandbox {
+    #[serde(default)]
+    command: Option<Vec<String>>,
+    #[serde(default)]
+    readable: Vec<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -108,14 +120,15 @@ struct RawConfig {
     #[serde(default)]
     tool: Vec<ToolRole>,
     #[serde(default)]
-    sandbox: Option<Sandbox>,
+    sandbox: RawSandbox,
 }
 
 impl Config {
     /// The file `--config` names, else `appa/file-tracker.toml` in the user's config directory
-    /// when it exists, over the built-in defaults. A file's path rules and tools are added to
-    /// the built-in ones — a path's label meets every rule that matches it — and its scalar
-    /// settings and sandbox replace the built-in ones.
+    /// when it exists, over the built-in defaults. A file's path rules, tools and readable
+    /// paths are added to the built-in ones — a path's label meets every rule that matches
+    /// it — and its other settings replace the built-in ones. A readable path may start with
+    /// `~/`, the home directory; one that does not exist is dropped.
     pub fn load(explicit: Option<&Path>) -> Result<Config, String> {
         let defaults: RawConfig = toml::from_str(DEFAULT).expect("the built-in configuration parses");
         let file = explicit.map(Path::to_path_buf).or_else(|| {
@@ -145,14 +158,35 @@ impl Config {
         paths.extend(defaults.path);
         let mut tools = raw.tool;
         tools.extend(defaults.tool);
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let readable = raw
+            .sandbox
+            .readable
+            .iter()
+            .chain(&defaults.sandbox.readable)
+            .filter_map(|written| match written.strip_prefix("~/") {
+                Some(rest) => home.as_ref().map(|home| home.join(rest)),
+                None => Some(resolve(PathBuf::from(written))),
+            })
+            .filter(|path| path.exists())
+            .collect();
         Ok(Config {
             store,
             paths,
             tools,
-            sandbox: raw
-                .sandbox
-                .or(defaults.sandbox)
-                .expect("the built-in configuration declares a sandbox"),
+            sandbox: Sandbox {
+                command: raw
+                    .sandbox
+                    .command
+                    .or(defaults.sandbox.command)
+                    .expect("the built-in configuration names a sandbox command"),
+                readable,
+                timeout_secs: raw
+                    .sandbox
+                    .timeout_secs
+                    .or(defaults.sandbox.timeout_secs)
+                    .expect("the built-in configuration names a sandbox timeout"),
+            },
             settle_wait: std::time::Duration::from_millis(
                 raw.settle_wait_ms.or(defaults.settle_wait_ms).unwrap_or(3000),
             ),
@@ -176,7 +210,7 @@ fn defaults_shell() -> RawConfig {
         reservation_timeout_secs: None,
         path: Vec::new(),
         tool: Vec::new(),
-        sandbox: None,
+        sandbox: RawSandbox::default(),
     }
 }
 

@@ -24,6 +24,14 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+/// Why SafeBash cannot run a command on this machine, when it cannot: the sandbox program
+/// the configuration names is not installed. A fresh install says so before the first
+/// session, and `clappa` before every session that falls back to SafeBash.
+pub fn sandbox_missing() -> Option<String> {
+    let config = config::Config::load(None).ok()?;
+    safebash::missing(&config)
+}
+
 /// Run one entry point: `arguments` are what follows `appa file-tracker`.
 pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
     let mut arguments = arguments.into_iter();

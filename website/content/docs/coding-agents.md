@@ -18,6 +18,7 @@ Start `clappa` for a protected session and `claude` for an ordinary session. `cl
 - **A launch token.** Without it, a new session ID opens a fresh label.
 - **A fork's parent.** Without it, a fork runs with a clean label even though it carries the parent's conversation. Do not fork such a session.
 - **A messaging address.** Without it, a session cannot receive peer messages.
+- **A confined shell.** Without it, Claude Code's own `Bash` declares no file lists, and the file-tracker refuses every `Bash` call. Register SafeBash instead: an MCP server named `file-tracker` that runs `appa file-tracker mcp`. Also list `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit` in `permissions.deny`.
 
 Protected sessions fail closed: while the runtime is unavailable, every hooked action is blocked. The status line shows the trajectory's current trust and audience. The [Claude Code guide](/claude-code) covers installation, policy setup, and a first blocked flow.
 
@@ -55,16 +56,20 @@ The plugin's built-in path rules give credential paths such as `.env*` and `~/.s
 
 ### SafeBash
 
-A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its input files and the system directories (`/usr`, `/etc`, `/lib` and similar), write only its output files, and connect only to its hosts. Every other top-level directory, such as `/home`, `/opt` or `/srv`, is hidden from it, and so are the working directory and the temporary directories. A file in `/etc` or `/run` that a path rule labels, such as an SSH host key or a token, is hidden too. The command starts without the environment variables whose names hold credentials: a word such as `TOKEN`, `SECRET`, `PASSWORD`, `KEY` or `AUTH`, and every `ANTHROPIC_` and `APPA_` variable. A write to an undeclared path does not reach the disk. Each output file is emptied when the command starts, so a command that is refused or cannot start leaves its outputs unchanged.
+A shell command can read and write any file the process can reach, so a label on a file does not cover a native shell. Every shell command therefore declares three lists beside its `command`: `input_files`, `output_files`, and `network_hosts`. The command can read only its inputs, the system directories (`/usr`, `/etc`, `/lib` and similar), the directories on its `PATH` and the installed toolchains. It can write only its outputs and connect only to its hosts. Every other top-level directory, such as `/home`, `/opt` or `/srv`, is hidden from it, and so are the working directory and the temporary directories.
+
+An input is a file, a directory or a Unix socket. A directory input carries the labels of every file it holds. A socket input, such as `/var/run/docker.sock` or the SSH agent's `$SSH_AUTH_SOCK`, lets the command reach the service behind it; every socket the call does not declare stays hidden. A socket carries the label its path rules give it. A container daemon can mount any file into a container, so the built-in rules give the Docker, Podman, and containerd sockets the audience `self`: a call that declares one narrows its session to `self`. An output written with a trailing `/` is a directory, such as a build directory or a compiler cache: the command reads what it holds and writes under it, and every file it leaves there takes the call's label. Each call also gets a temporary directory of its own as `$TMPDIR`, removed when the call ends.
+
+The built-in toolchain list holds the usual install locations outside the system, such as `/opt/homebrew`, `~/.cargo/bin`, `~/.local/bin`, `~/.nix-profile` and the `mise`, `nvm` and `pyenv` directories. A deployment adds more under `[sandbox] readable` in `~/.config/appa/file-tracker.toml`. A file in `/etc` or `/run` that a path rule labels, such as an SSH host key or a token, is hidden too. The command starts without the environment variables whose names hold credentials: a word such as `TOKEN`, `SECRET`, `PASSWORD`, `KEY` or `AUTH`, and every `ANTHROPIC_` and `APPA_` variable. A write to an undeclared path does not reach the disk. Each output file is emptied when the command starts, so a command that is refused or cannot start leaves its outputs unchanged.
 
 APPA builds no sandbox of its own. It confines each command in the best sandbox the harness has:
 
 | Where | Tool | Sandbox |
 |---|---|---|
-| Claude Code started by `clappa`, on a tested release | Claude Code's own `Bash`, with the three lists added | Claude Code's built-in sandbox (bubblewrap on Linux, Seatbelt on macOS) and its proxy, configured for each call |
+| Claude Code started by `clappa`, on a tested release (2.1.266 and 2.1.319) | Claude Code's own `Bash`, with the three lists added | Claude Code's built-in sandbox (bubblewrap on Linux, Seatbelt on macOS) and its proxy, configured for each call |
 | Claude Code otherwise | `mcp/file-tracker/SafeBash`, served by the file-tracker | Anthropic's sandbox runtime `srt`, the same runtime, started for each call |
 
-Before each session, `clappa` loads a preload into Claude Code and runs its self-test. The self-test checks that the lists survive Claude Code's input handling, that an undeclared file is hidden and an undeclared write does not reach the disk, and that each command reaches only its own hosts. If the release is not on the tested list or any check fails, `clappa` disables `Bash`, registers SafeBash, and prints why. A `Bash` call that declares no lists, such as one from Claude Code started without `clappa`, is refused. Both tools return the exit code, standard output and standard error as a successful result, so the call's label applies whatever the exit code.
+Before each session, `clappa` loads a preload into Claude Code and runs its self-test. The self-test checks that the lists survive Claude Code's input handling, that an undeclared file is hidden and an undeclared write does not reach the disk, and that each command reaches only its own hosts. If the release is not on the tested list or any check fails, `clappa` disables `Bash`, registers SafeBash, and prints why. When `srt` is not installed, `clappa` and `appa plugin install claude-code` say so and name the command that installs it. `clappa` keeps any `BUN_OPTIONS` already set, after its own preload, so another tool's preload loads too. A `Bash` call that declares no lists, such as one from Claude Code started without `clappa`, is refused. Both tools return the exit code, standard output and standard error as a successful result, so the call's label applies whatever the exit code.
 
 The annotator forwards the combined label of the input files, and the call's result carries it. The recorder applies the published label to every output file.
 
@@ -86,7 +91,9 @@ The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Cod
 
 - A shell command can send its input files to any host it declares. Network destinations carry no policy yet.
 - Credential variables are withheld by name. A variable whose name does not say it holds a credential reaches the command.
-- The system directories other than `/etc` and `/run`, such as `/usr` and `/lib`, are assumed to hold no credentials. A labeled file there is readable by a command that does not declare it.
+- The system directories other than `/etc` and `/run`, such as `/usr` and `/lib`, the directories on `PATH` and the readable toolchains are assumed to hold no credentials. A labeled file there is readable by a command that does not declare it.
+- A service reached through a declared socket is outside the sandbox. What the command sends it, and what the service does with it, carries no label.
+- A directory input or output is walked on every call for its labels and version. A directory with more than 250,000 entries is refused; declare a narrower one.
 - A file that changes outside a mediated call keeps its recorded label. A process outside the sandbox can still copy a file without its label.
 - A read waits while a write of the same file has not yet reached the recorder. If the write does not settle within the wait, the read fails and the agent can propose it again.
 - The stored audience must be one clause of audiences the policy declares. A file that two unrelated restricted audiences wrote fails its next annotation.

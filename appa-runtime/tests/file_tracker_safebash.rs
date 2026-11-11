@@ -216,7 +216,23 @@ fn a_bash_call_is_confined_to_what_it_declares() {
             .any(|hidden| hidden == "/usr" || hidden == "/etc"),
         "the system stays readable"
     );
-    assert_eq!(paths("allowRead"), serde_json::json!([input]));
+    let readable = paths("allowRead");
+    let readable: Vec<&str> = readable
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| path.as_str().unwrap())
+        .collect();
+    assert!(readable.contains(&input.to_str().unwrap()), "{readable:?}");
+    let home = std::env::var("HOME").unwrap();
+    for opened in &readable {
+        let opened = std::path::Path::new(opened);
+        assert!(
+            opened == input || !(opened.starts_with(&root) || std::path::Path::new(&home).starts_with(opened)),
+            "{} opens the working directory or the home",
+            opened.display()
+        );
+    }
     let withheld = answer["hiddenEnvironment"].as_array().unwrap();
     assert!(
         withheld.iter().any(|name| name == "PROBE_SERVICE_TOKEN"),
@@ -226,7 +242,12 @@ fn a_bash_call_is_confined_to_what_it_declares() {
         !withheld.iter().any(|name| name == "PATH" || name == "HOME"),
         "{withheld:?}"
     );
-    assert_eq!(paths("allowWrite"), serde_json::json!([output]));
+    let temporary = answer["tmpdir"].as_str().unwrap();
+    assert!(
+        std::path::Path::new(temporary).is_dir(),
+        "the call has its own temporary directory"
+    );
+    assert_eq!(paths("allowWrite"), serde_json::json!([output, temporary]));
     assert_eq!(answer["network"]["allowedDomains"], serde_json::json!(["example.com"]));
     assert_eq!(
         std::fs::read_to_string(&output).unwrap(),
@@ -238,6 +259,11 @@ fn a_bash_call_is_confined_to_what_it_declares() {
         prelude.contains(&format!(": >| '{}'", output.display())),
         "the command empties its output first: {prelude}"
     );
+    assert!(
+        prelude.starts_with(&format!("export TMPDIR='{temporary}'")),
+        "{prelude}"
+    );
+    std::fs::remove_dir(temporary).unwrap();
 
     let (ok, _) = confine(serde_json::json!({ "command": "cat in.txt" }));
     assert!(!ok, "a call that declares no lists has no confinement");
@@ -265,7 +291,7 @@ fn a_command_that_cannot_start_leaves_its_outputs_unchanged() {
         &config,
         serde_json::json!({ "command": "echo new > report.md", "input_files": [], "output_files": [output], "network_hosts": [] }),
     );
-    assert!(failed && text.contains("cannot start"), "{text}");
+    assert!(failed && text.contains("is not installed"), "{text}");
     assert_eq!(std::fs::read_to_string(&output).unwrap(), "weeks of work\n");
 }
 
@@ -291,4 +317,64 @@ fn a_call_refused_during_setup_leaves_no_scratch_behind() {
     assert!(failed && text.contains("empty"), "{text}");
     let left: Vec<_> = std::fs::read_dir(scratch_of(&config)).unwrap().collect();
     assert!(left.is_empty(), "{left:?}");
+}
+
+/// What everyday development needs: a service reached through the socket the call declares
+/// and no other, a build written under a declared directory, and a temporary directory of the
+/// call's own that is gone when the call ends.
+#[cfg(unix)]
+#[test]
+fn a_command_reaches_its_declared_socket_and_writes_under_its_declared_directory() {
+    if !installed("srt") || !installed("python3") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let config = root.join("file-tracker.toml");
+    std::fs::write(
+        &config,
+        format!("store = {:?}\n", root.join("store.json").display().to_string()),
+    )
+    .unwrap();
+    let socket = root.join("service.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = (&stream).write_all(b"pong");
+        }
+    });
+    let connect = format!(
+        "python3 -c \"import socket; s = socket.socket(socket.AF_UNIX); s.connect('{}'); print(s.recv(4).decode())\"",
+        socket.display()
+    );
+
+    let (text, failed) = safebash(
+        &config,
+        serde_json::json!({ "command": connect, "input_files": [socket], "output_files": [], "network_hosts": [] }),
+    );
+    assert!(!failed && text.contains("pong"), "a declared socket is reached: {text}");
+    let (text, _) = safebash(
+        &config,
+        serde_json::json!({ "command": connect, "input_files": [], "output_files": [], "network_hosts": [] }),
+    );
+    assert!(!text.contains("pong"), "an undeclared socket is not: {text}");
+
+    let build = root.join("build");
+    let (text, failed) = safebash(
+        &config,
+        serde_json::json!({
+            "command": format!(
+                "mkdir -p {build}/obj && t=$(mktemp) && echo built > $t && cp $t {build}/obj/app && cat {build}/obj/app",
+                build = build.display()
+            ),
+            "input_files": [], "output_files": [format!("{}/", build.display())], "network_hosts": [],
+        }),
+    );
+    assert!(!failed && text.contains("built"), "{text}");
+    assert_eq!(std::fs::read_to_string(build.join("obj/app")).unwrap(), "built\n");
+    assert_eq!(
+        std::fs::read_dir(scratch_of(&config)).unwrap().count(),
+        0,
+        "the call's temporary directory is gone"
+    );
 }

@@ -188,6 +188,22 @@ pattern = "/etc/sudoers*"
 audience = ["self"]
 write_trust = "trusted"
 
+# --- a container daemon reads every file, so a command that reaches it may read them all ---
+# SafeBash lets a command reach a socket it declares in input_files, and the
+# call carries the socket's label. Docker or Podman can mount any path into a
+# container, so their sockets carry the strictest label the built-in rules give.
+[[path]]
+pattern = "*/docker.sock"
+audience = ["self"]
+
+[[path]]
+pattern = "*/podman.sock"
+audience = ["self"]
+
+[[path]]
+pattern = "*/containerd.sock"
+audience = ["self"]
+
 [[path]]
 pattern = "/proc/*/environ"
 audience = ["self"]
@@ -319,10 +335,35 @@ role = "run"
 # on Linux — with a network proxy that admits only the declared hosts. Each
 # call starts its own `srt` with that call's files and hosts. Where `clappa`
 # confines Claude Code's own Bash per call, Claude Code's sandbox runs it.
-# A command reads the system directories (/usr, /etc, /lib, ...); every other
-# top-level directory is hidden. `readable` reopens toolchains a command needs,
-# such as ["/opt/homebrew", "/home/me/.cargo"].
+# A command reads the system directories (/usr, /etc, /lib, ...) and every
+# directory on its PATH outside the home and working directories; every other
+# top-level directory is hidden. `readable` reopens the toolchains below, where
+# they exist: package managers and language toolchains that keep their
+# programs outside the system. A deployment's `readable` adds to this list.
+# Each readable path is assumed to hold no credentials: a path rule hides no
+# file under it.
 [sandbox]
 command = ["srt"]
-readable = []
+readable = [
+  "/opt/homebrew",
+  "/opt/local",
+  "/home/linuxbrew/.linuxbrew",
+  "~/.cargo/bin",
+  "~/.rustup",
+  "~/.local/bin",
+  "~/.local/share/mise",
+  "~/.config/mise",
+  "~/.local/share/uv",
+  "~/.local/share/pnpm",
+  "~/.asdf",
+  "~/.nvm",
+  "~/.volta",
+  "~/.bun/bin",
+  "~/.deno/bin",
+  "~/.pyenv",
+  "~/.rbenv",
+  "~/.sdkman/candidates",
+  "~/go/bin",
+  "~/.nix-profile",
+]
 timeout_secs = 600

@@ -1,6 +1,10 @@
 //! What a call names, as the plugin keys it: absolute paths resolved through every symbolic
 //! link, so two spellings of one file are one file. The annotator, the recorder and SafeBash
 //! resolve alike, so the label a call was judged under is the label of the file it touches.
+//!
+//! A `run` call may name a directory: in `input_files`, the files under it are its inputs; in
+//! `output_files`, written with a trailing `/` or already a directory, the call reads what the
+//! directory holds and writes under it, as an edit does a file.
 
 use std::path::{Path, PathBuf};
 
@@ -13,7 +17,44 @@ pub struct Named {
     pub reads: Vec<PathBuf>,
     /// Files the call may change, its outputs.
     pub writes: Vec<PathBuf>,
+    /// The outputs that are directories. Each is among the reads as well.
+    pub directories: Vec<PathBuf>,
     pub hosts: Vec<String>,
+}
+
+/// How many entries a directory a call names may hold. A larger tree is refused: walking it
+/// for its label and version on every call would stall the agent.
+const TREE_LIMIT: usize = 250_000;
+
+/// Every entry under `root`, without following symbolic links, with its metadata. `root`
+/// itself is not listed. A tree past [`TREE_LIMIT`] entries is refused.
+pub fn tree(root: &Path) -> Result<Vec<(PathBuf, std::fs::Metadata)>, String> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(Result::ok) {
+            let Ok(metadata) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if metadata.is_dir() {
+                pending.push(entry.path());
+            }
+            found.push((entry.path(), metadata));
+            if found.len() > TREE_LIMIT {
+                return Err(format!(
+                    "{} holds more than {TREE_LIMIT} entries: declare the directories or files the command uses",
+                    root.display()
+                ));
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Whether `path` is `dir` or lies under it.
+pub fn covers(dir: &Path, path: &Path) -> bool {
+    path.starts_with(dir)
 }
 
 /// An absolute path with every existing component resolved: an existing file resolves
@@ -75,22 +116,33 @@ pub fn named(role: &ToolRole, arguments: &serde_json::Value) -> Result<Named, St
             Named {
                 reads: vec![path.clone()],
                 writes: vec![path],
-                hosts: Vec::new(),
+                ..Named::default()
             }
         }
         Role::Run => {
             let mut hosts: Vec<String> = list("network_hosts")?.iter().map(|host| host.to_lowercase()).collect();
             hosts.sort();
             hosts.dedup();
+            let mut reads: Vec<PathBuf> = list("input_files")?
+                .iter()
+                .map(|path| resolve(path))
+                .collect::<Result<_, _>>()?;
+            let mut writes = Vec::new();
+            let mut directories = Vec::new();
+            for written in list("output_files")? {
+                let path = resolve(&written)?;
+                if written.ends_with('/') || path.is_dir() {
+                    directories.push(path.clone());
+                    reads.push(path.clone());
+                }
+                writes.push(path);
+            }
+            reads.sort();
+            reads.dedup();
             Named {
-                reads: list("input_files")?
-                    .iter()
-                    .map(|path| resolve(path))
-                    .collect::<Result<_, _>>()?,
-                writes: list("output_files")?
-                    .iter()
-                    .map(|path| resolve(path))
-                    .collect::<Result<_, _>>()?,
+                reads,
+                writes,
+                directories,
                 hosts,
             }
         }

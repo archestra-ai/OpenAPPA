@@ -16,7 +16,14 @@
 // hash or minified name. A build that changes them fails the self-test, and `clappa` falls
 // back to SafeBash.
 
-delete process.env.BUN_OPTIONS;
+// The person's own BUN_OPTIONS, which `clappa` keeps after this preload, still reach the
+// programs a command runs; this preload does not.
+{
+  const own = `--preload ${import.meta.path}`;
+  const rest = (process.env.BUN_OPTIONS ?? "").replace(own, "").trim();
+  if (rest) process.env.BUN_OPTIONS = rest;
+  else delete process.env.BUN_OPTIONS;
+}
 
 import fs from "fs";
 import os from "os";
@@ -34,7 +41,7 @@ delete process.env.APPA_CLAUDE_BASH_SELFTEST;
 
 const GUIDANCE = `
 
-Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To find files, use the Glob tool, then declare the ones the command needs. Each output file is emptied before the command runs.`;
+Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory or a cache needs (for example ~/.cache/go-build/). Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To find files, use the Glob tool, then declare the ones the command needs. Each output file is emptied before the command runs.`;
 
 /** The exports of every embedded chunk whose source contains all of `needles`. */
 async function modulesWith(...needles) {
@@ -65,8 +72,9 @@ const sandbox = exported(
     ["wrapWithSandbox", "ensureInitializedForWrap", "getConfig", "getProxyPort"].every((k) => typeof v[k] === "function"),
   "sandbox manager",
 );
+// Bash lives beside the sandbox manager in some builds and in a chunk of its own in others.
 const bash = exported(
-  shared,
+  [...shared, ...(await modulesWith("wrapWithSandbox", "coerceInput"))],
   (v) =>
     typeof v === "object" &&
     v.name === "Bash" &&
@@ -129,6 +137,7 @@ const HIDDEN =
   "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing here is incomplete. Use the Glob tool to list files.";
 
 const calls = new AsyncLocalStorage();
+const wrapping = new AsyncLocalStorage();
 const proxied = new AsyncLocalStorage();
 const hostsByNonce = new Map();
 
@@ -153,7 +162,12 @@ bash.call = async function (input, context, ...rest) {
   // sandbox: no excluded command, no `dangerouslyDisableSandbox`, no simulated sed edit.
   const required = Object.create(context, {
     remoteCall: {
-      value: { ...(context?.remoteCall ?? {}), constraints: { ...(context?.remoteCall?.constraints ?? {}), sandbox: "required" } },
+      value: {
+        // Later builds report a confined command's outcome to the remote caller; there is none.
+        onNote() {},
+        ...(context?.remoteCall ?? {}),
+        constraints: { ...(context?.remoteCall?.constraints ?? {}), sandbox: "required" },
+      },
     },
   });
   let backgrounded = false;
@@ -175,7 +189,10 @@ bash.call = async function (input, context, ...rest) {
       },
     };
   } finally {
-    if (!backgrounded) hostsByNonce.delete(nonce);
+    if (!backgrounded) {
+      hostsByNonce.delete(nonce);
+      fs.rmSync(confined.tmpdir, { recursive: true, force: true });
+    }
   }
 };
 
@@ -186,6 +203,7 @@ sandbox.wrapWithSandbox = async function (command, shell, custom, signal, option
   const current = calls.getStore();
   if (!current) throw new Error("A sandboxed command outside a declared Bash call was not run.");
   await sandbox.ensureInitializedForWrap();
+  hookNetwork();
   const ours = current.confined.filesystem;
   const filesystem = {
     ...(custom?.filesystem ?? {}),
@@ -208,7 +226,9 @@ sandbox.wrapWithSandbox = async function (command, shell, custom, signal, option
   const perCall = { ...(custom ?? {}), filesystem, network: { ...(custom?.network ?? {}), ...current.confined.network } };
   // The outputs are emptied inside the sandbox, once the command starts.
   const confinedCommand = (current.confined.prelude ?? "") + command;
-  const wrapped = await wrap.call(this, confinedCommand, shell, perCall, signal, { ...(options ?? {}), commandId: current.nonce });
+  const wrapped = await wrapping.run(current, () =>
+    wrap.call(this, confinedCommand, shell, perCall, signal, { ...(options ?? {}), commandId: current.nonce }),
+  );
   hookNetwork();
   // The sandbox starts without the variables that hold credentials, so neither the command
   // nor its shell's /proc/<pid>/environ carries them.
@@ -252,6 +272,20 @@ function hookNetwork() {
     configurable: true,
     enumerable: true,
   });
+  // The sockets a command may connect to are its own call's, read only while its command is
+  // wrapped. Claude Code counts a sandbox that admits a socket as not confining, since the
+  // service behind it is outside: the file-tracker labels the call by the socket it declares
+  // instead, and Claude Code's other refusals of unconfined calls still hold.
+  for (const key of ["allowUnixSockets", "allowAllUnixSockets"]) {
+    Object.defineProperty(network, key, {
+      get() {
+        return wrapping.getStore()?.confined.network[key];
+      },
+      set() {},
+      configurable: true,
+      enumerable: true,
+    });
+  }
   network.strictAllowlist = true;
   network[HOOKED] = true;
 }

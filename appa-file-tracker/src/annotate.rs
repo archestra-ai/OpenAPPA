@@ -5,14 +5,14 @@
 //! sandbox confines a command to them, and what a host may receive is not judged here. Every
 //! file a call may change is reserved until its records settle it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use serde_json::{Value, json};
 
 use crate::config::{Config, Role};
 use crate::label::{Label, Ranks};
-use crate::paths::{Named, named};
+use crate::paths::{Named, named, tree};
 use crate::store::{Locked, Reservation, Store, digest_lines, now, version};
 
 /// What the consult declares the answer may use.
@@ -74,23 +74,27 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
     };
 
     let store = &locked.store;
-    let label_of = |path: &PathBuf| file_label(config, store, path);
-    let inputs = named
-        .reads
-        .iter()
-        .map(label_of)
-        .fold(Label::default(), |met, label| met.meet(&label, &store.ranks));
+    let mut inputs = Label::default();
+    for path in &named.reads {
+        inputs = inputs.meet(&file_label(config, store, path)?, &store.ranks);
+    }
     let (delta, forwards) = match role.role {
         Role::Read => (inputs, Label::default()),
         Role::Write => (Label::default(), Label::default()),
         Role::Edit => (inputs.clone(), inputs),
         Role::Run => (inputs.clone(), inputs),
     };
+    // A directory output writes what it holds, so the rules of every file in it apply. A
+    // file it creates is held to no rule; it carries the label the call publishes.
+    let mut written = named.writes.clone();
+    for directory in &named.directories {
+        written.extend(tree(directory)?.into_iter().map(|(path, _)| path));
+    }
     let rules = || {
         config
             .paths
             .iter()
-            .filter(|rule| named.writes.iter().any(|path| rule.matches(path)))
+            .filter(|rule| written.iter().any(|path| rule.matches(path)))
     };
     let mut write_trust = None;
     for rank in rules().filter_map(|rule| rule.write_trust.as_deref()) {
@@ -133,16 +137,24 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
     Ok(answer)
 }
 
-/// A file's label: what its recorded writes left, met with every path rule that matches it.
-pub fn file_label(config: &Config, store: &Store, path: &Path) -> Label {
-    config
+/// A file's label: what recorded writes left on it, on a directory above it, or — for a
+/// directory — on anything under it, met with every path rule that matches it or, for a
+/// directory, anything it holds.
+pub fn file_label(config: &Config, store: &Store, path: &Path) -> Result<Label, String> {
+    let mut paths = vec![path.to_path_buf()];
+    if path.is_dir() {
+        paths.extend(tree(path)?.into_iter().map(|(entry, _)| entry));
+    }
+    let ruled = config
         .paths
         .iter()
-        .filter(|rule| rule.matches(path))
-        .map(|rule| rule.label())
-        .fold(store.recorded(path).cloned().unwrap_or_default(), |met, label| {
-            met.meet(&label, &store.ranks)
-        })
+        .filter(|rule| paths.iter().any(|path| rule.matches(path)))
+        .map(|rule| rule.label());
+    Ok(store
+        .recorded(path)
+        .cloned()
+        .chain(ruled)
+        .fold(Label::default(), |met, label| met.meet(&label, &store.ranks)))
 }
 
 /// What the call was judged over: each file's version, so the same call over changed files is
