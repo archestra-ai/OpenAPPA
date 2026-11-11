@@ -211,7 +211,6 @@ jobs:
               - 'marketplace/**'
               - 'appa-package/**'
               - 'appa-runtime-api/**'
-              - 'scripts/appa-marketplace.sh'
               - 'scripts/lint_batteries.py'
               - 'scripts/test_lint_batteries.py'
               - 'scripts/lint_battery_toml.py'
@@ -450,13 +449,10 @@ jobs:
       - name: Manifest tests
         run: cargo test -p appa-package --all-targets --locked
 
-      - name: Generated marketplace catalog
-        run: bash scripts/appa-marketplace.sh --check
-
-      # Every package validates, every recorded digest is still the digest of
-      # the directory it names, and no package directory goes unnamed. A digest
-      # that drifted from its package is the one failure that must not reach a
-      # release, so it fails the build rather than being regenerated silently.
+      # The catalog renders from the package trees: every package validates,
+      # its directory names it, and the packages hold together. Each battery
+      # also composes into the hosts it declares. No catalog is committed, so
+      # no recorded digest can drift from its package.
       - name: Marketplace against the packages it describes
         run: cargo test -p appa --locked --test marketplace
 

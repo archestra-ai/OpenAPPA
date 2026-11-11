@@ -14,39 +14,29 @@ battery's `hosts` names the hosts it is written for; a plugin's `batteries`
 names the batteries its first install includes, the ones its host cannot be
 gated without. A battery's optional `detect` names programs, such as
 `gh`; a Claude Code plugin's first install also includes every battery written
-for the host whose program is on `PATH`. The directory name must match the manifest's package name. The package manifest
-is the authored source; `marketplace.toml` is generated from these manifests and
-the package contents.
+for the host whose program is on `PATH`. The directory name must match the manifest's package name. The package manifests
+and package trees are the only source. A version's catalog, `marketplace.toml`,
+is derived from them when the version is built: each package directory, its
+kind and name, and the digest of its tree. Nothing commits the catalog, so a
+package change needs no catalog change and no two branches conflict over it.
 
 After adding or editing a package, run:
 
 ```sh
-bash scripts/appa-marketplace.sh
-```
-
-The script validates packages and ownership before replacing the catalog.
-It includes current tracked and non-ignored files, including new packages,
-and excludes ignored test artifacts.
-
-Before committing, verify the working files:
-
-```sh
-bash scripts/appa-marketplace.sh --check
 cargo test -p appa --locked --test marketplace
 ```
 
-`--check` runs the same validation and generation, but compares the result with
-the working-tree catalog without modifying it. Use it to verify uncommitted digests.
+The test renders the catalog from the working files. Rendering validates every
+package and refuses a directory whose name or kind disagrees with its manifest.
+It also refuses two packages that share a namespace, an audience source, or a
+credential.
+The test also composes each battery into every host it declares. CI runs it.
 
-The Rust tests check working-tree package validation and runtime compatibility.
-The digest test, `every_recorded_digest_is_the_digest_of_its_committed_package`,
-checks the catalog and packages together from `git archive HEAD`.
-Deployments fetch committed content, not working files or ignored test artifacts.
-Passing that test does not verify uncommitted digests.
-
-Commit the catalog and package changes together, then rerun both commands to
-verify the new commit. CI runs both checks. Regeneration does not update installed
-deployments or contact a remote marketplace.
+A release renders the catalog from the release commit into the marketplace
+archive it publishes, and the release's descriptor records that catalog's
+digest. A development build renders it from the commit it was built from.
+Either way, a deployment checks every package it installs against the catalog
+and the catalog against the version.
 
 ## Install and manage a deployment
 

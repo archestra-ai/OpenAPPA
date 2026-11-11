@@ -106,7 +106,6 @@ does not name is blocked.
 
 ```sh
 cargo test --locked -p appa --test pagerduty_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 ```
 
 ## Sanitizers

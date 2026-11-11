@@ -55,8 +55,8 @@ fn main() {
 }
 
 /// The files git tracks or would track under `directory`, relative to it: the set
-/// `scripts/appa-marketplace.sh` digests, so a test run's `__pycache__` is never
-/// bundled. `None` outside a git checkout, where every file counts.
+/// a commit ships, so a test run's `__pycache__` is never bundled. `None` outside
+/// a git checkout, where every file counts.
 fn git_listed(directory: &Path) -> Option<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")

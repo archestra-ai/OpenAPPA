@@ -127,7 +127,6 @@ tool the policy does not name is blocked.
 
 ```sh
 cargo test --locked -p appa --test cloudflare_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 ```
 
 ## Sanitizers

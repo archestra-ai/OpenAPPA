@@ -14,14 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use super::{Compensation, InitError, Undo, file_before, write_state};
-use crate::guide;
+use crate::guide::{self, CONTRACTS};
 
 const ROUTER: &str = include_str!("../../../integrations/appa-guide/SKILL.md");
 const CLAUDE_CODE: &str = include_str!("../../../integrations/appa-guide/references/claude-code.md");
 
 pub(super) static TEXT: LazyLock<String> = LazyLock::new(|| [ROUTER, guide::CORE, CLAUDE_CODE].join("\n\n"));
-
-const CONTRACTS: &str = include_str!("../../../website/content/docs/contracts.md");
 
 /// Every version an install wrote opens with this frontmatter; a file under the
 /// skill's name that does not is someone else's.

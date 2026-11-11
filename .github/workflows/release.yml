@@ -198,13 +198,12 @@ jobs:
           RELEASE_PUSH_TOKEN: ${{ steps.release-pr-token.outputs.token }}
         run: |
           release_branch=$(jq -er '.headBranchName' <<<"$RELEASE_PR")
-          bash scripts/appa-marketplace.sh
           if git diff --quiet; then
             exit 0
           fi
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git add Cargo.lock scripts/mixed-version/Cargo.lock marketplace/marketplace.toml
+          git add Cargo.lock scripts/mixed-version/Cargo.lock
           git commit -m "chore: synchronize release version"
           git -c credential.helper= \
             -c 'credential.helper=!f() { test "$1" = get && printf "%s\n" "username=x-access-token" "password=$RELEASE_PUSH_TOKEN"; }; f' \
@@ -246,7 +245,11 @@ jobs:
           find staged -type d -name __pycache__ -prune -exec rm -rf -- {} +
           find staged -type f \( -name '*.pyc' -o -name '*.pyo' -o -name appa-package.toml \) -delete
           tar -C staged -czf "dist/appa-batteries-${VERSION}.tar.gz" .
-          bash scripts/appa-marketplace.sh --check
+          # The catalog is derived from this commit's packages, not committed
+          # beside them. publish-release reads it back out of this archive, so
+          # the descriptor's catalog digest is the digest of what ships.
+          cargo run --locked --quiet -p appa-package --example marketplace -- marketplace > catalog.toml
+          mv catalog.toml marketplace/marketplace.toml
           tar -C marketplace -czf "dist/appa-marketplace-${VERSION}.tar.gz" .
           digest=$(sha256sum "dist/appa-batteries-${VERSION}.tar.gz" | cut -d' ' -f1)
           echo "sha256=${digest}" >> "$GITHUB_OUTPUT"
@@ -588,9 +591,14 @@ jobs:
         env:
           SOURCE_COMMIT: ${{ needs.release-please.outputs.source_commit }}
           TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ needs.release-please.outputs.version }}
+        # The descriptor names the catalog inside the marketplace archive that
+        # ships, and the example rechecks every package against it there.
         run: |
+          mkdir /tmp/appa-marketplace
+          tar -C /tmp/appa-marketplace -xzf "dist/appa-marketplace-${VERSION}.tar.gz"
           cargo run --locked --quiet -p appa-package --example generation -- \
-            dist marketplace /tmp/appa-generation-images "$SOURCE_COMMIT" "$TAG_NAME" \
+            dist /tmp/appa-marketplace /tmp/appa-generation-images "$SOURCE_COMMIT" "$TAG_NAME" \
             > dist/appa-generation.json
 
       - name: Verify release assets and write checksums

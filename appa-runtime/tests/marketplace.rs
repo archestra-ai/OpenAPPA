@@ -1,16 +1,15 @@
-//! The marketplace manifest against the marketplace it describes.
+//! The marketplace's packages, as the catalog a version ships derives them.
 //!
-//! `marketplace.toml` is what a deployment authenticates a package against, so
-//! a digest that has drifted from the directory it names is the one failure
-//! that must never reach a release. This runs in the repository, where the
-//! packages are files; a deployment checks the same digests against what it
-//! fetched.
+//! The catalog a deployment authenticates a package against is rendered from
+//! the package trees whenever a version is built, so no recorded digest can
+//! drift from the directory it names. These tests check what the rendering
+//! cannot: that every package composes and runs as its host will run it.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use appa_package::{Host, Marketplace, PackageKind, Role, TreeDigest, check_ownership, validate_package};
+use appa_package::{Host, Marketplace, PackageKind, Role, validate_package};
 use appa_runtime::config::Config;
 
 fn repository() -> PathBuf {
@@ -25,7 +24,8 @@ fn marketplace_root() -> PathBuf {
 }
 
 fn manifest() -> Marketplace {
-    Marketplace::read(&marketplace_root().join("marketplace.toml")).expect("the marketplace manifest reads")
+    let catalog = Marketplace::render(&marketplace_root()).unwrap_or_else(|error| panic!("{error}"));
+    Marketplace::parse(&catalog, Path::new(appa_package::CATALOG_FILE)).expect("a rendered catalog parses")
 }
 
 #[test]
@@ -44,146 +44,21 @@ fn kagent_package_images_follow_the_release_registry_and_version() {
     }
 }
 
-/// Every package the manifest names is a package: it parses, its declared paths
-/// exist, its policy names only namespaces it covers, and it runs only helpers
-/// it ships.
+/// Every package directory is a package: it parses, its declared paths exist,
+/// its policy names only namespaces it covers, it runs only helpers it ships,
+/// and it is listed under the kind and name its directory spells.
 ///
 /// And the packages hold together: a namespace and a credential each have one
 /// owner. A deployment installs several of these side by side into one policy,
 /// so a second package covering the first's namespace would append contracts to
 /// tools the first never declared, and one naming a credential the first's
-/// prefix covers would be handed it at spawn.
+/// prefix covers would be handed it at spawn. Rendering the catalog refuses
+/// both, so a version with either cannot be built.
 #[test]
-fn every_package_the_marketplace_names_validates() {
-    let root = marketplace_root();
-    let mut packages = Vec::new();
-    for entry in manifest().packages {
-        let directory = root.join(entry.path.as_str());
-        let package = validate_package(&directory).unwrap_or_else(|error| {
-            panic!("{} does not validate: {error}", entry.path);
-        });
-        assert_eq!(
-            package.name, entry.name,
-            "{} is listed as {} and calls itself {}",
-            entry.path, entry.name, package.name
-        );
-        // The kind is the table the package is listed under, and it decides how
-        // a deployment installs it. A battery listed as an adapter parses,
-        // validates and digests, and is installed as the wrong thing.
-        let kind = match package.role {
-            Role::Plugin(_) => PackageKind::Plugin,
-            Role::Battery(_) => PackageKind::Battery,
-        };
-        assert_eq!(
-            kind, entry.kind,
-            "{} is listed as a {} and is a {kind}",
-            entry.path, entry.kind
-        );
-        packages.push(package);
-    }
-    check_ownership(&packages).expect("the marketplace's packages hold together");
-}
-
-/// The recorded digest is the digest of the package's committed content, which
-/// is what a deployment fetches and digests in turn. It is read out of Git
-/// rather than off the working tree, because a working tree also holds what the
-/// tests left behind — a `__pycache__` beside a battery's helper is not part of
-/// the package, and never reaches the archive a deployment resolves. When this
-/// fails, regenerate and commit the catalog with the package changes. Read the
-/// catalog from the same archive: uncommitted catalog changes describe working
-/// files, not HEAD. Check those with `bash scripts/appa-marketplace.sh --check`.
-#[test]
-fn every_recorded_digest_is_the_digest_of_its_committed_package() {
-    let exported = tempfile::tempdir().expect("a temp dir is creatable");
-    export_committed(exported.path());
-    let root = exported.path().join("marketplace");
-    let committed =
-        Marketplace::read(&root.join("marketplace.toml")).expect("the committed marketplace manifest reads");
-
-    let drifted: Vec<String> = committed
-        .packages
-        .iter()
-        .filter_map(|entry| {
-            let directory = root.join(entry.path.as_str());
-            let found = TreeDigest::of_tree(&directory).unwrap_or_else(|error| {
-                panic!("{} cannot be digested: {error}", entry.path);
-            });
-            (found != entry.digest).then(|| format!("[{}] {} -> {}", entry.path, entry.digest, found))
-        })
-        .collect();
-
-    assert!(
-        drifted.is_empty(),
-        "HEAD's catalog does not match HEAD's packages.\n\
-         Run `bash scripts/appa-marketplace.sh`, verify with `bash scripts/appa-marketplace.sh --check`, \
-         and commit the catalog with the package changes before rerunning this test:\n  {}",
-        drifted.join("\n  ")
-    );
-}
-
-/// The marketplace subtree as `HEAD` holds it. `git archive` is how the build
-/// script already reads committed content, and how a deployment will receive a
-/// generation.
-fn export_committed(destination: &Path) {
-    let archive = Command::new("git")
-        .arg("-C")
-        .arg(repository())
-        .args(["-c", "core.autocrlf=false"])
-        .args(["archive", "--format=tar", "HEAD", "--", "marketplace"])
-        .output()
-        .expect("git runs");
-    assert!(
-        archive.status.success(),
-        "git archive failed: {}",
-        String::from_utf8_lossy(&archive.stderr)
-    );
-    let mut extract = Command::new("tar")
-        .arg("-x")
-        .arg("-C")
-        .arg(destination)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .expect("tar runs");
-    extract
-        .stdin
-        .take()
-        .expect("tar takes its input")
-        .write_all(&archive.stdout)
-        .expect("the archive is written");
-    assert!(extract.wait().expect("tar finishes").success(), "tar failed");
-}
-
-/// A package directory that no entry names would ship unauthenticated, so the
-/// manifest must list every one of them.
-#[test]
-fn every_package_directory_is_named_by_the_marketplace() {
-    let root = marketplace_root();
-    let listed: Vec<PathBuf> = manifest()
-        .packages
-        .iter()
-        .map(|entry| root.join(entry.path.as_str()))
-        .collect();
-
-    let mut found = Vec::new();
-    for kind in ["plugins", "batteries"] {
-        let directory = root.join(kind);
-        for entry in std::fs::read_dir(&directory).expect("the marketplace holds both package kinds") {
-            let path = entry.expect("the directory entry reads").path();
-            if path.join(appa_package::MANIFEST_FILE).is_file() {
-                found.push(path);
-            }
-        }
-    }
-
-    let unlisted: Vec<&Path> = found
-        .iter()
-        .filter(|path| !listed.contains(path))
-        .map(PathBuf::as_path)
-        .collect();
-    assert!(
-        unlisted.is_empty(),
-        "a package directory the marketplace does not name: {unlisted:?}"
-    );
+fn the_catalog_renders_from_every_package_directory() {
+    let listed = manifest();
+    assert!(listed.packages.iter().any(|entry| entry.kind == PackageKind::Plugin));
+    assert!(listed.packages.iter().any(|entry| entry.kind == PackageKind::Battery));
 }
 
 /// A battery that validates is a battery a deployment can include. The two
