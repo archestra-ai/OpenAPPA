@@ -39,7 +39,9 @@ pub(crate) fn valid_implementation_name(name: &str) -> bool {
 /// The stock in-process implementations, each of one kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stock {
-    /// `approve` — an authority that approves every call it is asked about.
+    /// `approve` — an authority that approves every call it is asked about. Its ruling is
+    /// known before it is asked, so the runtime obtains it at the block: a plan that asks only
+    /// such authorities is applied there, and the agent never sees the block.
     Approve,
     /// `redact-email` — a sanitizer replacing every email-like token in the body with a
     /// fixed placeholder. A deliberately simple scan (registration is a trust decision,
