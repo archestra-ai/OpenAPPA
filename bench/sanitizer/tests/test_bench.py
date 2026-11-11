@@ -9,19 +9,16 @@ import pytest
 from appa_sanitizer_bench import corpus, runner, scoring
 
 REPO = corpus.ROOT.parents[1]
-SOURCES = {
-    "strip-instructions": REPO / "integrations/kagent/demo/chart/files/demo.appa.toml",
-    "strip-secret-values": REPO / "integrations/kagent/demo/chart/files/demo.appa.toml",
-    "redact-for-public": REPO / "marketplace/plugins/claude-code/default.appa.toml",
-}
+CLAUDE_CODE_DEFAULT = REPO / "marketplace/plugins/claude-code/default.appa.toml"
 
 
-def test_every_sanitizer_is_declared_as_its_source_declares_it():
-    bench = tomllib.loads(corpus.POLICY.read_text())["policy"]["sanitizer"]
-    for entry in bench:
-        source = tomllib.loads(SOURCES[entry["name"]].read_text())["policy"]["sanitizer"]
-        (shipped,) = [s for s in source if s["name"] == entry["name"]]
-        assert {k: entry[k] for k in ("on", "hint", "permits")} == {k: shipped[k] for k in ("on", "hint", "permits")}
+def test_the_root_sanitizer_and_deployment_are_the_claude_code_defaults():
+    bench = tomllib.loads(corpus.POLICY.read_text())["policy"]
+    shipped = tomllib.loads(CLAUDE_CODE_DEFAULT.read_text())["policy"]
+    by_name = {entry["name"]: entry for entry in shipped["sanitizer"]}
+    for entry in bench["sanitizer"]:
+        assert entry == by_name[entry["name"]]
+    assert bench["deployment"] == shipped["deployment"]
 
 
 def test_the_corpus_loads_and_covers_every_sanitizer():
@@ -32,7 +29,7 @@ def test_the_corpus_loads_and_covers_every_sanitizer():
 
 def test_a_keep_span_absent_from_the_value_is_refused(tmp_path: Path):
     (tmp_path / "bad.toml").write_text(
-        '[[case]]\nid = "x"\nsanitizer = "strip-instructions"\nkind = "benign"\nbody = "abc"\nkeep = ["zzz"]\n'
+        '[[case]]\nid = "x"\nsanitizer = "coding.strip-instructions"\nkind = "benign"\nbody = "abc"\nkeep = ["zzz"]\n'
     )
     with pytest.raises(corpus.CorpusError, match="keep spans absent"):
         corpus.load(tmp_path)
@@ -145,7 +142,14 @@ def _cli(*args: str) -> subprocess.CompletedProcess:
 
 def test_a_selection_of_no_case_is_refused(tmp_path: Path):
     unknown = _cli(
-        "run", "--skip-build", "--arm", "identity", "--sanitizer", "strip-instruction", "--output", str(tmp_path / "a")
+        "run",
+        "--skip-build",
+        "--arm",
+        "identity",
+        "--sanitizer",
+        "coding.strip-instruction",
+        "--output",
+        str(tmp_path / "a"),
     )
     assert unknown.returncode != 0 and "unknown sanitizer" in unknown.stderr
     empty = _cli(

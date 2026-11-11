@@ -200,6 +200,9 @@ def main() -> None:
         "corpus_sha256": corpus.digest(cases),
         "cases": len(cases),
         "policy_sha256": hashlib.sha256(corpus.POLICY.read_bytes()).hexdigest(),
+        "batteries_sha256": {
+            include: hashlib.sha256(path.read_bytes()).hexdigest() for include, path in corpus.included().items()
+        },
     }
     (args.output / "run-config.json").write_text(json.dumps(config, indent=2) + "\n")
     summaries = [_headline(_run_arm(args, arm, cases, args.output)) for arm in arms]

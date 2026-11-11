@@ -22,7 +22,7 @@ import subprocess
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .corpus import POLICY, ROOT, Case, mask, sanitizers
+from .corpus import POLICY, ROOT, Case, included, mask, sanitizers
 
 REPO_ROOT = ROOT.parents[1]
 APPA_BIN = REPO_ROOT / "target" / "debug" / "appa"
@@ -70,10 +70,11 @@ print(json.dumps({"version": 1, "answer": {"body": consult["artifact"]["body"]}}
 
 
 def deployment(backend: Backend) -> str:
-    """The bench policy with `[externals]` binding every sanitizer it registers to `backend`.
+    """The bench policy with `[externals]` binding every sanitizer it composes to `backend`.
 
-    The runtime refuses a policy that names an unbound sanitizer, so a run that asks only some
-    sanitizers still binds them all."""
+    A run that asks only some sanitizers still binds them all, so every run is asked under the
+    same composed policy: a battery sanitizer nothing binds is left out of it, with the
+    confinements only it covered."""
     lines = [
         POLICY.read_text().rstrip(),
         "",
@@ -82,7 +83,7 @@ def deployment(backend: Backend) -> str:
         f"max_body_bytes = {backend.max_body_bytes}",
     ]
     for name in sanitizers():
-        lines += ["", f"[externals.sanitizers.{name}]"]
+        lines += ["", f"[externals.sanitizers.{_toml_string(name)}]"]
         if backend.builtin == "identity":
             lines.append(f"command = [{', '.join(_toml_string(part) for part in IDENTITY_COMMAND)}]")
         else:
@@ -141,17 +142,22 @@ def ask(
 ) -> list[dict]:
     """Every case asked `repeat` times; the raw answer rows, unmasked.
 
-    Writes `policy.toml`, `values.sha256` (the digest of the values fed on standard input),
-    and the masked `answers.jsonl` into `output`.
+    Writes `policy.toml` and the shipped batteries it includes, `values.sha256` (the digest of
+    the values fed on standard input), and the masked `answers.jsonl` into `output`.
     """
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     if backend.builtin == "identity":
         (output / IDENTITY_SCRIPT).write_text(IDENTITY_SANITIZER)
+    for include, shipped in included().items():
+        (output / include).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(shipped, output / include)
     (output / "policy.toml").write_text(deployment(backend))
     values = "".join(json.dumps(case.value()) + "\n" for case in cases)
     (output / "values.sha256").write_text(hashlib.sha256(values.encode()).hexdigest() + "\n")
-    env = {key: value for key, value in os.environ.items() if key != TOKEN_VARIABLE}
+    # The includes resolve in the run directory only: a batteries directory named in the
+    # environment would be searched first.
+    env = {key: value for key, value in os.environ.items() if key not in (TOKEN_VARIABLE, "APPA_BATTERIES_DIR")}
     if token is not None:
         env[TOKEN_VARIABLE] = token
     if backend.claude_dir is not None:

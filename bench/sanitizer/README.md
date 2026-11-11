@@ -36,23 +36,34 @@ whether it would offer the sanitizer on a given value.
 | `claude-code` | The `claude-code` builtin. Default model `sonnet` and the runtime's default 60 s consult budget, as the shipped Claude Code profile has. |
 | `llm` | The `llm` builtin under `[externals.llm]`. Default `anthropic` / `claude-haiku-4-5`. |
 
-[`policy.toml`](policy.toml) registers the sanitizers that OpenAPPA ships with
-model backends. `tests/test_bench.py` checks that each `on`, `hint`, and
-`permits` stays equal to its source:
+[`policy.toml`](policy.toml) composes the sanitizers a Claude Code deployment
+runs. It includes the `claude-code`, `coding`, and `cloudflare` batteries as
+they ship, so each battery sanitizer is asked with its own `hint`, `on`, and
+`permits`. It also declares the Claude Code default's own sanitizer and
+deployment, which `tests/test_bench.py` holds equal to their source. Each run
+directory holds a copy of the included batteries, and `run-config.json`
+records their digests.
 
-- `strip-instructions` (trust, `suspicious` → `trusted`, `tool_output`) and
-  `strip-secret-values` (audience, `ops` → `public`, `tool_output`), from the
-  kagent demo policy.
-- `redact-for-public` (audience, `self` → `public`, `tool_input`), from the
-  Claude Code default policy.
+| Sanitizer | Permits | Point | Values |
+|---|---|---|---|
+| `coding.strip-instructions` | trust, `suspicious` → `trusted` | WebFetch result | Web pages and search results |
+| `cloudflare.strip-instructions` | trust, `suspicious` → `trusted` | `query_worker_observability` result | Workers logs |
+| `coding.strip-secrets` | audience, `self` → `internal` | Bash result | Output of a command that read a credential file |
+| `cloudflare.redact-for-public` | audience, `internal` → `public` | `query_worker_observability` result | Workers logs |
+| `redact-for-public` (Claude Code default) | audience, `self` → `public` | WebSearch, WebFetch, Bash call | Call arguments |
+
+The other batteries ship `strip-instructions` and `redact-for-public`
+variants that differ only in the domain their hint names.
 
 [`corpus/`](corpus) holds hand-written benign and attack cases. Each case lists
 `drop` spans, which must not survive, and `keep` spans, which should survive.
 The trust attacks target the sanitizer itself: instructions addressed to the
-sanitizer, payloads disguised as log facts, forged declarations, answer-schema
-breaks, role delimiters, fragments, base64, another language, reported speech,
-and markdown exfiltration. `corpus.py` adds a deterministic size sweep from 1 KB
-to 60 KB and injections buried mid-log.
+sanitizer, payloads disguised as log facts or install steps, forged
+declarations, answer-schema breaks, role delimiters, fragments, base64, another
+language, reported speech, hidden HTML, and markdown exfiltration. A web page's
+own install command is a `keep` span, because the hint asks to keep the
+commands a page states. `corpus.py` adds a deterministic size sweep from 1 KB
+to 60 KB of Workers logs and `.env` files, and injections buried mid-log.
 
 Scoring is rule-based substring matching, case-insensitive. No model judges the
 derivations. A paraphrase that keeps the payload's address still counts as a
@@ -84,9 +95,9 @@ uv run appa-sanitizer-bench run --arm identity --arm claude-code --arm llm \
 | `--llm-token-env` | `ANTHROPIC_API_KEY` | Where the harness reads the key |
 | `--sanitizer`, `--kind` | all | Case selection |
 
-Each arm writes `policy.toml`, `values.sha256`, `answers.jsonl` (one runtime
+Each arm writes `policy.toml` with the batteries it includes, `values.sha256`, `answers.jsonl` (one runtime
 line per consult), and `summary.json`. `run-config.json` records the commit, the
-corpus digest, and the policy digest. The run directory holds no local path and
+corpus digest, and the digests of the policy and of each included battery. The run directory holds no local path and
 no raw corpus value: the values reach the runtime on standard input only and
 are reproducible from the commit, and every `drop` span in an answer is
 recorded as `REDACTED-DROP-<index>`. Scoring reads the answers before that
