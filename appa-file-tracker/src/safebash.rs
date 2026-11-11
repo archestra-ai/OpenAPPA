@@ -28,8 +28,8 @@ const STREAM_LIMIT: usize = 64 * 1024;
 pub const DESCRIPTION: &str = "Runs one shell command in a sandbox. The command can read only the files, \
     directories and Unix sockets listed in input_files (plus system directories such as /usr and /etc, the \
     directories on PATH and installed toolchains), write only the files and directories listed in output_files, and \
-    connect only to the hosts listed in network_hosts. Use absolute paths. Each output file is emptied before the \
-    command runs. An output written with a trailing / is a directory: the command reads what it holds and writes \
+    connect only to the hosts listed in network_hosts. Use absolute paths. An output file that exists is read as \
+    well, so a command may rewrite it. An output written with a trailing / is a directory: the command reads what it holds and writes \
     under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). A credential \
     file such as .env inside a declared directory stays hidden unless the call names it. Declare every file the \
     command reads or writes: any other file in your workspace, home or /tmp is hidden from it, so ls and find there \
@@ -83,12 +83,17 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
         .arg("--settings")
         .arg(&file.0)
         .arg("-c")
-        .arg(format!("{}{command}", emptying(&named)))
+        .arg(command)
         .env("TMPDIR", &runtime)
         .env("CLAUDE_CODE_TMPDIR", &temporary)
         .env_remove("CLAUDE_TMPDIR");
     for name in hidden_environment(&named) {
         sandbox.env_remove(name);
+    }
+    for (name, value) in identity() {
+        if std::env::var_os(name).is_none() {
+            sandbox.env(name, value);
+        }
     }
     if let Some(missing) = missing(config) {
         return Err(missing);
@@ -147,12 +152,12 @@ impl Drop for Removed {
 /// Code's built-in sandbox: the same filesystem and network settings SafeBash gives `srt`,
 /// in `tmpdir` the call's own temporary directory, which the preload removes when the call
 /// ends, and in `prelude` the lines the preload runs ahead of the command to point `TMPDIR`
-/// there and empty its outputs, as SafeBash does. A call that does not name all three lists,
+/// there and give git the person's identity. A call that does not name all three lists,
 /// or names an input that is not a file, a directory or a socket, is refused.
 ///
 /// A command the person types at the prompt (`typed`) reaches no hook, so nothing labels
 /// its result: it reads and writes the working directory, reaches no host, and sees no file
-/// that carries a label, so its result carries none either.
+/// whose label restricts its audience, so its result needs none.
 pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let role = ToolRole {
         name: "Bash".to_string(),
@@ -174,20 +179,21 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let mut settings = settings(config, &named, concealing)?;
     push(&mut settings["filesystem"]["allowWrite"], &temporary);
     settings["tmpdir"] = json!(temporary);
-    settings["prelude"] = json!(format!(
-        "export TMPDIR={}\n{}{}",
-        quoted(&temporary),
-        identity(),
-        emptying(&named)
-    ));
+    let identity: String = identity()
+        .into_iter()
+        .map(|(name, value)| {
+            let value = value.replace(['"', '\\', '$', '`'], "");
+            format!("export {name}=\"${{{name}:-{value}}}\"\n")
+        })
+        .collect();
+    settings["prelude"] = json!(format!("export TMPDIR={}\n{identity}", quoted(&temporary)));
     settings["hiddenEnvironment"] = json!(hidden_environment(&named));
     Ok(settings)
 }
 
 /// Check what a call names and create its absent outputs, so the sandbox can open each for
 /// writing: every input an existing file, directory or socket, every output a regular file,
-/// a directory, or absent. An existing output file keeps its content until the command
-/// starts — [`emptying`].
+/// a directory, or absent.
 fn prepare(named: &Named) -> Result<(), String> {
     for directory in &named.directories {
         std::fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
@@ -216,10 +222,10 @@ fn prepare(named: &Named) -> Result<(), String> {
         }
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
-        // A compiler or linker that writes into an existing file keeps its mode: a program
-        // built into a declared output is runnable.
+        // An absent output is created for the sandbox to open; the file it leaves is an
+        // ordinary one. A program a command builds is declared by its directory.
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o755);
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
         options
             .open(output)
             .map_err(|error| format!("{}: {error}", output.display()))?;
@@ -227,25 +233,9 @@ fn prepare(named: &Named) -> Result<(), String> {
     Ok(())
 }
 
-/// The shell line that empties a call's outputs, run inside the sandbox ahead of the command:
-/// an output is emptied only once the command has started, never by a call that was refused
-/// or could not start. The command's output then derives from its declared inputs alone.
-fn emptying(named: &Named) -> String {
-    let empties: Vec<String> = named
-        .writes
-        .iter()
-        .filter(|path| !named.directories.contains(path))
-        .map(|path| format!(": >| {}", quoted(path)))
-        .collect();
-    if empties.is_empty() {
-        return String::new();
-    }
-    format!("{{ {}; }} || exit 126\n", empties.join(" && "))
-}
-
-/// The lines that give git the person's name and email, which it reads from `~/.gitconfig`:
+/// The variables that give git the person's name and email, which it reads from `~/.gitconfig`:
 /// the file stays hidden, since it may hold credentials, and only the identity crosses.
-fn identity() -> String {
+fn identity() -> Vec<(&'static str, String)> {
     let setting = |key: &str| {
         Command::new("git")
             .args(["config", "--global", "--get", key])
@@ -257,21 +247,16 @@ fn identity() -> String {
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
             .filter(|value| !value.is_empty())
     };
-    let mut lines = String::new();
+    let mut found = Vec::new();
     for (key, names) in [
         ("user.name", ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]),
         ("user.email", ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"]),
     ] {
         if let Some(value) = setting(key) {
-            for name in names {
-                lines.push_str(&format!(
-                    "export {name}=\"${{{name}:-{}}}\"\n",
-                    value.replace(['"', '\\', '$', '`'], "")
-                ));
-            }
+            found.extend(names.map(|name| (name, value.clone())));
         }
     }
-    lines
+    found
 }
 
 fn quoted(path: &Path) -> String {

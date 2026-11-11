@@ -123,6 +123,18 @@ fn a_command_sees_only_what_it_declares() {
     );
     assert_eq!(std::fs::read_to_string(&input).unwrap(), "declared\n");
 
+    // An output that exists is read as well: a command that rewrites it, as `npm install`
+    // does `package.json`, starts from what it held.
+    let (text, failed) = safebash(
+        &config,
+        serde_json::json!({
+            "command": format!("echo \"$(cat {output}) kept\" > {output}", output = output.display()),
+            "input_files": [], "output_files": [output], "network_hosts": [],
+        }),
+    );
+    assert!(!failed, "{text}");
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "DECLARED kept\n");
+
     // A declared host is reached through the sandbox's proxy, while the temporary
     // directories stay hidden. Skipped where this machine cannot reach it either.
     let reachable = Command::new("curl")
@@ -154,8 +166,8 @@ fn a_command_sees_only_what_it_declares() {
 
 /// What `clappa`'s preload hands Claude Code's sandbox for one Bash call: the declared input
 /// alone readable inside the hidden home, working and temporary directories, the declared
-/// output alone writable and emptied, the declared host alone reachable, and nothing for a
-/// call that declares no lists.
+/// output alone writable with its content intact, the declared host alone reachable, and
+/// nothing for a call that declares no lists.
 #[test]
 fn a_bash_call_is_confined_to_what_it_declares() {
     let dir = tempfile::tempdir().unwrap();
@@ -256,12 +268,12 @@ fn a_bash_call_is_confined_to_what_it_declares() {
     assert_eq!(
         std::fs::read_to_string(&output).unwrap(),
         "stale\n",
-        "an output keeps its content until the command starts"
+        "an output keeps its content"
     );
     let prelude = answer["prelude"].as_str().unwrap();
     assert!(
-        prelude.contains(&format!(": >| '{}'", output.display())),
-        "the command empties its output first: {prelude}"
+        !prelude.contains(&output.display().to_string()),
+        "the command reads its output as it was: {prelude}"
     );
     assert!(
         prelude.starts_with(&format!("export TMPDIR='{temporary}'")),
@@ -273,8 +285,7 @@ fn a_bash_call_is_confined_to_what_it_declares() {
     assert!(!ok, "a call that declares no lists has no confinement");
 }
 
-/// A command that cannot start leaves every declared output exactly as it was: the outputs are
-/// emptied inside the sandbox, never by a call that did not run.
+/// A command that cannot start leaves every declared output exactly as it was.
 #[test]
 fn a_command_that_cannot_start_leaves_its_outputs_unchanged() {
     let dir = tempfile::tempdir().unwrap();

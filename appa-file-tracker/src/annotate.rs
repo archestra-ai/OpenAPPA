@@ -1,8 +1,8 @@
 //! The Annotator: one consult in, one annotation out. A read's `delta` is the file's label; an
 //! edit forwards its predecessor's label, so the label the edit publishes keeps it; a write
 //! forwards nothing, so the label it publishes replaces the one it destroys; SafeBash forwards
-//! the meet of the labels of the inputs it sees — a file in a declared directory whose label
-//! restricts its readers is hidden unless the call names it. The hosts SafeBash reaches add
+//! the meet of the labels of the inputs it sees — a file in a declared directory that a path
+//! rule gives a restricted audience is hidden unless the call names it. The hosts SafeBash reaches add
 //! nothing to its label: the policy judges them by the call's selector. Every file a call may
 //! change is reserved until its records settle it.
 
@@ -190,11 +190,13 @@ pub fn file_label(config: &Config, store: &Store, path: &Path, reads: &[PathBuf]
 /// Which files under a directory a command reads stay out of its sight unless it names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Concealing {
-    /// Each file whose label restricts who may read it: a model's call reads a credential
-    /// only by naming it, and a directory it lists carries only what it can see.
+    /// Each file a path rule gives a restricted audience, such as `.env`: a model's call
+    /// reads a credential only by naming it. A file labeled by the writes recorded on it
+    /// stays in sight and its label counts, so a session reads back what it wrote.
     Restricted,
-    /// Each labeled file: a command the person types at the prompt reaches no hook that
-    /// would label its result, so it sees only what carries no label.
+    /// Each file whose label restricts its audience: a command the person types at the
+    /// prompt reaches no hook that would label its result. A label that only lowers trust
+    /// does not hide a file, since the person who types the command vouches for it.
     Labeled,
 }
 
@@ -213,16 +215,12 @@ pub fn concealed(
         if hidden.iter().any(|hidden| covers(hidden, entry)) || reads.iter().any(|read| covers(entry, read)) {
             continue;
         }
-        let label = own_label(config, store, entry);
         let conceals = match concealing {
-            Concealing::Restricted => !label.audience.is_empty(),
-            Concealing::Labeled => {
-                !label.audience.is_empty()
-                    || label
-                        .trust
-                        .as_deref()
-                        .is_some_and(|trust| Some(trust) != store.ranks.highest())
-            }
+            Concealing::Restricted => config
+                .paths
+                .iter()
+                .any(|rule| rule.matches(entry) && rule.audience.is_some()),
+            Concealing::Labeled => !own_label(config, store, entry).audience.is_empty(),
         };
         if conceals {
             hidden.push(entry.clone());

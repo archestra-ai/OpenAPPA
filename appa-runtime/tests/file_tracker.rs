@@ -396,7 +396,7 @@ async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_b
 }
 
 /// A directory a command reads carries the labels of the files in it the command sees: a
-/// file whose label restricts its readers stays out of sight unless the call names it. A
+/// file a path rule gives a restricted audience stays out of sight unless the call names it. A
 /// directory a command writes passes the call's label to each file the command changes in it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_directory_carries_the_labels_of_what_it_holds_and_of_what_wrote_it() {
@@ -477,14 +477,29 @@ async fn a_directory_carries_the_labels_of_what_it_holds_and_of_what_wrote_it() 
     };
     assert!(feedback.contains("public -> self"), "{feedback}");
 
-    // Session C reads the whole project, which now holds that file as well as `.env`: both
-    // stay out of its sight, so it runs at once and the session stays public.
+    // Session C reads the whole project, which now holds that file as well as `.env`. `.env`
+    // stays out of its sight; the file the self build wrote stays in sight, so its label
+    // counts and the session narrows first.
     start(&runtime, "c").await;
+    let HookDecision::DenyCall { feedback, .. } = propose(
+        &runtime,
+        "c",
+        safebash(serde_json::json!([work]), serde_json::json!([])),
+    )
+    .await
+    else {
+        panic!("a directory holding a file the self build wrote narrows the session first")
+    };
+    assert!(feedback.contains("public -> self"), "{feedback}");
+
+    // Session D reads only the sources: neither file is under them, so it runs at once and
+    // the session stays public.
+    start(&runtime, "d").await;
     assert_eq!(
         propose(
             &runtime,
-            "c",
-            safebash(serde_json::json!([work]), serde_json::json!([]))
+            "d",
+            safebash(serde_json::json!([work.join("src")]), serde_json::json!([]))
         )
         .await,
         HookDecision::AllowCall { spawn: None }

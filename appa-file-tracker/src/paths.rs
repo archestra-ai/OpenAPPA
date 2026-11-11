@@ -4,7 +4,8 @@
 //!
 //! A `run` call may name a directory: in `input_files`, the files under it are its inputs; in
 //! `output_files`, written with a trailing `/` or already a directory, the call reads what the
-//! directory holds and writes under it, as an edit does a file.
+//! directory holds and writes under it, as an edit does a file. An output file that exists is
+//! read as well.
 
 use std::path::{Path, PathBuf};
 
@@ -148,10 +149,14 @@ pub fn named(role: &ToolRole, arguments: &serde_json::Value) -> Result<Named, St
                 .collect::<Result<_, _>>()?;
             let mut writes = Vec::new();
             let mut directories = Vec::new();
+            // An output that exists is read as well: a command that rewrites a file, as
+            // `npm install` does `package.json`, reads what it held, and its label counts.
             for written in list("output_files")? {
                 let path = resolve(&written)?;
                 if written.ends_with('/') || path.is_dir() {
                     directories.push(path.clone());
+                    reads.push(path.clone());
+                } else if path.symlink_metadata().is_ok() {
                     reads.push(path.clone());
                 }
                 writes.push(path);

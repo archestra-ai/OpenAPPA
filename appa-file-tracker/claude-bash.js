@@ -41,7 +41,7 @@ delete process.env.APPA_CLAUDE_BASH_SELFTEST;
 
 const GUIDANCE = `
 
-Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. Each output file is emptied before the command runs.`;
+Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/ or ~/.npm/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json.`;
 
 /** The exports of every embedded chunk whose source contains all of `needles`. */
 async function modulesWith(...needles) {
@@ -139,9 +139,29 @@ bash.prompt = async function (...args) {
 
 // --- one call: its confinement, required sandboxing, and its exit code as a result ---
 
-// The model reads a listing of a confined directory as the truth; say on every result that it is not.
-const HIDDEN =
-  "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing here is incomplete. To list a directory, declare it in input_files.";
+// What a confined command's failure means, said beside its result, so the model declares what
+// it lacked instead of concluding that the file is gone or the tool cannot work here.
+const HINTS = [
+  {
+    // A listing or a comparison against git shows only what the call declared.
+    command: /(^|[\s;&|(`])(ls|find|tree|fd|du|git\s+(status|diff|ls-files|add|clean|stash))\b|\*/,
+    text: "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing or git status here is incomplete. To see a directory, declare it in input_files.",
+  },
+  {
+    output: /Read-only file system|EROFS/,
+    text: "[appa] A write to a path not in output_files fails as a read-only file system. Declare the path in output_files, or its directory with a trailing /, such as node_modules/.vite/ or .git/.",
+  },
+  {
+    output: /Device or resource busy|EBUSY/,
+    text: "[appa] A declared output file is rewritten in place and cannot be replaced or removed. A command that replaces files, such as git checkout or sed -i, declares their directory with a trailing / in output_files.",
+  },
+];
+
+/** `shown` with the hints that `command` and everything it printed, `printed`, call for. */
+function hinted(command, shown, printed) {
+  const hints = HINTS.filter((hint) => (hint.command ? hint.command.test(command ?? "") : hint.output.test(printed)));
+  return [shown, ...hints.map((hint) => hint.text)].filter(Boolean).join("\n");
+}
 
 const calls = new AsyncLocalStorage();
 const wrapping = new AsyncLocalStorage();
@@ -150,7 +170,7 @@ const hostsByNonce = new Map();
 
 // The schema requires the three lists, so a call without them did not come from the model:
 // it is a command the person typed at the prompt, which reaches no hook. It runs in the
-// working directory, with no host, and sees no file that carries a label.
+// working directory, with no host, and sees no file whose label restricts its audience.
 function confinement(input) {
   const lists = [input?.input_files, input?.output_files, input?.network_hosts];
   const request = lists.every(Array.isArray) ? input : { command: input?.command, typed: true };
@@ -161,8 +181,35 @@ function confinement(input) {
   }
 }
 
+// Claude Code keeps a Bash call in the conversation rebuilt from the fields it knows, so the
+// model would see its earlier calls without the lists and copy them that way. The lists go
+// back onto the stored call, found by its tool_use id, before the next request carries it.
+function remember(input, context, rest) {
+  if (![input?.input_files, input?.output_files, input?.network_hosts].every(Array.isArray)) return;
+  const id = context?.toolUseId;
+  if (typeof id !== "string") return;
+  const messages = [...(Array.isArray(context?.messages) ? context.messages : []), ...rest];
+  for (const message of messages) {
+    const content = message?.message?.content;
+    if (!Array.isArray(content)) continue;
+    const block = content.find((block) => block?.type === "tool_use" && block.id === id);
+    if (!block || typeof block.input !== "object" || block.input === null) continue;
+    if (!Array.isArray(block.input.input_files)) {
+      // The lists first, as the schema orders them.
+      block.input = {
+        input_files: input.input_files,
+        output_files: input.output_files,
+        network_hosts: input.network_hosts,
+        ...block.input,
+      };
+    }
+    return;
+  }
+}
+
 const call = bash.call;
 bash.call = async function (input, context, ...rest) {
+  remember(input, context, rest);
   const confined = confinement(input);
   const nonce = crypto.randomBytes(16).toString("hex");
   hostsByNonce.set(nonce, confined.network.allowedDomains);
@@ -183,14 +230,14 @@ bash.call = async function (input, context, ...rest) {
     const result = await calls.run({ confined, nonce }, () => call.call(this, input, required, ...rest));
     backgrounded = result?.data?.backgroundTaskId !== undefined;
     if (!backgrounded && typeof result?.data?.stdout === "string") {
-      result.data.stdout = [result.data.stdout, HIDDEN].filter(Boolean).join("\n");
+      result.data.stdout = hinted(input?.command, result.data.stdout, `${result.data.stdout}\n${result.data.stderr ?? ""}`);
     }
     return result;
   } catch (error) {
     if (error?.name !== "ShellError") throw error;
     return {
       data: {
-        stdout: [error.stderr, `Exit code ${error.code}`, HIDDEN].filter(Boolean).join("\n"),
+        stdout: hinted(input?.command, [error.stderr, `Exit code ${error.code}`].filter(Boolean).join("\n"), String(error.stderr ?? "")),
         stderr: "",
         interrupted: Boolean(error.interrupted),
         isImage: false,
@@ -232,7 +279,7 @@ sandbox.wrapWithSandbox = async function (command, shell, custom, signal, option
     filesystem.allowWrite.push(cwdFile);
   }
   const perCall = { ...(custom ?? {}), filesystem, network: { ...(custom?.network ?? {}), ...current.confined.network } };
-  // The outputs are emptied inside the sandbox, once the command starts.
+  // The prelude points TMPDIR at the call's own directory and gives git the person's identity.
   const confinedCommand = (current.confined.prelude ?? "") + command;
   const wrapped = await wrapping.run(current, () =>
     wrap.call(this, confinedCommand, shell, perCall, signal, { ...(options ?? {}), commandId: current.nonce }),
