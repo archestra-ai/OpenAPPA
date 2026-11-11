@@ -41,7 +41,7 @@ delete process.env.APPA_CLAUDE_BASH_SELFTEST;
 
 const GUIDANCE = `
 
-Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com, and cargo needs index.crates.io and static.crates.io, not crates.io. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/, ~/.npm/ or ~/.cargo/registry/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json. A command that replaces a file rather than rewriting it, such as cargo add or sed -i, declares the file's directory with a trailing / instead.`;
+Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com, and cargo needs index.crates.io and static.crates.io, not crates.io. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/, ~/.npm/ or ~/.cargo/registry/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json, but not replace, rename or remove it: write through it, as sed 's/a/b/' f > "$TMPDIR/f" && cat "$TMPDIR/f" > f does in place of sed -i, and declare the file's directory with a trailing / only for a tool that always replaces the file, such as cargo add. The sandbox keeps a repository's config and hooks read-only, in .git, a bare <name>.git or .husky/, even in a declared directory, so git config, git remote add and the upstream that git push -u sets fail: leave those to the person, in their own terminal.`;
 
 /** The exports of every embedded chunk whose source contains all of `needles`. */
 async function modulesWith(...needles) {
@@ -176,12 +176,23 @@ const HINTS = [
     text: "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing or git status here is incomplete. To see a directory, declare it in input_files.",
   },
   {
-    output: /Read-only file system|EROFS/,
+    output: /^(?!.*config file).*(Read-only file system|EROFS)/m,
     text: "[appa] A write to a path not in output_files fails as a read-only file system. Declare the path in output_files, or its directory with a trailing /, such as node_modules/.vite/ or .git/.",
   },
   {
-    output: /Device or resource busy|EBUSY/,
-    text: "[appa] A declared output file is rewritten in place and cannot be replaced or removed. A command that replaces files, such as git checkout or sed -i, declares their directory with a trailing / in output_files. The sandbox never lets a command write some files, such as .git/config.",
+    // A repository's config stays read-only in a directory output: Claude Code's sandbox keeps
+    // it so below its working directory whatever its settings say, and the file-tracker's
+    // write guards everywhere else. A setting there such as core.hooksPath or core.fsmonitor
+    // runs code the next time the person runs git, outside any sandbox.
+    output: /could not (lock|write) config file/,
+    text: "[appa] The sandbox keeps .git/config read-only, even in a declared directory: a setting there, such as core.hooksPath or core.fsmonitor, would run code outside the sandbox. So git config and git remote add fail, and git push -u pushes but sets no upstream, whatever its \"set up to track\" line says. Tell the person the git command to run in their own terminal, such as git branch --set-upstream-to=origin/<branch>; a ! command at the prompt runs in the same sandbox.",
+  },
+  {
+    // Each declared output file is a mount of its own, so a rename over it or an unlink of
+    // it fails. Replacing it would need its directory writable, which lets the command
+    // create any other file there.
+    output: /^(?!.*config file).*(Device or resource busy|EBUSY)/m,
+    text: `[appa] A declared output file can be rewritten but not replaced, renamed or removed, so a tool that writes a temporary file and renames it over the output fails. Write through the file instead: sed 's/a/b/' f > "$TMPDIR/f" && cat "$TMPDIR/f" > f in place of sed -i, and git show HEAD:./f > f in place of git checkout -- f. For a tool that always replaces the file, such as cargo add, declare the file's directory with a trailing / in output_files.`,
   },
   {
     // What `ls -l` shows of /dev/null mounted where a protected file is absent (`PROTECTED`).
