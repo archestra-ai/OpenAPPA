@@ -66,7 +66,7 @@ def write_run_manifest(path, results) -> None:
     path.write_text(
         json.dumps(
             {
-                "format_version": 1,
+                "format_version": submission.RUN_MANIFEST_FORMAT_VERSION,
                 "run_digest": digest,
                 "config": config,
             }

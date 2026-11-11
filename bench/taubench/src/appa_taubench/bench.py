@@ -67,6 +67,7 @@ tau_llm_utils.to_litellm_messages = _standard_litellm_messages
 TAU2_REVISION = "93ee97b8303ce0e89e0ad17e6207591a1846f84b"
 PACKAGE_ROOT = Path(__file__).resolve().parent
 RUN_MANIFEST = "run-config.json"
+RUN_MANIFEST_FORMAT_VERSION = 2
 # The engine renders a redispatch remedy as `- Run <tool> first; it clears: <gap>.`
 REMEDY_ADVICE = re.compile(r"^\s*-\s*Run (.+?) first; it clears:", re.MULTILINE)
 PILOT_TASK_IDS = (
@@ -236,7 +237,7 @@ def ensure_run_manifest(output_dir: Path, spec: RunSpec) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / RUN_MANIFEST
     payload = {
-        "format_version": 2,
+        "format_version": RUN_MANIFEST_FORMAT_VERSION,
         "run_digest": spec.digest(),
         "config": spec.experiment_payload(),
         "execution": {"max_concurrency_values": [spec.max_concurrency]},
@@ -714,12 +715,11 @@ def _execute_bench(
     if stats.completions:
         logger.info(
             "OpenAPPA (new episodes): checks=%d allowed=%d policy_blocks=%d "
-            "sequential_blocks=%d hidden_completions=%d hidden_cost=$%.4f "
+            "hidden_completions=%d hidden_cost=$%.4f "
             "admitted_results=%d sealed_results=%d completions=%d",
             stats.checks,
             stats.allowed,
             stats.policy_blocks,
-            stats.sequential_blocks,
             stats.hidden_completions,
             stats.hidden_cost,
             stats.admitted_results,
