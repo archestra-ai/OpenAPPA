@@ -41,7 +41,7 @@ delete process.env.APPA_CLAUDE_BASH_SELFTEST;
 
 const GUIDANCE = `
 
-Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/ or ~/.npm/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json.`;
+Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, and go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/ or ~/.npm/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json.`;
 
 /** The exports of every embedded chunk whose source contains all of `needles`. */
 async function modulesWith(...needles) {
@@ -121,13 +121,41 @@ extended.parse = function (value, ...rest) {
 };
 Object.defineProperty(bash, "inputSchema", { get: () => extended, configurable: true });
 
+// Claude Code rewrites a command before `coerceInput` sees it: it drops a leading
+// `cd <working directory> && ` and unescapes `\\;`. The lists are found under the command
+// as the model wrote it.
+function declaredFor(command) {
+  if (typeof command !== "string") return undefined;
+  for (const [written, lists] of declared) {
+    const unescaped = written.replaceAll("\\\\;", "\\;");
+    const stripped = /^cd \S.* && /.test(unescaped) && unescaped.endsWith(` && ${command}`);
+    if (written === command || unescaped === command || stripped) {
+      declared.delete(written);
+      return lists;
+    }
+  }
+  return undefined;
+}
+
+// A model's call that names none of the lists reads the working directory and nothing else:
+// no output and no host, the least a command that looks at the project needs. Rejecting it
+// instead leaves a call without lists in the conversation, which the model copies.
+const DEFAULTED = new Set();
+const defaults = () => ({ input_files: [process.cwd()], output_files: [], network_hosts: [] });
+
+// Only the model's calls pass here; a command the person types reaches `call` directly.
 const coerce = bash.coerceInput;
 bash.coerceInput = function (input, ...rest) {
   const coerced = coerce ? coerce.call(this, input, ...rest) : undefined;
   const target = coerced?.input ?? { ...input };
-  const lists = declared.get(target.command);
-  if (!lists || Array.isArray(target.input_files)) return coerced;
-  declared.delete(target.command);
+  if (Array.isArray(target.input_files)) return coerced;
+  const named = [input?.input_files, input?.output_files, input?.network_hosts].some((list) => list !== undefined);
+  let lists = declaredFor(target.command);
+  if (!lists && named) return coerced;
+  if (!lists) {
+    lists = defaults();
+    DEFAULTED.add(target.command);
+  }
   Object.assign(target, lists);
   return { ...(coerced ?? {}), input: target, shapeClass: coerced?.shapeClass ?? "appa_declared_lists" };
 };
@@ -153,13 +181,18 @@ const HINTS = [
   },
   {
     output: /Device or resource busy|EBUSY/,
-    text: "[appa] A declared output file is rewritten in place and cannot be replaced or removed. A command that replaces files, such as git checkout or sed -i, declares their directory with a trailing / in output_files.",
+    text: "[appa] A declared output file is rewritten in place and cannot be replaced or removed. A command that replaces files, such as git checkout or sed -i, declares their directory with a trailing / in output_files. The sandbox never lets a command write some files, such as .git/config.",
   },
 ];
 
 /** `shown` with the hints that `command` and everything it printed, `printed`, call for. */
 function hinted(command, shown, printed) {
   const hints = HINTS.filter((hint) => (hint.command ? hint.command.test(command ?? "") : hint.output.test(printed)));
+  if (DEFAULTED.delete(command)) {
+    hints.unshift({
+      text: `[appa] This call named no lists, so it ran as ${JSON.stringify(defaults())}: it read the working directory, wrote nothing and reached no host. Name all three lists in every Bash call.`,
+    });
+  }
   return [shown, ...hints.map((hint) => hint.text)].filter(Boolean).join("\n");
 }
 
@@ -388,6 +421,12 @@ async function selfTest() {
   extended.parse({ command: "true", input_files: ["/a"], output_files: ["/b"], network_hosts: ["example.com"] });
   const coerced = bash.coerceInput({ command: "true" });
   check(coerced?.input?.input_files?.[0] === "/a", "the declared lists do not survive Claude Code's input normalizer");
+  extended.parse({ command: "cd /p && make", input_files: ["/p"], output_files: [], network_hosts: [] });
+  check(bash.coerceInput({ command: "make" })?.input?.input_files?.[0] === "/p", "the lists of a call that starts with cd are lost");
+  const bare = bash.coerceInput({ command: "ls" })?.input;
+  check(bare?.input_files?.[0] === process.cwd() && bare.network_hosts.length === 0, "a call without lists does not read the working directory alone");
+  DEFAULTED.delete("ls");
+  check(!bash.coerceInput({ command: "ls", input_files: [] })?.input?.output_files, "a call naming some lists is completed");
 
   // Outside a session the settings are not loaded yet; the sandbox reads them.
   const loader = (await modulesWith("enableConfigs")).find((module) => typeof module.enableConfigs === "function");
