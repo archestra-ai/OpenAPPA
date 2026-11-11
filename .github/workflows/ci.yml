@@ -49,7 +49,6 @@ jobs:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
           lockfiles: |
             Cargo.lock
-            appa-dogwood/Cargo.lock
             bench/corp-systems/Cargo.lock
 
   # Each job runs only when its own inputs change. Skipped required
