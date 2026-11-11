@@ -481,6 +481,43 @@ fn forwarded_content_bounds_the_recipients_a_call_reaches() {
     }
 }
 
+/// A log written before a release pinned `forwards` records none for a call that forwards, and
+/// replays. A record pinning forwards the declaration does not hold was never written here.
+#[test]
+fn a_release_recorded_without_its_forwards_replays() {
+    let forwards = Delta {
+        trust: Some(SUSPICIOUS),
+        audience: None,
+    };
+    let e = engine(vec![gated(
+        "mail_report",
+        Delta::NONE,
+        forwards,
+        LabelRequirements::default(),
+    )]);
+    let log = vec![opened(&e)];
+    let released =
+        appended_facts(proposed(&e, &log, "b1", nonce(), call("mail_report", json!({}))).expect("the batch decides"));
+    let pinning = |forwards: Delta| -> Vec<Fact> {
+        let mut released = released.clone();
+        let pinned = released.iter_mut().find_map(|fact| match fact {
+            Fact::DispatchOpened { terms, .. } => Some(terms),
+            _ => None,
+        });
+        pinned.expect("the call releases").forwards = forwards;
+        [log.clone(), released].concat()
+    };
+    assert_eq!(e.validate_replay(&[log.clone(), released.clone()].concat()), Ok(()));
+    assert_eq!(e.validate_replay(&pinning(Delta::NONE)), Ok(()));
+    assert_eq!(
+        e.validate_replay(&pinning(Delta {
+            trust: None,
+            audience: Some(DeltaAudience::Static(readers(&["a"]))),
+        })),
+        Err(TransitionRefusal::ForgedLabel)
+    );
+}
+
 #[test]
 fn attention_is_always_a_gap() {
     let tool = ToolAnnotation {

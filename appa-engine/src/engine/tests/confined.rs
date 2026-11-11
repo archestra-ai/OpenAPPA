@@ -473,6 +473,25 @@ fn a_sanitized_file_read_keeps_the_files_audience() {
     assert_eq!(e.validate_replay(&log), Ok(()));
 }
 
+/// The log an engine built before held messages had a record of their own wrote for
+/// [`released_file_fetch`], as it stored it: the held message pinned as a file read. It reads
+/// as the same held message, so the family replays.
+#[test]
+fn a_log_written_before_held_messages_were_recorded_replays() {
+    let e = file_redacting_engine();
+    let stored: Vec<Fact> =
+        serde_json::from_str(include_str!("fixtures/held_read_before_recorders.json")).expect("the stored log decodes");
+    assert_eq!(e.validate_replay(&stored), Ok(()));
+    assert_eq!(stored, released_file_fetch(&e, &insider_file()).0);
+}
+
+/// A held message was recorded as a file read. Any other file basis is no held message.
+#[test]
+fn a_file_basis_that_is_not_a_read_does_not_decode() {
+    let edited = include_str!("fixtures/held_read_before_recorders.json").replace(r#""Read":"#, r#""Edit":"#);
+    assert!(serde_json::from_str::<Vec<Fact>>(&edited).is_err());
+}
+
 /// A log that bound a file read's sanitizer, or derived its first hop, from the tool's
 /// declared output alone dropped the file's audience; replay refuses both records.
 #[test]

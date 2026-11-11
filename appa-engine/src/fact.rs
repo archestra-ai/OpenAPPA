@@ -351,6 +351,15 @@ impl ReleaseTerms {
             tags: contract.tags.clone(),
         }
     }
+
+    /// Whether these are the terms `contract` releases a call under. A log written before a
+    /// release pinned `forwards` records none, and the label that release publishes reads the
+    /// `forwards` its record holds, so such a record answers for its delta and tags.
+    pub(crate) fn release(&self, contract: &crate::contract::ToolAnnotation) -> bool {
+        self.delta == contract.delta
+            && self.tags == contract.tags
+            && (self.forwards.is_none() || self.forwards == contract.forwards)
+    }
 }
 
 #[cfg(test)]
@@ -417,7 +426,12 @@ pub enum Fact {
         /// byte-for-byte.
         annotation: Option<crate::contract::PinnedAnnotation>,
         /// The held peer message the call reads, where the runtime pinned one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            alias = "file_basis",
+            deserialize_with = "crate::value::recorded_held",
+            skip_serializing_if = "Option::is_none"
+        )]
         held: Option<crate::value::HeldMessage>,
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
