@@ -9,19 +9,25 @@
 //! Every rule here is about *liveness*: a record is not a state, and the state is what the
 //! records that follow it have not ended.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
-use appa_eventlog::{HostActor, HostObservation, HostRecord, Log};
+use appa_engine::value::TrajectoryId;
+use appa_eventlog::{
+    AheadAttempt, AheadOutcome, DeclaredArguments, EndKind, HostActor, HostObservation, HostRecord, InvocationNonce,
+    Log, StoredLabel,
+};
 use appa_runtime_api::{Actor, Adapter, Ruling, inventory::ToolInventory};
 
 use super::{EventError, PermitKey, Unvouched, acting_trajectory, inventory_refused};
 
-/// One actor's standing behind one key, and the ruling that rides it.
+/// One actor's standing behind one key, the ruling that rides it, and the position of the
+/// vouch that stands: an unnamed declaration is the attempt that seq names.
 #[derive(Debug, Clone, PartialEq)]
-struct LiveVouch {
-    actor: Actor,
-    ruling: Option<Ruling>,
+pub(crate) struct LiveVouch {
+    pub(crate) actor: Actor,
+    pub(crate) ruling: Option<Ruling>,
+    pub(crate) seq: u64,
 }
 
 /// One actor's execution of what a key names, and the moment after which a reader treats it
@@ -65,7 +71,20 @@ impl HostState {
                 | HostObservation::PeerAdmitted { .. }
                 | HostObservation::Launched { .. }
                 | HostObservation::LaunchMoved { .. }
-                | HostObservation::Aliased { .. } => {}
+                | HostObservation::Aliased { .. }
+                | HostObservation::AheadDeclared { spends: None, .. }
+                | HostObservation::AheadReserved { .. }
+                | HostObservation::AheadSettled { .. } => {}
+                // A daemon declaration consumes the vouch that authorized it, as a release does.
+                HostObservation::AheadDeclared {
+                    actor,
+                    spends: Some(spent),
+                    ..
+                } => {
+                    if let Some(key) = recorded_key(&spent.key) {
+                        state.end(&actor_of(actor), &key);
+                    }
+                }
                 HostObservation::Vouched { actor, key, ruling } => {
                     let (Some(key), actor) = (recorded_key(key), actor_of(actor)) else {
                         continue;
@@ -78,9 +97,17 @@ impl HostState {
                     if offer {
                         holders.clear();
                     }
+                    let seq = record.seq;
                     match holders.iter_mut().find(|holder| holder.actor == actor) {
-                        Some(holder) => holder.ruling = *ruling,
-                        None => holders.push(LiveVouch { actor, ruling: *ruling }),
+                        Some(holder) => {
+                            holder.ruling = *ruling;
+                            holder.seq = seq;
+                        }
+                        None => holders.push(LiveVouch {
+                            actor,
+                            ruling: *ruling,
+                            seq,
+                        }),
                     }
                 }
                 HostObservation::Released { actor, key } => {
@@ -97,7 +124,7 @@ impl HostState {
                     state.end(&actor, &key);
                     state.claims.insert(key, Claim { actor, until: *until });
                 }
-                HostObservation::TurnEnded { actor } => {
+                HostObservation::TurnEnded { actor, .. } => {
                     let ended = actor_of(actor);
                     state.vouches.retain(|_, holders| {
                         holders.retain(|holder| holder.actor != ended);
@@ -113,8 +140,13 @@ impl HostState {
     /// The trajectory vouched for this key, with the ruling its harness attached, or why no
     /// one answer names a caller.
     pub(crate) fn vouched(&self, key: &PermitKey) -> Result<(Actor, Option<Ruling>), Unvouched> {
+        self.standing(key).map(|only| (only.actor, only.ruling))
+    }
+
+    /// The one live vouch behind this key, or why no one answer names a caller.
+    pub(crate) fn standing(&self, key: &PermitKey) -> Result<LiveVouch, Unvouched> {
         match self.vouches.get(key).map(Vec::as_slice) {
-            Some([only]) => Ok((only.actor.clone(), only.ruling)),
+            Some([only]) => Ok(only.clone()),
             Some([]) | None => Err(Unvouched::Nobody),
             Some(_) => Err(Unvouched::Ambiguous),
         }
@@ -136,6 +168,165 @@ impl HostState {
         if self.claims.get(key).is_some_and(|claim| claim.actor == *actor) {
             self.claims.remove(key);
         }
+    }
+}
+
+/// One declaration made ahead of the spawn, as its record holds it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Declared {
+    pub(crate) actor: Actor,
+    pub(crate) arguments: DeclaredArguments,
+    pub(crate) label: StoredLabel,
+    pub(crate) seq: u64,
+}
+
+/// What one family's records say about returns declared ahead of a spawn. Keys are the acting
+/// trajectory, the child where the harness named one.
+#[derive(Debug, Default)]
+pub(crate) struct AheadState {
+    declared: BTreeMap<(TrajectoryId, AheadAttempt), Declared>,
+    /// The latest declaration of each trajectory: a newer one supersedes the one before it.
+    latest: BTreeMap<TrajectoryId, AheadAttempt>,
+    /// What each call's first record took: a declaration, or none.
+    assigned: BTreeMap<(TrajectoryId, String), Option<AheadAttempt>>,
+    /// The declarations a spawn took: a call's first record, or an invocation's reservation.
+    taken: BTreeSet<(TrajectoryId, AheadAttempt)>,
+    reserved: BTreeMap<(TrajectoryId, InvocationNonce), AheadAttempt>,
+    settled: BTreeMap<(TrajectoryId, AheadAttempt), AheadOutcome>,
+    /// The seq of each trajectory's latest turn boundary.
+    last_boundary: BTreeMap<TrajectoryId, u64>,
+}
+
+impl AheadState {
+    pub(crate) fn fold(records: &[HostRecord]) -> AheadState {
+        let mut state = AheadState::default();
+        for record in records {
+            match &record.observation {
+                HostObservation::AheadDeclared {
+                    actor,
+                    attempt,
+                    arguments,
+                    label,
+                    ..
+                } => {
+                    let trajectory = acting_trajectory(&actor_of(actor)).clone();
+                    state.latest.insert(trajectory.clone(), attempt.clone());
+                    state
+                        .declared
+                        .entry((trajectory, attempt.clone()))
+                        .or_insert_with(|| Declared {
+                            actor: actor_of(actor),
+                            arguments: arguments.clone(),
+                            label: label.clone(),
+                            seq: record.seq,
+                        });
+                }
+                HostObservation::CallBound {
+                    trajectory,
+                    call_id,
+                    ahead,
+                    ..
+                }
+                | HostObservation::CallDenied {
+                    trajectory,
+                    call_id,
+                    ahead,
+                    ..
+                } => state.assign(trajectory, call_id, ahead.as_ref()),
+                HostObservation::AheadReserved {
+                    trajectory,
+                    attempt,
+                    invocation,
+                } => {
+                    state
+                        .reserved
+                        .entry((trajectory.clone(), *invocation))
+                        .or_insert_with(|| attempt.clone());
+                    state.taken.insert((trajectory.clone(), attempt.clone()));
+                }
+                HostObservation::AheadSettled {
+                    trajectory,
+                    attempt,
+                    outcome,
+                } => {
+                    state
+                        .settled
+                        .entry((trajectory.clone(), attempt.clone()))
+                        .or_insert(*outcome);
+                }
+                HostObservation::TurnEnded {
+                    actor,
+                    end_kind: EndKind::Boundary,
+                } => {
+                    let trajectory = acting_trajectory(&actor_of(actor)).clone();
+                    state.last_boundary.insert(trajectory, record.seq);
+                }
+                _ => {}
+            }
+        }
+        state
+    }
+
+    /// Only a call's first record assigns: a retry reuses what it took, and a call first
+    /// recorded with none never takes a declaration later.
+    fn assign(&mut self, trajectory: &TrajectoryId, call_id: &str, ahead: Option<&AheadAttempt>) {
+        let call = (trajectory.clone(), call_id.to_string());
+        if self.assigned.contains_key(&call) {
+            return;
+        }
+        self.assigned.insert(call, ahead.cloned());
+        if let Some(attempt) = ahead {
+            self.taken.insert((trajectory.clone(), attempt.clone()));
+        }
+    }
+
+    /// Whether a turn boundary of `trajectory` landed after this declaration.
+    pub(crate) fn cleared(&self, trajectory: &TrajectoryId, declared: &Declared) -> bool {
+        self.last_boundary
+            .get(trajectory)
+            .is_some_and(|boundary| *boundary > declared.seq)
+    }
+
+    /// The declaration the trajectory's next spawn takes: its latest, unless a spawn already
+    /// took it or a turn boundary cleared it.
+    pub(crate) fn live(&self, trajectory: &TrajectoryId) -> Option<&AheadAttempt> {
+        let attempt = self.latest.get(trajectory)?;
+        let key = (trajectory.clone(), attempt.clone());
+        let declared = self.declared.get(&key)?;
+        (!self.taken.contains(&key) && !self.cleared(trajectory, declared)).then_some(attempt)
+    }
+
+    pub(crate) fn declared(&self, trajectory: &TrajectoryId, attempt: &AheadAttempt) -> Option<&Declared> {
+        self.declared.get(&(trajectory.clone(), attempt.clone()))
+    }
+
+    /// What this call's first record took: `None` before any record, `Some(None)` when it took
+    /// no declaration.
+    pub(crate) fn assignment(&self, trajectory: &TrajectoryId, call_id: &str) -> Option<Option<&AheadAttempt>> {
+        self.assigned
+            .get(&(trajectory.clone(), call_id.to_string()))
+            .map(Option::as_ref)
+    }
+
+    pub(crate) fn reservation_of(
+        &self,
+        trajectory: &TrajectoryId,
+        invocation: InvocationNonce,
+    ) -> Option<&AheadAttempt> {
+        self.reserved.get(&(trajectory.clone(), invocation))
+    }
+
+    pub(crate) fn settlement(&self, trajectory: &TrajectoryId, attempt: &AheadAttempt) -> Option<AheadOutcome> {
+        self.settled.get(&(trajectory.clone(), attempt.clone())).copied()
+    }
+
+    /// Every declaration this family made under `attempt`, whichever actor made it.
+    pub(crate) fn declared_by_attempt(&self, attempt: &AheadAttempt) -> Vec<&Declared> {
+        self.declared
+            .iter()
+            .filter(|((_, made), _)| made == attempt)
+            .map(|(_, declared)| declared)
+            .collect()
     }
 }
 
@@ -173,7 +364,7 @@ pub(crate) fn prompted(records: &[HostRecord], acting: &appa_engine::value::Traj
     let marks = |observation: &HostObservation| match observation {
         HostObservation::PromptSeen { actor }
         | HostObservation::PromptSettled { actor }
-        | HostObservation::TurnEnded { actor } => {
+        | HostObservation::TurnEnded { actor, .. } => {
             actor.child.as_ref().unwrap_or(&actor.root).as_str() == acting.as_str()
         }
         _ => false,

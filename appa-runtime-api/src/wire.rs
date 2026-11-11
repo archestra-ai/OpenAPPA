@@ -51,8 +51,8 @@ use serde_json::value::RawValue;
 use crate::{
     Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, LaunchStart, LaunchToken, OfferedInputSanitizer,
     OfferedRemedy, OfferedReturn, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall,
-    RefusalClass, Review, ReviewChannel, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind,
-    ToolOutcome, TrajectoryId,
+    RefusalClass, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef,
+    StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -1262,6 +1262,12 @@ pub enum UnsanitizedReturn {
 pub struct WireReview {
     pub offer_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Vec<ReviewScopeItem>>,
 }
 
 /// The runtime's answer on the wire.
@@ -1349,6 +1355,9 @@ impl WireDecision {
                         .map(|entry| WireReview {
                             offer_id: entry.offer.clone(),
                             text: entry.text.clone(),
+                            authority: entry.authority.clone(),
+                            hint: entry.hint.clone(),
+                            scope: entry.scope.clone(),
                         })
                         .collect(),
                 ),
@@ -1427,6 +1436,9 @@ impl WireDecision {
                     .map(|entry| Review {
                         offer: entry.offer_id,
                         text: entry.text,
+                        authority: entry.authority,
+                        hint: entry.hint,
+                        scope: entry.scope,
                     })
                     .collect(),
             },
@@ -1456,9 +1468,160 @@ impl WireDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ReviewNarrowing, ReviewRequirement};
 
     fn raw(json: &str) -> Box<RawValue> {
         RawValue::from_string(json.to_string()).expect("the fixture is JSON")
+    }
+
+    fn denied_with(review: Review) -> HookDecision {
+        HookDecision::DenyCall {
+            feedback: "no".to_string(),
+            offers: Vec::new(),
+            review: vec![review],
+        }
+    }
+
+    fn review_with(authority: Option<&str>, scope: Option<Vec<ReviewScopeItem>>) -> Review {
+        Review {
+            offer: "o1".to_string(),
+            text: "approve?".to_string(),
+            authority: authority.map(str::to_string),
+            hint: None,
+            scope,
+        }
+    }
+
+    fn round_trip(decision: &HookDecision) -> HookDecision {
+        let json = serde_json::to_string(&WireDecision::of(decision)).expect("serializes");
+        serde_json::from_str::<WireDecision>(&json)
+            .expect("reads")
+            .into_decision()
+            .expect("parses")
+    }
+
+    #[test]
+    fn a_review_entry_stored_before_the_typed_fields_reads_them_as_unknown() {
+        let stored: WireDecision = serde_json::from_str(
+            r#"{"protocol":1,"decision":"deny_call","feedback":"no","offers":[],"review":[{"offer_id":"o1","text":"approve?"}]}"#,
+        )
+        .expect("an old receipt reads");
+        assert_eq!(
+            stored.into_decision().expect("parses"),
+            denied_with(review_with(None, None))
+        );
+    }
+
+    #[test]
+    fn an_unknown_scope_and_an_empty_scope_differ_on_the_wire_and_after_a_round_trip() {
+        let unknown = denied_with(review_with(None, None));
+        let empty = denied_with(review_with(Some("operator"), Some(Vec::new())));
+        let entry = |decision: &HookDecision| {
+            serde_json::to_value(WireDecision::of(decision)).expect("serializes")["review"][0].clone()
+        };
+        assert_eq!(
+            entry(&unknown),
+            serde_json::json!({"offer_id": "o1", "text": "approve?"})
+        );
+        assert_eq!(
+            entry(&empty),
+            serde_json::json!({"offer_id": "o1", "text": "approve?", "authority": "operator", "scope": []})
+        );
+        assert_eq!(round_trip(&unknown), unknown);
+        assert_eq!(round_trip(&empty), empty);
+    }
+
+    #[test]
+    fn every_scope_kind_has_one_wire_shape_and_round_trips() {
+        let cases = [
+            (
+                ReviewScopeItem::Attention {
+                    mark: "signoff".to_string(),
+                    text: "attention: signoff".to_string(),
+                },
+                serde_json::json!({"kind": "attention", "mark": "signoff", "text": "attention: signoff"}),
+            ),
+            (
+                ReviewScopeItem::Requirement {
+                    requirement: ReviewRequirement::Trust {
+                        required: "trusted".to_string(),
+                    },
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "requirement", "requirement": {"type": "trust", "required": "trusted"}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Requirement {
+                    requirement: ReviewRequirement::PublicAudience,
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "requirement", "requirement": {"type": "public_audience"}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Requirement {
+                    requirement: ReviewRequirement::Audience {
+                        readers: vec!["alice".to_string()],
+                    },
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "requirement", "requirement": {"type": "audience", "readers": ["alice"]}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Requirement {
+                    requirement: ReviewRequirement::Effect {
+                        excludes: "deploy".to_string(),
+                    },
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "requirement", "requirement": {"type": "effect", "excludes": "deploy"}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Narrowing {
+                    narrowing: ReviewNarrowing::Blocked {
+                        tools: vec!["a".to_string()],
+                    },
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "narrowing", "narrowing": {"type": "blocked", "tools": ["a"]}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Narrowing {
+                    narrowing: ReviewNarrowing::SignOff {
+                        tools: vec!["a".to_string()],
+                    },
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "narrowing", "narrowing": {"type": "sign_off", "tools": ["a"]}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Narrowing {
+                    narrowing: ReviewNarrowing::RecipientChecked {
+                        tools: vec!["a".to_string()],
+                    },
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "narrowing", "narrowing": {"type": "recipient_checked", "tools": ["a"]}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Narrowing {
+                    narrowing: ReviewNarrowing::PerCall,
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "narrowing", "narrowing": {"type": "per_call"}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Narrowing {
+                    narrowing: ReviewNarrowing::Unjudged,
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "narrowing", "narrowing": {"type": "unjudged"}, "text": "t"}),
+            ),
+        ];
+        for (item, expected) in cases {
+            assert_eq!(serde_json::to_value(&item).expect("serializes"), expected);
+            let decision = denied_with(review_with(Some("operator"), Some(vec![item])));
+            assert_eq!(round_trip(&decision), decision);
+        }
     }
 
     /// The one raw spelling this fixture host gives the control tool,
@@ -2667,6 +2830,9 @@ mod tests {
                 review: vec![Review {
                     offer: "o1".to_string(),
                     text: "approve?".to_string(),
+                    authority: None,
+                    hint: None,
+                    scope: None,
                 }],
             },
             HookDecision::Block {

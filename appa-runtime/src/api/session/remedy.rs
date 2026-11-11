@@ -16,8 +16,9 @@ pub(super) fn remedy_presentation(
 }
 
 /// The reviews a harness with its own channel shows: one per offer whose plan consults a
-/// `hitl` authority, the texts of several such authorities joined. Authorities of every
-/// other backend answer themselves and need no person here.
+/// `hitl` authority, the texts of several such authorities joined. A joined review names no
+/// one authority, hint or scope, so those read as unknown and a host shows the whole text.
+/// Authorities of every other backend answer themselves and need no person here.
 pub(super) fn join_review(
     feedback: &[Feedback],
     externals: &crate::external::ExternalServices,
@@ -45,10 +46,16 @@ pub(in crate::api) fn reviews(
             Some(review) => {
                 review.text.push_str("\n\n");
                 review.text.push_str(&pending.text);
+                review.authority = None;
+                review.hint = None;
+                review.scope = None;
             }
             None => reviews.push(appa_runtime_api::Review {
                 offer: pending.offer.0.clone(),
                 text: pending.text.clone(),
+                authority: Some(pending.authority.clone()),
+                hint: pending.hint.clone(),
+                scope: Some(pending.scope.clone()),
             }),
         }
     }
@@ -75,12 +82,54 @@ impl Session {
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
     ) -> Result<RemedyDecision, EventError> {
+        self.on_remedy_at(
+            &offer,
+            arguments,
+            elicitation,
+            ruling,
+            Occasion::Remedy { offer: &offer },
+        )
+        .await
+    }
+
+    /// Apply the declaration a blocked spawn took through its block's offer. The application
+    /// is judged again where it commits, so one the family settled or moved meanwhile is
+    /// refused rather than applied.
+    pub(super) async fn apply_ahead(
+        &self,
+        offer: &OfferId,
+        claim: &AheadClaim<'_>,
+        arguments: RemedyArguments,
+    ) -> Result<RemedyDecision, EventError> {
+        self.on_remedy_at(offer, arguments, None, None, Occasion::AheadApply { offer, claim })
+            .await
+    }
+
+    async fn on_remedy_at(
+        &self,
+        offer: &OfferId,
+        arguments: RemedyArguments,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+        occasion: Occasion<'_>,
+    ) -> Result<RemedyDecision, EventError> {
         let trajectory = self.trajectory.clone();
         let decision = self
             .drive_with_evidence(
                 |context, evidence| {
-                    if context.offer_pursuer(&offer).as_ref() != Some(&trajectory) {
+                    if context.offer_pursuer(offer).as_ref() != Some(&trajectory) {
                         return Err(EventError::UnknownOffer);
+                    }
+                    if let Occasion::AheadApply { claim, .. } = occasion {
+                        let ahead = AheadState::fold(context.log.host_records());
+                        if ahead.settlement(&trajectory, claim.attempt).is_some()
+                            || !matches!(
+                                context.judge(&ahead, claim)?,
+                                Judgment::Apply { offer: judged, .. } if judged == *offer
+                            )
+                        {
+                            return Err(EventError::AheadMoved);
+                        }
                     }
                     Ok(EngineEvent::ExecuteOffer {
                         trajectory: trajectory.clone(),
@@ -93,7 +142,7 @@ impl Session {
                 },
                 elicitation,
                 ruling,
-                Occasion::Remedy { offer: &offer },
+                occasion,
             )
             .await?;
 
