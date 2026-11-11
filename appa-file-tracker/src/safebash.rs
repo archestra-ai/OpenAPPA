@@ -156,8 +156,9 @@ impl Drop for Removed {
 /// or names an input that is not a file, a directory or a socket, is refused.
 ///
 /// A command the person types at the prompt (`typed`) reaches no hook, so nothing labels
-/// its result: it reads and writes the working directory, reaches no host, and sees no file
-/// whose label restricts its audience, so its result needs none.
+/// its result: it reads and writes the working directory, reads the package managers'
+/// download caches, reaches no host, and sees no file whose label restricts its audience, so
+/// its result needs none.
 pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let role = ToolRole {
         name: "Bash".to_string(),
@@ -168,7 +169,9 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
         true => {
             let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
             let cwd = cwd.display().to_string();
-            let typed = json!({ "input_files": [cwd], "output_files": [format!("{cwd}/")], "network_hosts": [] });
+            let mut inputs = vec![cwd.clone()];
+            inputs.extend(caches().into_iter().map(|cache| cache.display().to_string()));
+            let typed = json!({ "input_files": inputs, "output_files": [format!("{cwd}/")], "network_hosts": [] });
             (named(&role, &typed)?, Concealing::Labeled)
         }
         false => (named(&role, arguments)?, Concealing::Restricted),
@@ -189,6 +192,32 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     settings["prelude"] = json!(format!("export TMPDIR={}\n{identity}", quoted(&temporary)));
     settings["hiddenEnvironment"] = json!(hidden_environment(&named));
     Ok(settings)
+}
+
+/// The download caches of the package managers a typed command uses offline, where they exist:
+/// Go's modules, cargo's registry and npm's cache. A typed command reaches no host, so
+/// without them a build that needs a downloaded dependency fails.
+fn caches() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let variable = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let gopath = std::env::var_os("GOPATH")
+        .and_then(|paths| std::env::split_paths(&paths).next())
+        .or_else(|| home.as_ref().map(|home| home.join("go")));
+    [
+        variable("GOMODCACHE").or_else(|| gopath.map(|gopath| gopath.join("pkg/mod"))),
+        variable("CARGO_HOME")
+            .or_else(|| home.as_ref().map(|home| home.join(".cargo")))
+            .map(|cargo| cargo.join("registry")),
+        home.as_ref().map(|home| home.join(".npm")),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|cache| cache.is_dir())
+    .collect()
 }
 
 /// Check what a call names and create its absent outputs, so the sandbox can open each for
@@ -467,7 +496,16 @@ pub fn toolchains(config: &Config) -> Vec<PathBuf> {
             .filter(|root| opens(root) && root.parent() != home.as_deref());
         found.push(root.map_or(dir.clone(), Path::to_path_buf));
     }
-    found.extend(config.sandbox.readable.iter().cloned());
+    // A readable path that holds the home, the working directory or the store, as a variable
+    // set to the home would name, opens nothing.
+    found.extend(
+        config
+            .sandbox
+            .readable
+            .iter()
+            .filter(|dir| !guarded.iter().any(|guard| covers(dir, guard)))
+            .cloned(),
+    );
     found.sort();
     found.dedup();
     found

@@ -344,7 +344,8 @@ role = "run"
 # they exist: package managers and language toolchains that keep their
 # programs outside the system. A deployment's `readable` adds to this list.
 # Each readable path is assumed to hold no credentials: a path rule hides no
-# file under it.
+# file under it. A path may start with `~/` or with `$NAME/`, the directory
+# an environment variable names.
 [sandbox]
 command = ["srt"]
 readable = [
@@ -352,7 +353,9 @@ readable = [
   "/opt/local",
   "/home/linuxbrew/.linuxbrew",
   "~/.cargo/bin",
+  "$CARGO_HOME/bin",
   "~/.rustup",
+  "$RUSTUP_HOME",
   "~/.local/bin",
   "~/.local/share/mise",
   "~/.config/mise",

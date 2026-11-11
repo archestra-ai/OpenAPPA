@@ -41,7 +41,7 @@ delete process.env.APPA_CLAUDE_BASH_SELFTEST;
 
 const GUIDANCE = `
 
-Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, and go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/ or ~/.npm/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json.`;
+Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com, and cargo needs index.crates.io and static.crates.io, not crates.io. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/, ~/.npm/ or ~/.cargo/registry/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json.`;
 
 /** The exports of every embedded chunk whose source contains all of `needles`. */
 async function modulesWith(...needles) {
@@ -104,8 +104,8 @@ try {
 } catch {}
 
 // Claude Code parses a streamed Bash call against the schema, then rebuilds the input from
-// the fields it knows and hands it to `coerceInput`. The lists cross that gap here, keyed by
-// the command they were declared with.
+// the fields it knows and hands it to `coerceInput`, once or more. The lists cross that gap
+// here, keyed by the command they were declared with; the latest few hundred are kept.
 const declared = new Map();
 const parse = extended.parse.bind(extended);
 extended.parse = function (value, ...rest) {
@@ -116,6 +116,7 @@ extended.parse = function (value, ...rest) {
       output_files: parsed.output_files,
       network_hosts: parsed.network_hosts,
     });
+    if (declared.size > 256) declared.delete(declared.keys().next().value);
   }
   return parsed;
 };
@@ -129,10 +130,7 @@ function declaredFor(command) {
   for (const [written, lists] of declared) {
     const unescaped = written.replaceAll("\\\\;", "\\;");
     const stripped = /^cd \S.* && /.test(unescaped) && unescaped.endsWith(` && ${command}`);
-    if (written === command || unescaped === command || stripped) {
-      declared.delete(written);
-      return lists;
-    }
+    if (written === command || unescaped === command || stripped) return lists;
   }
   return undefined;
 }
@@ -185,10 +183,13 @@ const HINTS = [
   },
 ];
 
-/** `shown` with the hints that `command` and everything it printed, `printed`, call for. */
-function hinted(command, shown, printed) {
+/** `shown` with the hints that `input` and everything it printed, `printed`, call for. */
+function hinted(input, shown, printed) {
+  const command = input?.command;
   const hints = HINTS.filter((hint) => (hint.command ? hint.command.test(command ?? "") : hint.output.test(printed)));
-  if (DEFAULTED.delete(command)) {
+  const ran = JSON.stringify([input?.input_files, input?.output_files, input?.network_hosts]);
+  const fallback = defaults();
+  if (DEFAULTED.delete(command) && ran === JSON.stringify([fallback.input_files, fallback.output_files, fallback.network_hosts])) {
     hints.unshift({
       text: `[appa] This call named no lists, so it ran as ${JSON.stringify(defaults())}: it read the working directory, wrote nothing and reached no host. Name all three lists in every Bash call.`,
     });
@@ -263,14 +264,14 @@ bash.call = async function (input, context, ...rest) {
     const result = await calls.run({ confined, nonce }, () => call.call(this, input, required, ...rest));
     backgrounded = result?.data?.backgroundTaskId !== undefined;
     if (!backgrounded && typeof result?.data?.stdout === "string") {
-      result.data.stdout = hinted(input?.command, result.data.stdout, `${result.data.stdout}\n${result.data.stderr ?? ""}`);
+      result.data.stdout = hinted(input, result.data.stdout, `${result.data.stdout}\n${result.data.stderr ?? ""}`);
     }
     return result;
   } catch (error) {
     if (error?.name !== "ShellError") throw error;
     return {
       data: {
-        stdout: hinted(input?.command, [error.stderr, `Exit code ${error.code}`].filter(Boolean).join("\n"), String(error.stderr ?? "")),
+        stdout: hinted(input, [error.stderr, `Exit code ${error.code}`].filter(Boolean).join("\n"), String(error.stderr ?? "")),
         stderr: "",
         interrupted: Boolean(error.interrupted),
         isImage: false,

@@ -134,7 +134,8 @@ impl Config {
     /// when it exists, over the built-in defaults. A file's path rules, tools and readable
     /// paths are added to the built-in ones — a path's label meets every rule that matches
     /// it — and its other settings replace the built-in ones. A readable path may start with
-    /// `~/`, the home directory; one that does not exist is dropped.
+    /// `~/`, the home directory, or `$NAME/`, the directory an environment variable names; one
+    /// that does not exist is dropped.
     pub fn load(explicit: Option<&Path>) -> Result<Config, String> {
         let defaults: RawConfig = toml::from_str(DEFAULT).expect("the built-in configuration parses");
         let file = explicit.map(Path::to_path_buf).or_else(|| {
@@ -170,9 +171,20 @@ impl Config {
             .readable
             .iter()
             .chain(&defaults.sandbox.readable)
-            .filter_map(|written| match written.strip_prefix("~/") {
-                Some(rest) => home.as_ref().map(|home| home.join(rest)),
-                None => Some(resolve(PathBuf::from(written))),
+            .filter_map(|written| {
+                if let Some(rest) = written.strip_prefix("~/") {
+                    return home.as_ref().map(|home| home.join(rest));
+                }
+                // `$NAME/rest` names a path under the directory an environment variable
+                // holds, and nothing when the variable is not set.
+                if let Some(variable) = written.strip_prefix('$') {
+                    let (name, rest) = variable.split_once('/').unwrap_or((variable, ""));
+                    let base = std::env::var_os(name)
+                        .map(PathBuf::from)
+                        .filter(|base| base.is_absolute())?;
+                    return Some(base.join(rest));
+                }
+                Some(resolve(PathBuf::from(written)))
             })
             .filter(|path| path.exists())
             .collect();
