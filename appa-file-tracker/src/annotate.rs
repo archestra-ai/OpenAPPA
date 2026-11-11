@@ -374,4 +374,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(answer["answer"]["requires"]["trust"], "high");
     }
+
+    /// The built-in rules make the Databricks CLI's token cache and Claude Code's settings
+    /// `self` data, whether Read or a shell command that declares the file reads them. A
+    /// file beside them that holds no credential, a skill, stays unlabeled.
+    #[test]
+    fn credential_files_beside_a_config_directory_read_as_self() {
+        let dir = std::env::temp_dir().join(format!("appa-ft-self-{}-{}", std::process::id(), now()));
+        let config_path = dir.join("file-tracker.toml");
+        let path = |relative: &str| {
+            let path = dir.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "{}\n").unwrap();
+            path.display().to_string()
+        };
+        let files = [
+            path("home/.databricks/token-cache.json"),
+            path("home/.claude/settings.json"),
+            path("project/.claude/settings.local.json"),
+        ];
+        let skill = path("project/.claude/skills/review/SKILL.md");
+        std::fs::write(
+            &config_path,
+            format!("store = {:?}\n", dir.join("store.json").display().to_string()),
+        )
+        .unwrap();
+        let config = Config::load(Some(&config_path)).unwrap();
+        let ask = |name: &str, arguments: Value| {
+            let request = json!({
+                "kind": "annotation",
+                "artifact": { "args": { "name": name, "arguments": arguments } },
+                "declaration": { "trust_ranks": ["suspicious", "trusted"], "audiences": ["self", "internal"] },
+            });
+            annotate(&config, &request).unwrap()["answer"]["delta"]["audience"].clone()
+        };
+        let read = |file: &str| ask("host/claude-code/Read", json!({ "file_path": file }));
+        let run = |file: &str| {
+            ask(
+                "host/claude-code/Bash",
+                json!({ "command": "cat", "input_files": [file], "output_files": [], "network_hosts": [] }),
+            )
+        };
+        let labels: Vec<_> = files.iter().map(|file| (read(file), run(file))).collect();
+        let unlabeled = (read(&skill), run(&skill));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (file, (read, run)) in files.iter().zip(labels) {
+            assert_eq!(read, json!(["self"]), "Read {file}");
+            assert_eq!(run, json!(["self"]), "Bash {file}");
+        }
+        assert_eq!(unlabeled, (Value::Null, Value::Null), "a skill holds no credential");
+    }
 }

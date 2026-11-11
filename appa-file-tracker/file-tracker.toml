@@ -90,6 +90,12 @@ pattern = "*/.databrickscfg"
 audience = ["self"]
 write_trust = "trusted"
 
+# The Databricks CLI's OAuth token cache, `token-cache.json`.
+[[path]]
+pattern = "*/.databricks/*"
+audience = ["self"]
+write_trust = "trusted"
+
 [[path]]
 pattern = "*/.vault-token"
 audience = ["self"]
@@ -297,8 +303,13 @@ pattern = "*/Library/LaunchAgents/*"
 write_trust = "trusted"
 
 # --- the files that can turn the protection off ask the person running the session ---
+# Claude Code's settings can also hold credentials in their `env` block, so they are `self`
+# data. A pattern cannot tell the home directory's settings from a project's, so a
+# project's committed `.claude/settings.json` is `self` too, and a command that declares
+# the project directory does not see it unless it names the file.
 [[path]]
 pattern = "*/.claude/settings*"
+audience = ["self"]
 write_attention = ["human-approval"]
 
 [[path]]
