@@ -347,13 +347,17 @@ pub enum RemedyRefusal {
     Superseded,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,
+    /// An annotator the plan consults gave no answer. This attempt committed no engine facts,
+    /// did not authorize the call, and did not consume the offer; a retry needs a fresh vouch,
+    /// which a control hook writes.
+    Unanswered { annotator: String, class: NoAnswerClass },
     /// Runtime storage or execution failure.
     Runtime { detail: String },
 }
 
 impl RemedyRefusal {
-    pub fn detail(&self) -> &str {
-        match self {
+    pub fn detail(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(match self {
             Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
             Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
             Self::Superseded => {
@@ -369,8 +373,14 @@ impl RemedyRefusal {
             Self::AmbiguousReplay => "more than one session declared under this attempt",
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
+            Self::Unanswered { annotator, class } => {
+                return std::borrow::Cow::Owned(format!(
+                    "annotator {annotator} gave no answer ({class}), so the plan was not applied. Nothing changed \
+                     and the offer still stands: call execute_remedy_plan again with the same offer id."
+                ));
+            }
             Self::Runtime { detail } => detail,
-        }
+        })
     }
 }
 
@@ -389,8 +399,8 @@ impl RemedyAttempt {
 /// What one whole `execute_remedy_plan` act produced: the engine's
 /// answer, or the control channel's own refusal. `Refused` covers a
 /// quote this trajectory pursues no offer for, an offer already
-/// executing, and a storage failure — never an engine decision, and it
-/// never says which.
+/// executing, an annotator that gave no answer, and a storage failure —
+/// never an engine decision.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
     Authorized { call: ProposedCall },
@@ -402,11 +412,17 @@ pub enum RemedyOutcome {
 
 impl From<EventError> for RemedyOutcome {
     fn from(error: EventError) -> RemedyOutcome {
-        RemedyOutcome::Refused {
-            reason: RemedyRefusal::Runtime {
+        let reason = match error {
+            EventError::AnnotationRefused {
+                annotator,
+                no_answer: Some(class),
+                ..
+            } => RemedyRefusal::Unanswered { annotator, class },
+            error => RemedyRefusal::Runtime {
                 detail: error.to_string(),
             },
-        }
+        };
+        RemedyOutcome::Refused { reason }
     }
 }
 
@@ -510,11 +526,11 @@ pub enum OpenError {
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
     UndeclaredExternal { kind: &'static str, name: String },
     #[error(
-        "annotator {0} names a builtin on its declaration and takes no [externals.annotators] binding — remove the binding"
+        "{kind} {name} names a builtin on its declaration and takes no [externals.{kind}s] binding — remove the binding"
     )]
-    BoundBuiltinAnnotator(String),
-    #[error("annotator {0} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
-    LlmNotConfigured(String),
+    BoundBuiltin { kind: &'static str, name: String },
+    #[error("{kind} {name} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
+    LlmNotConfigured { kind: &'static str, name: String },
     #[error(
         "{kind} {name} names the builtin \"{builtin}\", but [externals.{builtin}] cannot serve it: {missing}; set the key and reload"
     )]
@@ -526,9 +542,9 @@ pub enum OpenError {
     },
     #[error("annotator {0} names the builtin \"jev\", but the deployment declares no [externals.jev]")]
     JevNotConfigured(String),
-    #[error("annotator {0} names the builtin \"archestra\", but the host supplies no archestra endpoint")]
+    #[error("{kind} {name} names the builtin \"archestra\", but the host supplies no archestra endpoint")]
     #[cfg(feature = "archestra")]
-    ArchestraNotConfigured(String),
+    ArchestraNotConfigured { kind: &'static str, name: String },
     #[error("annotator {0} names the builtin \"jev\", which judges the complete call and takes no inputs")]
     JevInputs(String),
     #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
@@ -666,6 +682,9 @@ pub(crate) enum EventError {
         annotator: String,
         reason: String,
         next_action: &'static str,
+        /// Why the external Annotator gave no answer; `None` when the runtime refused an
+        /// answer it had.
+        no_answer: Option<NoAnswerClass>,
     },
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
@@ -684,7 +703,17 @@ pub(crate) enum EventError {
 }
 
 impl EventError {
+    /// The engine refused an annotation it had.
     fn annotation_refused(annotator: String, reason: String) -> Self {
+        Self::annotation(annotator, reason, None)
+    }
+
+    /// The external Annotator gave no answer.
+    fn annotation_unanswered(annotator: String, reason: &crate::external::NoAnswerReason) -> Self {
+        Self::annotation(annotator, reason.diagnostic(), Some(reason.into()))
+    }
+
+    fn annotation(annotator: String, reason: String, no_answer: Option<NoAnswerClass>) -> Self {
         let next_action = if annotator == "claude-code.undeclared-tool" {
             "; this tool has no exact policy contract; run /appa-guide to write rules for this tool"
         } else {
@@ -694,6 +723,7 @@ impl EventError {
             annotator,
             reason,
             next_action,
+            no_answer,
         }
     }
 
@@ -902,7 +932,21 @@ impl Deployment {
         naming: ToolNaming,
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config, naming)?;
-        validate_deployment(&policy, &config.externals)?;
+        // A sanitizer binding no declaration names is idle: a root binds the sanitizers of a
+        // battery it may install later. It stays in the composed config, but nothing here
+        // validates or builds it, so it cannot stop this deployment from opening.
+        // A binding of the reserved `attest-schema` is never idle: validation refuses it.
+        let declared: std::collections::BTreeSet<String> = policy
+            .registry_config()
+            .sanitizers
+            .iter()
+            .map(|sanitizer| sanitizer.name.as_str().to_string())
+            .collect();
+        let mut in_use = config.externals.clone();
+        in_use
+            .sanitizers
+            .retain(|name, _| declared.contains(name) || name == appa_engine::names::SanitizerName::ATTEST_SCHEMA);
+        validate_deployment(&policy, &in_use)?;
         let policy = match config.do_something {
             DoSomething::Refused => policy,
             DoSomething::Served => {
@@ -916,7 +960,18 @@ impl Deployment {
             .annotators()
             .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
             .collect();
-        let mut externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
+        // A Sanitizer naming a model builtin on its declaration is served by the same backend
+        // a binding naming that builtin resolves to.
+        let mut bindings = in_use;
+        bindings
+            .sanitizers
+            .extend(policy.sanitizer_builtins().map(|(name, builtin)| {
+                (
+                    name.as_str().to_string(),
+                    crate::config::Implementation::Builtin(builtin.wire_name().to_string()),
+                )
+            }));
+        let mut externals = ExternalServices::new(bindings, modules, annotator_builtins, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         externals.credential_store = config.credential_store.clone();
         Ok(Deployment {
@@ -3573,11 +3628,7 @@ impl Runtime {
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
             Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
             Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
-            Err(error) => RemedyOutcome::Refused {
-                reason: RemedyRefusal::Runtime {
-                    detail: error.to_string(),
-                },
-            },
+            Err(error) => error.into(),
         }
     }
 
@@ -4183,12 +4234,59 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
                 .to_string(),
         ));
     }
-    bound_exactly(
+    // A Sanitizer that names a model builtin on its declaration is served by the runtime,
+    // as such an Annotator is below: refused when it is also bound, or when the deployment
+    // declares no profile for it. Every other Sanitizer is bound exactly once.
+    let declared_builtins: std::collections::BTreeMap<&str, appa_policy::AnnotatorBuiltin> = policy
+        .sanitizer_builtins()
+        .map(|(name, builtin)| (name.as_str(), builtin))
+        .collect();
+    for (name, builtin) in &declared_builtins {
+        if externals.sanitizers.contains_key(*name) {
+            return Err(OpenError::BoundBuiltin {
+                kind: "sanitizer",
+                name: name.to_string(),
+            });
+        }
+        if *builtin == appa_policy::AnnotatorBuiltin::Llm && externals.llm.is_none() {
+            return Err(OpenError::LlmNotConfigured {
+                kind: "sanitizer",
+                name: name.to_string(),
+            });
+        }
+    }
+    // The host-supplied transport, named on a declaration or in a binding, opens only where
+    // the host supplies its endpoint.
+    #[cfg(feature = "archestra")]
+    if externals.archestra.is_none() {
+        let declared = declared_builtins
+            .iter()
+            .filter(|(_, builtin)| **builtin == appa_policy::AnnotatorBuiltin::Archestra)
+            .map(|(name, _)| name.to_string());
+        let bound = externals
+            .sanitizers
+            .iter()
+            .filter(|(_, bound)| {
+                matches!(bound, crate::config::Implementation::Builtin(named) if named == crate::config::ARCHESTRA_BUILTIN)
+            })
+            .map(|(name, _)| name.clone());
+        if let Some(name) = declared.chain(bound).next() {
+            return Err(OpenError::ArchestraNotConfigured {
+                kind: "sanitizer",
+                name,
+            });
+        }
+    }
+    // A binding with no declaration stays idle rather than refused, as an unreferenced
+    // audience source does: a root binds the sanitizers of the batteries it may include,
+    // and composition leaves out a battery's sanitizer the root does not bind.
+    no_unbound(
         "sanitizer",
         rc.sanitizers
             .iter()
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-            .map(|sanitizer| sanitizer.name.as_str()),
+            .map(|sanitizer| sanitizer.name.as_str())
+            .filter(|name| !declared_builtins.contains_key(name)),
         &externals.sanitizers,
     )?;
     // A declared builtin is served by the runtime itself, so it is refused when it is also
@@ -4203,18 +4301,27 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             continue;
         };
         if externals.annotators.contains_key(name) {
-            return Err(OpenError::BoundBuiltinAnnotator(name.to_string()));
+            return Err(OpenError::BoundBuiltin {
+                kind: "annotator",
+                name: name.to_string(),
+            });
         }
         match builtin {
             appa_policy::AnnotatorBuiltin::Llm if externals.llm.is_none() => {
-                return Err(OpenError::LlmNotConfigured(name.to_string()));
+                return Err(OpenError::LlmNotConfigured {
+                    kind: "annotator",
+                    name: name.to_string(),
+                });
             }
             appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
                 return Err(OpenError::JevNotConfigured(name.to_string()));
             }
             #[cfg(feature = "archestra")]
             appa_policy::AnnotatorBuiltin::Archestra if externals.archestra.is_none() => {
-                return Err(OpenError::ArchestraNotConfigured(name.to_string()));
+                return Err(OpenError::ArchestraNotConfigured {
+                    kind: "annotator",
+                    name: name.to_string(),
+                });
             }
             // Jev judges the complete call and answers the lowest or the highest rank.
             appa_policy::AnnotatorBuiltin::Jev if !binding.inputs.is_empty() => {
@@ -4268,6 +4375,10 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             .annotators()
             .filter(|(_, binding)| binding.builtin == Some(builtin))
             .map(|(name, _)| ("annotator", name.as_str()));
+        let sanitizers = policy
+            .sanitizer_builtins()
+            .filter(|(_, declared)| *declared == builtin)
+            .map(|(name, _)| ("sanitizer", name.as_str()));
         let bindings = [
             ("authority", &externals.authorities),
             ("sanitizer", &externals.sanitizers),
@@ -4276,7 +4387,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         .flat_map(|(kind, table)| table.iter().map(move |(name, bound)| (kind, name.as_str(), bound)))
         .filter(|(_, _, bound)| matches!(bound, Implementation::Builtin(named) if named == builtin.wire_name()))
         .map(|(kind, name, _)| (kind, name));
-        if let Some((kind, name)) = annotators.chain(bindings).next() {
+        if let Some((kind, name)) = annotators.chain(sanitizers).chain(bindings).next() {
             return Err(OpenError::ModelKeyMissing {
                 kind,
                 name: name.to_string(),
@@ -4857,7 +4968,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         bound.externals.annotators.insert("classifier".to_string(), endpoint());
         assert!(matches!(
             load(bound),
-            Err(OpenError::BoundBuiltinAnnotator(name)) if name == "classifier"
+            Err(OpenError::BoundBuiltin { kind: "annotator", name }) if name == "classifier"
         ));
     }
 
@@ -4883,7 +4994,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         assert!(matches!(
             load(claude_config(policy)),
-            Err(OpenError::LlmNotConfigured(name)) if name == "classifier"
+            Err(OpenError::LlmNotConfigured { kind: "annotator", name }) if name == "classifier"
         ));
         assert!(load(with_profile()).is_ok());
 
@@ -4891,7 +5002,77 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let runtime = Runtime::open(with_profile(), dir.path().join("appa.db"), None).expect("the deployment opens");
         assert!(matches!(
             runtime.reload(claude_config(policy)),
-            Err(OpenError::LlmNotConfigured(name)) if name == "classifier"
+            Err(OpenError::LlmNotConfigured { kind: "annotator", name }) if name == "classifier"
+        ));
+    }
+
+    /// A Sanitizer naming a model builtin on its declaration opens with no binding, is
+    /// refused beside one, and names `llm` only over a deployment declaring the profile.
+    #[test]
+    fn a_declared_sanitizer_builtin_opens_unbound_and_llm_needs_its_profile() {
+        let policy = |builtin: &str| {
+            format!(
+                r#"
+            [policy]
+            version = 2
+            [[policy.tool]]
+            name = "lookup"
+            delta = {{ trust = "suspicious" }}
+            tags = ["records"]
+            [[policy.sanitizer]]
+            name = "clean"
+            on = ["tool_output"]
+            builtin = "{builtin}"
+            tags = ["records"]
+            [policy.sanitizer.permits]
+            trust = {{ from = "suspicious", to = "trusted" }}
+            [policy.deployment]
+            confined_results = ["lookup"]
+        "#
+            )
+        };
+        assert!(load(claude_config(&policy("claude-code"))).is_ok());
+
+        let mut bound = claude_config(&policy("claude-code"));
+        bound.externals.sanitizers.insert(
+            "clean".to_string(),
+            crate::config::Implementation::Builtin("claude-code".to_string()),
+        );
+        assert!(matches!(
+            load(bound),
+            Err(OpenError::BoundBuiltin { kind: "sanitizer", name }) if name == "clean"
+        ));
+
+        assert!(matches!(
+            load(claude_config(&policy("llm"))),
+            Err(OpenError::LlmNotConfigured { kind: "sanitizer", name }) if name == "clean"
+        ));
+        assert!(
+            load(claude_config(&format!(
+                "{}\n[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n",
+                policy("llm")
+            )))
+            .is_ok()
+        );
+    }
+
+    /// A sanitizer binding no declaration names is idle, so a model key it cannot reach does
+    /// not stop the deployment from opening; once a declaration names it, the key is checked.
+    #[test]
+    fn an_idle_sanitizer_binding_does_not_block_opening() {
+        let externals = "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n\
+                         [externals.sanitizers.\"future.mask\"]\nbuiltin = \"llm\"\n";
+        let tool = "[[policy.tool]]\nname = \"post\"\ndelta = {}\ntags = [\"outbound\"]\n";
+        let declared = "[[policy.sanitizer]]\nname = \"future.mask\"\non = [\"tool_input\"]\ntags = [\"outbound\"]\n\
+                        [policy.sanitizer.permits]\naudience = { from = [\"internal\"], to = [\"public\"] }\n";
+        let document = |sanitizer: &str| format!("[policy]\nversion = 2\n{tool}{sanitizer}\n{externals}");
+        assert!(
+            load(claude_config(&document(""))).is_ok(),
+            "the idle binding is not validated"
+        );
+        assert!(matches!(
+            load(claude_config(&document(declared))),
+            Err(OpenError::ModelKeyMissing { kind: "sanitizer", name, .. }) if name == "future.mask"
         ));
     }
 

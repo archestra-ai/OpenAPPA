@@ -197,9 +197,10 @@ sandbox.wrapWithSandbox = async function (command, shell, custom, signal, option
     allowWrite: [...ours.allowWrite],
     denyWrite: [...(custom?.filesystem?.denyWrite ?? []), ...ours.denyWrite],
   };
-  // Claude Code's shell writes its working directory to a file of its own after the command.
-  const cwdFile = /pwd -P >\| (\/tmp\/claude-[^\s'"]+)/.exec(command)?.[1];
-  if (cwdFile) {
+  // Claude Code's shell writes its working directory to a file of its own after the command,
+  // so its suffix is the last match: an earlier one is the command's own text.
+  const cwdFile = [...command.matchAll(/pwd -P >\| (\/tmp\/claude-[^\s'"]+)/g)].at(-1)?.[1];
+  if (cwdFile && !cwdFile.split("/").includes("..")) {
     fs.mkdirSync(path.dirname(cwdFile), { recursive: true });
     fs.writeFileSync(cwdFile, "");
     filesystem.allowWrite.push(cwdFile);

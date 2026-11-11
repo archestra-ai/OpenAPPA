@@ -21,6 +21,20 @@ The GitHub battery covers the MCP server's default profile, repository, issue, p
 
 The battery does not include optional GitHub tools. Add rules to the root config before enabling Actions, Discussions, Gists, Projects, or security alerts.
 
+## Sanitizers
+
+When the deployment binds a sanitizer below, the battery confines the results of 26 reads that return text other people wrote and of `sub_issue_write`, which returns the parent issue; the target policies tag the same reads. A read that narrows the session then offers, beside the plain narrowing, each sanitizer below that the deployment binds, and the agent chooses. A chosen sanitizer runs a model on the confined result with the sanitizer's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+
+| Sanitizer | `permits` | Effect |
+|---|---|---|
+| `github.strip-instructions` | `trust`: `suspicious` → `trusted` | Removes every instruction from the result and keeps the data. The read does not lower the session's trust, so it adds no trust gap to a later call that requires `trusted` data. The audience does not change. |
+
+A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts. A sanitizer never clears a requirement, such as a review mark.
+
+The model for each sanitizer is configured in the deployment, not in the battery. A sanitizer runs only when the root config binds it under `[externals.sanitizers]`: for example `builtin = "llm"` with an `[externals.llm]` profile, `builtin = "claude-code"` where the `claude` CLI is installed, or a `url`. The default config of the Claude Code plugin binds every battery sanitizer to `claude-code`, so in `clappa` sessions it is active once the battery is installed. A sanitizer that the root does not bind is not offered, and the results that only it covers are not confined. The battery then decides as it would without sanitizers.
+
+APPA does not verify what the model removed: binding a sanitizer registers it as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tag offers no sanitizer. To change a sanitizer's hint, declare a `[[policy.sanitizer]]` with the same name in the root config. The root declaration replaces the battery's whole, so copy its `on`, `tags`, and `permits`.
+
 ## Audience source
 
 The audience source can build `self`, organization member, organization team, and repository collaborator audiences. The battery binds it, its two annotators, and its context provider; map `self` and `internal` onto it in the root config. The scripts read their token from `APPA_PROVIDER_GITHUB_TOKEN`, or from your GitHub CLI login (`gh auth login`) when the variable is unset; a token needs the `repo` and `read:org` scopes. `appa battery install github` names the variable and the fallback after it includes the battery. The scripts call `https://api.github.com`; set `GITHUB_API_URL` to a GitHub Enterprise Server's `/api/v3` root instead.
