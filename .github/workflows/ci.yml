@@ -49,6 +49,7 @@ jobs:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
           lockfiles: |
             Cargo.lock
+            appa-dogwood/Cargo.lock
             bench/corp-systems/Cargo.lock
 
   # Each job runs only when its own inputs change. Skipped required
@@ -135,6 +136,7 @@ jobs:
               - 'appa-adapter-opencode/**'
               - 'appa-adapter-kagent/**'
               - 'appa-adapter-claude-code/**'
+              - 'appa-dogwood/**'
               - 'appa-example-agent/**'
               - 'appa-agent-python/**'
               - 'website-chat-playground/**'
@@ -538,6 +540,12 @@ jobs:
       - name: Rust lint (runtime without the daemon feature)
         run: cargo clippy -p appa --lib --tests --no-default-features --locked -- -D warnings
 
+      # Outside the workspace, so the two commands above do not reach it.
+      - name: Rust formatting and lint (Dogwood plugin)
+        run: |
+          cargo fmt --manifest-path appa-dogwood/Cargo.toml --check
+          cargo clippy --manifest-path appa-dogwood/Cargo.toml --all-targets --locked -- -D warnings
+
   rust-tests:
     name: Rust Tests
     needs: [changes, cargo-release-age]
@@ -587,6 +595,10 @@ jobs:
       # checks a build without it refuses the builtin.
       - name: Rust tests (policy without the archestra builtin)
         run: cargo test -p appa-policy --locked
+
+      # Outside the workspace, so `--workspace` does not reach it.
+      - name: Rust tests (Dogwood plugin)
+        run: cargo test --manifest-path appa-dogwood/Cargo.toml --locked
 
       - name: Install the host schema
         run: psql "$OPENAPPA_TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f appa-eventlog/tests/fixtures/host_schema.sql

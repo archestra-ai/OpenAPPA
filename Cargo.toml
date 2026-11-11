@@ -6,7 +6,6 @@ members = [
     "appa-builtin",
     "appa-engine",
     "appa-file-tracker",
-    "appa-dogwood",
     "appa-package",
     "appa-eventlog",
     "appa-policy",
@@ -21,7 +20,7 @@ members = [
     "website-chat-playground",
     "bench/corp-agent",
 ]
-exclude = ["bench/corp-systems", "scripts/mixed-version"]
+exclude = ["appa-dogwood", "bench/corp-systems", "scripts/mixed-version"]
 
 [workspace.package]
 edition = "2024"

@@ -1,27 +1,32 @@
 [package]
 name = "appa-dogwood"
-version.workspace = true
-edition.workspace = true
+version = "0.42.0"
+edition = "2024"
 publish = false
 description = "OpenAPPA's Dogwood plugin: the Annotator and recorder that decide a tool call with Dogwood (and so Cedar) policies over the history of the calls it recorded."
 
-# Its own executable, not an `appa` subcommand: Dogwood brings the Cedar toolchain with it, and
-# the runtime binary does not carry that for deployments that never use it.
+# Standalone on purpose: out of the root workspace and its lockfile. cedar-policy-core
+# enables serde_json's `preserve_order`, and Cargo unifies features across a workspace
+# build, so as a member this crate would change how every other crate's JSON maps behave
+# under `cargo test --workspace` — not how `appa` ships. For the same reason the plugin is
+# its own executable, not an `appa` subcommand.
+[workspace]
+
 [[bin]]
 name = "appa-dogwood"
 path = "src/main.rs"
 
 [dependencies]
 dogwood-language = "=1.1.0"
-serde = { workspace = true }
-serde_json = { workspace = true }
-toml = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
 
 [dev-dependencies]
-appa-runtime = { workspace = true }
+appa-runtime = { package = "appa", path = "../appa-runtime", default-features = false }
 appa-runtime-api = { path = "../appa-runtime-api" }
 tempfile = "3"
-tokio = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
-[lints]
-workspace = true
+[lints.rust]
+dead_code = "deny"
