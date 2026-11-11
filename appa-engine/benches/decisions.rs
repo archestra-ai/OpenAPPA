@@ -70,6 +70,7 @@ fn engine() -> Engine {
         },
     };
     let officer = Authority {
+        except: Vec::new(),
         name: AuthorityName::new(OFFICER),
         mandate: Mandate {
             trust_ceiling: Some(TRUSTED),
