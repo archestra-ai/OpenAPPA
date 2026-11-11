@@ -32,40 +32,70 @@ pub(crate) enum ToolMatcher {
 /// policy identity. Non-emptiness is the constructor's invariant, so a matcher that would
 /// match every call vacuously cannot be built — that is what [`ToolMatcher::Bare`] is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct ArgumentPatterns(BTreeMap<String, Vec<PatternPart>>);
+pub(crate) struct ArgumentPatterns(BTreeMap<String, Pattern>);
 
 impl ArgumentPatterns {
     /// The clause that proves a conjunction holds at least one: a conjunction is built from
     /// it outwards, so the empty state has no constructor at all.
-    fn first(argument: String, pattern: Vec<PatternPart>) -> ArgumentPatterns {
+    fn first(argument: String, pattern: Pattern) -> ArgumentPatterns {
         ArgumentPatterns(BTreeMap::from([(argument, pattern)]))
     }
 
     /// Add a conjunct. `None` when `argument` is already declared: one argument carries one
     /// pattern, so a repeated name is an authoring mistake rather than a second conjunct.
-    fn and(&mut self, argument: String, pattern: Vec<PatternPart>) -> Option<()> {
+    fn and(&mut self, argument: String, pattern: Pattern) -> Option<()> {
         self.0.insert(argument, pattern).is_none().then_some(())
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// One clause's pattern: the alternatives `|` separates, of which a value matches any. The set
+/// is the normal form — alternation is commutative and idempotent, so `a|b`, `b|a` and `a|b|a`
+/// are one pattern and one policy identity. Only the clause parser builds one, and it ends
+/// every clause with an alternative, so a pattern is never empty.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Pattern(BTreeSet<Vec<PatternPart>>);
+
+impl Pattern {
+    fn matches(&self, value: &str) -> bool {
+        self.0.iter().any(|alternative| wildcard_matches(alternative, value))
+    }
+
+    fn scans(&self) -> bool {
+        self.0
+            .iter()
+            .any(|alternative| alternative.contains(&PatternPart::Wildcard))
+    }
+}
+
+/// A pattern with one alternative serializes as that alternative's parts: alternation adds
+/// nothing to the identity of a selector that does not use it.
+impl Serialize for Pattern {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0.first() {
+            Some(sole) if self.0.len() == 1 => sole.serialize(serializer),
+            _ => self.0.serialize(serializer),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) enum PatternPart {
     Literal(String),
     Wildcard,
 }
 
 impl ToolMatcher {
-    /// Every declared clause must match: the argument is a string whose value matches that
-    /// clause's pattern, or a non-empty array of strings that each match it. A missing
-    /// argument, an empty array, or any other value does not match.
+    /// Every declared clause must match: the argument is a string whose value matches one of
+    /// that clause's alternatives, or a non-empty array of strings that each match one. A
+    /// missing argument, an empty array, or any other value does not match.
     fn matches(&self, arguments: &serde_json::Value) -> bool {
         match self {
             ToolMatcher::Bare => true,
             ToolMatcher::Arguments(ArgumentPatterns(clauses)) => {
-                let string_matches = |pattern: &[PatternPart], value: &serde_json::Value| {
-                    value.as_str().is_some_and(|value| wildcard_matches(pattern, value))
+                let string_matches = |pattern: &Pattern, value: &serde_json::Value| {
+                    value.as_str().is_some_and(|value| pattern.matches(value))
                 };
-                let clause_matches = |(argument, pattern): (&String, &Vec<PatternPart>)| match arguments.get(argument) {
+                let clause_matches = |(argument, pattern): (&String, &Pattern)| match arguments.get(argument) {
                     Some(serde_json::Value::Array(values)) => {
                         !values.is_empty() && values.iter().all(|value| string_matches(pattern, value))
                     }
@@ -78,12 +108,14 @@ impl ToolMatcher {
                 // a long value at all. Argument-name order is the normal form the identity
                 // digest reads, never an evaluation order, and normalizing it is exactly what
                 // takes this choice away from the policy author.
-                let scans = |pattern: &[PatternPart]| pattern.contains(&PatternPart::Wildcard);
                 clauses
                     .iter()
-                    .filter(|(_, pattern)| !scans(pattern))
+                    .filter(|(_, pattern)| !pattern.scans())
                     .all(clause_matches)
-                    && clauses.iter().filter(|(_, pattern)| scans(pattern)).all(clause_matches)
+                    && clauses
+                        .iter()
+                        .filter(|(_, pattern)| pattern.scans())
+                        .all(clause_matches)
             }
         }
     }
@@ -99,7 +131,9 @@ impl ToolMatcher {
         clauses
             .into_iter()
             .flatten()
-            .filter(|(_, pattern)| wildcard_in_url_host(pattern))
+            .filter(|(_, Pattern(alternatives))| {
+                alternatives.iter().any(|alternative| wildcard_in_url_host(alternative))
+            })
             .map(|(argument, _)| argument.as_str())
     }
 }
@@ -153,9 +187,9 @@ fn push_wildcard(parts: &mut Vec<PatternPart>, literal: &mut String) {
 }
 
 /// One `argument:pattern` clause, read from `chars` up to an unescaped `,` or the selector's
-/// closing `)`. Returns the clause and whether the selector closed here; `None` is a
-/// malformed clause.
-fn parse_clause(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<(String, Vec<PatternPart>, bool)> {
+/// closing `)`; an unescaped `|` separates the pattern's alternatives. Returns the clause and
+/// whether the selector closed here; `None` is a malformed clause.
+fn parse_clause(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<(String, Pattern, bool)> {
     let mut argument = String::new();
     loop {
         match chars.next()? {
@@ -169,25 +203,31 @@ fn parse_clause(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<
     if argument.is_empty() {
         return None;
     }
+    let mut alternatives = BTreeSet::new();
     let mut parts = Vec::new();
     let mut literal = String::new();
+    let mut alternative = |parts: &mut Vec<PatternPart>, literal: &mut String| {
+        if !literal.is_empty() {
+            parts.push(PatternPart::Literal(std::mem::take(literal)));
+        }
+        alternatives.insert(std::mem::take(parts));
+    };
     let closed = loop {
         match chars.next()? {
             '*' => push_wildcard(&mut parts, &mut literal),
             '\\' => match chars.next()? {
-                next @ ('*' | ')' | '\\' | ',') => literal.push(next),
+                next @ ('*' | ')' | '\\' | ',' | '|') => literal.push(next),
                 _ => return None,
             },
+            '|' => alternative(&mut parts, &mut literal),
             ',' => break false,
             ')' if chars.peek().is_none() => break true,
             ')' => return None,
             other => literal.push(other),
         }
     };
-    if !literal.is_empty() {
-        parts.push(PatternPart::Literal(literal));
-    }
-    Some((argument, parts, closed))
+    alternative(&mut parts, &mut literal);
+    Some((argument, Pattern(alternatives), closed))
 }
 
 /// What a `[[tool]]` declaration names once its argument selector is split off: one tool by
@@ -292,20 +332,23 @@ pub fn respell_declaration(
     Ok(format!("{tool}({})", clauses.join(",")))
 }
 
-fn spell_pattern(pattern: &[PatternPart]) -> String {
-    pattern
-        .iter()
-        .map(|part| match part {
-            PatternPart::Wildcard => "*".to_string(),
-            PatternPart::Literal(literal) => literal
-                .chars()
-                .flat_map(|c| match c {
-                    '*' | ')' | '\\' | ',' => vec!['\\', c],
-                    c => vec![c],
-                })
-                .collect(),
-        })
-        .collect()
+fn spell_pattern(Pattern(alternatives): &Pattern) -> String {
+    let spell = |alternative: &Vec<PatternPart>| -> String {
+        alternative
+            .iter()
+            .map(|part| match part {
+                PatternPart::Wildcard => "*".to_string(),
+                PatternPart::Literal(literal) => literal
+                    .chars()
+                    .flat_map(|c| match c {
+                        '*' | ')' | '\\' | ',' | '|' => vec!['\\', c],
+                        c => vec![c],
+                    })
+                    .collect(),
+            })
+            .collect()
+    };
+    alternatives.iter().map(spell).collect::<Vec<_>>().join("|")
 }
 
 /// The arguments of an authored declaration name whose pattern puts `*` inside a URL host. A
@@ -3054,6 +3097,7 @@ mod tests {
             flagged("fetch(url:https://github.com/*,mirror:http://*.example/*)"),
             ["mirror"]
         );
+        assert_eq!(flagged("fetch(url:https://github.com/*|https://*.example/*)"), ["url"]);
     }
 
     #[test]
@@ -3066,6 +3110,7 @@ mod tests {
             (r"read(path:\*)", "*", "x", false),
             (r"read(path:\))", ")", "x", false),
             (r"read(path:\\)", "\\", "x", false),
+            (r"read(path:a\|b)", "a|b", "a", false),
             ("read(path:a(b:c)", "a(b:c", "x", false),
         ] {
             let matcher = parsed(pattern).expect("the selector is valid");
@@ -3110,6 +3155,50 @@ mod tests {
         let platform = parsed("edit(teams:platform-*)").expect("the selector is valid");
         assert!(platform.matches(&teams(serde_json::json!(["platform-a", "platform-b"]))));
         assert!(!platform.matches(&teams(serde_json::json!(["platform-a", "sales"]))));
+    }
+
+    /// `|` separates alternatives: a string matches when it matches any of them, and a list
+    /// when every entry matches one, not necessarily the same one. The case is PyPI, whose
+    /// installs reach `pypi.org` and `files.pythonhosted.org` in one call.
+    #[test]
+    fn a_value_matches_a_pattern_when_it_matches_any_alternative() {
+        let parsed = |name| parse_tool_selector(name).map(|(_, matcher)| matcher);
+        let hosts = |value: serde_json::Value| serde_json::json!({ "network_hosts": value });
+        let pypi = parsed("bash(network_hosts:pypi.org|files.pythonhosted.org)").expect("the selector is valid");
+        assert!(pypi.matches(&hosts(serde_json::json!("pypi.org"))));
+        assert!(pypi.matches(&hosts(serde_json::json!("files.pythonhosted.org"))));
+        assert!(pypi.matches(&hosts(serde_json::json!(["pypi.org", "files.pythonhosted.org"]))));
+        assert!(pypi.matches(&hosts(serde_json::json!(["files.pythonhosted.org", "pypi.org"]))));
+        assert!(
+            !pypi.matches(&hosts(serde_json::json!(["pypi.org", "evil.example"]))),
+            "one foreign entry takes the list out"
+        );
+        assert!(!pypi.matches(&hosts(serde_json::json!("upload.pypi.org"))));
+        assert!(
+            !pypi.matches(&hosts(serde_json::json!("pypi.org|files.pythonhosted.org"))),
+            "each alternative matches the full value"
+        );
+        assert!(!pypi.matches(&hosts(serde_json::json!([]))));
+
+        // Each alternative carries its own wildcards, and a later clause still conjoins.
+        let wild = parsed("fetch(host:*.golang.org|*.crates.io,port:443)").expect("the selector is valid");
+        assert!(wild.matches(&serde_json::json!({ "host": "proxy.golang.org", "port": "443" })));
+        assert!(wild.matches(&serde_json::json!({ "host": "index.crates.io", "port": "443" })));
+        assert!(!wild.matches(&serde_json::json!({ "host": "crates.io", "port": "443" })));
+        assert!(!wild.matches(&serde_json::json!({ "host": "index.crates.io", "port": "80" })));
+
+        // An empty alternative matches the empty string, as an empty pattern does.
+        let optional = parsed("read(mode:|ro)").expect("an empty alternative is valid");
+        assert!(optional.matches(&serde_json::json!({ "mode": "" })));
+        assert!(optional.matches(&serde_json::json!({ "mode": "ro" })));
+        assert!(!optional.matches(&serde_json::json!({ "mode": "rw" })));
+
+        // Alternation is commutative and idempotent, so these spellings are one matcher, and
+        // a repeated alternative is the pattern without it.
+        assert_eq!(parsed("t(a:x|y)").unwrap(), parsed("t(a:y|x)").unwrap());
+        assert_eq!(parsed("t(a:x|y|x)").unwrap(), parsed("t(a:x|y)").unwrap());
+        assert_eq!(parsed("t(a:x|x)").unwrap(), parsed("t(a:x)").unwrap());
+        assert_ne!(parsed("t(a:x|y)").unwrap(), parsed("t(a:x)").unwrap());
     }
 
     /// The conjunction: a selector may name several arguments, and a call is selected only
@@ -3208,12 +3297,14 @@ mod tests {
     #[test]
     fn a_respelled_selector_matches_the_renamed_arguments_of_the_same_call() {
         let arguments = BTreeMap::from([("command".to_string(), "cmd".to_string())]);
-        let authored = r"tool/coding/shell(command:*a\*b\)c\\d\,e*)";
+        let authored = r"tool/coding/shell(command:*a\*b\)c\\d\,e\|f*|git push*)";
         let respelled = respell_declaration(authored, "host/codex/exec", &arguments).unwrap();
         let (name, matcher) = parse_tool_selector(&respelled).unwrap();
         assert_eq!(name, ContractName::Named(ToolName::new("host/codex/exec")));
-        let value = r"x a*b)c\d,e y";
+        let value = r"x a*b)c\d,e|f y";
         assert!(matcher.matches(&serde_json::json!({ "cmd": value })));
+        assert!(matcher.matches(&serde_json::json!({ "cmd": "git push origin" })));
+        assert!(!matcher.matches(&serde_json::json!({ "cmd": "x a*b)c\\d,e" })));
         assert!(!matcher.matches(&serde_json::json!({ "command": value })));
         let (_, original) = parse_tool_selector(authored).unwrap();
         assert!(original.matches(&serde_json::json!({ "command": value })));

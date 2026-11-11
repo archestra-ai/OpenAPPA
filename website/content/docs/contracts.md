@@ -218,9 +218,23 @@ Use `*` to match any sequence of characters, including an empty sequence:
 
 `*` also matches `/`, `?` and `#`. Do not put it inside a URL host: `https://*.example.com/*` also matches `https://attacker.test/?x=.example.com/`. End each host with `/` and list each subdomain, as in `https://docs.example.com/*`. OpenAPPA logs a warning at load for a pattern with `*` inside a URL host.
 
+#### Match one of several values
+
+Use `|` to separate alternatives in a pattern. A string matches when it matches one alternative. An array matches when every element matches an alternative, and different elements can match different alternatives. Each alternative must match the full value and can contain `*`.
+
+A Python package install connects to two PyPI hosts. This contract selects an `install` call whose `hosts` array holds only those hosts, in any combination:
+
+```toml
+[[policy.tool]]
+name = "install(hosts:pypi.org|files.pythonhosted.org)"
+delta = {}
+```
+
+A call whose `hosts` also holds `evil.example` does not match, because that element matches no alternative. Name each host exactly when a wildcard would also cover hosts that other people control.
+
 #### Match special characters literally
 
-Some characters have a special meaning in a selector. For example, `*` matches any text, and a comma separates argument conditions.
+Some characters have a special meaning in a selector. For example, `*` matches any text, `|` separates alternatives, and a comma separates argument conditions.
 
 To match the character itself, put a backslash before it:
 
@@ -240,6 +254,8 @@ delta = {}
 ```
 
 The backslash tells OpenAPPA that the comma belongs to the query value. It does not separate two argument conditions.
+
+To match a vertical bar, write `\|`. For example, `search(query:a\|b)` matches only the query `a|b`.
 
 Use single quotes around the name to preserve backslashes as written. If you use double quotes, TOML requires each backslash to be doubled. These two lines mean the same thing:
 
