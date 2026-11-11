@@ -25,6 +25,7 @@ COPY appa-example-agent appa-example-agent
 COPY appa-agent-python appa-agent-python
 COPY appa-engine appa-engine
 COPY appa-file-tracker appa-file-tracker
+COPY appa-dogwood appa-dogwood
 COPY appa-package appa-package
 COPY appa-policy appa-policy
 COPY appa-runtime appa-runtime
