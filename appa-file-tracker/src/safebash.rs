@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::annotate::{Concealing, concealed, guarded};
+use crate::annotate::{Concealing, concealed, guarded, recorded_label};
 use crate::config::{Config, Role, ToolRole};
 use crate::paths::{Named, covers, named, tree};
 use crate::store::Locked;
@@ -30,7 +30,9 @@ pub const DESCRIPTION: &str = "Runs one shell command in a sandbox. The command 
     directories on PATH and installed toolchains), write only the files and directories listed in output_files, and \
     connect only to the hosts listed in network_hosts. Use absolute paths. An output file that exists is read as \
     well, so a command may rewrite it. An output written with a trailing / is a directory: the command reads what it holds and writes \
-    under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). A credential \
+    under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). A command that \
+    reaches a Go, cargo or npm registry keeps what it downloads in that package manager's cache, which every later \
+    command reads without declaring it. A credential \
     file such as .env inside a declared directory stays hidden unless the call names it. Declare every file the \
     command reads or writes: any other file in your workspace, home or /tmp is hidden from it, so ls and find there \
     show only what the call declares. $TMPDIR is a private directory for this call alone, removed when it ends. To \
@@ -156,9 +158,8 @@ impl Drop for Removed {
 /// or names an input that is not a file, a directory or a socket, is refused.
 ///
 /// A command the person types at the prompt (`typed`) reaches no hook, so nothing labels
-/// its result: it reads and writes the working directory, reads the package managers'
-/// download caches, reaches no host, and sees no file whose label restricts its audience, so
-/// its result needs none.
+/// its result: it reads and writes the working directory, reaches no host, and sees no file
+/// whose label restricts its audience, so its result needs none.
 pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let role = ToolRole {
         name: "Bash".to_string(),
@@ -169,9 +170,7 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
         true => {
             let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
             let cwd = cwd.display().to_string();
-            let mut inputs = vec![cwd.clone()];
-            inputs.extend(caches().into_iter().map(|cache| cache.display().to_string()));
-            let typed = json!({ "input_files": inputs, "output_files": [format!("{cwd}/")], "network_hosts": [] });
+            let typed = json!({ "input_files": [cwd], "output_files": [format!("{cwd}/")], "network_hosts": [] });
             (named(&role, &typed)?, Concealing::Labeled)
         }
         false => (named(&role, arguments)?, Concealing::Restricted),
@@ -192,32 +191,6 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     settings["prelude"] = json!(format!("export TMPDIR={}\n{identity}", quoted(&temporary)));
     settings["hiddenEnvironment"] = json!(hidden_environment(&named));
     Ok(settings)
-}
-
-/// The download caches of the package managers a typed command uses offline, where they exist:
-/// Go's modules, cargo's registry and npm's cache. A typed command reaches no host, so
-/// without them a build that needs a downloaded dependency fails.
-fn caches() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let variable = |name: &str| {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|path| path.is_absolute())
-    };
-    let gopath = std::env::var_os("GOPATH")
-        .and_then(|paths| std::env::split_paths(&paths).next())
-        .or_else(|| home.as_ref().map(|home| home.join("go")));
-    [
-        variable("GOMODCACHE").or_else(|| gopath.map(|gopath| gopath.join("pkg/mod"))),
-        variable("CARGO_HOME")
-            .or_else(|| home.as_ref().map(|home| home.join(".cargo")))
-            .map(|cargo| cargo.join("registry")),
-        home.as_ref().map(|home| home.join(".npm")),
-    ]
-    .into_iter()
-    .flatten()
-    .filter(|cache| cache.is_dir())
-    .collect()
 }
 
 /// Check what a call names and create its absent outputs, so the sandbox can open each for
@@ -379,6 +352,11 @@ const SYSTEM: &[&str] = &[
     "/private",
 ];
 
+/// How many files recorded with a label that a call reads uncounted a toolchain or a download
+/// cache may hold and still open to it: each is hidden by a mount of its own, and the sandbox
+/// takes a bounded number of them.
+const TOOLCHAIN_HOLES: usize = 500;
+
 /// The system directories a credential can live in, walked for the files a path rule labels.
 const SYSTEM_CONFIGURATION: &[&str] = &["/etc", "/run", "/private/etc"];
 
@@ -460,11 +438,12 @@ fn outside_the_system(root: impl IntoIterator<Item = (PathBuf, bool)>) -> Vec<Pa
 
 /// The directories a command reads beside its inputs and the system: the directories on
 /// `PATH`, the installed toolchain each `bin` among them belongs to — a Go, Python or Node
-/// installation reads its own library beside its programs — and `[sandbox] readable`. Each
-/// is assumed to hold no credentials. A directory that is the home or the working directory,
-/// holds one of them or the store, or lies under the working directory is not opened, and
-/// neither is a directory directly under the home, such as `~/.cargo`, which holds the
-/// person's own configuration beside the programs.
+/// installation reads its own library beside its programs — `[sandbox] readable`, and the
+/// package managers' download caches that exist. Each is assumed to hold no credentials and
+/// no instructions: no path rule applies under it. A directory that is the home or the
+/// working directory, holds one of them or the store, or lies under the working directory is
+/// not opened, and neither is a directory directly under the home, such as `~/.cargo`, which
+/// holds the person's own configuration beside the programs.
 pub fn toolchains(config: &Config) -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let cwd = std::env::current_dir().ok();
@@ -496,15 +475,17 @@ pub fn toolchains(config: &Config) -> Vec<PathBuf> {
             .filter(|root| opens(root) && root.parent() != home.as_deref());
         found.push(root.map_or(dir.clone(), Path::to_path_buf));
     }
-    // A readable path that holds the home, the working directory or the store, as a variable
-    // set to the home would name, opens nothing.
+    // A readable path or a cache that holds the home, the working directory or the store, as
+    // a variable set to the home would name, opens nothing.
+    let caches = crate::paths::caches().into_iter().map(|(cache, _)| cache);
     found.extend(
         config
             .sandbox
             .readable
             .iter()
-            .filter(|dir| !guarded.iter().any(|guard| covers(dir, guard)))
-            .cloned(),
+            .cloned()
+            .chain(caches.filter(|cache| cache.is_dir()))
+            .filter(|dir| !guarded.iter().any(|guard| covers(dir, guard))),
     );
     found.sort();
     found.dedup();
@@ -533,9 +514,10 @@ fn around(root: &Path, holes: &[PathBuf]) -> Vec<PathBuf> {
 /// The sandbox settings for one call. Reads are hidden everywhere but the system — every
 /// other top-level directory, and within the system's reach home, the working directory, the
 /// temporary directories, every socket and labeled file under `/etc` and `/run`, and every
-/// file the store has recorded — and reopened for the inputs, the toolchains and `[sandbox]
-/// readable` alone. Within a directory the call reads, what [`concealed`] names stays hidden
-/// unless the call names it, so the command sees exactly what the annotation labeled. Writes
+/// file the store has recorded with a label — and reopened for the inputs, the toolchains,
+/// `[sandbox] readable` and the download caches alone. Within a directory the call reads,
+/// what [`concealed`] names stays hidden unless the call names it, so the command sees
+/// exactly what the annotation labeled. Writes
 /// are allowed to the outputs alone, and within a directory output not to what [`guarded`]
 /// keeps. The proxy admits the declared hosts alone, and a command connects to the sockets
 /// it declares alone.
@@ -576,17 +558,31 @@ fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Va
     hidden.extend(std::env::current_dir().ok());
     let store_dir = config.store.parent().map(Path::to_path_buf);
     hidden.extend(store_dir.clone());
-    hidden.extend(store.files.keys().filter(|path| !declared(path)).cloned());
+    // A recorded file the call does not declare carries a label no annotation counted: it is
+    // hidden unless its label is one `concealing` lets a command read uncounted, so a
+    // toolchain or a download cache shows what recorded writes left there unlabeled.
+    let unseen: Vec<PathBuf> = store
+        .files
+        .iter()
+        .filter(|(path, recorded)| !declared(path) && concealing.hides(&recorded.label, &store.ranks))
+        .map(|(path, _)| path.clone())
+        .collect();
+    // A toolchain opens to a call that does not declare it around each such file in it, a
+    // mount each, so one that holds more than [`TOOLCHAIN_HOLES`] stays closed, and so does
+    // one under a recorded directory whose label it hides.
+    let closed = |toolchain: &PathBuf| {
+        concealing.hides(&recorded_label(store, toolchain), &store.ranks)
+            || unseen.iter().filter(|path| covers(toolchain, path)).count() > TOOLCHAIN_HOLES
+    };
 
     let toolchains = toolchains(config);
+    let covered = |path: &PathBuf| toolchains.iter().any(|toolchain| covers(toolchain, path));
     let mut secret = Vec::new();
-    for read in named.reads.iter().filter(|read| read.is_dir()) {
-        if !toolchains.iter().any(|toolchain| covers(toolchain, read)) {
-            secret.extend(concealed(config, store, &tree(read)?, &named.reads, concealing));
-        }
+    for read in named.reads.iter().filter(|read| read.is_dir() && !covered(read)) {
+        secret.extend(concealed(config, store, &tree(read)?, &named.reads, concealing));
     }
     let mut kept = Vec::new();
-    for directory in &named.directories {
+    for directory in named.directories.iter().filter(|directory| !covered(directory)) {
         kept.extend(guarded(config, &tree(directory)?, &named.writes));
     }
     // A read directory is opened around what it conceals and around the outputs in it, which
@@ -598,7 +594,29 @@ fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Va
         .filter(|read| !named.writes.contains(read))
         .flat_map(|read| around(read, &holes))
         .collect();
-    readable.extend(toolchains);
+    // Nor does a toolchain open that another call, whose records have not settled, may be
+    // writing, and a download cache the call writes without declaring it is written only
+    // where it opens.
+    readable.extend(
+        toolchains
+            .iter()
+            .filter(|toolchain| {
+                let writes = named
+                    .writes
+                    .iter()
+                    .any(|write| covers(toolchain, write) || covers(write, toolchain));
+                !closed(toolchain) && (writes || store.holder(toolchain).is_none())
+            })
+            .cloned(),
+    );
+    readable.sort();
+    readable.dedup();
+    let writable: Vec<&PathBuf> = named
+        .writes
+        .iter()
+        .filter(|write| named.reads.contains(write) || !named.directories.contains(write) || !closed(write))
+        .collect();
+    hidden.extend(unseen);
     hidden.extend(secret);
     let mut unwritable = vec![PathBuf::from("/tmp/claude")];
     unwritable.extend(kept);
@@ -618,7 +636,7 @@ fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Va
         "filesystem": {
             "denyRead": hidden,
             "allowRead": readable,
-            "allowWrite": named.writes,
+            "allowWrite": writable,
             "denyWrite": unwritable,
         },
         "network": network,
@@ -723,5 +741,101 @@ mod tests {
             outside_the_system(listing),
             ["/opt", "/srv", "/home", "/data", "/var"].map(PathBuf::from).to_vec()
         );
+    }
+
+    /// A cache full of files that path rules match, such as a crate's test certificates and
+    /// `.env` examples, opens as one mount for every kind of call, declared or not: a typed
+    /// command once got a mount around each such file, past what bubblewrap accepts. Only a
+    /// file a recorded write labeled stays hidden from a call that does not declare the
+    /// cache, and a call that declares it carries that label; a cache holding more such
+    /// files than the sandbox takes mounts stays closed instead.
+    #[test]
+    fn a_cache_opens_whole_and_hides_only_what_was_recorded_with_a_label() {
+        use crate::label::{Label, Ranks};
+        use crate::store::{Recorded, version};
+        let dir = unique("appa-ft-cache");
+        let cache = dir.join("cache");
+        for index in 0..500 {
+            let tests = cache.join(format!("crate-{index}/tests"));
+            std::fs::create_dir_all(&tests).unwrap();
+            std::fs::write(tests.join("cert.pem"), "test certificate").unwrap();
+            std::fs::write(cache.join(format!("crate-{index}/.env.example")), "KEY=example").unwrap();
+        }
+        let config_path = dir.join("file-tracker.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "store = {:?}\n[sandbox]\nreadable = [{:?}]\n",
+                dir.join("store.json").display().to_string(),
+                cache.display().to_string()
+            ),
+        )
+        .unwrap();
+        let config = Config::load(Some(&config_path)).unwrap();
+        let (private, public) = (cache.join("crate-0/private.txt"), cache.join("crate-1/public.txt"));
+        let mut locked = Locked::open(&config.store).unwrap();
+        locked.store.ranks = Ranks(vec!["suspicious".to_string(), "trusted".to_string()]);
+        for (path, audience) in [(&private, vec![vec!["self".to_string()]]), (&public, vec![])] {
+            std::fs::write(path, "downloaded").unwrap();
+            let label = Label {
+                trust: Some("trusted".to_string()),
+                audience,
+            };
+            let version = version(path);
+            locked.store.files.insert(path.clone(), Recorded { label, version });
+        }
+        locked.save().unwrap();
+
+        let under = |settings: &Value, list: &str| -> Vec<PathBuf> {
+            let paths = settings["filesystem"][list].as_array().unwrap().iter();
+            paths
+                .map(|path| PathBuf::from(path.as_str().unwrap()))
+                .filter(|path| covers(&cache, path))
+                .collect()
+        };
+        let calls = [
+            (json!({ "command": "true", "typed": true }), vec![private.clone()]),
+            (
+                json!({ "input_files": [], "output_files": [], "network_hosts": [] }),
+                vec![private.clone()],
+            ),
+            (
+                json!({ "input_files": [cache], "output_files": [], "network_hosts": [] }),
+                vec![],
+            ),
+        ];
+        for (call, hidden) in calls {
+            let settings = sandbox(&config, &call).unwrap();
+            let _ = std::fs::remove_dir_all(settings["tmpdir"].as_str().unwrap());
+            assert_eq!(under(&settings, "allowRead"), std::slice::from_ref(&cache), "{call}");
+            assert_eq!(under(&settings, "denyRead"), hidden, "{call}");
+        }
+
+        let request = json!({
+            "kind": "annotation",
+            "artifact": { "args": {
+                "name": "host/claude-code/Bash",
+                "arguments": { "command": "true", "input_files": [cache], "output_files": [], "network_hosts": [] },
+            }},
+            "declaration": { "trust_ranks": ["suspicious", "trusted"], "audiences": ["self"] },
+        });
+        let answer = crate::annotate::annotate(&config, &request).unwrap();
+        assert_eq!(answer["answer"]["delta"]["audience"], json!(["self"]));
+
+        // Past the mounts a cache may take, it stays closed to a call that does not declare it.
+        let mut locked = Locked::open(&config.store).unwrap();
+        for index in 0..TOOLCHAIN_HOLES {
+            let recorded = locked.store.files[&private].clone();
+            locked
+                .store
+                .files
+                .insert(cache.join(format!("crate-{index}/more")), recorded);
+        }
+        locked.save().unwrap();
+        let call = json!({ "input_files": [], "output_files": [], "network_hosts": [] });
+        let settings = sandbox(&config, &call).unwrap();
+        let _ = std::fs::remove_dir_all(settings["tmpdir"].as_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(under(&settings, "allowRead"), Vec::<PathBuf>::new());
     }
 }

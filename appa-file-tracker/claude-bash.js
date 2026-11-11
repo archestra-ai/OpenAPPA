@@ -41,7 +41,7 @@ delete process.env.APPA_CLAUDE_BASH_SELFTEST;
 
 const GUIDANCE = `
 
-Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com, and cargo needs index.crates.io and static.crates.io, not crates.io. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/, ~/.npm/ or ~/.cargo/registry/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json, but not replace, rename or remove it: write through it, as sed 's/a/b/' f > "$TMPDIR/f" && cat "$TMPDIR/f" > f does in place of sed -i, and declare the file's directory with a trailing / only for a tool that always replaces the file, such as cargo add. The sandbox keeps a repository's config and hooks read-only, in .git, a bare <name>.git or .husky/, even in a declared directory, so git config, git remote add and the upstream that git push -u sets fail: leave those to the person, in their own terminal.`;
+Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com, and cargo needs index.crates.io and static.crates.io, not crates.io. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). A call that names a Go, cargo or npm registry host keeps what it downloads in that package manager's cache (~/go/pkg/mod, ~/.cargo/registry, ~/.npm/_cacache), and every later call reads the cache with no host and without declaring it; if a build still reports a missing download, declare the cache in input_files. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json, but not replace, rename or remove it: write through it, as sed 's/a/b/' f > "$TMPDIR/f" && cat "$TMPDIR/f" > f does in place of sed -i, and declare the file's directory with a trailing / only for a tool that always replaces the file, such as cargo add. The sandbox keeps a repository's config and hooks read-only, in .git, a bare <name>.git or .husky/, even in a declared directory, so git config, git remote add and the upstream that git push -u sets fail: leave those to the person, in their own terminal.`;
 
 /** The exports of every embedded chunk whose source contains all of `needles`. */
 async function modulesWith(...needles) {
@@ -475,9 +475,11 @@ function check(condition, what) {
   if (!condition) throw new Error(what);
 }
 
-// One command, confined as a Bash call declaring `lists` would be, run in `cwd`.
-async function confinedRun(lists, command, cwd) {
+// One command, confined as a Bash call declaring `lists` would be, run in `cwd`. `widen`
+// changes the confinement first.
+async function confinedRun(lists, command, cwd, widen = () => {}) {
   const confined = confinement(lists);
+  widen(confined.filesystem);
   const wrapped = await calls.run({ confined, nonce: "selftest" }, () =>
     sandbox.wrapWithSandbox(command, "/bin/bash", undefined, undefined, { commandId: "selftest" }),
   );
@@ -593,6 +595,28 @@ async function selfTest() {
         !fs.statSync(path.join(repo, ".bashrc"), { throwIfNoEntry: false })?.size,
         "a protected file absent from a directory output is written",
       );
+    }
+
+    // A toolchain or a download cache opens whole, read-only or written as a registry call
+    // writes its cache, but for what the store recorded there with a label: the file-tracker
+    // hides each such file or directory with a denyRead entry inside it.
+    const cache = path.join(dir, "cache");
+    fs.mkdirSync(path.join(cache, "labeled"), { recursive: true });
+    fs.writeFileSync(path.join(cache, "open.txt"), "OPEN\n");
+    fs.writeFileSync(path.join(cache, "recorded.txt"), "CANARY-RECORDED\n");
+    fs.writeFileSync(path.join(cache, "labeled", "file.txt"), "CANARY-RECORDED\n");
+    for (const list of ["allowRead", "allowWrite"]) {
+      const opened = await confinedRun(
+        { command: "true", input_files: [], output_files: [], network_hosts: [] },
+        `cat ${cache}/open.txt ${cache}/recorded.txt ${cache}/labeled/file.txt`,
+        dir,
+        (filesystem) => {
+          filesystem[list].push(cache);
+          filesystem.denyRead.push(path.join(cache, "recorded.txt"), path.join(cache, "labeled"));
+        },
+      );
+      check(opened.stdout.includes("OPEN"), `a cache in ${list} is not readable: ${opened.stdout}${opened.stderr}`);
+      check(!opened.stdout.includes("CANARY-RECORDED"), `a recorded file in a cache in ${list} is readable`);
     }
   } finally {
     delete process.env.APPA_SELFTEST_TOKEN;

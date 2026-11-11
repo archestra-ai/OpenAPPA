@@ -74,17 +74,39 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
         }
     };
 
+    // A download cache the call writes without declaring it is created empty, so what its
+    // record labels is what the call downloads, never the cache whole.
+    let caches: Vec<&PathBuf> = named
+        .directories
+        .iter()
+        .filter(|directory| !named.reads.contains(directory))
+        .collect();
+    for cache in &caches {
+        std::fs::create_dir_all(cache).map_err(|error| format!("{}: {error}", cache.display()))?;
+    }
     let store = &locked.store;
     let toolchains = crate::safebash::toolchains(config);
+    let covered = |path: &PathBuf| toolchains.iter().any(|toolchain| covers(toolchain, path));
     let mut inputs = Label::default();
     for path in &named.reads {
         // A toolchain is readable to every command and assumed to hold no credentials: what
-        // a call reads there carries only what recorded writes left on it.
-        let label = match toolchains.iter().any(|toolchain| covers(toolchain, path)) {
-            true => recorded_label(store, path),
+        // a call reads there carries only what recorded writes left on it, above it or under it.
+        let label = match covered(path) {
+            true => store
+                .files
+                .iter()
+                .filter(|(recorded, _)| covers(recorded, path) || covers(path, recorded))
+                .fold(Label::default(), |met, (_, recorded)| {
+                    met.meet(&recorded.label, &store.ranks)
+                }),
             false => file_label(config, store, path, &named.reads)?,
         };
         inputs = inputs.meet(&label, &store.ranks);
+    }
+    // A download cache the call writes without declaring it shows the command what it holds
+    // but the files recorded there with a label: it carries what was recorded on it or above.
+    for cache in &caches {
+        inputs = inputs.meet(&recorded_label(store, cache), &store.ranks);
     }
     let (delta, forwards) = match role.role {
         Role::Read => (inputs, Label::default()),
@@ -101,14 +123,17 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
     let mut trees = std::collections::BTreeMap::new();
     for directory in &named.directories {
         let entries = tree(directory)?;
-        let kept = guarded(config, &entries, &named.writes);
-        written.extend(
-            entries
-                .iter()
-                .map(|(path, _)| path)
-                .filter(|path| !kept.iter().any(|kept| covers(kept, path)))
-                .cloned(),
-        );
+        // No path rule applies in a toolchain or a download cache.
+        if !covered(directory) {
+            let kept = guarded(config, &entries, &named.writes);
+            written.extend(
+                entries
+                    .iter()
+                    .map(|(path, _)| path)
+                    .filter(|path| !kept.iter().any(|kept| covers(kept, path)))
+                    .cloned(),
+            );
+        }
         trees.insert(
             directory.clone(),
             entries
@@ -200,6 +225,17 @@ pub enum Concealing {
     Labeled,
 }
 
+impl Concealing {
+    /// Whether a file recorded with `label` stays hidden from a call that reads it without
+    /// counting its label, as a call reads a toolchain or a download cache it does not
+    /// declare: for a model's call every label that restricts the audience or lowers trust,
+    /// for a typed command every label that restricts the audience.
+    pub fn hides(self, label: &Label, ranks: &Ranks) -> bool {
+        let lowered = label.trust.as_ref().is_some_and(|trust| Some(trust) != ranks.0.last());
+        !label.audience.is_empty() || (self == Concealing::Restricted && lowered)
+    }
+}
+
 /// The entries under a directory a call does not see, each with everything under it: those
 /// whose own label `concealing` names, unless the call names the entry or a path under it.
 /// `entries` lists each directory ahead of what it holds, as [`tree`] does.
@@ -249,7 +285,7 @@ pub fn guarded(config: &Config, entries: &[(PathBuf, std::fs::Metadata)], writes
 }
 
 /// What recorded writes left on `path` or on a directory above it.
-fn recorded_label(store: &Store, path: &Path) -> Label {
+pub fn recorded_label(store: &Store, path: &Path) -> Label {
     store
         .files
         .iter()

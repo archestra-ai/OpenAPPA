@@ -18,7 +18,8 @@ pub struct Named {
     pub reads: Vec<PathBuf>,
     /// Files the call may change, its outputs.
     pub writes: Vec<PathBuf>,
-    /// The outputs that are directories. Each is among the reads as well.
+    /// The outputs that are directories. Each is among the reads as well, but a download
+    /// cache the call writes because it reaches its registry: see [`caches`].
     pub directories: Vec<PathBuf>,
     pub hosts: Vec<String>,
 }
@@ -51,6 +52,45 @@ pub fn tree(root: &Path) -> Result<Vec<(PathBuf, std::fs::Metadata)>, String> {
         }
     }
     Ok(found)
+}
+
+/// The package managers' download caches, resolved whether they exist or not, each with the
+/// registry domains whose downloads it keeps: Go's modules from `golang.org`, cargo's
+/// registry from `crates.io`, and npm's from `registry.npmjs.org`. Every call reads them as
+/// toolchains, and a call that reaches one of a cache's registries writes it.
+pub fn caches() -> Vec<(PathBuf, &'static [&'static str])> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let variable = |name: &str| {
+        std::env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+    };
+    let gopath = std::env::var_os("GOPATH")
+        .and_then(|paths| std::env::split_paths(&paths).next())
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.as_ref().map(|home| home.join("go")));
+    let caches: [(Option<PathBuf>, &'static [&'static str]); 3] = [
+        (
+            variable("GOMODCACHE").or_else(|| gopath.map(|gopath| gopath.join("pkg/mod"))),
+            &["golang.org"],
+        ),
+        (
+            variable("CARGO_HOME")
+                .or_else(|| home.as_ref().map(|home| home.join(".cargo")))
+                .map(|cargo| cargo.join("registry")),
+            &["crates.io"],
+        ),
+        (
+            variable("npm_config_cache")
+                .or_else(|| home.as_ref().map(|home| home.join(".npm")))
+                .map(|npm| npm.join("_cacache")),
+            &["registry.npmjs.org"],
+        ),
+    ];
+    caches
+        .into_iter()
+        .filter_map(|(path, registries)| Some((resolve(path?.to_str()?).ok()?, registries)))
+        .collect()
 }
 
 /// Whether `path` is `dir` or lies under it.
@@ -160,6 +200,22 @@ pub fn named(role: &ToolRole, arguments: &serde_json::Value) -> Result<Named, St
                     reads.push(path.clone());
                 }
                 writes.push(path);
+            }
+            // A call that reaches a package registry writes that package manager's download
+            // cache, which it need not declare. It reads the cache as every call does, as a
+            // toolchain without what recorded writes labeled there, so the cache is no input.
+            for (cache, registries) in caches() {
+                let reaches = hosts.iter().any(|host| {
+                    let host = host.trim_start_matches("*.");
+                    let host = host.split_once(':').map_or(host, |(name, _)| name);
+                    registries
+                        .iter()
+                        .any(|registry| host == *registry || host.ends_with(&format!(".{registry}")))
+                });
+                if reaches && !directories.iter().any(|directory| covers(directory, &cache)) {
+                    directories.push(cache.clone());
+                    writes.push(cache);
+                }
             }
             reads.sort();
             reads.dedup();
