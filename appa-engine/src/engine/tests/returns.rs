@@ -1296,6 +1296,7 @@ fn gapped_spawn_engine() -> Engine {
     let mut cfg = returning_registry(vec![]);
     cfg.tools = declared(vec![spawn, plain_tool("open_spawn")]);
     cfg.authorities = vec![crate::authority::Authority {
+        except: Vec::new(),
         name: AuthorityName::new("officer"),
         mandate: crate::authority::Mandate {
             reader_ceiling: Some(DeclaredAudience::literal(Audience::restricted([ReaderId::new(

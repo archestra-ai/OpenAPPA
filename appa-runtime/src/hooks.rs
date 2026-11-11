@@ -15,6 +15,7 @@ use crate::api::{
     OfferId, RemedyPresentation, Runtime, Session, SpawnResultDecision, ToolCallDecision, ToolResultDecision,
     is_control_tool,
 };
+use appa_eventlog::EndKind;
 
 fn wire(decision: &HookDecision) -> serde_json::Value {
     serde_json::to_value(WireDecision::of(decision)).expect("a wire decision serializes")
@@ -221,6 +222,10 @@ fn continued(
             child: id(child),
             spawn,
         },
+        HookEvent::ChildTurnEnd { root, child } => HookEvent::ChildTurnEnd {
+            root: id(root),
+            child: id(child),
+        },
         HookEvent::ChildEnd { root, child, value } => HookEvent::ChildEnd {
             root: id(root),
             child: id(child),
@@ -371,9 +376,10 @@ fn bare_hook(
 fn hook_root(event: &HookEvent) -> &TrajectoryId {
     match event {
         HookEvent::SessionStart { root, .. } => root,
-        HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } | HookEvent::ChildReturn { root, .. } => {
-            root
-        }
+        HookEvent::ChildStart { root, .. }
+        | HookEvent::ChildEnd { root, .. }
+        | HookEvent::ChildTurnEnd { root, .. }
+        | HookEvent::ChildReturn { root, .. } => root,
         HookEvent::Prompt { actor, .. }
         | HookEvent::TurnEnd { actor }
         | HookEvent::ToolCall { actor, .. }
@@ -530,7 +536,7 @@ fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
         HookEvent::SpawnResume { call, .. } => (HookKind::SpawnResume, Some(call.tool.clone())),
         HookEvent::ToolResult { call, .. } => (HookKind::ToolResult, Some(call.tool.clone())),
         HookEvent::ChildStart { .. } => (HookKind::ChildStart, None),
-        HookEvent::ChildEnd { .. } => (HookKind::ChildEnd, None),
+        HookEvent::ChildEnd { .. } | HookEvent::ChildTurnEnd { .. } => (HookKind::ChildEnd, None),
         HookEvent::ChildReturn { .. } => (HookKind::ChildReturn, None),
         HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
     }
@@ -620,6 +626,7 @@ async fn dispatch_event(
         }
         HookEvent::ChildStart { root, child, spawn } => dispatcher.child_start(root, child, spawn),
         HookEvent::ChildEnd { root, child, value } => dispatcher.child_end(root, child, value).await,
+        HookEvent::ChildTurnEnd { root, child } => dispatcher.child_turn_end(root, child).await,
         HookEvent::ChildReturn { root, child, value } => dispatcher.child_return(root, child, value).await,
     }
 }
@@ -753,7 +760,7 @@ impl Dispatcher<'_> {
         {
             tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
         }
-        if let Err(error) = self.runtime.record_turn_end(&actor) {
+        if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
             tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
         }
         HookDecision::Ack
@@ -790,7 +797,9 @@ impl Dispatcher<'_> {
             {
                 return fold(error, Refusal::Deny);
             }
-            if let Err(error) = self.runtime.record_turn_end(&actor) {
+            // A housekeeping end: it settles what the interrupted turn left open, and leaves
+            // the return this turn declared ahead to the spawn it was declared for.
+            if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Housekeeping) {
                 return fold(error, Refusal::Deny);
             }
         }
@@ -962,6 +971,31 @@ impl Dispatcher<'_> {
         }
     }
 
+    async fn child_turn_end(&mut self, root: TrajectoryId, child: TrajectoryId) -> HookDecision {
+        match on_child(
+            self.runtime,
+            &root,
+            &child,
+            MissingStart::Refuse,
+            self.options,
+            |session| async move { session.on_child_turn_end().await },
+        )
+        .await
+        {
+            Ok(decision) => {
+                let actor = Actor {
+                    root,
+                    child: Some(child),
+                };
+                if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
+                    tracing::warn!(%error, "the empty child turn's end was not recorded");
+                }
+                return_decision(None, decision)
+            }
+            Err(error) => refuse(error),
+        }
+    }
+
     /// The subagent's return is checked here and blocked when it may not cross; a block
     /// keeps the subagent running until it returns what may. A child the family never saw
     /// start is blocked too: its return has no fork to cross on.
@@ -989,7 +1023,7 @@ impl Dispatcher<'_> {
                         root: root.clone(),
                         child: Some(child.clone()),
                     };
-                    if let Err(error) = self.runtime.record_turn_end(&actor) {
+                    if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
                         tracing::warn!(root = %root.0, child = %child.0, %error, "the child's end was not recorded");
                     }
                 }
@@ -1128,7 +1162,11 @@ fn control_call(
                 {
                     return fold(error, Refusal::Deny);
                 }
-                runtime.vouch(&crate::api::declaration_key(&args, named), actor, ruling);
+                // Unlike an offer's vouch, a declaration's that did not land is reported: its
+                // execution would otherwise answer as one no hook vouched for.
+                if let Err(error) = runtime.record_vouch(&crate::api::declaration_key(&args, named), actor, ruling) {
+                    return fold(error, Refusal::Deny);
+                }
             }
             tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
             return HookDecision::PassControl;
@@ -2001,6 +2039,69 @@ mod tests {
         });
         let (_, answer) = hook(&runtime, &json(&next)).await;
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
+    }
+
+    /// A declaration's vouch that does not land refuses its control call, so the execution
+    /// after it never answers as one no hook vouched for.
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn a_declaration_vouch_that_does_not_land_refuses_the_control_call() {
+        use crate::api::{ExecuteRemedyPlanArgs, Holder, LabelArgs, declaration_key};
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let control = async |label: serde_json::Value| {
+            let event = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": CONTROL_TOOL_FIXTURE_NAME,
+                "tool_input": { "label": label },
+            });
+            let parsed = through_the_codec(&event).expect("the control call parses");
+            handle_internal(
+                &runtime,
+                parsed,
+                EmbeddedPresentationOptions::default(),
+                ToolCallIds::Unnamed,
+            )
+            .await
+            .decision
+        };
+        // Another declaration's control call opens the root first.
+        assert!(matches!(
+            control(serde_json::json!({ "trust": "trusted" })).await,
+            HookDecision::PassControl
+        ));
+        let args = || ExecuteRemedyPlanArgs {
+            offer_id: None,
+            label: Some(LabelArgs {
+                trust: None,
+                audience: None,
+            }),
+            return_schema: None,
+        };
+        runtime.store().fail_commit_after(0);
+        let refused = control(serde_json::json!({})).await;
+        assert!(!matches!(refused, HookDecision::PassControl), "{refused:?}");
+        assert_eq!(
+            runtime
+                .discover_holder(&declaration_key(&args(), None))
+                .expect("the discovery reads"),
+            Holder::Nobody,
+            "nothing was vouched"
+        );
+        assert!(matches!(
+            control(serde_json::json!({})).await,
+            HookDecision::PassControl
+        ));
+        let declared = runtime.execute_remedy_plan(args(), None, None).await;
+        assert!(!declared.is_error, "{}", declared.text);
+        assert_eq!(
+            runtime
+                .discover_holder(&declaration_key(&args(), None))
+                .expect("the discovery reads"),
+            Holder::Nobody,
+            "the declaration spent the vouch"
+        );
     }
 
     #[tokio::test]

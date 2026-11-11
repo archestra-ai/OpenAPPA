@@ -16,6 +16,7 @@ from tau2.scripts.leaderboard.submission import Submission
 
 from appa_taubench.bench import (
     RUN_MANIFEST,
+    RUN_MANIFEST_FORMAT_VERSION,
     TAU2_REVISION,
     check_tau_installation,
     validate_results_for_submission,
@@ -132,7 +133,11 @@ def validate_run_manifest(manifest_path: Path, results: Results) -> None:
         raise ValueError(f"invalid {RUN_MANIFEST}: {manifest_path}") from error
     config = manifest.get("config")
     run_digest = manifest.get("run_digest")
-    if manifest.get("format_version") != 1 or not isinstance(config, dict) or not isinstance(run_digest, str):
+    if (
+        manifest.get("format_version") != RUN_MANIFEST_FORMAT_VERSION
+        or not isinstance(config, dict)
+        or not isinstance(run_digest, str)
+    ):
         raise ValueError(f"invalid {RUN_MANIFEST} envelope")
     computed_digest = hashlib.sha256(json.dumps(config, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     if run_digest != computed_digest:

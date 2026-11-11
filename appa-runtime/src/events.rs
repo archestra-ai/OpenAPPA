@@ -181,6 +181,46 @@ pub enum NoAnswerClass {
     ModulePanicked,
 }
 
+/// The class as `NoAnswerReason::diagnostic` spells it, without the external's own words.
+impl std::fmt::Display for NoAnswerClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoAnswerClass::NonSuccess { status } => write!(f, "non_success status={status}"),
+            NoAnswerClass::Unregistered => f.write_str("unregistered"),
+            NoAnswerClass::Unreachable => f.write_str("unreachable"),
+            #[cfg(feature = "daemon")]
+            NoAnswerClass::Dismissed => f.write_str("dismissed"),
+            NoAnswerClass::Timeout => f.write_str("timeout"),
+            NoAnswerClass::Transport => f.write_str("transport"),
+            NoAnswerClass::Malformed => f.write_str("malformed"),
+            NoAnswerClass::Oversized => f.write_str("oversized"),
+            NoAnswerClass::UnsupportedVersion => f.write_str("unsupported_version"),
+            NoAnswerClass::ModuleError => f.write_str("module_error"),
+            NoAnswerClass::ModulePanicked => f.write_str("module_panicked"),
+        }
+    }
+}
+
+impl NoAnswerClass {
+    /// Whether asking again later may get an answer: the external was unreachable, timed
+    /// out, or failed in transport, or its HTTP status was 429 or 5xx. A command's exit code
+    /// also arrives as `NonSuccess`; on Unix it is at most 255, so it never reads as transient.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            NoAnswerClass::Unreachable | NoAnswerClass::Timeout | NoAnswerClass::Transport => true,
+            NoAnswerClass::NonSuccess { status } => matches!(status, 429 | 500..=599),
+            NoAnswerClass::Unregistered
+            | NoAnswerClass::Malformed
+            | NoAnswerClass::Oversized
+            | NoAnswerClass::UnsupportedVersion
+            | NoAnswerClass::ModuleError
+            | NoAnswerClass::ModulePanicked => false,
+            #[cfg(feature = "daemon")]
+            NoAnswerClass::Dismissed => false,
+        }
+    }
+}
+
 impl From<&crate::external::NoAnswerReason> for NoAnswerClass {
     fn from(reason: &crate::external::NoAnswerReason) -> Self {
         use crate::external::NoAnswerReason as Reason;
@@ -762,6 +802,37 @@ mod tests {
         assert_eq!(rendered["kind"], "external");
         assert_eq!(rendered["role"], "audience_source");
         assert_eq!(rendered["outcome"]["no_answer"], "unreachable");
+    }
+
+    #[test]
+    fn only_reachability_rate_limits_and_server_errors_are_transient() {
+        let cases = [
+            (NoAnswerClass::Unreachable, true),
+            (NoAnswerClass::Timeout, true),
+            (NoAnswerClass::Transport, true),
+            (NoAnswerClass::NonSuccess { status: 429 }, true),
+            (NoAnswerClass::NonSuccess { status: 500 }, true),
+            (NoAnswerClass::NonSuccess { status: 503 }, true),
+            (NoAnswerClass::NonSuccess { status: 599 }, true),
+            (NoAnswerClass::NonSuccess { status: 1 }, false),
+            (NoAnswerClass::NonSuccess { status: 255 }, false),
+            (NoAnswerClass::NonSuccess { status: 400 }, false),
+            (NoAnswerClass::NonSuccess { status: 428 }, false),
+            (NoAnswerClass::NonSuccess { status: 430 }, false),
+            (NoAnswerClass::NonSuccess { status: 499 }, false),
+            (NoAnswerClass::NonSuccess { status: 600 }, false),
+            (NoAnswerClass::Unregistered, false),
+            (NoAnswerClass::Malformed, false),
+            (NoAnswerClass::Oversized, false),
+            (NoAnswerClass::UnsupportedVersion, false),
+            (NoAnswerClass::ModuleError, false),
+            (NoAnswerClass::ModulePanicked, false),
+            #[cfg(feature = "daemon")]
+            (NoAnswerClass::Dismissed, false),
+        ];
+        for (class, transient) in cases {
+            assert_eq!(class.is_transient(), transient, "{class:?}");
+        }
     }
 
     /// The byte budget, not the entry caps: filling with tiny events hits the per-list count

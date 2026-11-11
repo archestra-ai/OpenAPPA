@@ -6,9 +6,9 @@
 #
 # Order matters: the first matching rule wins, so the argument-selected
 # credential rules come before each tool's bare rule. A name written
-# with a selector is declared, and a call no selector matches is refused rather
-# than sent to a root's `*` fallback, so the bare rules at the end of each
-# group are what keep ordinary commands, reads, searches and writes running.
+# with a selector is declared, and a call no selector matches falls through to
+# the root's `*` wildcard rule, so the bare rules at the end of each group are
+# what keep ordinary commands, reads, searches and writes running.
 
 
 [policy]

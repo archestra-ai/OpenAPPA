@@ -106,6 +106,25 @@ impl Session {
         }
     }
 
+    /// Finish an empty child turn under its immutable recorded return contract.
+    /// A void contract ends here; a crossing contract remains available for follow-ups.
+    pub async fn on_child_turn_end(&self) -> Result<ChildReturnDecision, EventError> {
+        let log = self.inner.log(&self.root)?;
+        let deployment = self.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        let view = policy.rebuild_view(&log).map_err(EventError::from)?;
+        let returns = policy
+            .engine()
+            .return_policy_of(&view, &self.trajectory)
+            .ok_or(EventError::NotAChild)?;
+        if matches!(returns, appa_engine::fact::ReturnPolicy::Void) {
+            self.on_child_end(None).await
+        } else {
+            self.on_turn_end().await?;
+            Ok(ChildReturnDecision::NoValue)
+        }
+    }
+
     /// The child finished its turn and returns `value`; `None` returns no
     /// value. The return is the child's only channel to the parent and is
     /// checked before it may cross; it names the fork that opened the

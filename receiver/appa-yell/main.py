@@ -257,9 +257,9 @@ def _allow_slack_dispatch() -> bool:
 
 
 def sanitize_message_for_slack(message: str) -> str:
-    """Break mentions and truncate long messages to avoid Block Kit overflows."""
-    # Inserting a zero-width space after '@' neuters @channel, @here, @everyone, and user mentions.
-    neutered = message.replace("@", "@\u200b").strip()
+    """Neutralize Slack control sequences and truncate long messages to avoid Block Kit overflows."""
+    # Slack mrkdwn requires & < > escaped (ampersand first); the zero-width space after '@' breaks plain-text mentions.
+    neutered = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("@", "@\u200b").strip()
     if not neutered:
         return "(empty message)"
     if len(neutered) > MAX_SLACK_MESSAGE_CHARS:

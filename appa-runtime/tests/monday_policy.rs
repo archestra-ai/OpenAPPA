@@ -120,7 +120,8 @@ timeout_ms = 30000
 review_timeout_ms = 600000
 max_body_bytes = 1048576
 [externals.authorities.monday-operator]
-builtin = "approve"
+# Approves when asked. The stock "approve" is applied at the block, which this test reads.
+command = ["/bin/sh", "-c", 'cat > /dev/null; printf "%s" "{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}"']
 [externals.audience.people]
 url = "{source}/audience"
 selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members", feeds = "internal" }}]

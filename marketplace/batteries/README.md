@@ -9,7 +9,7 @@ so a deployment can customize its hint without editing the battery.
 | Battery | Covers | Externals |
 | --- | --- | --- |
 | `coding/` | canonical coding-agent tools under `tool/coding/`: `shell`, `powershell`, `read_file`, `search_files`, `write_file`, `edit_file`, `fetch_url`, `web_search`; a client battery's `[aliases.tool.coding]` map binds them | The Claude Code model annotates shell and PowerShell calls and fetches of unlisted URLs; static rules label the requester's secrets `self`, the Databricks CLI's credential commands among them |
-| `claude-code/` | Claude Code's built-in tools: `Read`, `Write` and `Edit` labeled per file by the file-tracker, `Bash` and SafeBash confined to the files and hosts they declare, `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` blocked, `coding`'s web rules bound to `WebFetch` and `WebSearch`, and rules for the tools only Claude Code offers; include it with `coding` | The file-tracker annotates file calls; the SafeBash fallback needs `srt` |
+| `claude-code/` | Claude Code's built-in tools: the map binding `coding`'s canonical tools to `Bash`, `PowerShell`, `Read`, `Grep`, `Write`, `Edit`, `WebFetch` and `WebSearch`, and rules for `Monitor` and the tools only Claude Code offers; include it with `coding` | The Claude Code model annotates Monitor calls |
 | `opencode/` | selected OpenCode V2 file, web, shell, and foreground delegation tools; shell starts with `pwd` only | none |
 | `slack/` | the claude.ai Slack connector, all 19 tools: read, search, send, canvases | an annotator asking Slack whether a conversation is shared through Slack Connect; the `slack` audience source: viewer, full members, user groups, one conversation's members |
 | `github/` | the GitHub MCP server's default tool sets: profile, repositories, issues, pull requests, users (44 tools) | two annotators asking GitHub for a repository's visibility; the `github` audience source: viewer, org members, teams, a repository's collaborators |
@@ -44,9 +44,8 @@ in the deployment, not in the battery: the root binds the ones it runs under
 the root does not bind is left out, and the battery's `[policy.deployment] confined_results` entries that
 only it covers are dropped with it, so the battery decides as it would
 without sanitizers. The Claude Code plugin's default config binds every
-battery sanitizer except `coding.strip-secrets` and
-`opencode.strip-instructions`; of the `coding` sanitizers it binds only
-`coding.strip-instructions`. `archestra` and
+battery sanitizer except `opencode.strip-instructions`, whose tools never
+appear in a Claude Code session. `archestra` and
 `xmemory` ship none: their reads keep the session's trust, and their records
 have no public core to release. `claude-code` ships none either: Claude Code's
 replacement of a result is not verified live for the `suspicious` tools it

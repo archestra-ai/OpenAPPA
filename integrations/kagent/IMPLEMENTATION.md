@@ -648,13 +648,13 @@ The integration suite ([tests/](tests/)) drives the real gated path with no clus
 
 The job `kagent-integration` runs those twenty-four cases on the kagent v0.9.12 lane, against a debug `appa` binary it builds. It gates every pull request that touches the python package, the suite, the demo tools, the mocks, the demo policy, or the runtime crates. It uploads the trajectory database and every process log on a failure.
 
-The job `kagent-e2e-subset` runs all eighteen A2A cases against a real model, on a kind cluster it stands up itself. It runs on cell A-py alone, on the `run-e2e` label or a manual dispatch, and never on a fork pull request, which cannot read the OpenRouter key. Each test gets three total attempts, and exhaustion fails the job. The model matches the public playground: `openai/gpt-5.6-terra` at OpenRouter.
+The job `kagent-a2a-e2e` runs all eighteen A2A cases against a real model, on a kind cluster it stands up itself. It runs on cell A-py alone, on a manual dispatch from `main` only. No pull request runs it, because only `main` can read the OpenRouter key. Each test gets three total attempts, and exhaustion fails the job. The model matches the public playground: `openai/gpt-5.6-terra` at OpenRouter.
 
-Three scripts under [e2e/ci/](e2e/ci/) load the images, install kagent plus both OpenAPPA charts, and run the cases. A person runs the same three on a laptop or a dev VM. A placeholder job of the same name names the label on every other update.
+Three scripts under [e2e/ci/](e2e/ci/) load the images, install kagent plus both OpenAPPA charts, and run the cases. A person runs the same three on a laptop or a dev VM.
 
 The live matrices span three dimensions, and every combination is a row. The dimensions are kagent version, runtime plugin, and driver. The python plugin runs against the google-adk that kagent version locks. The go plugin runs on the adk/v2 v2.1.0 inside its image. The driver is the dashboard in headless Chromium, or A2A `message/send` alone. Each row runs the same eighteen conversations from [e2e/ui](e2e/ui/) and [e2e/a2a](e2e/a2a/). The index is [e2e/README.md](e2e/README.md), and the runner is `e2e/run-matrix.sh`.
 
-Local matrices assume a running stack at `APPA_UI_URL` and `APPA_A2A_URL`. The scripts under [e2e/ci/](e2e/ci/) provision the A-py A2A row. All four kagent v0.9.12 rows pass after the child-return and remote-runtime changes. The PR CI runs the Go unit suite and integration suite. A labeled pull request adds the complete eighteen-case A-py A2A row. The v0.10 rows have no stack.
+Local matrices assume a running stack at `APPA_UI_URL` and `APPA_A2A_URL`. The scripts under [e2e/ci/](e2e/ci/) provision the A-py A2A row. All four kagent v0.9.12 rows pass after the child-return and remote-runtime changes. The PR CI runs the Go unit suite and integration suite. A manual dispatch from `main` adds the complete eighteen-case A-py A2A row. The v0.10 rows have no stack.
 
 | kagent | Cell | Runtime plugin | Driver | Status |
 |---|---|---|---|---|
@@ -662,7 +662,7 @@ Local matrices assume a running stack at `APPA_UI_URL` and `APPA_A2A_URL`. The s
 | v0.9.12 | A-py | python · google-adk 1.31.1 | A2A | 18/18 |
 | v0.9.12 | A-go | go · adk/v2 v2.1.0 | dashboard | 18/18 |
 | v0.9.12 | A-go | go · adk/v2 v2.1.0 | A2A | 18/18 |
-| v0.9.12 | A-py | python · google-adk 1.31.1 | A2A, all 18 cases in CI | gates after three attempts per case, on the `run-e2e` label |
+| v0.9.12 | A-py | python · google-adk 1.31.1 | A2A, all 18 cases in CI | gates after three attempts per case, on a dispatch from `main` |
 | v0.10.0-rc4 | B1-py | python · google-adk 2.8.0 | dashboard, A2A | not run |
 | v0.10.0-rc4 | B1-go | go · adk/v2 v2.1.0 | dashboard, A2A | not run |
 | main | B2-py, B2-go | python · google-adk 2.8.0, go · adk/v2 v2.1.0 (kagent main locks v2.2.0) | dashboard, A2A | not run |

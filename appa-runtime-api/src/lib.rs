@@ -465,6 +465,70 @@ pub enum Ruling {
 pub struct Review {
     pub offer: String,
     pub text: String,
+    /// The authority this review asks. `None` when unknown: a decision stored before this
+    /// field, or a `text` that joins the reviews of several authorities.
+    pub authority: Option<String>,
+    /// The policy author's hint for that authority.
+    pub hint: Option<String>,
+    /// What approving accepts, one item per coverage bullet in `text`. `None` when unknown,
+    /// under the same two conditions as `authority`: show `text` instead. `Some(vec![])`
+    /// means approving accepts nothing else.
+    pub scope: Option<Vec<ReviewScopeItem>>,
+}
+
+/// One thing approving a review accepts. Identifiers are exact and unescaped; `text` is the
+/// bullet the review prints for this item, safe to display as it stands.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReviewScopeItem {
+    Attention {
+        mark: String,
+        text: String,
+    },
+    Requirement {
+        requirement: ReviewRequirement,
+        text: String,
+    },
+    Narrowing {
+        narrowing: ReviewNarrowing,
+        text: String,
+    },
+}
+
+impl ReviewScopeItem {
+    pub fn text(&self) -> &str {
+        match self {
+            Self::Attention { text, .. } | Self::Requirement { text, .. } | Self::Narrowing { text, .. } => text,
+        }
+    }
+}
+
+/// A gap other than attention that the ruling would cover.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReviewRequirement {
+    Trust { required: String },
+    PublicAudience,
+    Audience { readers: Vec<String> },
+    Effect { excludes: String },
+}
+
+/// What approving also does to the rest of the conversation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReviewNarrowing {
+    Blocked {
+        tools: Vec<String>,
+    },
+    SignOff {
+        tools: Vec<String>,
+    },
+    RecipientChecked {
+        tools: Vec<String>,
+    },
+    PerCall,
+    /// The narrowing is known but its impact on each tool is not.
+    Unjudged,
 }
 
 /// One hook event in the runtime's vocabulary. The adapter maps each
@@ -502,6 +566,9 @@ pub enum HookEvent {
     /// harness never ran, except an identified spawn whose subagent is still
     /// running: a background subagent works past its parent's turn.
     TurnEnd { actor: Actor },
+    /// A child finished without output. Close a no-return child permanently;
+    /// retain a child with a crossing return contract for subsequent turns.
+    ChildTurnEnd { root: TrajectoryId, child: TrajectoryId },
     ToolCall {
         actor: Actor,
         call: ProposedCall,

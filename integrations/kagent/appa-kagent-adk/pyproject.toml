@@ -47,6 +47,13 @@ line-length = 120
 select = ["E", "F", "I", "UP"]
 
 [tool.uv]
+# Older supported ADK releases cap OpenTelemetry below the tracestate parsing
+# fix (GHSA-xcq7-p3pf-p88h). Keep the API and SDK on the patched release line
+# while retaining compatibility with the Python 3.10 / ADK 1.x lane.
+override-dependencies = [
+  "opentelemetry-api>=1.45.1,<2",
+  "opentelemetry-sdk>=1.45.1,<2",
+]
 # uv keys a path dependency's built wheel on pyproject.toml alone, so a
 # `uv run --with <this dir>` would reuse a stale build after a source
 # edit. Key it on the sources too.

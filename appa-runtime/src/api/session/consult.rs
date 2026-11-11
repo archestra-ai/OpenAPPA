@@ -109,7 +109,7 @@ impl Session {
                     trajectory: self.trajectory.0.clone(),
                     call_id: occasion.call_id().map(str::to_string),
                     offer_id: match occasion {
-                        Occasion::Remedy { offer } => Some(offer.0.clone()),
+                        Occasion::Remedy { offer } | Occasion::AheadApply { offer, .. } => Some(offer.0.clone()),
                         Occasion::Proposal { .. } | Occasion::Report { .. } | Occasion::Other => None,
                     },
                     call_digest: call.map(|call| crate::engine::hex(call.bytes())),
@@ -237,7 +237,7 @@ impl Session {
                             }
                             _ => tracing::debug!(annotator, ?reason, "an annotation consult produced no answer"),
                         }
-                        return Err(EventError::annotation_refused(annotator.clone(), reason.diagnostic()));
+                        return Err(EventError::annotation_unanswered(annotator.clone(), &reason));
                     }
                 };
                 ExternalEvidence::Annotation {

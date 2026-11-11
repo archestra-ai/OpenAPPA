@@ -277,6 +277,7 @@ impl RawAuthority {
             scope: Scope {
                 tags: self.tags.into_iter().map(TagName::new).collect(),
             },
+            except: self.except_tags.into_iter().map(TagName::new).collect(),
             hint,
         })
     }
