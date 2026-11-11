@@ -6,8 +6,10 @@
 #   settle_wait_ms = 3000              # how long a call on a reserved file waits
 #   reservation_timeout_secs = 300     # when an annotated, never-released call lets go
 #
-# A path rule labels every file whose absolute, resolved path its pattern
-# matches (`*` matches any run of characters, `/` included). The label holds
+# A path rule labels every file its pattern matches (`*` matches any run of
+# characters, `/` included). A pattern with a `/` is matched against the
+# absolute, resolved path; one without, such as `*secrets*`, against the file's
+# name, so a repository named `k8s-secrets` is not labeled whole. The label holds
 # before any recorded write and under every later one: a read returns the
 # meet of the recorded label and every matching rule. `write_trust` and
 # `write_attention` are what a call that writes such a file requires.
@@ -335,8 +337,9 @@ role = "run"
 # on Linux — with a network proxy that admits only the declared hosts. Each
 # call starts its own `srt` with that call's files and hosts. Where `clappa`
 # confines Claude Code's own Bash per call, Claude Code's sandbox runs it.
-# A command reads the system directories (/usr, /etc, /lib, ...) and every
-# directory on its PATH outside the home and working directories; every other
+# A command reads the system directories (/usr, /etc, /lib, ...), every
+# directory on its PATH outside the home and working directories, and the
+# toolchain each `bin` among them belongs to; every other
 # top-level directory is hidden. `readable` reopens the toolchains below, where
 # they exist: package managers and language toolchains that keep their
 # programs outside the system. A deployment's `readable` adds to this list.

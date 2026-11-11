@@ -57,7 +57,12 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
         }
     };
     let outcome = match command.as_str() {
-        "annotate" => answer(|request| annotate::annotate(&config, request)),
+        "annotate" => answer(|request| {
+            let started = std::time::Instant::now();
+            let answer = annotate::annotate(&config, request);
+            log(&config, request, &answer, started.elapsed());
+            answer
+        }),
         "record" => answer(|delivery| record::record(&config, delivery)),
         "mcp" => safebash::serve(&config),
         "sandbox" => answer(|arguments| safebash::sandbox(&config, arguments)),
@@ -69,6 +74,42 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
             eprintln!("appa file-tracker: {error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// One line per annotation in `file-tracker.log` beside the store: the call's tool and the
+/// files and hosts it names, and what the annotation answered or why it refused. A refused
+/// call reaches no other record, so this is where its lists are found. The command text and
+/// file contents are left out.
+fn log(
+    config: &config::Config,
+    request: &serde_json::Value,
+    answer: &Result<serde_json::Value, String>,
+    elapsed: std::time::Duration,
+) {
+    use std::io::Write;
+    let call = &request["artifact"]["args"];
+    let arguments = &call["arguments"];
+    let mut line = serde_json::json!({
+        "at": store::now(),
+        "tool": call["name"],
+        "ms": elapsed.as_millis() as u64,
+    });
+    for field in ["file_path", "input_files", "output_files", "network_hosts"] {
+        if !arguments[field].is_null() {
+            line[field] = arguments[field].clone();
+        }
+    }
+    match answer {
+        Ok(answer) => {
+            line["delta"] = answer["answer"]["delta"].clone();
+            line["requires"] = answer["answer"]["requires"].clone();
+        }
+        Err(error) => line["refused"] = serde_json::json!(error),
+    }
+    let path = config.store.with_extension("log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
     }
 }
 

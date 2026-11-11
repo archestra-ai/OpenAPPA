@@ -17,8 +17,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::annotate::{Concealing, concealed, guarded};
 use crate::config::{Config, Role, ToolRole};
-use crate::paths::{Named, named};
+use crate::paths::{Named, covers, named, tree};
 use crate::store::Locked;
 
 /// How much of each stream a result carries.
@@ -29,10 +30,11 @@ pub const DESCRIPTION: &str = "Runs one shell command in a sandbox. The command 
     directories on PATH and installed toolchains), write only the files and directories listed in output_files, and \
     connect only to the hosts listed in network_hosts. Use absolute paths. Each output file is emptied before the \
     command runs. An output written with a trailing / is a directory: the command reads what it holds and writes \
-    under it, as a build directory or a cache needs (for example ~/.cache/go-build/). Declare every file the \
+    under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). A credential \
+    file such as .env inside a declared directory stays hidden unless the call names it. Declare every file the \
     command reads or writes: any other file in your workspace, home or /tmp is hidden from it, so ls and find there \
     show only what the call declares. $TMPDIR is a private directory for this call alone, removed when it ends. To \
-    find files, use the Glob tool, then declare the ones the command needs. Declare a socket such as \
+    list a directory, declare it in input_files. Declare a socket such as \
     /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it.";
 
 pub fn schema() -> Value {
@@ -66,7 +68,7 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
     for dir in [&runtime, &temporary] {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     }
-    let mut settings = settings(config, &named)?;
+    let mut settings = settings(config, &named, Concealing::Restricted)?;
     push(&mut settings["filesystem"]["allowRead"], &runtime);
     push(&mut settings["filesystem"]["allowWrite"], &temporary);
     let file = Removed(tempfile_in_temp(&settings)?);
@@ -147,20 +149,37 @@ impl Drop for Removed {
 /// ends, and in `prelude` the lines the preload runs ahead of the command to point `TMPDIR`
 /// there and empty its outputs, as SafeBash does. A call that does not name all three lists,
 /// or names an input that is not a file, a directory or a socket, is refused.
+///
+/// A command the person types at the prompt (`typed`) reaches no hook, so nothing labels
+/// its result: it reads and writes the working directory, reaches no host, and sees no file
+/// that carries a label, so its result carries none either.
 pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let role = ToolRole {
         name: "Bash".to_string(),
         role: Role::Run,
         path: None,
     };
-    let named = named(&role, arguments)?;
+    let (named, concealing) = match arguments["typed"].as_bool() == Some(true) {
+        true => {
+            let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+            let cwd = cwd.display().to_string();
+            let typed = json!({ "input_files": [cwd], "output_files": [format!("{cwd}/")], "network_hosts": [] });
+            (named(&role, &typed)?, Concealing::Labeled)
+        }
+        false => (named(&role, arguments)?, Concealing::Restricted),
+    };
     prepare(&named)?;
     let temporary = unique("appa-bash");
     std::fs::create_dir_all(&temporary).map_err(|error| format!("{}: {error}", temporary.display()))?;
-    let mut settings = settings(config, &named)?;
+    let mut settings = settings(config, &named, concealing)?;
     push(&mut settings["filesystem"]["allowWrite"], &temporary);
     settings["tmpdir"] = json!(temporary);
-    settings["prelude"] = json!(format!("export TMPDIR={}\n{}", quoted(&temporary), emptying(&named)));
+    settings["prelude"] = json!(format!(
+        "export TMPDIR={}\n{}{}",
+        quoted(&temporary),
+        identity(),
+        emptying(&named)
+    ));
     settings["hiddenEnvironment"] = json!(hidden_environment(&named));
     Ok(settings)
 }
@@ -192,6 +211,9 @@ fn prepare(named: &Named) -> Result<(), String> {
                 output.display()
             ));
         }
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
         let mut options = std::fs::OpenOptions::new();
         options.create(true).append(true);
         // A compiler or linker that writes into an existing file keeps its mode: a program
@@ -219,6 +241,37 @@ fn emptying(named: &Named) -> String {
         return String::new();
     }
     format!("{{ {}; }} || exit 126\n", empties.join(" && "))
+}
+
+/// The lines that give git the person's name and email, which it reads from `~/.gitconfig`:
+/// the file stays hidden, since it may hold credentials, and only the identity crosses.
+fn identity() -> String {
+    let setting = |key: &str| {
+        Command::new("git")
+            .args(["config", "--global", "--get", key])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let mut lines = String::new();
+    for (key, names) in [
+        ("user.name", ["GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"]),
+        ("user.email", ["GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"]),
+    ] {
+        if let Some(value) = setting(key) {
+            for name in names {
+                lines.push_str(&format!(
+                    "export {name}=\"${{{name}:-{}}}\"\n",
+                    value.replace(['"', '\\', '$', '`'], "")
+                ));
+            }
+        }
+    }
+    lines
 }
 
 fn quoted(path: &Path) -> String {
@@ -391,14 +444,82 @@ fn outside_the_system(root: impl IntoIterator<Item = (PathBuf, bool)>) -> Vec<Pa
         .collect()
 }
 
+/// The directories a command reads beside its inputs and the system: the directories on
+/// `PATH`, the installed toolchain each `bin` among them belongs to — a Go, Python or Node
+/// installation reads its own library beside its programs — and `[sandbox] readable`. Each
+/// is assumed to hold no credentials. A directory that is the home or the working directory,
+/// holds one of them or the store, or lies under the working directory is not opened, and
+/// neither is a directory directly under the home, such as `~/.cargo`, which holds the
+/// person's own configuration beside the programs.
+pub fn toolchains(config: &Config) -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let cwd = std::env::current_dir().ok();
+    let guarded: Vec<PathBuf> = home
+        .iter()
+        .chain(&cwd)
+        .cloned()
+        .chain(config.store.parent().map(Path::to_path_buf))
+        .collect();
+    let opens = |dir: &Path| {
+        dir.is_absolute()
+            && dir.is_dir()
+            && !SYSTEM.iter().any(|system| covers(Path::new(system), dir))
+            && !guarded.iter().any(|guard| covers(dir, guard))
+            && !cwd.as_ref().is_some_and(|cwd| covers(cwd, dir))
+    };
+    let mut found: Vec<PathBuf> = Vec::new();
+    let on_path = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    for dir in on_path {
+        let dir = std::fs::canonicalize(&dir).unwrap_or(dir);
+        if !opens(&dir) {
+            continue;
+        }
+        let root = dir
+            .parent()
+            .filter(|_| dir.file_name().is_some_and(|name| name == "bin"))
+            .filter(|root| opens(root) && root.parent() != home.as_deref());
+        found.push(root.map_or(dir.clone(), Path::to_path_buf));
+    }
+    found.extend(config.sandbox.readable.iter().cloned());
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The parts of `root` a command reads when `holes` must stay out of its sight: `root` whole
+/// when no hole lies in it, nothing when it is one, and otherwise the same of each entry it
+/// holds. A symbolic link among the entries is left out, since what it names is not `root`'s.
+fn around(root: &Path, holes: &[PathBuf]) -> Vec<PathBuf> {
+    if holes.iter().any(|hole| hole == root) {
+        return Vec::new();
+    }
+    if !holes.iter().any(|hole| covers(root, hole)) {
+        return vec![root.to_path_buf()];
+    }
+    std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| !kind.is_symlink()))
+        .flat_map(|entry| around(&entry.path(), holes))
+        .collect()
+}
+
 /// The sandbox settings for one call. Reads are hidden everywhere but the system — every
 /// other top-level directory, and within the system's reach home, the working directory, the
 /// temporary directories, every socket and labeled file under `/etc` and `/run`, and every
-/// file the store has recorded — and reopened for the inputs, the directories on `PATH` and
-/// `[sandbox] readable` alone; writes are allowed to the outputs alone; the proxy admits the
-/// declared hosts alone, and a command connects to the sockets it declares alone.
-fn settings(config: &Config, named: &Named) -> Result<Value, String> {
-    let declared = |path: &PathBuf| named.reads.iter().any(|read| crate::paths::covers(read, path));
+/// file the store has recorded — and reopened for the inputs, the toolchains and `[sandbox]
+/// readable` alone. Within a directory the call reads, what [`concealed`] names stays hidden
+/// unless the call names it, so the command sees exactly what the annotation labeled. Writes
+/// are allowed to the outputs alone, and within a directory output not to what [`guarded`]
+/// keeps. The proxy admits the declared hosts alone, and a command connects to the sockets
+/// it declares alone.
+fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Value, String> {
+    let locked = Locked::open(&config.store)?;
+    let store = &locked.store;
+    let declared = |path: &PathBuf| named.reads.iter().any(|read| covers(read, path));
     let listed = |dir: &str| -> Vec<(PathBuf, bool)> {
         std::fs::read_dir(dir)
             .into_iter()
@@ -428,36 +549,36 @@ fn settings(config: &Config, named: &Named) -> Result<Value, String> {
             .into_iter()
             .filter(|path| !declared(path)),
     );
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let cwd = std::env::current_dir().ok();
-    hidden.extend(home.clone());
-    hidden.extend(cwd.clone());
-    hidden.extend(config.store.parent().map(Path::to_path_buf));
-    {
-        let locked = Locked::open(&config.store)?;
-        hidden.extend(locked.store.files.keys().filter(|path| !declared(path)).cloned());
+    hidden.extend(std::env::var_os("HOME").map(PathBuf::from));
+    hidden.extend(std::env::current_dir().ok());
+    let store_dir = config.store.parent().map(Path::to_path_buf);
+    hidden.extend(store_dir.clone());
+    hidden.extend(store.files.keys().filter(|path| !declared(path)).cloned());
+
+    let toolchains = toolchains(config);
+    let mut secret = Vec::new();
+    for read in named.reads.iter().filter(|read| read.is_dir()) {
+        if !toolchains.iter().any(|toolchain| covers(toolchain, read)) {
+            secret.extend(concealed(config, store, &tree(read)?, &named.reads, concealing));
+        }
     }
-    // A directory on PATH holds the programs the person runs; one that is the home or the
-    // working directory, lies under the working directory, or holds the store is not opened.
-    let guarded: Vec<PathBuf> = home
+    let mut kept = Vec::new();
+    for directory in &named.directories {
+        kept.extend(guarded(config, &tree(directory)?, &named.writes));
+    }
+    // A read directory is opened around what it conceals and around the outputs in it, which
+    // are opened for writing: a writable path inside one opened read-only stays read-only.
+    let holes: Vec<PathBuf> = secret.iter().chain(&named.writes).chain(&store_dir).cloned().collect();
+    let mut readable: Vec<PathBuf> = named
+        .reads
         .iter()
-        .chain(&cwd)
-        .cloned()
-        .chain(config.store.parent().map(Path::to_path_buf))
+        .filter(|read| !named.writes.contains(read))
+        .flat_map(|read| around(read, &holes))
         .collect();
-    let on_path = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|dir| dir.is_absolute() && dir.is_dir())
-        .filter(|dir| !SYSTEM.iter().any(|system| crate::paths::covers(Path::new(system), dir)))
-        .filter(|dir| {
-            !guarded.iter().any(|guard| crate::paths::covers(dir, guard))
-                && !cwd.as_ref().is_some_and(|cwd| crate::paths::covers(cwd, dir))
-        });
-    let mut readable: Vec<PathBuf> = named.reads.clone();
-    readable.extend(on_path);
-    readable.extend(config.sandbox.readable.iter().cloned());
+    readable.extend(toolchains);
+    hidden.extend(secret);
+    let mut unwritable = vec![PathBuf::from("/tmp/claude")];
+    unwritable.extend(kept);
     let mut network = json!({
         "allowedDomains": named.hosts,
         "deniedDomains": [],
@@ -475,7 +596,7 @@ fn settings(config: &Config, named: &Named) -> Result<Value, String> {
             "denyRead": hidden,
             "allowRead": readable,
             "allowWrite": named.writes,
-            "denyWrite": ["/tmp/claude"],
+            "denyWrite": unwritable,
         },
         "network": network,
     }))

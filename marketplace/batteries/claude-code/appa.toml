@@ -58,6 +58,53 @@ recorder = "file-tracker"
 # the root policy is read first and can say otherwise for a host the
 # deployment knows, such as an internal host that requires `internal` readers.
 # A call that names no host matches the rules after these.
+#
+# A package install reaches its registry, which serves public packages and is
+# told only which ones the command fetches: a call whose hosts are all one
+# registry's runs as a call without hosts does. A selector matches a list when
+# every entry matches its one pattern, so a registry that spans unrelated
+# hosts, such as PyPI's `pypi.org` and `files.pythonhosted.org`, has no rule
+# here and takes the rule for any host.
+[[policy.tool]]
+name = "host/claude-code/Bash(network_hosts:registry.npmjs.org)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "mcp/file-tracker/SafeBash(network_hosts:registry.npmjs.org)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(network_hosts:registry.yarnpkg.com)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "mcp/file-tracker/SafeBash(network_hosts:registry.yarnpkg.com)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(network_hosts:*.golang.org)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "mcp/file-tracker/SafeBash(network_hosts:*.golang.org)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "host/claude-code/Bash(network_hosts:*.crates.io)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "mcp/file-tracker/SafeBash(network_hosts:*.crates.io)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
 [[policy.tool]]
 name = "host/claude-code/Bash(network_hosts:*)"
 annotator = "file-tracker"

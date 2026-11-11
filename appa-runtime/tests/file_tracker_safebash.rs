@@ -140,12 +140,16 @@ fn a_command_sees_only_what_it_declares() {
         assert!(!failed && text.contains("status=200"), "{text}");
     }
 
-    // An undeclared file as an input is refused before anything runs.
+    // An input that does not exist is read as nothing: a probe for it runs and finds nothing.
+    let missing = root.join("missing");
     let (text, failed) = safebash(
         &config,
-        serde_json::json!({ "command": "true", "input_files": [root.join("missing")], "output_files": [], "network_hosts": [] }),
+        serde_json::json!({
+            "command": format!("test -e {} || echo ABSENT", missing.display()),
+            "input_files": [missing], "output_files": [], "network_hosts": [],
+        }),
     );
-    assert!(failed && text.contains("refused"), "{text}");
+    assert!(!failed && text.contains("ABSENT"), "{text}");
 }
 
 /// What `clappa`'s preload hands Claude Code's sandbox for one Bash call: the declared input

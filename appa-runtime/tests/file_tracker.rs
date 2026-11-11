@@ -110,6 +110,12 @@ async fn propose(runtime: &Arc<Runtime>, root: &str, proposed: ProposedCall) -> 
 
 /// Propose, accept a narrowing the runtime offers, and report the call run.
 async fn run(runtime: &Arc<Runtime>, root: &str, proposed: ProposedCall, body: &str) {
+    run_then(runtime, root, proposed, body, || {}).await;
+}
+
+/// [`run`], with `command` standing in for what the call does between its annotation and
+/// its result.
+async fn run_then(runtime: &Arc<Runtime>, root: &str, proposed: ProposedCall, body: &str, command: impl FnOnce()) {
     let mut decision = propose(runtime, root, clone(&proposed)).await;
     if let HookDecision::DenyCall { feedback, .. } = &decision {
         let offer = feedback
@@ -124,6 +130,7 @@ async fn run(runtime: &Arc<Runtime>, root: &str, proposed: ProposedCall, body: &
         decision = propose(runtime, root, clone(&proposed)).await;
     }
     assert_eq!(decision, HookDecision::AllowCall { spawn: None }, "{}", proposed.tool);
+    command();
     let event = HookEvent::ToolResult {
         actor: actor(root),
         call: proposed,
@@ -361,6 +368,17 @@ async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_b
     start(&runtime, "u").await;
     run(&runtime, "u", fetch(), "<html>").await;
     assert_eq!(recorded(&store, &fetched)["trust"], serde_json::json!("suspicious"));
+    // A package install reaches only its registry: the `self` session runs it at once.
+    let install = call(
+        "host/claude-code/Bash",
+        serde_json::json!({
+            "command": "npm install", "input_files": [], "output_files": [], "network_hosts": ["registry.npmjs.org"],
+        }),
+    );
+    assert_eq!(
+        propose(&runtime, "t", install).await,
+        HookDecision::AllowCall { spawn: None }
+    );
 
     let notes = root.join("notes.txt");
     std::fs::write(&notes, "TOKEN=1\n").unwrap();
@@ -377,8 +395,9 @@ async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_b
     assert_eq!(recorded(&store, &notes)["audience"], serde_json::json!([["self"]]));
 }
 
-/// A directory a command reads carries the labels of the files it holds, and a directory a
-/// command writes passes the call's label to every file the command leaves in it.
+/// A directory a command reads carries the labels of the files in it the command sees: a
+/// file whose label restricts its readers stays out of sight unless the call names it. A
+/// directory a command writes passes the call's label to each file the command changes in it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_directory_carries_the_labels_of_what_it_holds_and_of_what_wrote_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -401,43 +420,48 @@ async fn a_directory_carries_the_labels_of_what_it_holds_and_of_what_wrote_it() 
         )
     };
 
-    // Session A reads only `src/`: no credential is under it, and the session stays public.
-    // It builds into `build/`, which takes the session's label.
-    start(&runtime, "a").await;
+    let project = |inputs: serde_json::Value| safebash(inputs, serde_json::json!([format!("{}/", build.display())]));
     std::fs::create_dir(&build).unwrap();
-    run(
-        &runtime,
-        "a",
-        safebash(
-            serde_json::json!([work.join("src")]),
-            serde_json::json!([format!("{}/", build.display())]),
-        ),
-        "built",
-    )
-    .await;
-    assert_eq!(recorded(&store, &build)["audience"], serde_json::Value::Null);
+    std::fs::write(build.join("old"), "kept\n").unwrap();
 
-    // Reading the whole project reads `.env`, so it narrows the session to self; a build into
-    // `build/` then leaves `build/app` self data.
-    let project = || {
-        safebash(
-            serde_json::json!([work]),
-            serde_json::json!([format!("{}/", build.display())]),
-        )
-    };
-    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, "a", project()).await else {
-        panic!("a directory holding .env narrows the session first")
+    // Session A reads the whole project. `.env`, which the call does not name, stays out of
+    // the command's sight and out of its label, so the session stays public, and what the
+    // build writes into `build/` is public.
+    start(&runtime, "a").await;
+    run_then(&runtime, "a", project(serde_json::json!([work])), "built", || {
+        std::fs::write(build.join("app"), "binary\n").unwrap();
+    })
+    .await;
+    assert_eq!(
+        recorded(&store, &build.join("app"))["audience"],
+        serde_json::Value::Null
+    );
+
+    // Naming `.env` reads it: the session narrows to self, and the next build leaves self
+    // data in the one file it changes. The file it left as it was keeps no record.
+    let named = || project(serde_json::json!([work, work.join(".env")]));
+    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, "a", named()).await else {
+        panic!("a call naming .env narrows the session first")
     };
     assert!(feedback.contains("public -> self"), "{feedback}");
-    std::fs::write(build.join("app"), "binary\n").unwrap();
-    run(&runtime, "a", project(), "built").await;
+    run_then(&runtime, "a", named(), "built", || {
+        std::fs::write(build.join("app"), "binary v2\n").unwrap();
+    })
+    .await;
     let deadline = Instant::now() + Duration::from_secs(20);
-    while recorded(&store, &build)["audience"] != serde_json::json!([["self"]]) {
-        assert!(Instant::now() < deadline, "the recorder never relabeled build/");
+    while recorded(&store, &build.join("app"))["audience"] != serde_json::json!([["self"]]) {
+        assert!(
+            Instant::now() < deadline,
+            "the recorder never relabeled build/app: {}",
+            std::fs::read_to_string(&store).unwrap()
+        );
         std::thread::sleep(Duration::from_millis(50));
     }
+    let held: serde_json::Value = serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
+    assert!(held["files"][build.join("old").to_str().unwrap()].is_null(), "{held}");
+    assert!(held["files"][build.to_str().unwrap()].is_null(), "{held}");
 
-    // Session B reads one file the build left: it carries the directory's label.
+    // Session B reads the file the build changed: it carries the build's label.
     start(&runtime, "b").await;
     let HookDecision::DenyCall { feedback, .. } = propose(
         &runtime,
@@ -449,9 +473,22 @@ async fn a_directory_carries_the_labels_of_what_it_holds_and_of_what_wrote_it() 
     )
     .await
     else {
-        panic!("a file under a self directory narrows the session first")
+        panic!("a file the self build wrote narrows the session first")
     };
     assert!(feedback.contains("public -> self"), "{feedback}");
+
+    // Session C reads the whole project, which now holds that file as well as `.env`: both
+    // stay out of its sight, so it runs at once and the session stays public.
+    start(&runtime, "c").await;
+    assert_eq!(
+        propose(
+            &runtime,
+            "c",
+            safebash(serde_json::json!([work]), serde_json::json!([]))
+        )
+        .await,
+        HookDecision::AllowCall { spawn: None }
+    );
 }
 
 /// A container daemon reaches every file, so a command that declares its socket narrows the

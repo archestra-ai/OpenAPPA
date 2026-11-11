@@ -58,21 +58,36 @@ pub fn covers(dir: &Path, path: &Path) -> bool {
 }
 
 /// An absolute path with every existing component resolved: an existing file resolves
-/// whole, an absent one through its parent directory. A relative path is refused: the
-/// plugin does not know the harness's working directory.
+/// whole, an absent one through its nearest existing directory, so an output may lie in a
+/// directory the command creates. A relative path is refused: the plugin does not know the
+/// harness's working directory.
 pub fn resolve(written: &str) -> Result<PathBuf, String> {
     let path = Path::new(written);
     if !path.is_absolute() {
         return Err(format!("{written:?} is not an absolute path"));
     }
-    if let Ok(resolved) = std::fs::canonicalize(path) {
-        return Ok(resolved);
+    let mut absent = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(existing) {
+            return Ok(absent.iter().rev().fold(resolved, |path, name| path.join(name)));
+        }
+        let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+            return Err(format!("{written:?} names no file"));
+        };
+        absent.push(name);
+        existing = parent;
     }
-    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
-        return Err(format!("{written:?} names no file"));
-    };
-    let parent = std::fs::canonicalize(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
-    Ok(parent.join(name))
+}
+
+/// Whether a declared entry names the call's own temporary directory, which every call gets
+/// private and writable and never declares.
+fn temporary(written: &str) -> bool {
+    ["$TMPDIR", "${TMPDIR}"].iter().any(|name| {
+        written
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
 }
 
 pub fn named(role: &ToolRole, arguments: &serde_json::Value) -> Result<Named, String> {
@@ -98,6 +113,7 @@ pub fn named(role: &ToolRole, arguments: &serde_json::Value) -> Result<Named, St
                         .map(str::to_string)
                         .ok_or_else(|| format!("{field} holds a non-string"))
                 })
+                .filter(|item| item.as_deref().map_or(true, |item| !temporary(item)))
                 .collect(),
             _ => Err(format!("{field} is not a list")),
         }
@@ -123,9 +139,12 @@ pub fn named(role: &ToolRole, arguments: &serde_json::Value) -> Result<Named, St
             let mut hosts: Vec<String> = list("network_hosts")?.iter().map(|host| host.to_lowercase()).collect();
             hosts.sort();
             hosts.dedup();
+            // An input that is not there is read as nothing: a probe such as `test -f` names
+            // what may be absent.
             let mut reads: Vec<PathBuf> = list("input_files")?
                 .iter()
                 .map(|path| resolve(path))
+                .filter(|path| path.as_ref().map_or(true, |path| path.symlink_metadata().is_ok()))
                 .collect::<Result<_, _>>()?;
             let mut writes = Vec::new();
             let mut directories = Vec::new();

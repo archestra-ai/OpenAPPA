@@ -1,19 +1,20 @@
 //! The Annotator: one consult in, one annotation out. A read's `delta` is the file's label; an
 //! edit forwards its predecessor's label, so the label the edit publishes keeps it; a write
 //! forwards nothing, so the label it publishes replaces the one it destroys; SafeBash forwards
-//! the meet of its inputs' labels. The hosts SafeBash reaches add nothing to its label: the
-//! sandbox confines a command to them, and what a host may receive is not judged here. Every
-//! file a call may change is reserved until its records settle it.
+//! the meet of the labels of the inputs it sees — a file in a declared directory whose label
+//! restricts its readers is hidden unless the call names it. The hosts SafeBash reaches add
+//! nothing to its label: the policy judges them by the call's selector. Every file a call may
+//! change is reserved until its records settle it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde_json::{Value, json};
 
-use crate::config::{Config, Role};
+use crate::config::{Config, PathRule, Role};
 use crate::label::{Label, Ranks};
-use crate::paths::{Named, named, tree};
-use crate::store::{Locked, Reservation, Store, digest_lines, now, version};
+use crate::paths::{Named, covers, named, tree};
+use crate::store::{Locked, Reservation, Store, digest_lines, now, stamp, version};
 
 /// What the consult declares the answer may use.
 struct Mandate {
@@ -74,9 +75,16 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
     };
 
     let store = &locked.store;
+    let toolchains = crate::safebash::toolchains(config);
     let mut inputs = Label::default();
     for path in &named.reads {
-        inputs = inputs.meet(&file_label(config, store, path)?, &store.ranks);
+        // A toolchain is readable to every command and assumed to hold no credentials: what
+        // a call reads there carries only what recorded writes left on it.
+        let label = match toolchains.iter().any(|toolchain| covers(toolchain, path)) {
+            true => recorded_label(store, path),
+            false => file_label(config, store, path, &named.reads)?,
+        };
+        inputs = inputs.meet(&label, &store.ranks);
     }
     let (delta, forwards) = match role.role {
         Role::Read => (inputs, Label::default()),
@@ -84,11 +92,30 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
         Role::Edit => (inputs.clone(), inputs),
         Role::Run => (inputs.clone(), inputs),
     };
-    // A directory output writes what it holds, so the rules of every file in it apply. A
-    // file it creates is held to no rule; it carries the label the call publishes.
+    // A directory output writes what it holds, so the rules of every file in it apply, but
+    // for the files a rule guards for writing: the sandbox keeps those as they are unless
+    // the call names them. A file it creates is held to no rule; it carries the label the
+    // call publishes. What the directory holds now is kept, so its record labels only what
+    // the call changes.
     let mut written = named.writes.clone();
+    let mut trees = std::collections::BTreeMap::new();
     for directory in &named.directories {
-        written.extend(tree(directory)?.into_iter().map(|(path, _)| path));
+        let entries = tree(directory)?;
+        let kept = guarded(config, &entries, &named.writes);
+        written.extend(
+            entries
+                .iter()
+                .map(|(path, _)| path)
+                .filter(|path| !kept.iter().any(|kept| covers(kept, path)))
+                .cloned(),
+        );
+        trees.insert(
+            directory.clone(),
+            entries
+                .iter()
+                .map(|(path, metadata)| (path.clone(), stamp(metadata)))
+                .collect(),
+        );
     }
     let rules = || {
         config
@@ -128,6 +155,7 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
             arguments: arguments.clone(),
             evidence,
             writes: named.writes.iter().map(|path| (path.clone(), version(path))).collect(),
+            trees,
             created: now(),
             dispatch: None,
             published: None,
@@ -137,24 +165,111 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
     Ok(answer)
 }
 
-/// A file's label: what recorded writes left on it, on a directory above it, or — for a
-/// directory — on anything under it, met with every path rule that matches it or, for a
-/// directory, anything it holds.
-pub fn file_label(config: &Config, store: &Store, path: &Path) -> Result<Label, String> {
-    let mut paths = vec![path.to_path_buf()];
-    if path.is_dir() {
-        paths.extend(tree(path)?.into_iter().map(|(entry, _)| entry));
-    }
-    let ruled = config
+/// A file's label: what recorded writes left on it or on a directory above it, met with every
+/// path rule that matches it — and, for a directory, the own label of everything under it the
+/// call sees. An entry [`concealed`] from a call that names `reads` adds nothing.
+pub fn file_label(config: &Config, store: &Store, path: &Path, reads: &[PathBuf]) -> Result<Label, String> {
+    let mut label = config
         .paths
         .iter()
-        .filter(|rule| paths.iter().any(|path| rule.matches(path)))
-        .map(|rule| rule.label());
-    Ok(store
-        .recorded(path)
-        .cloned()
-        .chain(ruled)
-        .fold(Label::default(), |met, label| met.meet(&label, &store.ranks)))
+        .filter(|rule| rule.matches(path))
+        .map(PathRule::label)
+        .fold(recorded_label(store, path), |met, label| met.meet(&label, &store.ranks));
+    if path.is_dir() {
+        let entries = tree(path)?;
+        let hidden = concealed(config, store, &entries, reads, Concealing::Restricted);
+        for (entry, _) in &entries {
+            if !hidden.iter().any(|hidden| covers(hidden, entry)) {
+                label = label.meet(&own_label(config, store, entry), &store.ranks);
+            }
+        }
+    }
+    Ok(label)
+}
+
+/// Which files under a directory a command reads stay out of its sight unless it names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Concealing {
+    /// Each file whose label restricts who may read it: a model's call reads a credential
+    /// only by naming it, and a directory it lists carries only what it can see.
+    Restricted,
+    /// Each labeled file: a command the person types at the prompt reaches no hook that
+    /// would label its result, so it sees only what carries no label.
+    Labeled,
+}
+
+/// The entries under a directory a call does not see, each with everything under it: those
+/// whose own label `concealing` names, unless the call names the entry or a path under it.
+/// `entries` lists each directory ahead of what it holds, as [`tree`] does.
+pub fn concealed(
+    config: &Config,
+    store: &Store,
+    entries: &[(PathBuf, std::fs::Metadata)],
+    reads: &[PathBuf],
+    concealing: Concealing,
+) -> Vec<PathBuf> {
+    let mut hidden: Vec<PathBuf> = Vec::new();
+    for (entry, _) in entries {
+        if hidden.iter().any(|hidden| covers(hidden, entry)) || reads.iter().any(|read| covers(entry, read)) {
+            continue;
+        }
+        let label = own_label(config, store, entry);
+        let conceals = match concealing {
+            Concealing::Restricted => !label.audience.is_empty(),
+            Concealing::Labeled => {
+                !label.audience.is_empty()
+                    || label
+                        .trust
+                        .as_deref()
+                        .is_some_and(|trust| Some(trust) != store.ranks.highest())
+            }
+        };
+        if conceals {
+            hidden.push(entry.clone());
+        }
+    }
+    hidden
+}
+
+/// The entries of a directory output a command keeps as they are, each with everything under
+/// it: those a path rule guards for writing, unless the call names the entry or a path under it.
+pub fn guarded(config: &Config, entries: &[(PathBuf, std::fs::Metadata)], writes: &[PathBuf]) -> Vec<PathBuf> {
+    let mut kept: Vec<PathBuf> = Vec::new();
+    for (entry, _) in entries {
+        if kept.iter().any(|kept| covers(kept, entry)) || writes.iter().any(|write| covers(entry, write)) {
+            continue;
+        }
+        if config
+            .paths
+            .iter()
+            .any(|rule| rule.matches(entry) && (rule.write_trust.is_some() || !rule.write_attention.is_empty()))
+        {
+            kept.push(entry.clone());
+        }
+    }
+    kept
+}
+
+/// What recorded writes left on `path` or on a directory above it.
+fn recorded_label(store: &Store, path: &Path) -> Label {
+    store
+        .files
+        .iter()
+        .filter(|(recorded, _)| covers(recorded, path))
+        .fold(Label::default(), |met, (_, recorded)| {
+            met.meet(&recorded.label, &store.ranks)
+        })
+}
+
+/// A path's own label: every path rule that matches it and what the store recorded on it.
+fn own_label(config: &Config, store: &Store, path: &Path) -> Label {
+    config
+        .paths
+        .iter()
+        .filter(|rule| rule.matches(path))
+        .map(PathRule::label)
+        .chain(store.files.get(path).map(|recorded| recorded.label.clone()))
+        .fold(Label::default(), |met, label| met.meet(&label, &store.ranks))
 }
 
 /// What the call was judged over: each file's version, so the same call over changed files is

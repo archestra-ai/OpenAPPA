@@ -41,7 +41,7 @@ delete process.env.APPA_CLAUDE_BASH_SELFTEST;
 
 const GUIDANCE = `
 
-Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory or a cache needs (for example ~/.cache/go-build/). Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To find files, use the Glob tool, then declare the ones the command needs. Each output file is emptied before the command runs.`;
+Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. Each output file is emptied before the command runs.`;
 
 /** The exports of every embedded chunk whose source contains all of `needles`. */
 async function modulesWith(...needles) {
@@ -90,11 +90,18 @@ const base = bash.inputSchema;
 const text = base.shape?.description?._def?.innerType;
 if (typeof text?.array !== "function") throw new Error("this Claude Code build's Bash schema has no plain string field");
 const list = (description) => text.array().describe(description);
-const extended = base.safeExtend({
-  input_files: list("Absolute paths of every file the command reads."),
-  output_files: list("Absolute paths of every file the command writes."),
-  network_hosts: list("Hosts the command connects to: example.com, *.example.com, or host:port."),
-});
+// The lists come ahead of `command` in the schema the model reads: a model writes the
+// arguments in that order, and one that has written the command tends to end the call there.
+const lists = {
+  input_files: list("Absolute paths of every file the command reads. Required, even when empty."),
+  output_files: list("Absolute paths of every file the command writes. Required, even when empty."),
+  network_hosts: list("Hosts the command connects to: example.com, *.example.com, or host:port. Required, even when empty."),
+};
+const extended = base.safeExtend(lists);
+try {
+  // Before anything reads the shape, put the lists first; a build that refuses keeps them last.
+  Object.defineProperty(extended._zod.def, "shape", { value: { ...lists, ...base.shape }, configurable: true, enumerable: true });
+} catch {}
 
 // Claude Code parses a streamed Bash call against the schema, then rebuilds the input from
 // the fields it knows and hands it to `coerceInput`. The lists cross that gap here, keyed by
@@ -134,20 +141,21 @@ bash.prompt = async function (...args) {
 
 // The model reads a listing of a confined directory as the truth; say on every result that it is not.
 const HIDDEN =
-  "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing here is incomplete. Use the Glob tool to list files.";
+  "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing here is incomplete. To list a directory, declare it in input_files.";
 
 const calls = new AsyncLocalStorage();
 const wrapping = new AsyncLocalStorage();
 const proxied = new AsyncLocalStorage();
 const hostsByNonce = new Map();
 
+// The schema requires the three lists, so a call without them did not come from the model:
+// it is a command the person typed at the prompt, which reaches no hook. It runs in the
+// working directory, with no host, and sees no file that carries a label.
 function confinement(input) {
   const lists = [input?.input_files, input?.output_files, input?.network_hosts];
-  if (!lists.every(Array.isArray)) {
-    throw new Error("This Bash call declares no input_files, output_files and network_hosts, so it cannot be confined. The command was not run.");
-  }
+  const request = lists.every(Array.isArray) ? input : { command: input?.command, typed: true };
   try {
-    return JSON.parse(execFileSync(TRACKER, ["file-tracker", "sandbox"], { input: JSON.stringify(input), encoding: "utf8" }));
+    return JSON.parse(execFileSync(TRACKER, ["file-tracker", "sandbox"], { input: JSON.stringify(request), encoding: "utf8" }));
   } catch (error) {
     throw new Error(`The command was not run: ${String(error.stderr || error.message).trim()}`);
   }
@@ -307,6 +315,28 @@ function check(condition, what) {
   if (!condition) throw new Error(what);
 }
 
+// One command, confined as a Bash call declaring `lists` would be, run in `cwd`.
+async function confinedRun(lists, command, cwd) {
+  const confined = confinement(lists);
+  const wrapped = await calls.run({ confined, nonce: "selftest" }, () =>
+    sandbox.wrapWithSandbox(command, "/bin/bash", undefined, undefined, { commandId: "selftest" }),
+  );
+  // Claude Code hands the wrapped command its own executable on descriptor 3, for the
+  // sandbox's syscall filter.
+  const executable = fs.openSync(process.execPath, "r");
+  try {
+    return spawnSync("/bin/bash", ["-c", wrapped], {
+      encoding: "utf8",
+      cwd,
+      timeout: 20000,
+      stdio: ["ignore", "pipe", "pipe", executable],
+    });
+  } finally {
+    fs.closeSync(executable);
+    fs.rmSync(confined.tmpdir, { recursive: true, force: true });
+  }
+}
+
 async function selfTest() {
   extended.parse({ command: "true", input_files: ["/a"], output_files: ["/b"], network_hosts: ["example.com"] });
   const coerced = bash.coerceInput({ command: "true" });
@@ -330,26 +360,48 @@ async function selfTest() {
     fs.writeFileSync(secret, "UNDECLARED\n");
     process.env.APPA_SELFTEST_TOKEN = "CANARY-ENVIRONMENT";
     const lists = { command: "true", input_files: [input], output_files: [output], network_hosts: [] };
-    const confined = confinement(lists);
     const command = `cat ${input}; cat ${secret}; tr A-Z a-z < ${input} > ${output}; echo x > ${stray}; printenv APPA_SELFTEST_TOKEN; tr '\\0' '\\n' < /proc/$$/environ`;
-    const wrapped = await calls.run({ confined, nonce: "selftest" }, () =>
-      sandbox.wrapWithSandbox(command, "/bin/bash", undefined, undefined, { commandId: "selftest" }),
-    );
-    // Claude Code hands the wrapped command its own executable on descriptor 3, for the
-    // sandbox's syscall filter.
-    const executable = fs.openSync(process.execPath, "r");
-    const ran = spawnSync("/bin/bash", ["-c", wrapped], {
-      encoding: "utf8",
-      cwd: dir,
-      timeout: 20000,
-      stdio: ["ignore", "pipe", "pipe", executable],
-    });
-    fs.closeSync(executable);
+    const ran = await confinedRun(lists, command, dir);
     check(ran.stdout.includes("DECLARED"), `a declared input is not readable: ${ran.stdout}${ran.stderr}`);
     check(!ran.stdout.includes("UNDECLARED"), "an undeclared file is readable");
     check(fs.readFileSync(output, "utf8") === "declared\n", `a declared output is not written: ${ran.stderr}`);
     check(!fs.existsSync(stray), "an undeclared write reached the disk");
     check(!ran.stdout.includes("CANARY-ENVIRONMENT"), "a credential variable reaches the command");
+
+    // A declared directory: what it holds is read but a credential in it, which the call
+    // does not name, and an output inside it is written.
+    const project = path.join(dir, "project");
+    fs.mkdirSync(path.join(project, "src"), { recursive: true });
+    fs.writeFileSync(path.join(project, "src", "main.txt"), "SOURCE\n");
+    fs.writeFileSync(path.join(project, ".env"), "TOKEN=CANARY-DOTENV\n");
+    const build = path.join(project, "build");
+    const built = await confinedRun(
+      { command: "true", input_files: [project], output_files: [`${build}/`], network_hosts: [] },
+      `cat ${project}/src/main.txt; cat ${project}/.env; mkdir -p ${build}/sub && echo BUILT > ${build}/sub/out.txt`,
+      project,
+    );
+    check(built.stdout.includes("SOURCE"), `a file in a declared directory is not readable: ${built.stdout}${built.stderr}`);
+    check(!built.stdout.includes("CANARY-DOTENV"), "a credential in a declared directory is readable");
+    check(
+      fs.existsSync(path.join(build, "sub", "out.txt")),
+      `an output inside a declared directory is not written: ${built.stdout}${built.stderr}`,
+    );
+
+    // A directory output, as a command the person types gets the working directory: what
+    // it writes reaches the disk, a credential in it stays unreadable, and a file a rule
+    // guards for writing stays as it was.
+    fs.writeFileSync(path.join(project, "CLAUDE.md"), "ORIGINAL\n");
+    const typed = await confinedRun(
+      { command: "true", input_files: [], output_files: [`${project}/`], network_hosts: [] },
+      `cat ${project}/.env; echo NEW > ${project}/new.txt; echo CHANGED > ${project}/CLAUDE.md`,
+      project,
+    );
+    check(!typed.stdout.includes("CANARY-DOTENV"), "a credential in a directory output is readable");
+    check(fs.existsSync(path.join(project, "new.txt")), `a directory output is not written: ${typed.stdout}${typed.stderr}`);
+    check(
+      fs.readFileSync(path.join(project, "CLAUDE.md"), "utf8") === "ORIGINAL\n",
+      "a file guarded for writing in a directory output is written",
+    );
   } finally {
     delete process.env.APPA_SELFTEST_TOKEN;
     fs.rmSync(dir, { recursive: true, force: true });

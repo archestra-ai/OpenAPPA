@@ -24,7 +24,9 @@ pub struct Config {
 }
 
 /// A path pattern and what it says about every file it matches. `*` matches any run of
-/// characters, `/` included; the pattern is matched against the absolute, resolved path.
+/// characters, `/` included. A pattern with a `/` is matched against the absolute, resolved
+/// path; one without is matched against the file's name, so `*secrets*` names
+/// `db-secrets.yaml` and not every file in a repository called `k8s-secrets`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathRule {
@@ -44,7 +46,11 @@ pub struct PathRule {
 
 impl PathRule {
     pub fn matches(&self, path: &Path) -> bool {
-        path.to_str().is_some_and(|path| wildcard(&self.pattern, path))
+        let text = match self.pattern.contains('/') {
+            true => path.to_str(),
+            false => path.file_name().and_then(|name| name.to_str()),
+        };
+        text.is_some_and(|text| wildcard(&self.pattern, text))
     }
 
     pub fn label(&self) -> Label {
@@ -226,19 +232,26 @@ fn state_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
 }
 
-/// `*` matches any run of characters; every other character matches itself.
+/// `*` matches any run of characters; every other character matches itself. Each literal
+/// between stars is taken at its first occurrence, which is the match if any is: the time is
+/// linear in the text, whatever the number of stars.
 fn wildcard(pattern: &str, text: &str) -> bool {
-    match pattern.split_once('*') {
-        None => pattern == text,
-        Some((head, rest)) => {
-            let Some(text) = text.strip_prefix(head) else {
-                return false;
-            };
-            (0..=text.len())
-                .filter(|at| text.is_char_boundary(*at))
-                .any(|at| wildcard(rest, &text[at..]))
+    let mut parts = pattern.split('*');
+    let first = parts.next().expect("split yields a first part");
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let middle: Vec<&str> = parts.collect();
+    let Some((last, middle)) = middle.split_last() else {
+        return rest.is_empty();
+    };
+    for literal in middle {
+        match rest.find(literal) {
+            Some(at) => rest = &rest[at + literal.len()..],
+            None => return false,
         }
     }
+    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 #[cfg(test)]
@@ -252,6 +265,57 @@ mod tests {
         assert!(wildcard("*.pem", "/w/key.pem"));
         assert!(!wildcard("*.pem", "/w/key.pem.txt"));
         assert!(wildcard("/etc/ssh/*", "/etc/ssh/sshd_config"));
+    }
+
+    /// The linear matcher agrees with the definition — try every split — on every pattern
+    /// and text of up to five characters over `a`, `b` and `*`.
+    #[test]
+    fn the_wildcard_agrees_with_trying_every_split() {
+        fn by_definition(pattern: &str, text: &str) -> bool {
+            match pattern.split_once('*') {
+                None => pattern == text,
+                Some((head, rest)) => text
+                    .strip_prefix(head)
+                    .is_some_and(|text| (0..=text.len()).any(|at| by_definition(rest, &text[at..]))),
+            }
+        }
+        let words = |alphabet: &[char]| -> Vec<String> {
+            let mut all = vec![String::new()];
+            for length in 1..=5 {
+                let mut next: Vec<String> = all.iter().filter(|word| word.len() == length - 1).cloned().collect();
+                next = next
+                    .iter()
+                    .flat_map(|word| alphabet.iter().map(move |letter| format!("{word}{letter}")))
+                    .collect();
+                all.extend(next);
+            }
+            all
+        };
+        let texts = words(&['a', 'b']);
+        for pattern in words(&['a', 'b', '*']) {
+            for text in &texts {
+                assert_eq!(
+                    wildcard(&pattern, text),
+                    by_definition(&pattern, text),
+                    "{pattern:?} on {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pattern_without_a_slash_names_the_file_and_one_with_a_slash_its_path() {
+        let rule = |pattern: &str| PathRule {
+            pattern: pattern.to_string(),
+            trust: None,
+            audience: None,
+            write_trust: None,
+            write_attention: Vec::new(),
+        };
+        assert!(rule("*secrets*").matches(Path::new("/w/app/db-secrets.yaml")));
+        assert!(!rule("*secrets*").matches(Path::new("/w/k8s-secrets/README.md")));
+        assert!(rule("*/.ssh/*").matches(Path::new("/home/me/.ssh/id_ed25519")));
+        assert!(!rule("*/.ssh/*").matches(Path::new("/home/me/ssh/id_ed25519")));
     }
 
     #[test]

@@ -32,7 +32,15 @@ pub struct Store {
     /// replayed refusal never takes the reservation of a later, identical proposal.
     #[serde(default)]
     pub given_back: BTreeSet<String>,
+    /// The reservations given back, kept for a day: the runtime releases a call it refused
+    /// once a remedy is accepted without consulting the plugin again, and that release
+    /// settles on what the call saw when it was annotated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returned: Vec<Reservation>,
 }
+
+/// How long a given-back reservation is kept for a release that comes after a remedy.
+const RETURNED_FOR_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Recorded {
@@ -49,6 +57,9 @@ pub struct Reservation {
     pub arguments: serde_json::Value,
     pub evidence: String,
     pub writes: BTreeMap<PathBuf, String>,
+    /// What each directory output held at the annotation: every entry, with its [`stamp`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub trees: BTreeMap<PathBuf, BTreeMap<PathBuf, String>>,
     /// Seconds since the epoch at the annotation.
     pub created: u64,
     /// The dispatch the runtime released the call as, and the label it published.
@@ -122,20 +133,13 @@ impl Store {
     /// releases it.
     pub fn expire(&mut self, timeout: std::time::Duration) {
         let now = now();
+        self.returned
+            .retain(|reservation| now.saturating_sub(reservation.created) < RETURNED_FOR_SECS);
         self.reservations.retain(|reservation| {
             reservation.dispatch.is_some()
                 || now.saturating_sub(reservation.created) < timeout.as_secs()
                 || reservation.writes.iter().any(|(path, seen)| &version(path) != seen)
         });
-    }
-
-    /// The labels `path` carries from recorded writes: of the path itself, of every recorded
-    /// directory above it, and of every recorded file under it.
-    pub fn recorded(&self, path: &Path) -> impl Iterator<Item = &Label> {
-        self.files
-            .iter()
-            .filter(move |(recorded, _)| covers(recorded, path) || covers(path, recorded))
-            .map(|(_, recorded)| &recorded.label)
     }
 
     /// Settle one released call's outcome on the files it reserved. A success replaces the
@@ -148,6 +152,10 @@ impl Store {
             .clone()
             .expect("a settled reservation was released with its published label");
         for (path, seen) in &reservation.writes {
+            if let Some(before) = reservation.trees.get(path) {
+                self.settle_directory(path, seen, before, &published, success);
+                continue;
+            }
             let now = version(path);
             if !success && &now == seen {
                 continue;
@@ -163,6 +171,59 @@ impl Store {
             self.settled.insert(dispatch);
         }
     }
+
+    /// Settle a directory output on what the call changed in it, never on the directory as a
+    /// whole: each file it created or changed takes the published label, as a file output
+    /// does, and a directory it created takes it whole. A file it left as it was keeps its own
+    /// label, so a build into the project leaves the sources it did not touch as they were.
+    fn settle_directory(
+        &mut self,
+        directory: &Path,
+        seen: &str,
+        before: &BTreeMap<PathBuf, String>,
+        published: &Label,
+        success: bool,
+    ) {
+        let mut changed: Vec<PathBuf> = Vec::new();
+        if seen == "absent" {
+            if directory.exists() {
+                changed.push(directory.to_path_buf());
+            }
+        } else {
+            for (entry, metadata) in tree(directory).unwrap_or_default() {
+                if changed
+                    .iter()
+                    .any(|created| created.is_dir() && covers(created, &entry))
+                {
+                    continue;
+                }
+                match before.get(&entry) {
+                    None => changed.push(entry),
+                    Some(stamped) if !metadata.is_dir() && stamped != &stamp(&metadata) => changed.push(entry),
+                    Some(_) => {}
+                }
+            }
+        }
+        for path in changed {
+            let label = match (success, self.files.get(&path)) {
+                (false, Some(previous)) => previous.label.meet(published, &self.ranks),
+                _ => published.clone(),
+            };
+            let version = version(&path);
+            self.files.insert(path, Recorded { label, version });
+        }
+    }
+}
+
+/// An entry's kind, size and modification time: what tells a changed entry of a directory
+/// apart from one the call left as it was, without reading its content.
+pub fn stamp(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    format!("{:?}\t{}\t{modified}", metadata.file_type(), metadata.len())
 }
 
 /// A file's version: the digest of its content, or `absent`. A directory's is the digest of
@@ -176,19 +237,7 @@ pub fn version(path: &Path) -> String {
             };
             let mut lines: Vec<String> = entries
                 .iter()
-                .map(|(entry, metadata)| {
-                    let modified = metadata
-                        .modified()
-                        .ok()
-                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                        .map_or(0, |elapsed| elapsed.as_nanos());
-                    format!(
-                        "{}\t{:?}\t{}\t{modified}",
-                        entry.display(),
-                        metadata.file_type(),
-                        metadata.len()
-                    )
-                })
+                .map(|(entry, metadata)| format!("{}\t{}", entry.display(), stamp(metadata)))
                 .collect();
             lines.sort();
             digest_lines(&lines)
@@ -237,6 +286,7 @@ mod tests {
                     arguments: serde_json::Value::Null,
                     evidence: String::new(),
                     writes: [(file.clone(), version(&file))].into(),
+                    trees: Default::default(),
                     created: 0,
                     dispatch: None,
                     published: Some(Label::default()),
@@ -265,6 +315,7 @@ mod tests {
                 arguments: serde_json::Value::Null,
                 evidence: String::new(),
                 writes: [(file.clone(), "sha256:before".to_string())].into(),
+                trees: Default::default(),
                 created: 0,
                 dispatch: None,
                 published: Some(Label::default()),

@@ -34,8 +34,9 @@ A shell command declares its `input_files`, `output_files` and
 the three lists to Claude Code's own `Bash` and confines each call in Claude
 Code's sandbox; where its self-test fails, it serves SafeBash in Anthropic's
 sandbox runtime `srt` instead. A `Bash` call that declares no lists is
-refused. A call that declares a host requires public data, and its result is
-`suspicious`; a root rule such as `host/claude-code/Bash(network_hosts:*.corp.example)`
+refused. A call whose hosts are all one package registry's (npm, Yarn, the Go
+module proxy, crates.io) runs as a call without hosts. Any other call that
+declares a host requires public data, and its result is `suspicious`; a root rule such as `host/claude-code/Bash(network_hosts:*.corp.example)`
 can give a known host its own readers. `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` require the
 `blocked` mark: they read or write file content out of the file-tracker's
 sight.

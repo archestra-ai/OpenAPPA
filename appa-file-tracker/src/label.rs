@@ -30,6 +30,10 @@ impl Ranks {
         self.0.first().map(String::as_str)
     }
 
+    pub fn highest(&self) -> Option<&str> {
+        self.0.last().map(String::as_str)
+    }
+
     /// The higher of two required ranks: the stricter trust floor.
     pub fn higher<'a>(&self, left: Option<&'a str>, right: Option<&'a str>) -> Option<&'a str> {
         match (left, right) {
