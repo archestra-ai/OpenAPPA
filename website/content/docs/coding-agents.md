@@ -87,7 +87,7 @@ recorder = "file-tracker"
 requires = { audience = { contains = ["internal"] } }
 ```
 
-The battery gives the npm, Yarn, Go module and crates.io registries rules of their own: a call whose hosts all match one registry's pattern runs as a call without hosts does. A registry learns which packages the command fetches. PyPI spans `pypi.org` and `files.pythonhosted.org`, which no one pattern matches, so a `pip` or `uv` install takes the rule for any host.
+The battery gives the npm, Yarn, Go module, crates.io and PyPI registries rules of their own: a call whose hosts all match one registry's pattern runs as a call without hosts does. PyPI's rule names both of its hosts, `pypi.org` and `files.pythonhosted.org`. A registry learns which packages the command fetches.
 
 A host rule matches a call only when every host the call declares matches its pattern. A call that also declares another host falls through to the battery's rule. `*` matches dots too, so write `example.com` and `*.example.com` as two rules rather than `*example.com`.
 

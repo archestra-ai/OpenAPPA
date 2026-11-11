@@ -368,16 +368,46 @@ async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_b
     start(&runtime, "u").await;
     run(&runtime, "u", fetch(), "<html>").await;
     assert_eq!(recorded(&store, &fetched)["trust"], serde_json::json!("suspicious"));
-    // A package install reaches only its registry: the `self` session runs it at once.
-    let install = call(
-        "host/claude-code/Bash",
-        serde_json::json!({
-            "command": "npm install", "input_files": [], "output_files": [], "network_hosts": ["registry.npmjs.org"],
-        }),
-    );
-    assert_eq!(
-        propose(&runtime, "t", install).await,
-        HookDecision::AllowCall { spawn: None }
+    // A package install reaches only its registry: the `self` session runs it at once. PyPI
+    // serves its index and its files from two hosts, and a call that names both runs too.
+    let install = |command: &str, hosts: serde_json::Value| {
+        call(
+            "host/claude-code/Bash",
+            serde_json::json!({
+                "command": command, "input_files": [], "output_files": [], "network_hosts": hosts,
+            }),
+        )
+    };
+    for (command, hosts) in [
+        ("npm install", serde_json::json!(["registry.npmjs.org"])),
+        ("uv sync", serde_json::json!(["pypi.org", "files.pythonhosted.org"])),
+    ] {
+        let proposed = install(command, hosts);
+        assert_eq!(
+            propose(&runtime, "t", clone(&proposed)).await,
+            HookDecision::AllowCall { spawn: None },
+            "{command}"
+        );
+        let done = HookEvent::ToolResult {
+            actor: actor("t"),
+            call: proposed,
+            call_id: None,
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available("installed".to_string()),
+            },
+        };
+        assert_eq!(hooks::handle(&runtime, done).await, HookDecision::Ack);
+    }
+    // One more host takes the call back to the rule for any host.
+    let beside = propose(
+        &runtime,
+        "t",
+        install("uv sync", serde_json::json!(["pypi.org", "example.com"])),
+    )
+    .await;
+    assert!(
+        matches!(&beside, HookDecision::DenyCall { feedback, .. } if feedback.contains("public")),
+        "{beside:?}"
     );
 
     let notes = root.join("notes.txt");
