@@ -169,16 +169,28 @@ builtin = "hitl"
 [externals.sanitizers.redact-for-public]
 builtin = "claude-code"
 
+# The Claude Code battery routes Read, Write, Edit, Bash and SafeBash through
+# the file-tracker, which the `appa` executable serves. While it is bound,
+# `clappa` confines each Bash call in Claude Code's own sandbox, or, where the
+# preload's self-test fails, disables Bash and registers SafeBash, which runs
+# in Anthropic's sandbox runtime, `srt`. It disables PowerShell, Monitor, Grep
+# and NotebookEdit either way.
+[externals.annotators.file-tracker]
+command = ["appa", "file-tracker", "annotate"]
+
+[externals.recorders.file-tracker]
+command = ["appa", "file-tracker", "record"]
+
 # The model for each battery sanitizer is configured here, not in the battery.
 # A Claude Code session has the `claude` CLI, so this policy binds every
-# battery sanitizer to it, and each one is offered by default. A binding for a
-# battery this deployment does not include stays idle, and it activates when
-# `appa battery install` adds that battery. To turn one sanitizer off, delete
-# its binding: the battery then decides as it would without it.
+# battery sanitizer to it, and each one is offered by default, except
+# `coding.strip-secrets`: the file-tracker labels credential reads here, and
+# no shell result is confined for it to run on. A
+# binding for a battery this deployment does not include stays idle, and it
+# activates when `appa battery install` adds that battery. To turn one
+# sanitizer off, delete its binding: the battery then decides as it would
+# without it.
 [externals.sanitizers."coding.strip-instructions"]
-builtin = "claude-code"
-
-[externals.sanitizers."coding.strip-secrets"]
 builtin = "claude-code"
 
 [externals.sanitizers."cloudflare.strip-instructions"]

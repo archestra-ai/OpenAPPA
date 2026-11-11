@@ -1,13 +1,13 @@
 schema = 1
 name = "claude-code"
-description = "Claude Code tool rules: the map that binds the coding battery's canonical tools to Claude Code's Bash, PowerShell, Read, Grep, Write, Edit, WebFetch and WebSearch, rules for the built-in tools only Claude Code offers, and Monitor calls labeled per call by the Claude Code Annotator."
+description = "Claude Code tool rules: Read, Write and Edit labeled per file by the file-tracker, Claude Code's own Bash confined per call in its built-in sandbox, with SafeBash as the fallback, the coding battery's web rules bound to WebFetch and WebSearch, and rules for the built-in tools only Claude Code offers."
 
 [battery]
 policy = "appa.toml"
 hosts = ["claude-code"]
-namespaces = ["claude-code"]
+namespaces = ["claude-code", "file-tracker"]
 helpers = []
-benefit = "Applies the coding battery's rules to Claude Code's built-in tools, and covers the session, plan, task and messaging tools only Claude Code offers."
+benefit = "Keeps a label on every file Claude Code reads or writes, across sessions, confines shell commands to the files and hosts they declare, and covers the session, plan, task and messaging tools only Claude Code offers."
 
 [battery.targets.single-user]
 policy = "appa.toml"

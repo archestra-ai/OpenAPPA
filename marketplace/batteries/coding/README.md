@@ -3,9 +3,10 @@
 This battery gives a coding agent policy-aware shell commands and `self`
 labels on the requester's own secrets. It writes its rules once, for
 canonical tools under `tool/coding/`. A client battery binds each canonical
-tool to the client's own tool with an `[aliases.tool.coding]` map; the
-`claude-code` battery is that map for Claude Code, and `appa plugin install
-claude-code` includes both. A rule no map binds is inactive.
+tool to the client's own tool with an `[aliases.tool.coding]` map. A rule
+no map binds is inactive. The `claude-code` battery binds only `fetch_url`
+and `web_search`: Claude Code's file tools and its `Bash` go through the
+file-tracker instead.
 
 | Canonical tool | What it is | Argument the rules read |
 | --- | --- | --- |
@@ -27,7 +28,7 @@ claude-code` includes both. A rule no map binds is inactive.
   inside a word or a string literal, a single-quoted name, and a template such
   as `.env.example` reach the Annotator. Where a client's map entry sets
   `confined = true` and the root binds `coding.strip-secrets` (the Claude Code
-  default does both for Bash and PowerShell), the command's
+  default does not, because the file-tracker serves Bash there), the command's
   result is withheld and the battery offers
   `coding.strip-secrets` beside the narrowing: the model replaces
   every secret value in the output with `[redacted-secret]`, and the masked
@@ -102,7 +103,7 @@ The model for both sanitizers is configured in the deployment, not in the
 battery. A deployment runs one by binding it under `[externals.sanitizers]`,
 for example to `builtin = "llm"` or, where the `claude` CLI is installed,
 `builtin = "claude-code"`; the Claude Code
-plugin's default config binds both. A sanitizer the root does not bind is
+plugin's default config binds only `coding.strip-instructions`. A sanitizer the root does not bind is
 not offered. APPA does not verify what the model removed: binding a
 sanitizer registers it as trusted. A root rule for a tool precedes the
 battery's, and a root rule without the battery's tag offers no sanitizer.
@@ -121,6 +122,5 @@ version = 2
 ```
 
 The `coding` battery alone declares no client tool. Root rules take
-precedence over both batteries, and a root rule names the client's tool
-(`host/claude-code/Bash(command:kubectl *)`); the `claude-code` battery's
-README shows overrides and Annotator hints.
+precedence over both batteries, and a root rule names the client's tool,
+such as `host/claude-code/WebFetch(url:https://wiki.example/*)`.
