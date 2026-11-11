@@ -762,6 +762,10 @@ pub enum LoadError {
     )]
     ForwardsPlaceholder { tool: String },
     #[error(
+        "tool {tool} names an Annotator and requires `contains` with a placeholder: a floor beside an Annotator names its readers literally"
+    )]
+    AnnotatedRecipientPlaceholder { tool: String },
+    #[error(
         "sanitizer {sanitizer} registers on tool_output but the deployment confines no application point — neither a result point nor, under context control, a child's return"
     )]
     OutputSanitizerUncovered { sanitizer: String },
@@ -1384,12 +1388,34 @@ impl Registry {
                         }
                     }
                 }
-                ToolDeclaration::Annotated { name, annotator, .. } => {
+                ToolDeclaration::Annotated {
+                    name,
+                    annotator,
+                    requires,
+                    delta_trust,
+                    ..
+                } => {
                     if !annotator_declarations.contains_key(annotator) {
                         return Err(LoadError::UnknownAnnotator {
                             tool: name.as_str().to_string(),
                             annotator: annotator.as_str().to_string(),
                         });
+                    }
+                    check_rank(&config.trust_chain, *delta_trust, || {
+                        format!("tool {} delta", name.as_str())
+                    })?;
+                    check_rank(&config.trust_chain, requires.trust_floor, || {
+                        format!("tool {} trust floor", name.as_str())
+                    })?;
+                    for requirement in &requires.audience {
+                        let AudienceRequirement::Includes(RecipientSpec::Static(recipients)) = requirement else {
+                            return Err(LoadError::AnnotatedRecipientPlaceholder {
+                                tool: name.as_str().to_string(),
+                            });
+                        };
+                        direct.extend(check_declared(&audience, recipients, || {
+                            format!("tool {} contains", name.as_str())
+                        })?);
                     }
                 }
             }
@@ -2335,6 +2361,8 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new(by),
+            requires: Default::default(),
+            delta_trust: None,
         }
     }
 
@@ -3527,6 +3555,8 @@ mod tests {
                 description: None,
                 parameters: crate::params::ToolParameters::open(),
                 annotator: AnnotatorName::new("any"),
+                requires: Default::default(),
+                delta_trust: None,
             }];
             Registry::build_covered(cfg)
         };
@@ -3992,6 +4022,8 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new("any"),
+            requires: Default::default(),
+            delta_trust: None,
         };
         let emitters: Vec<ToolDeclaration> = (0..8)
             .map(|bits| {

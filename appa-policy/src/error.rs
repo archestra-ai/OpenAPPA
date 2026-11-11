@@ -71,7 +71,7 @@ pub enum ConfigError {
         spelling: String,
     },
     #[error(
-        "tool {tool} names annotator {annotator} and also declares `{field}`; `annotator` replaces the static semantic fields"
+        "tool {tool} names annotator {annotator} and also declares `{field}`; beside an Annotator a rule writes only a label floor: `requires.trust`, `requires.audience.contains`, and `delta.trust`"
     )]
     AnnotatorWithStatics {
         tool: String,

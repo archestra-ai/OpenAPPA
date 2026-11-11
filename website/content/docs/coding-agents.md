@@ -75,7 +75,17 @@ The annotator forwards the combined label of the input files, and the call's res
 
 The label of a copied secret therefore survives across sessions. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later shell command that reads `/tmp/notes.txt` narrows its session to `self`, in this session or in any other, so a later public sink such as `WebFetch` is refused.
 
-The hosts a call declares do not change its label. The sandbox confines the command to them, but APPA does not check what a host may receive.
+A call that declares a host sends what the session holds to it. The Claude Code battery therefore requires public data for every networked call, and labels its result `suspicious`, because strangers write what a host returns. The file-tracker still labels the call's files, so a command that reads `.env` and declares a host is refused. A host rule in the root policy is checked first and can give a known host its own contract:
+
+```toml
+[[policy.tool]]
+name = "host/claude-code/Bash(network_hosts:*.corp.example)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = { audience = { contains = ["internal"] } }
+```
+
+A host rule matches a call only when every host the call declares matches its pattern. A call that also declares another host falls through to the battery's rule. `*` matches dots too, so write `example.com` and `*.example.com` as two rules rather than `*example.com`.
 
 ### Per harness
 
@@ -89,7 +99,7 @@ The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Cod
 
 ### Limits
 
-- A shell command can send its input files to any host it declares. Network destinations carry no policy yet.
+- A host learns what the command sends, and a public host is public. A session that holds `self` or `internal` data cannot reach the network until a host rule names a host for those readers.
 - Credential variables are withheld by name. A variable whose name does not say it holds a credential reaches the command.
 - The system directories other than `/etc` and `/run`, such as `/usr` and `/lib`, the directories on `PATH` and the readable toolchains are assumed to hold no credentials. A labeled file there is readable by a command that does not declare it.
 - A service reached through a declared socket is outside the sandbox. What the command sends it, and what the service does with it, carries no label.

@@ -115,10 +115,13 @@ audience or the proposal configures an audience source for it.
 
 The Claude Code battery confines every shell command, `Bash` or SafeBash, to
 the files and hosts it declares, and blocks `PowerShell`, `Monitor`, `Grep`
-and `NotebookEdit`. Propose no rule and no Annotator hint for those tools. A CLI command that reaches a service an MCP
-battery covers declares its `network_hosts`, and no rule judges that host;
-recommend the service's MCP battery when the user needs rules for the
-service. `Read`, `Write` and `Edit` go through the file-tracker. Label
+and `NotebookEdit`. Propose no rule and no Annotator hint for those tools. A command that declares `network_hosts` requires
+public data, and its result is `suspicious`. When the user's work needs a
+known host for `self` or `internal` data, propose a root rule such as
+`host/claude-code/Bash(network_hosts:*.corp.example)` with `annotator` and
+`recorder` set to `file-tracker` and the readers that host may receive.
+Recommend a service's MCP battery when the user needs rules for the service
+itself. `Read`, `Write` and `Edit` go through the file-tracker. Label
 paths in `~/.config/appa/file-tracker.toml`, never with root `Read`, `Write`
 or `Edit` rules: a root rule for those tools precedes the battery's and
 stops the file-tracker from recording the label.

@@ -433,7 +433,7 @@ fn a_duplicate_annotator_is_refused() {
 }
 
 #[test]
-fn a_tool_names_an_annotator_or_declares_static_semantics_never_both() {
+fn beside_an_annotator_a_tool_writes_only_a_label_floor() {
     let with = |statics: &str| {
         format!(
             "version = 2\n[[annotator]]\nname = \"acl\"\n\
@@ -443,10 +443,23 @@ fn a_tool_names_an_annotator_or_declares_static_semantics_never_both() {
     assert!(load(&with("")).is_ok());
     // Metadata is not a recipe: it stays legal beside `annotator`.
     assert!(load(&with("description = \"Sends one message.\"\ntags = [\"outbound\"]")).is_ok());
+    // A label floor narrows every answer, so it stays legal beside `annotator`.
+    assert!(load(&with("requires = { trust = \"trusted\" }")).is_ok());
+    assert!(load(&with("requires = { audience = { contains = [\"public\"] } }")).is_ok());
+    assert!(load(&with("delta = { trust = \"suspicious\" }")).is_ok());
+    // The floor holds before any call, so its readers are literal.
+    assert!(matches!(
+        load(&with("requires = { audience = { contains = [\"$to\"] } }")),
+        Err(ConfigError::Registry(LoadError::AnnotatedRecipientPlaceholder { tool })) if tool == "send"
+    ));
     for (field, statics) in [
-        ("delta", "delta = {}"),
+        ("delta.audience", "delta = { audience = [\"public\"] }"),
         ("forwards", "forwards = { trust = \"suspicious\" }"),
-        ("requires", "requires = { trust = \"trusted\" }"),
+        ("requires.attention", "requires = { attention = [\"blocked\"] }"),
+        (
+            "requires.effects",
+            "requires = { effects = { contains = [\"email.sent\"] } }",
+        ),
         ("effects", "effects = [\"email.sent\"]"),
     ] {
         assert!(

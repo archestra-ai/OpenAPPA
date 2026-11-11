@@ -340,6 +340,21 @@ fn the_initialized_default_composes_with_the_claude_code_battery() {
         assert_eq!(rule["annotator"].as_str(), Some("file-tracker"), "{name}");
         assert_eq!(rule["recorder"].as_str(), Some("file-tracker"), "{name}");
     }
+    // A networked call matches its own rule first: the first matching rule wins.
+    let position = |name: &str| tools.iter().position(|tool| tool["name"].as_str() == Some(name));
+    for shell in ["host/claude-code/Bash", "mcp/file-tracker/SafeBash"] {
+        let networked = format!("{shell}(network_hosts:*)");
+        let rule = rule(&networked);
+        assert_eq!(rule["annotator"].as_str(), Some("file-tracker"), "{networked}");
+        assert_eq!(rule["recorder"].as_str(), Some("file-tracker"), "{networked}");
+        assert_eq!(
+            rule["requires"]["audience"]["contains"],
+            toml::Value::Array(vec!["public".into()]),
+            "{networked}"
+        );
+        assert_eq!(rule["delta"]["trust"].as_str(), Some("suspicious"), "{networked}");
+        assert!(position(&networked) < position(shell), "{networked} precedes {shell}");
+    }
     for name in [
         "host/claude-code/PowerShell",
         "host/claude-code/Monitor",

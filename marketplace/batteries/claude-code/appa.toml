@@ -51,6 +51,27 @@ recorder = "file-tracker"
 # sandbox; where it cannot, it serves SafeBash instead, which runs in
 # Anthropic's sandbox runtime `srt`. A Bash call that names no lists — Claude
 # Code started without `clappa` — is refused: the file-tracker cannot judge it.
+#
+# A call that names a host sends what the session holds to it, so the data
+# must be public; what comes back was written by strangers, so it is
+# `suspicious`. The file-tracker still labels the call's files. A host rule in
+# the root policy is read first and can say otherwise for a host the
+# deployment knows, such as an internal host that requires `internal` readers.
+# A call that names no host matches the rules after these.
+[[policy.tool]]
+name = "host/claude-code/Bash(network_hosts:*)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp/file-tracker/SafeBash(network_hosts:*)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
 [[policy.tool]]
 name = "host/claude-code/Bash"
 annotator = "file-tracker"

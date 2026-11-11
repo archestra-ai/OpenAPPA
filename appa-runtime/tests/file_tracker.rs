@@ -339,6 +339,29 @@ async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_b
     let narrowed = propose(&runtime, "t", send()).await;
     assert!(matches!(narrowed, HookDecision::DenyCall { .. }), "{narrowed:?}");
 
+    // A call that names a host requires public data: the `self` session cannot reach the
+    // network even with a command that reads no file, while the call above that named no
+    // host ran.
+    let fetched = root.join("fetched.txt");
+    let fetch = || {
+        call(
+            "host/claude-code/Bash",
+            serde_json::json!({
+                "command": format!("curl -so {} https://example.com", fetched.display()),
+                "input_files": [], "output_files": [fetched], "network_hosts": ["example.com"],
+            }),
+        )
+    };
+    let leak = propose(&runtime, "t", fetch()).await;
+    assert!(
+        matches!(&leak, HookDecision::DenyCall { feedback, .. } if feedback.contains("public")),
+        "{leak:?}"
+    );
+    // A public session's networked call runs, and what it brings back is `suspicious`.
+    start(&runtime, "u").await;
+    run(&runtime, "u", fetch(), "<html>").await;
+    assert_eq!(recorded(&store, &fetched)["trust"], serde_json::json!("suspicious"));
+
     let notes = root.join("notes.txt");
     std::fs::write(&notes, "TOKEN=1\n").unwrap();
     run(

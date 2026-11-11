@@ -133,26 +133,46 @@ impl RawTool {
             None => ToolParameters::open(),
         };
         if let Some(annotator) = self.annotator {
-            let statics = match (&self.delta, &self.forwards, &self.requires, self.effects.is_empty()) {
-                (Some(_), _, _, _) => Some("delta"),
-                (None, Some(_), _, _) => Some("forwards"),
-                (None, None, Some(_), _) => Some("requires"),
-                (None, None, None, false) => Some("effects"),
-                (None, None, None, true) => None,
+            // Beside an Annotator a rule may write a label floor: a trust floor, the readers
+            // the data must reach, and a lowest result trust. Every other field is the
+            // Annotator's to answer.
+            let refused = |field: &'static str| ConfigError::AnnotatorWithStatics {
+                tool: self.name.clone(),
+                annotator: annotator.clone(),
+                field,
             };
-            if let Some(field) = statics {
-                return Err(ConfigError::AnnotatorWithStatics {
-                    tool: self.name,
-                    annotator,
-                    field,
-                });
+            if self.forwards.is_some() {
+                return Err(refused("forwards"));
             }
+            if !self.effects.is_empty() {
+                return Err(refused("effects"));
+            }
+            let delta_trust = match self.delta {
+                Some(RawDelta { audience: Some(_), .. }) => return Err(refused("delta.audience")),
+                Some(delta) => delta.convert(chain, &ctx())?.trust,
+                None => None,
+            };
+            let requires = match self.requires {
+                Some(raw) => {
+                    let requires = raw.convert(chain, &ctx())?;
+                    if !requires.history.is_empty() {
+                        return Err(refused("requires.effects"));
+                    }
+                    if !requires.attention.is_empty() {
+                        return Err(refused("requires.attention"));
+                    }
+                    requires.label
+                }
+                None => LabelRequirements::default(),
+            };
             return Ok(ToolDeclaration::Annotated {
                 name: ToolName::new(self.name),
                 tags: self.tags.into_iter().map(TagName::new).collect(),
                 description: self.description,
                 parameters,
                 annotator: AnnotatorName::new(annotator),
+                requires,
+                delta_trust,
             });
         }
         // Declaring the tool is the deployment saying it knows it, so an omitted `delta` and

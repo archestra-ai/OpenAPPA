@@ -33,7 +33,10 @@
 //! declaration is its own annotation, or `Annotated`, a registered Annotator consulted per
 //! call whose answer is bounded by its mandate and pinned ([`contract::PinnedAnnotation`])
 //! to the producing Annotator and the call's canonical digest, so a rewrite is annotated
-//! afresh and replay never consults again. The
+//! afresh and replay never consults again. An `Annotated` declaration may write a label
+//! floor beside its Annotator — a trust floor, literal readers the data must reach, and a
+//! lowest result trust — that narrows every answer, so no answer loosens what the policy
+//! author wrote. The
 //! wildcard declaration (`"*"`) routes every call without a matching explicit contract through an
 //! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
 //! to arrive is an operational refusal, never a policy denial.

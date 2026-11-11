@@ -507,6 +507,8 @@ mod tests {
             description: Some("A test tool.".to_string()),
             parameters: crate::params::test_string_argument_schema("room"),
             annotator: crate::names::AnnotatorName::new("directory"),
+            requires: Default::default(),
+            delta_trust: None,
         };
         Registry::build_covered(RegistryConfig {
             recorders: Default::default(),

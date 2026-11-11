@@ -518,6 +518,8 @@ mod tests {
                     description: None,
                     parameters: ToolParameters::open(),
                     annotator: AnnotatorName::new("classifier"),
+                    requires: Default::default(),
+                    delta_trust: None,
                 },
             ],
             annotators,
