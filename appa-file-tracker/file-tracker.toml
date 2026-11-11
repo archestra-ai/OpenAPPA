@@ -231,8 +231,41 @@ write_trust = "trusted"
 pattern = "*/.claude/commands/*"
 write_trust = "trusted"
 
+# A repository's hooks, and its config, which can name programs git runs (core.hooksPath,
+# core.fsmonitor): in a working tree's .git, a bare <name>.git, a submodule's .git/modules/*/
+# and a worktree's config.worktree. A bare repository named otherwise is not guarded. A hooks
+# directory is kept whole, so a directory output cannot add a hook either; husky's .husky/
+# is the hooks directory core.hooksPath most often names.
 [[path]]
-pattern = "*/.git/hooks/*"
+pattern = "*.git/hooks"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.git/hooks/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.git/config"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.git/modules/*/hooks"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.git/modules/*/hooks/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*.git/modules/*/config"
+write_trust = "trusted"
+
+[[path]]
+pattern = "config.worktree"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.husky*"
 write_trust = "trusted"
 
 [[path]]

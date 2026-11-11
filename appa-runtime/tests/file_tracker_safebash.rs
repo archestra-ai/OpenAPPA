@@ -285,6 +285,99 @@ fn a_bash_call_is_confined_to_what_it_declares() {
     assert!(!ok, "a call that declares no lists has no confinement");
 }
 
+/// A directory output keeps every repository's config and hooks as they are, wherever the
+/// repository lies: in a working tree's `.git`, a bare remote, a submodule's gitdir, a
+/// worktree's `config.worktree` and husky's `.husky/`. A hook there, or a `core.hooksPath` the
+/// config names, runs outside the sandbox the next time the person uses git. A call that
+/// names one of those files may write it.
+#[test]
+fn a_directory_output_keeps_a_repositorys_config_and_hooks_unless_the_call_names_them() {
+    if !installed("git") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let config = root.join("file-tracker.toml");
+    std::fs::write(
+        &config,
+        format!("store = {:?}\n", root.join("store.json").display().to_string()),
+    )
+    .unwrap();
+    let (project, remote) = (root.join("project"), root.join("remote.git"));
+    let git = |args: &[&str], target: &std::path::Path| {
+        assert!(Command::new("git").args(args).arg(target).status().unwrap().success());
+    };
+    git(&["init", "-q"], &project);
+    git(&["init", "-q", "--bare"], &remote);
+    let submodule = project.join(".git/modules/vendor/lib");
+    git(&["init", "-q", "--bare"], &submodule);
+    // A template without hooks leaves the directory out.
+    for repository in [&remote, &submodule] {
+        std::fs::create_dir_all(repository.join("hooks")).unwrap();
+    }
+    std::fs::write(project.join(".git/config.worktree"), "").unwrap();
+    std::fs::create_dir_all(project.join(".husky")).unwrap();
+    std::fs::write(project.join(".husky/pre-commit"), "npm test\n").unwrap();
+    let (repository_config, post_receive) = (project.join(".git/config"), remote.join("hooks/post-receive"));
+    let husky_hook = project.join(".husky/pre-commit");
+    let unwritable = |outputs: serde_json::Value| -> Vec<std::path::PathBuf> {
+        let mut tracker = Command::new(env!("CARGO_BIN_EXE_appa"))
+            .args(["file-tracker", "sandbox", "--config"])
+            .arg(&config)
+            .current_dir(&root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let call = serde_json::json!({ "command": "git push", "input_files": [], "output_files": outputs, "network_hosts": [] });
+        writeln!(tracker.stdin.take().unwrap(), "{call}").unwrap();
+        let output = tracker.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let _ = std::fs::remove_dir_all(answer["tmpdir"].as_str().unwrap());
+        answer["filesystem"]["denyWrite"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|path| path.as_str().unwrap().into())
+            .collect()
+    };
+    let kept = |denied: &[std::path::PathBuf], path: &std::path::Path| denied.iter().any(|kept| path.starts_with(kept));
+    let directories = [format!("{}/", project.display()), format!("{}/", remote.display())];
+
+    let denied = unwritable(serde_json::json!(directories));
+    assert!(kept(&denied, &repository_config), "{denied:?}");
+    assert!(kept(&denied, &remote.join("config")), "{denied:?}");
+    assert!(
+        kept(&denied, &post_receive),
+        "a hook the remote does not hold yet cannot be added: {denied:?}"
+    );
+    for guarded in [
+        submodule.join("config"),
+        submodule.join("hooks/post-checkout"),
+        project.join(".git/config.worktree"),
+        husky_hook.clone(),
+        project.join(".husky/pre-push"),
+    ] {
+        assert!(kept(&denied, &guarded), "{}: {denied:?}", guarded.display());
+    }
+    assert!(
+        !kept(&denied, &project.join("src.rs")),
+        "the rest stays writable: {denied:?}"
+    );
+
+    let named = unwritable(serde_json::json!([
+        &directories[0],
+        &directories[1],
+        repository_config,
+        post_receive,
+        husky_hook
+    ]));
+    for named_file in [&repository_config, &post_receive, &husky_hook] {
+        assert!(!kept(&named, named_file), "{}: {named:?}", named_file.display());
+    }
+}
+
 /// A command that cannot start leaves every declared output exactly as it was.
 #[test]
 fn a_command_that_cannot_start_leaves_its_outputs_unchanged() {
