@@ -181,6 +181,26 @@ pub enum NoAnswerClass {
     ModulePanicked,
 }
 
+/// The class as `NoAnswerReason::diagnostic` spells it, without the external's own words.
+impl std::fmt::Display for NoAnswerClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NoAnswerClass::NonSuccess { status } => write!(f, "non_success status={status}"),
+            NoAnswerClass::Unregistered => f.write_str("unregistered"),
+            NoAnswerClass::Unreachable => f.write_str("unreachable"),
+            #[cfg(feature = "daemon")]
+            NoAnswerClass::Dismissed => f.write_str("dismissed"),
+            NoAnswerClass::Timeout => f.write_str("timeout"),
+            NoAnswerClass::Transport => f.write_str("transport"),
+            NoAnswerClass::Malformed => f.write_str("malformed"),
+            NoAnswerClass::Oversized => f.write_str("oversized"),
+            NoAnswerClass::UnsupportedVersion => f.write_str("unsupported_version"),
+            NoAnswerClass::ModuleError => f.write_str("module_error"),
+            NoAnswerClass::ModulePanicked => f.write_str("module_panicked"),
+        }
+    }
+}
+
 impl NoAnswerClass {
     /// Whether asking again later may get an answer: the external was unreachable, timed
     /// out, or failed in transport, or its HTTP status was 429 or 5xx. A command's exit code

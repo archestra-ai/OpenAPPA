@@ -356,8 +356,8 @@ pub enum RemedyRefusal {
 }
 
 impl RemedyRefusal {
-    pub fn detail(&self) -> &str {
-        match self {
+    pub fn detail(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(match self {
             Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
             Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
             Self::Superseded => {
@@ -373,9 +373,13 @@ impl RemedyRefusal {
             Self::AmbiguousReplay => "more than one session declared under this attempt",
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
-            Self::Unanswered { .. } => "an annotator this plan consults gave no answer, so the plan was not applied",
+            Self::Unanswered { annotator, class } => {
+                return std::borrow::Cow::Owned(format!(
+                    "annotator {annotator} gave no answer ({class}), so the plan was not applied"
+                ));
+            }
             Self::Runtime { detail } => detail,
-        }
+        })
     }
 }
 
@@ -698,7 +702,17 @@ pub(crate) enum EventError {
 }
 
 impl EventError {
-    fn annotation_refused(annotator: String, reason: String, no_answer: Option<NoAnswerClass>) -> Self {
+    /// The engine refused an annotation it had.
+    fn annotation_refused(annotator: String, reason: String) -> Self {
+        Self::annotation(annotator, reason, None)
+    }
+
+    /// The external Annotator gave no answer.
+    fn annotation_unanswered(annotator: String, reason: &crate::external::NoAnswerReason) -> Self {
+        Self::annotation(annotator, reason.diagnostic(), Some(reason.into()))
+    }
+
+    fn annotation(annotator: String, reason: String, no_answer: Option<NoAnswerClass>) -> Self {
         let next_action = if annotator == "claude-code.undeclared-tool" {
             "; this tool has no exact policy contract; run /appa-guide to write rules for this tool"
         } else {
@@ -824,7 +838,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::OutcomeMismatch => EventError::OutcomeMismatch,
             EngineRefusal::UndeclaredTool { tool } => EventError::UndeclaredTool { tool },
             EngineRefusal::Arguments { detail } => EventError::RemedyArguments { detail },
-            EngineRefusal::Annotation { annotator, reason } => EventError::annotation_refused(annotator, reason, None),
+            EngineRefusal::Annotation { annotator, reason } => EventError::annotation_refused(annotator, reason),
         }
     }
 }
