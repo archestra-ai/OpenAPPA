@@ -1041,26 +1041,33 @@ fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde
     let stage =
         tempfile::tempdir().map_err(|error| super::io("stage catalog", Path::new("temporary directory"), error))?;
     let mut fetched = None;
-    let (source, version, marketplace) = match &selection {
-        Some(selection) => (
-            "retained",
-            Some(Version::of(selection.generation())),
-            Installation::retained_marketplace(&path, selection)?,
-        ),
+    let (source, version, marketplace, catalog) = match &selection {
+        Some(selection) => {
+            let marketplace = Installation::retained_marketplace(&path, selection)?;
+            let catalog = read_catalog(&marketplace)?;
+            (
+                "retained",
+                Some(Version::of(selection.generation())),
+                marketplace,
+                catalog,
+            )
+        }
         None if is_published_build() => {
             let acquired = fetched.insert(Acquired::fetch(None, Requirements::Packages)?);
+            let marketplace = acquired.marketplace().to_path_buf();
+            let catalog = read_catalog(&marketplace)?;
             (
                 "published",
                 Some(Version::of(acquired.generation())),
-                acquired.marketplace().to_path_buf(),
+                marketplace,
+                catalog,
             )
         }
         None => match Acquired::build_catalog(stage.path())? {
-            (Some(commit), marketplace) => ("build", Some(Version::build(&commit)), marketplace),
-            (None, marketplace) => ("checkout", None, marketplace),
+            (Some(commit), marketplace, catalog) => ("build", Some(Version::build(&commit)), marketplace, catalog),
+            (None, marketplace, catalog) => ("checkout", None, marketplace, catalog),
         },
     };
-    let catalog = read_catalog(&marketplace)?;
     let packages = catalog
         .packages
         .iter()

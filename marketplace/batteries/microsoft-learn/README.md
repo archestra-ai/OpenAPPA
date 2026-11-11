@@ -74,7 +74,6 @@ root rules run first.
 
 ```sh
 cargo test --locked -p appa --test microsoft_learn_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 ```
 
 ## Sanitizers

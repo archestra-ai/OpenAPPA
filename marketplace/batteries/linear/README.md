@@ -140,7 +140,6 @@ not grant permission.
 
 ```sh
 cargo test --locked -p appa --test linear_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 python3 -m unittest discover -s marketplace/batteries/linear -p 'test_*.py'
 ```
 

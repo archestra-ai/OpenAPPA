@@ -68,7 +68,6 @@ names.
 
 ```sh
 cargo test --locked -p appa --test notion_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 ```
 
 ## Sanitizers
