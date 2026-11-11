@@ -64,8 +64,18 @@ behavior. A root Bash rule also precedes the `coding` battery's credential
 rules, so a command it matches is not narrowed for a credential path it names.
 
 The map's `confined = true` confines Bash and PowerShell results, so a
-sanitizer the root declares can run on the command's output; a root needs no
-deployment setting for it.
+sanitizer can run on the command's output; a root needs no deployment setting
+for it. Once a root binds the `coding` battery's `coding.strip-secrets`, as the
+installed default root does, a command that names a credential path offers it:
+the model replaces every secret value in the output, which returns at
+`internal` instead of narrowing the session to `self`. A sanitizer the root
+declares can run there too.
+
+The map confines no WebFetch result. A root that binds
+`coding.strip-instructions` confines WebFetch itself with
+`confined_results = ["host/claude-code/WebFetch"]` under `[policy.deployment]`;
+the installed default root already does. WebSearch stays unconfined: Claude
+Code's replacement of its result is not verified live.
 `appa battery remove claude-code` takes the map, and with it the confinement,
 out.
 

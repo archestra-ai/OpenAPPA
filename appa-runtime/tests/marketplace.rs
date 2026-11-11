@@ -447,6 +447,19 @@ fn a_battery_that_validates_loads() {
                 "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n",
             ),
         ),
+        // A model sanitizer names its builtin on its declaration, as an
+        // Annotator does, and takes no binding; the root picks the model.
+        (
+            "a model sanitizer named on its declaration",
+            yes,
+            yes,
+            body(
+                &format!(
+                    "{tool}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\nbuiltin = \"claude-code\"\n[policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n"
+                ),
+                "",
+            ),
+        ),
         // Stricter than the loader again: the loader lets an operator's own
         // file bind the stock approving authority; a battery may not.
         (
