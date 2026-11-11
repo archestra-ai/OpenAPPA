@@ -595,6 +595,24 @@ async function selfTest() {
         !fs.statSync(path.join(repo, ".bashrc"), { throwIfNoEntry: false })?.size,
         "a protected file absent from a directory output is written",
       );
+
+      // A working directory below the repository's root, as in a monorepo: a call that
+      // declares the repository finds it from there, and a credential there stays hidden.
+      const sub = path.join(repo, "sub");
+      fs.mkdirSync(sub);
+      fs.writeFileSync(path.join(sub, ".env"), "TOKEN=CANARY-SUBDIRECTORY\n");
+      process.chdir(sub);
+      try {
+        const below = await confinedRun(
+          { command: "true", input_files: [repo], output_files: [`${repo}/`], network_hosts: [] },
+          "git rev-parse --show-toplevel; cat .env",
+          sub,
+        );
+        check(below.stdout.startsWith(`${repo}\n`), `git finds no repository from a subdirectory: ${below.stdout}${below.stderr}`);
+        check(!below.stdout.includes("CANARY-SUBDIRECTORY"), "a credential in the working directory is readable");
+      } finally {
+        process.chdir(home);
+      }
     }
 
     // A toolchain or a download cache opens whole, read-only or written as a registry call

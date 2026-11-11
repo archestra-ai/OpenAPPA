@@ -512,15 +512,15 @@ fn around(root: &Path, holes: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 /// The sandbox settings for one call. Reads are hidden everywhere but the system — every
-/// other top-level directory, and within the system's reach home, the working directory, the
-/// temporary directories, every socket and labeled file under `/etc` and `/run`, and every
-/// file the store has recorded with a label — and reopened for the inputs, the toolchains,
-/// `[sandbox] readable` and the download caches alone. Within a directory the call reads,
-/// what [`concealed`] names stays hidden unless the call names it, so the command sees
-/// exactly what the annotation labeled. Writes
-/// are allowed to the outputs alone, and within a directory output not to what [`guarded`]
-/// keeps. The proxy admits the declared hosts alone, and a command connects to the sockets
-/// it declares alone.
+/// other top-level directory, and within the system's reach home and the working directory
+/// unless a declared input holds them, the temporary directories, every socket and labeled
+/// file under `/etc` and `/run`, and every file the store has recorded with a label — and
+/// reopened for the inputs, the toolchains, `[sandbox] readable` and the download caches
+/// alone. Within a directory the call reads, what [`concealed`] names stays hidden unless the
+/// call names it, so the command sees exactly what the annotation labeled. Writes are allowed
+/// to the outputs alone, and within a directory output not to what [`guarded`] keeps. The
+/// proxy admits the declared hosts alone, and a command connects to the sockets it declares
+/// alone.
 fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Value, String> {
     let locked = Locked::open(&config.store)?;
     let store = &locked.store;
@@ -554,8 +554,16 @@ fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Va
             .into_iter()
             .filter(|path| !declared(path)),
     );
-    hidden.extend(std::env::var_os("HOME").map(PathBuf::from));
-    hidden.extend(std::env::current_dir().ok());
+    // A declared directory that holds the home or the working directory opens it: the
+    // sandbox would otherwise mount an empty directory over it, and git there would find
+    // no repository above it.
+    hidden.extend(
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain(std::env::current_dir().ok())
+            .filter(|path| !declared(path)),
+    );
     let store_dir = config.store.parent().map(Path::to_path_buf);
     hidden.extend(store_dir.clone());
     // A recorded file the call does not declare carries a label no annotation counted: it is
