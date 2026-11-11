@@ -122,6 +122,8 @@ pub struct Feedback {
 pub struct PendingReview {
     pub offer: OfferId,
     pub authority: String,
+    pub hint: Option<String>,
+    pub scope: Vec<appa_runtime_api::ReviewScopeItem>,
     pub text: String,
 }
 
@@ -303,20 +305,11 @@ pub enum EngineEvent {
 
 /// What `execute_remedy_plan` carries beside the offer id: the floor the child's return may
 /// narrow the declaring trajectory to and, for an attesting plan, the schema the return must
-/// match. Read only when the offered plan declares a return; every other plan ignores them.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct RemedyArguments {
-    pub label: Option<LabelSpelling>,
-    pub return_schema: Option<serde_json::Value>,
-}
+/// match. Read only when the offered plan declares a return; every other plan ignores them. A
+/// declaration ahead of the spawn records them as they are.
+pub use appa_eventlog::DeclaredArguments as RemedyArguments;
 
-/// A label as the policy dialect spells a `delta`: a trust rank name and an audience list. An
-/// omitted dimension keeps the declaring trajectory's current value.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct LabelSpelling {
-    pub trust: Option<String>,
-    pub audience: Option<Vec<String>>,
-}
+pub use appa_eventlog::LabelSpelling;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Next {
@@ -2030,6 +2023,8 @@ impl RuntimeEngine {
                 Some(PendingReview {
                     offer: offer.clone(),
                     authority: requirement.authority.as_str().to_string(),
+                    hint: declaration.hint.clone(),
+                    scope: crate::elicit::review_scope(&artifact),
                     text: crate::elicit::review_text(requirement.authority.as_str(), &declaration, &artifact),
                 })
             })
@@ -2455,6 +2450,19 @@ impl RuntimeEngine {
         parse_offer(offer)
             .and_then(|offer| self.engine.offer_plan(view, trajectory, &offer))
             .is_some_and(|plan| plan.declares_only())
+    }
+
+    /// Whether this offer's plan is rulings alone, each by an authority `rules` accepts.
+    pub(crate) fn offer_asks_only(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &OfferId,
+        rules: impl Fn(&str) -> bool,
+    ) -> bool {
+        parse_offer(offer)
+            .and_then(|offer| self.engine.offer_plan(view, trajectory, &offer))
+            .is_some_and(|plan| plan.asks_only(|authority| rules(authority.as_str())))
     }
 
     fn return_policy_of_route(

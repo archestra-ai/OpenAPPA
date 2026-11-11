@@ -17,8 +17,10 @@ pub trait ConsultTranscriber: Send + Sync {
     fn record(&self, record: ConsultRecord);
 }
 
-/// Which transport served a recorded consult. Stock implementations, inline rosters and
-/// `appa replay`'s stand-in answer in process and are never recorded.
+/// Which transport served a recorded consult. The stock `approve` authority is recorded: its
+/// ruling releases a call, and the record is the only account of what it let through. Stock
+/// sanitizers, inline rosters and `appa replay`'s stand-in answer in process and are never
+/// recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConsultBackend {
@@ -29,6 +31,7 @@ pub enum ConsultBackend {
     Jev,
     ClaudeCode,
     Hitl,
+    Stock,
     #[cfg(feature = "archestra")]
     Archestra,
 }

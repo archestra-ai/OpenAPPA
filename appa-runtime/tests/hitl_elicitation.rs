@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use appa_runtime::api::Runtime;
 use appa_runtime::{config::Config, hooks, mcp};
-use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, Ruling, TrajectoryId};
+use appa_runtime_api::{
+    Actor, HookDecision, HookEvent, ProposedCall, Review, ReviewNarrowing, ReviewScopeItem, Ruling, TrajectoryId,
+};
 use rmcp::ClientHandler;
 use rmcp::model::ProtocolVersion;
 use rmcp::model::{ElicitRequestParams, ElicitResult, ElicitationAction};
@@ -804,6 +806,145 @@ async fn an_unanswered_review_closes_on_its_window_and_the_offer_stands() {
     assert!(
         retried.contains("Authorized"),
         "an unanswered review took nothing away; the same offer still rules: {retried}",
+    );
+}
+
+/// The reviews a first call to `publish` is blocked with, through the real hook path.
+async fn reviews_of_blocked_publish(policy: String) -> Vec<Review> {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, policy).expect("the fixture writes");
+    let config = Config::load(&path).expect("the fixture validates");
+    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+    let root = TrajectoryId("cc:typed-review".to_string());
+    hooks::handle(
+        &runtime,
+        HookEvent::SessionStart {
+            root: root.clone(),
+            principal: None,
+            address: None,
+            title: None,
+            launch: None,
+            start: None,
+        },
+    )
+    .await;
+    let blocked = hooks::handle(
+        &runtime,
+        HookEvent::ToolCall {
+            actor: Actor { root, child: None },
+            call: ProposedCall {
+                tool: "publish".to_string(),
+                arguments: raw(serde_json::json!({"body": "the quarterly figures"})),
+                cwd: None,
+            },
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { review, .. } = blocked else {
+        panic!("publish is blocked until ruled on: {blocked:?}");
+    };
+    review
+}
+
+#[tokio::test]
+async fn the_block_names_the_authority_hint_and_attention_scope() {
+    let reviews = reviews_of_blocked_publish(policy(5000)).await;
+    let [review] = reviews.as_slice() else {
+        panic!("one offer, one authority: {reviews:?}");
+    };
+    assert_eq!(review.authority.as_deref(), Some("operator"));
+    assert_eq!(review.hint.as_deref(), Some("The person at the keyboard."));
+    assert_eq!(
+        review.scope,
+        Some(vec![ReviewScopeItem::Attention {
+            mark: "signoff".to_string(),
+            text: "attention: signoff".to_string(),
+        }])
+    );
+}
+
+#[tokio::test]
+async fn the_block_scope_matches_the_printed_coverage_including_a_narrowing() {
+    let reviews = reviews_of_blocked_publish(NARROWING_POLICY.to_string()).await;
+    let [review] = reviews.as_slice() else {
+        panic!("one offer, one authority: {reviews:?}");
+    };
+    assert_eq!(review.hint, None);
+    let scope = review.scope.clone().expect("a fresh block knows its scope");
+    assert_eq!(
+        scope,
+        [
+            ReviewScopeItem::Attention {
+                mark: "signoff".to_string(),
+                text: "attention: signoff".to_string(),
+            },
+            ReviewScopeItem::Narrowing {
+                narrowing: ReviewNarrowing::SignOff {
+                    tools: vec!["deploy".to_string()],
+                },
+                text: "after this, `deploy` will need approval in this conversation".to_string(),
+            },
+        ]
+    );
+    let bullets = scope
+        .iter()
+        .map(|item| format!("  - {}", item.text()))
+        .collect::<Vec<_>>();
+    assert_eq!(coverage_lines(&review.text), bullets);
+}
+
+const TWO_REVIEWERS_POLICY: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "publish"
+delta = {}
+requires = { attention = ["legal", "security"] }
+
+[[policy.authority]]
+name = "counsel"
+hint = "Legal review."
+
+[policy.authority.permits]
+attention = ["legal"]
+
+[[policy.authority]]
+name = "guard"
+hint = "Security review."
+
+[policy.authority.permits]
+attention = ["security"]
+
+[externals]
+timeout_ms = 1000
+review_timeout_ms = 5000
+max_body_bytes = 4096
+
+[externals.authorities.counsel]
+builtin = "hitl"
+
+[externals.authorities.guard]
+builtin = "hitl"
+"#;
+
+/// One text answers for both authorities, so no single authority, hint or scope describes
+/// it: each reads as unknown, and a host shows the whole text.
+#[tokio::test]
+async fn a_review_joining_several_authorities_leaves_its_typed_fields_unknown() {
+    let reviews = reviews_of_blocked_publish(TWO_REVIEWERS_POLICY.to_string()).await;
+    let [review] = reviews.as_slice() else {
+        panic!("one offer consults both authorities: {reviews:?}");
+    };
+    assert_eq!(
+        (&review.authority, &review.hint, &review.scope),
+        (&None, &None, &None),
+        "{review:?}"
     );
 }
 
