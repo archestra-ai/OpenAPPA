@@ -6,6 +6,8 @@
 //! - `mcp` serves SafeBash as an MCP server on stdio.
 //! - `sandbox` reads one Claude Code `Bash` call's arguments on stdin and writes the
 //!   confinement `clappa`'s preload gives Claude Code's sandbox for that call.
+//! - `labels [<path>...]` lists the labels recorded writes left under each path, and
+//!   `reset <path>...` removes them: the person's commands, run in their own terminal.
 //!
 //! Each takes `--config <file-tracker.toml>`.
 
@@ -17,6 +19,7 @@ mod config;
 mod label;
 mod paths;
 mod record;
+mod reset;
 mod safebash;
 mod store;
 
@@ -32,17 +35,41 @@ pub fn sandbox_missing() -> Option<String> {
     safebash::missing(&config)
 }
 
+/// What `clappa` says before a session in the current directory when files under it carry
+/// labels earlier sessions recorded, with the commands that review and reset them.
+pub fn earlier_labels() -> Option<String> {
+    let config = config::Config::load(None).ok()?;
+    reset::note(&config, &std::env::current_dir().ok()?)
+}
+
+const USAGE: &str = "usage: appa file-tracker <command> [--config <file-tracker.toml>]
+  labels [<path>...]   list the labels recorded on files under each path (default: .)
+  reset <path>...      remove the labels recorded on files under each path
+  annotate | record | mcp | sandbox   the plugin's entry points, run by the runtime and clappa";
+
 /// Run one entry point: `arguments` are what follows `appa file-tracker`.
 pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
     let mut arguments = arguments.into_iter();
     let Some(command) = arguments.next() else {
-        eprintln!("usage: appa file-tracker annotate|record|mcp|sandbox [--config <file-tracker.toml>]");
+        eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    if matches!(command.as_str(), "-h" | "--help" | "help") {
+        println!("{USAGE}");
+        return ExitCode::SUCCESS;
+    }
     let mut explicit: Option<PathBuf> = None;
+    let mut paths: Vec<String> = Vec::new();
     while let Some(argument) = arguments.next() {
-        match (argument.as_str(), arguments.next()) {
-            ("--config", Some(path)) => explicit = Some(PathBuf::from(path)),
+        match (argument.as_str(), argument.starts_with('-')) {
+            ("--config", _) => match arguments.next() {
+                Some(path) => explicit = Some(PathBuf::from(path)),
+                None => {
+                    eprintln!("appa file-tracker: --config names a file");
+                    return ExitCode::from(2);
+                }
+            },
+            (_, false) if matches!(command.as_str(), "labels" | "reset") => paths.push(argument),
             _ => {
                 eprintln!("appa file-tracker: unknown argument {argument:?}");
                 return ExitCode::from(2);
@@ -66,6 +93,8 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
         "record" => answer(|delivery| record::record(&config, delivery)),
         "mcp" => safebash::serve(&config),
         "sandbox" => answer(|arguments| safebash::sandbox(&config, arguments)),
+        "labels" => reset::labels(&config, &paths).map(|listing| print!("{listing}")),
+        "reset" => reset::reset(&config, &paths).map(|done| print!("{done}")),
         other => Err(format!("unknown command {other:?}")),
     };
     match outcome {

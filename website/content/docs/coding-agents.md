@@ -89,6 +89,21 @@ The battery gives the npm, Yarn, Go module and crates.io registries rules of the
 
 A host rule matches a call only when every host the call declares matches its pattern. A call that also declares another host falls through to the battery's rule. `*` matches dots too, so write `example.com` and `*.example.com` as two rules rather than `*example.com`.
 
+### Resetting labels
+
+A recorded label stays on a file until the person running the sessions resets it. A session that read `.env` records `self` on every file it writes, including source files, lock files and `.git` objects that hold no credential. A fresh session that reads those files narrows to `self`. Only the person can decide that a file no longer holds what its label says, so no tool call resets a label.
+
+Run these commands in your own terminal, outside the agent's session:
+
+```sh
+appa file-tracker labels [<path>...]   # the labels recorded under each path; default: the current directory
+appa file-tracker reset <path>...      # remove the labels recorded at or under each path
+```
+
+`reset` removes recorded labels only. A path rule still labels each file it matches, so `.env` keeps `self`. A label recorded on a directory above the path still covers it; `reset` names that directory. A session already running keeps its own label, and the files it writes next are labeled again.
+
+`clappa` says before a session starts when files under the working directory carry recorded labels. An agent cannot reset a label itself: the label store is outside every command's declared outputs, so the sandbox keeps it read-only. A call that declares the store as an output asks the person running the session first.
+
 ### Per harness
 
 | Harness | File tools | Shell |

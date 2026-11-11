@@ -47,7 +47,12 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
     let signals = Signals::install();
     let mut command = Command::new("claude");
     let shell = match bound(&crate::init::paths::installed_config_path()) {
-        true => shell(settings, data_dir, &token),
+        true => {
+            if let Some(note) = appa_file_tracker::earlier_labels() {
+                eprintln!("clappa: {note}");
+            }
+            shell(settings, data_dir, &token)
+        }
         false => Shell::Untracked,
     };
     command.args(shell.arguments(settings));
