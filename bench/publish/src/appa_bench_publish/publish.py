@@ -32,7 +32,7 @@ PROVIDER_TOKEN_RE = re.compile(rb"(?<![A-Za-z0-9_-])sk-(?:ant-|or-)?[A-Za-z0-9_-
 CREDENTIAL_ASSIGNMENT_RE = re.compile(
     rb"(?:OPENROUTER_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|"
     rb"api[_-]?key|access[_-]?token)[\"']?\s*[:=]\s*[\"']?"
-    rb"(?!null\b|none\b|redacted\b|unset\b|<redacted>)[^\s\"',}]{8,}",
+    rb"(?!null\b|none\b|\[?redacted\b|unset\b|<redacted>)[^\s\"',}]{8,}",
     re.IGNORECASE,
 )
 LOCAL_PATH_RE = re.compile(
@@ -208,6 +208,9 @@ def _recorded_commit(run_dir: Path, benchmark: str) -> str:
         case "corp":
             path = run_dir / "config.json"
             provenance_path: tuple[str, ...] = ()
+        case "sanitizer":
+            path = run_dir / "run-config.json"
+            provenance_path = ()
         case "agentthreatbench":
             path = run_dir / "run-config.json"
             provenance_path = ("config",)

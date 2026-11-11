@@ -1,0 +1,34 @@
+# The policy every sanitizer under test is registered in: a Claude Code
+# deployment as `marketplace/plugins/claude-code/default.appa.toml` composes
+# one. The batteries are included as they ship, so each battery sanitizer is
+# declared — `on`, `hint`, `permits` and tags — exactly as a deployment
+# declares it. The harness copies each included battery into the run
+# directory, where these include paths resolve, and appends the `[externals]`
+# that bind every sanitizer to the backend under test. No tool runs.
+
+include = [
+  "batteries/claude-code/appa.toml",
+  "batteries/coding/appa.toml",
+  "batteries/cloudflare/appa.toml",
+]
+
+[policy]
+version = 2
+
+# The Claude Code default's deployment: it controls a subagent's context, and
+# it confines WebFetch for `coding.strip-instructions`. The `claude-code`
+# battery confines Bash for `coding.strip-secrets`; the `cloudflare` battery
+# confines its own reads.
+[policy.deployment]
+context_control = true
+confined_results = ["host/claude-code/WebFetch"]
+
+# The Claude Code default's own sanitizer, on calls bound for `public`
+# readers. `tests/test_bench.py` holds it equal to its source.
+[[policy.sanitizer]]
+name = "redact-for-public"
+on = ["tool_input"]
+hint = "These arguments leave for readers outside this organization. Remove every piece of information not intended for the public: credentials and secrets, personal data, and the organization's internal details such as private code, unreleased plans, customer records and internal discussions. Keep everything else, so the call still does its job."
+
+[policy.sanitizer.permits]
+audience = { from = ["self"], to = ["public"] }

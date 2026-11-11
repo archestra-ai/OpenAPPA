@@ -112,6 +112,19 @@ def test_refuses_sensitive_run_contents(tmp_path: Path, contents: str, message: 
     assert list(output.iterdir()) == []
 
 
+def test_a_bracketed_redaction_marker_is_not_a_credential(tmp_path: Path) -> None:
+    run = tmp_path / "redacted-run"
+    run.mkdir()
+    write_provenance(run)
+    (run / "answer.txt").write_text("SERVICE_*_API_KEY: [REDACTED]\nPARTNER_API_KEY: [REDACTED:api-key]\n")
+
+    prepare_bundle(run, "corp", COMMIT, tmp_path / "bundle")
+
+    (run / "answer.txt").write_text("PARTNER_API_KEY: [pk_prod_7Hq2Zr9Lm4Xw8Vt1]\n")
+    with pytest.raises(PublishError, match="provider credential"):
+        prepare_bundle(run, "corp", COMMIT, tmp_path / "bundle-2")
+
+
 def test_refuses_absolute_path_inside_nested_eval_zip(tmp_path: Path) -> None:
     import zipfile
 
