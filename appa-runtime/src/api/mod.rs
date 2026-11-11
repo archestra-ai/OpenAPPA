@@ -375,7 +375,8 @@ impl RemedyRefusal {
             Self::AlreadyExecuting => "this offer is already being executed",
             Self::Unanswered { annotator, class } => {
                 return std::borrow::Cow::Owned(format!(
-                    "annotator {annotator} gave no answer ({class}), so the plan was not applied"
+                    "annotator {annotator} gave no answer ({class}), so the plan was not applied. Nothing changed \
+                     and the offer still stands: call execute_remedy_plan again with the same offer id."
                 ));
             }
             Self::Runtime { detail } => detail,
