@@ -32,7 +32,8 @@ fn config_from(dir: &Path, example: &str, extra: &str) -> Config {
     let (before, after) = example
         .split_once(deployment)
         .expect("the example carries the context-controlling deployment");
-    let text = format!("{before}{deployment}\n{extra}\n{after}");
+    // The extra rules go ahead of the deployment table, whose keys follow its header.
+    let text = format!("{before}{extra}\n{deployment}{after}");
     let path = dir.join(format!("appa-{}.toml", text.len()));
     std::fs::write(&path, including_session_tool_rules(dir, &text)).expect("the deployment writes");
     Config::load(&path).expect("the deployment loads")

@@ -39,10 +39,12 @@ token_env = "APPA_PROVIDER_HUGGINGFACE_TOKEN"
 [[policy.tool]]
 name = "mcp/huggingface/hub_repo_details"
 annotator = "huggingface.repo-visibility"
+tags = ["huggingface"]
 
 [[policy.tool]]
 name = "mcp/huggingface/hf_fs"
 annotator = "huggingface.repo-visibility"
+tags = ["huggingface"]
 
 # --- writes into a named repository: its visibility decides who must be allowed to see the data ---
 

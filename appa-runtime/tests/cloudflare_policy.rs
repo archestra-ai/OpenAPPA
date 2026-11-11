@@ -4,7 +4,7 @@ mod common;
 
 use appa_runtime::api::{AuditEvent, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw, root};
+use common::{actor, battery_runtime, members_source, propose, ran, raw, root, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -53,7 +53,7 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
         "search_cloudflare_documentation",
         serde_json::json!({ "query": "durable objects alarms" }),
     );
-    let offer = offer_of(&propose(&runtime, docs.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, docs.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         appa_runtime::api::RemedyOutcome::Authorized { .. }
@@ -76,7 +76,7 @@ async fn public_reads_run_until_the_workers_logs_narrow_the_trajectory() {
         "query_worker_observability",
         serde_json::json!({ "query": { "view": "events", "limit": 5 } }),
     );
-    let offer = offer_of(&propose(&runtime, logs.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, logs.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         appa_runtime::api::RemedyOutcome::Authorized { .. }

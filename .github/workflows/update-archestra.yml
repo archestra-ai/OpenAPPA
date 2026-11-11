@@ -133,7 +133,7 @@ jobs:
 
       - name: Create Archestra-only installation token
         id: app-token
-        uses: archestra-ai/.github/actions/github-app-token@3a014e2fa0a740f1ec68f6379b602470a418cd6e # v1.13.0
+        uses: archestra-ai/.github/actions/github-app-token@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
         with:
           app-id: ${{ vars.APPA_ARCHESTRA_UPDATER_APP_ID }}
           private-key: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}

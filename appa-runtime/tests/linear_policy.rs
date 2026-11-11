@@ -9,7 +9,7 @@ use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::{Router, extract::State, routing::post};
-use common::{actor, members_source, offer_of, propose, ran, raw, repo_root, root, serve, session_runtime};
+use common::{actor, members_source, propose, ran, raw, repo_root, root, serve, session_runtime, unsanitized_offer_of};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -101,7 +101,7 @@ async fn linear_write_requires_review_and_records_its_effect() {
         let write = call(tool, args);
         let decision = propose(&runtime, write.clone()).await;
         assert!(!matches!(decision, HookDecision::AllowCall { .. }));
-        let outcome = runtime.execute_remedy(&actor(), offer_of(&decision)).await;
+        let outcome = runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await;
         // A public trajectory covers either destination symbolically. Reviewing the
         // write must not require a directory lookup before accepting its restriction.
         assert!(matches!(outcome, RemedyOutcome::Authorized { .. }), "{outcome:?}");
@@ -138,7 +138,7 @@ requires = { trust = "trusted", audience = { contains = ["alice@corp.example"] }
     )
     .await;
     let read = call("get_issue", serde_json::json!({"id":"ENG-1"}));
-    let offer = offer_of(&propose(&runtime, read.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, read.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }
@@ -191,7 +191,7 @@ async fn moving_an_issue_is_bounded_by_the_destination_teams_readers() {
 
     // Narrow the trajectory to Alice first: a `contains` on the public trajectory reads nothing.
     let read = call("get_issue", serde_json::json!({"id":"ENG-1"}));
-    let offer = offer_of(&propose(&runtime, read.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, read.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }
@@ -210,7 +210,7 @@ async fn moving_an_issue_is_bounded_by_the_destination_teams_readers() {
     let decision = propose(&runtime, mv.clone()).await;
     assert!(!matches!(decision, HookDecision::AllowCall { .. }));
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(
@@ -241,7 +241,7 @@ async fn a_private_team_read_narrows_to_the_team_without_failing_its_requirement
     };
     assert!(review.is_empty(), "accepting a narrowing consults no human");
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(
@@ -349,7 +349,7 @@ async fn opened(config: Config) -> Arc<Runtime> {
 /// first, as the audit records it.
 async fn admitted(runtime: &Arc<Runtime>, read: ProposedCall) -> (String, String) {
     if let decision @ HookDecision::DenyCall { .. } = propose(runtime, read.clone()).await {
-        let outcome = runtime.execute_remedy(&actor(), offer_of(&decision)).await;
+        let outcome = runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await;
         assert!(matches!(outcome, RemedyOutcome::Authorized { .. }), "{outcome:?}");
     }
     assert_eq!(

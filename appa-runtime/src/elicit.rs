@@ -401,9 +401,10 @@ fn headline(artifact: &AuthorityArtifact) -> String {
 }
 
 /// `text` on one row of at most [`HEADLINE_WIDTH`] characters: whitespace runs, line
-/// breaks included, become one space, and a cut shows as `…`.
+/// breaks included, become one space, any other character [`terminal_safe`] replaces is
+/// replaced, and a cut shows as `…`.
 fn one_line(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = terminal_safe(&text.split_whitespace().collect::<Vec<_>>().join(" "));
     let mut cuts = flat.char_indices().skip(HEADLINE_WIDTH - 1).map(|(at, _)| at);
     match (cuts.next(), cuts.next()) {
         (Some(cut), Some(_)) => format!("{}…", &flat[..cut]),
@@ -592,6 +593,22 @@ mod tests {
         assert_eq!(one_line(&full), full);
         let over = "é".repeat(HEADLINE_WIDTH + 1);
         assert_eq!(one_line(&over), format!("{}…", "é".repeat(HEADLINE_WIDTH - 1)));
+    }
+
+    /// A command cannot restyle or reorder its headline row: escape, backspace, delete and
+    /// bidi controls in it are replaced.
+    #[test]
+    fn the_headline_replaces_terminal_controls_in_the_call() {
+        let headline = headline(&artifact(serde_json::json!({
+            "command": "rm -rf ~\u{1b}[2K\u{8}\u{7f}\u{202E}ls",
+            "description": "list\u{1b}]0;x\u{7}",
+        })));
+        assert_eq!(
+            headline,
+            "▄█▄▄▄█▄  ▀▀█  Approve this call?\n\
+             ██▄█▄██   ▄   $ rm -rf ~\u{FFFD}[2K\u{FFFD}\u{FFFD}\u{FFFD}ls\n\
+             \x20             list\u{FFFD}]0;x\u{FFFD}\n"
+        );
     }
 
     /// The review names the required recipients, each quoted on the one line of its

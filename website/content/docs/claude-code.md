@@ -67,6 +67,8 @@ Claude can read the meeting, but that read narrows who may receive the resulting
 
 The refusal names the policy conflict and provides available remedies (such as routing through a configured sanitizer or requesting authorized human review).
 
+In a `clappa` session, the sanitizers of every installed battery are active by default. The default config binds each one to the local `claude` CLI. A read that would lower the session's trust, or narrow its audience, then also offers the sanitizer's rewrite of the result, so the session can keep its label. To turn off a sanitizer, delete its `[externals.sanitizers."<name>"]` binding from the config that `appa plugin install claude-code` wrote.
+
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](/images/claude-code-blocked-flow.png)
 
 ## How it works under the hood

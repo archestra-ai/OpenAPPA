@@ -5,7 +5,7 @@ mod common;
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve, session_runtime};
+use common::{actor, propose, ran, raw, repo_root, root, serve, session_runtime, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -122,7 +122,7 @@ async fn admit(runtime: &Arc<Runtime>, call: ProposedCall) {
     let decision = propose(runtime, call.clone()).await;
     if !matches!(decision, HookDecision::AllowCall { .. }) {
         assert!(matches!(
-            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }
         ));
         assert_eq!(
@@ -250,7 +250,7 @@ async fn code_run_with_the_token_needs_review_and_records_no_effect() {
         let decision = propose(&runtime, reviewed.clone()).await;
         assert!(!matches!(decision, HookDecision::AllowCall { .. }), "{}", reviewed.tool);
         assert!(matches!(
-            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }
         ));
         assert_eq!(

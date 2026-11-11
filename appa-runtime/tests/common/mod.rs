@@ -264,6 +264,27 @@ pub fn last_offer(feedback: &str) -> OfferId {
         .unwrap_or_else(|| panic!("no offer id in feedback: {feedback}"))
 }
 
+/// The last offer a denial's feedback names that delivers the raw result: the
+/// plain acceptance of a narrowing, or an authority's ruling beside it. A
+/// battery that confines a result also lists its output sanitizers and, for a
+/// tool with effects, withholding after these; a suite with no model to answer
+/// a sanitizer takes the route that needs none.
+pub fn unsanitized_offer_of(decision: &HookDecision) -> OfferId {
+    let HookDecision::DenyCall { feedback, .. } = decision else {
+        panic!("expected a deny carrying feedback, got {decision:?}")
+    };
+    let mut route = "";
+    let mut found = None;
+    for line in feedback.lines() {
+        if line.trim_start().starts_with("- ") {
+            route = line;
+        } else if line.contains("offer_id:") && !route.contains("sanitizer") && !route.contains("withhold") {
+            found = offers(line).pop();
+        }
+    }
+    found.unwrap_or_else(|| panic!("no offer without a sanitizer in feedback: {feedback}"))
+}
+
 /// The last offer a denial's feedback names.
 pub fn offer_of(decision: &HookDecision) -> OfferId {
     let HookDecision::DenyCall { feedback, .. } = decision else {
