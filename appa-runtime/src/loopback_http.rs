@@ -2,9 +2,10 @@
 //!
 //! Every client this binary runs as — the hook poster, the statusline, the
 //! starter — reaches the runtime through here. Only `http` to a loopback
-//! address is spoken: the runtime refuses to listen anywhere else, so there is
-//! no transport to secure, and a socket is cheaper than an HTTP client on a
-//! path the harness pays for on every tool call. A URL that resolves off this
+//! address is spoken: the runtime listens on loopback unless `--listen` says
+//! otherwise, and these local clients refuse any other address, so there is no
+//! transport to secure and a socket is cheaper than an HTTP client on a path
+//! the harness pays for on every tool call. A URL that resolves off this
 //! machine is refused before anything is posted to it.
 
 use std::io::{Read, Write};

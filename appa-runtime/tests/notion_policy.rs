@@ -3,7 +3,7 @@ mod common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw, root};
+use common::{actor, battery_runtime, members_source, propose, ran, raw, root, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -36,7 +36,8 @@ review_timeout_ms = 600000
 max_body_bytes = 1048576
 
 [externals.authorities.notion-operator]
-builtin = "approve"
+# Approves when asked. The stock "approve" is applied at the block, which this test reads.
+command = ["/bin/sh", "-c", 'cat > /dev/null; printf "%s" "{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}"']
 
 [externals.audience.people]
 url = "{source}"
@@ -59,7 +60,7 @@ async fn a_page_read_keeps_trust_and_a_search_lowers_it() {
         "notion-fetch",
         serde_json::json!({ "id": "https://www.notion.so/acme/Plan-1" }),
     );
-    let offer = offer_of(&propose(&runtime, read.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, read.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }
@@ -81,7 +82,7 @@ async fn a_page_read_keeps_trust_and_a_search_lowers_it() {
     ran(&runtime, summary).await;
 
     let search = call("notion-search", serde_json::json!({ "query": "budget" }));
-    let offer = offer_of(&propose(&runtime, search.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, search.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }
@@ -134,7 +135,7 @@ async fn writes_record_their_effects_and_structural_changes_wait_for_review() {
     let decision = propose(&runtime, mv.clone()).await;
     assert!(!matches!(decision, HookDecision::AllowCall { .. }));
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(

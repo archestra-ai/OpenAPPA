@@ -122,6 +122,22 @@ fn declaration_only_policy_builds_the_engine_registry() {
     assert_eq!(config.registry_config().tools.len(), 2);
 }
 
+/// `except_tags` reaches the engine as the authority's exception, beside its scope.
+#[test]
+fn an_authority_excepts_the_tags_it_names() {
+    let policy = DECLARATIONS
+        .replace("name = \"send\"", "name = \"send\"\ntags = [\"legacy\"]")
+        .replace("[authority.permits]", "except_tags = [\"legacy\"]\n[authority.permits]");
+    let config = load(&policy).expect("the excepting policy compiles");
+    let approver = config
+        .engine()
+        .registry()
+        .authority(&AuthorityName::new("approver"))
+        .expect("the authority registers");
+    assert_eq!(approver.except, vec![appa_engine::names::TagName::new("legacy")]);
+    assert!(approver.scope.is_unscoped());
+}
+
 #[test]
 fn server_qualification_preserves_the_contract_and_deployment_references() {
     let qualified = DECLARATIONS.replace("name = \"lookup\"", "name = \"lookup\"\nserver = \"demo\"");
@@ -213,6 +229,21 @@ fn an_inline_binding_on_the_reserved_attest_schema_is_refused() {
         load(policy),
         Err(ConfigError::ForbiddenInlineBinding { kind: "sanitizer", name }) if name == "attest-schema"
     ));
+}
+
+#[test]
+fn a_model_builtin_on_the_reserved_attest_schema_is_refused() {
+    for builtin in ["llm", "claude-code"] {
+        let policy = format!(
+            "version = 2\n\
+             [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\nbuiltin = \"{builtin}\"\n\
+             [sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n"
+        );
+        assert!(
+            matches!(load(&policy), Err(ConfigError::ReservedSanitizerBuiltin { builtin: found }) if found == builtin),
+            "attest-schema accepted builtin {builtin}"
+        );
+    }
 }
 
 #[test]

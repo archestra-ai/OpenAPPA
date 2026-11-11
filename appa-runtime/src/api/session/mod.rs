@@ -18,6 +18,7 @@ use appa_engine::label::ReaderId;
 use appa_engine::names::ContextProviderName;
 use appa_engine::transition::ProposalBatchId;
 
+use super::host::AheadState;
 use super::{
     ChildReturnDecision, ConsultContext, ConsultRecord, Deployment, EmbeddedPresentationOptions, EventError, ExactCall,
     Inner, OfferId, OutcomeBody, PromptKey, ProposedCall, RemedyDecision, RemedyPresentation, SpawnKind, SpawnRef,
@@ -60,6 +61,11 @@ enum Occasion<'a> {
     Proposal {
         call_id: Option<&'a str>,
         prompt: Option<&'a PromptKey>,
+        spawn: Option<SpawnKind>,
+        /// `None` once this invocation's first decision took no declaration: only that
+        /// decision takes one.
+        invocation: Option<appa_eventlog::InvocationNonce>,
+        took: &'a Took,
     },
     Report {
         call_id: Option<&'a str>,
@@ -67,14 +73,29 @@ enum Occasion<'a> {
     Remedy {
         offer: &'a OfferId,
     },
+    /// The declaration a spawn took, applied through its block's offer: a remedy whose
+    /// approval also settles the declaration as applied.
+    AheadApply {
+        offer: &'a OfferId,
+        claim: &'a AheadClaim<'a>,
+    },
     Other,
+}
+
+/// The declaration ahead a blocked spawn took, and what its judgment reads: whether the spawn
+/// starts several subagents, and the offers its block made.
+#[derive(Debug)]
+pub(super) struct AheadClaim<'a> {
+    attempt: &'a appa_eventlog::AheadAttempt,
+    spawn: SpawnKind,
+    offers: &'a [appa_runtime_api::OfferedRemedy],
 }
 
 impl<'a> Occasion<'a> {
     fn call_id(self) -> Option<&'a str> {
         match self {
             Occasion::Proposal { call_id, .. } | Occasion::Report { call_id } => call_id,
-            Occasion::Remedy { .. } | Occasion::Other => None,
+            Occasion::Remedy { .. } | Occasion::AheadApply { .. } | Occasion::Other => None,
         }
     }
 }
@@ -268,6 +289,10 @@ pub(crate) fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> 
 }
 #[cfg(test)]
 mod real_engine_tests;
+
+/// Returns declared ahead across the replicas of one store.
+#[cfg(test)]
+mod ahead_tests;
 
 /// Writers of one family on PostgreSQL, each driving its own event at the same moment
 /// through the runtime's shared store: the steps take turns on the family's row, so none

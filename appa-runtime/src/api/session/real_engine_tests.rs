@@ -5963,6 +5963,159 @@ fn annotated(dir: &std::path::Path, binding: &str) -> Config {
     Config::load(&path).expect("the fixture validates")
 }
 
+/// One stock `approve` authority covers every trust gate and the `irreversible` mark, except the
+/// trust gate of the tool whose tag it excepts.
+const STOCK_APPROVED: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "taint"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "send"
+tags = ["kept"]
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "post"
+requires = { trust = "trusted" }
+delta = {}
+
+[[policy.tool]]
+name = "wire"
+parameters = { type = "object", properties = { amount = { type = "integer" } } }
+requires = { attention = ["irreversible"] }
+delta = {}
+
+[[policy.tool]]
+name = "import"
+requires = { attention = ["irreversible"] }
+delta = { trust = "suspicious" }
+
+[[policy.authority]]
+name = "rollout"
+except_tags = ["kept"]
+[policy.authority.permits]
+trust_below = "trusted"
+attention = ["irreversible"]
+
+[policy.deployment]
+context_control = true
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+
+[externals.authorities.rollout]
+builtin = "approve"
+"#;
+
+fn bare(tool: &str) -> ProposedCall {
+    ProposedCall {
+        tool: tool.to_string(),
+        arguments: raw(serde_json::json!({})),
+        cwd: None,
+    }
+}
+
+/// A plan that asks only stock `approve` authorities is applied at the block: the call is
+/// released without the agent executing anything, and the ruling is still recorded.
+#[tokio::test]
+async fn a_stock_approve_plan_is_applied_at_the_block() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let transcriber = Arc::new(Collected::default());
+    let session = runtime
+        .transcribing(transcriber.clone())
+        .create_session(root(), None)
+        .expect("a fresh id opens");
+
+    let decision = session
+        .on_tool_call_identified(wire(500), Some("host-call-1".to_string()), None, None)
+        .await
+        .expect("the call is judged");
+    assert!(matches!(decision, ToolCallDecision::Allow { .. }), "{decision:?}");
+
+    let [record] = transcriber.taken().try_into().expect("one ruling, one record");
+    assert_eq!(record.role, crate::api::ExternalRole::Authority);
+    assert_eq!(record.external_name, "rollout");
+    assert_eq!(record.backend, crate::api::ConsultBackend::Stock);
+    assert_eq!(record.request["artifact"]["tool"], "wire");
+    assert_eq!(record.outcome, crate::api::ExternalOutcome::Answered);
+    assert_eq!(record.answer, Some(serde_json::json!({"ruling": "approve"})));
+    assert_eq!(record.raw_response, None);
+    assert!(record.context.offer_id.is_some());
+
+    // The host asking again under the same call id is answered from the record: the one
+    // dispatch stands, and no authority is consulted a second time.
+    let repeated = session
+        .on_tool_call_identified(wire(500), Some("host-call-1".to_string()), None, None)
+        .await
+        .expect("the repeat is answered");
+    assert!(matches!(repeated, ToolCallDecision::Allow { .. }), "{repeated:?}");
+    assert!(transcriber.taken().is_empty());
+    assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+}
+
+/// A trust gate the authority covers is released on every call that meets it, since an approval
+/// never raises the label. The tool whose tag the authority excepts stays blocked, with no plan.
+#[tokio::test]
+async fn an_excepted_tool_stays_blocked_beside_an_approved_one() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
+
+    let kept = session
+        .on_tool_call(bare("send"), false)
+        .await
+        .expect("the block is delivered");
+    assert!(
+        matches!(&kept, ToolCallDecision::Deny { offers, .. } if offers.is_empty()),
+        "{kept:?}"
+    );
+    for _ in 0..2 {
+        let released = session
+            .on_tool_call(bare("post"), false)
+            .await
+            .expect("the call is judged");
+        assert!(matches!(released, ToolCallDecision::Allow { .. }), "{released:?}");
+        let outcome = ToolOutcome::Success {
+            body: OutcomeBody::Available("data".to_string()),
+        };
+        let kept = session
+            .on_tool_result(bare("post"), outcome)
+            .await
+            .expect("the result is admitted");
+        assert_eq!(kept, ToolResultDecision::Keep);
+    }
+}
+
+/// A plan that also accepts a narrowing is the agent's to choose: accepting it changes what
+/// the rest of the trajectory may do, so the block is delivered with its plans.
+#[tokio::test]
+async fn a_plan_that_accepts_a_narrowing_is_left_to_the_agent() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+
+    let decision = session
+        .on_tool_call(bare("import"), false)
+        .await
+        .expect("the block is delivered");
+    assert!(
+        matches!(&decision, ToolCallDecision::Deny { offers, .. } if !offers.is_empty()),
+        "{decision:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_recorded_annotation_carries_its_wire_exchange_and_join_keys() {
     use axum::routing::post;

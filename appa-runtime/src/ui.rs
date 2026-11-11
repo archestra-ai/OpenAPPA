@@ -581,6 +581,16 @@ fn launch(args: Args) -> Result<(), String> {
         return Err("--battery takes exactly one battery".into());
     };
     let local = Arc::new(Local::new(&args)?);
+    // No token makes a battery that is not installed ready: refuse instead of waiting.
+    let (entries, errors) = local.catalog();
+    if !entries.iter().any(|entry| &entry.name == name) {
+        let prefix = format!("{name}: ");
+        return Err(errors
+            .into_iter()
+            .filter(|error| error.starts_with(&prefix))
+            .collect::<Vec<_>>()
+            .join("\n"));
+    }
     let setup = Arc::new(Setup {
         battery: name.clone(),
         ready: tokio::sync::Notify::new(),

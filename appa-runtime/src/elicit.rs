@@ -78,6 +78,7 @@ use crate::external::ConsultOutcome;
 use crate::external::NoAnswerReason;
 #[cfg(feature = "daemon")]
 use appa_runtime_api::Ruling;
+use appa_runtime_api::{ReviewNarrowing, ReviewRequirement, ReviewScopeItem};
 
 /// Which channel carries one review back to a person. An enum rather than a
 /// struct because a build without the server stack has no channel at all: the
@@ -332,12 +333,9 @@ pub(crate) const MARK_BOTTOM: &str = "██▄█▄██";
 pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, artifact: &AuthorityArtifact) -> String {
     let arguments =
         serde_json::to_string_pretty(&artifact.arguments).unwrap_or_else(|_| artifact.arguments.to_string());
-    let coverage = artifact
-        .requirements
+    let coverage = review_scope(artifact)
         .iter()
-        .map(requirement_text)
-        .chain(artifact.narrows.iter().flat_map(narrowing_bullets))
-        .map(|fact| format!("  - {fact}"))
+        .map(|item| format!("  - {}", item.text()))
         .collect::<Vec<_>>();
     let coverage = match coverage.as_slice() {
         [] => "  (none)".to_string(),
@@ -366,6 +364,17 @@ pub(crate) fn review_text(authority: &str, declaration: &AuthorityDeclaration, a
     )
 }
 
+/// What approving this consult accepts. The review's coverage bullets are printed from these
+/// items, so a bullet and its item cannot disagree.
+pub(crate) fn review_scope(artifact: &AuthorityArtifact) -> Vec<ReviewScopeItem> {
+    artifact
+        .requirements
+        .iter()
+        .map(requirement_item)
+        .chain(artifact.narrows.iter().flat_map(narrowing_items))
+        .collect()
+}
+
 /// The widest a headline line's call text runs: a harness counts a wrapped row against
 /// the few lines it shows, so a longer line would push the rest of the headline out.
 const HEADLINE_WIDTH: usize = 64;
@@ -392,9 +401,10 @@ fn headline(artifact: &AuthorityArtifact) -> String {
 }
 
 /// `text` on one row of at most [`HEADLINE_WIDTH`] characters: whitespace runs, line
-/// breaks included, become one space, and a cut shows as `…`.
+/// breaks included, become one space, any other character [`terminal_safe`] replaces is
+/// replaced, and a cut shows as `…`.
 fn one_line(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = terminal_safe(&text.split_whitespace().collect::<Vec<_>>().join(" "));
     let mut cuts = flat.char_indices().skip(HEADLINE_WIDTH - 1).map(|(at, _)| at);
     match (cuts.next(), cuts.next()) {
         (Some(cut), Some(_)) => format!("{}…", &flat[..cut]),
@@ -416,6 +426,33 @@ fn requirement_text(requirement: &Requirement) -> String {
         }
         Requirement::Attention { mark } => format!("attention: {}", terminal_safe(mark)),
     }
+}
+
+fn requirement_item(requirement: &Requirement) -> ReviewScopeItem {
+    let text = requirement_text(requirement);
+    let requirement = match requirement {
+        Requirement::Attention { mark } => {
+            return ReviewScopeItem::Attention {
+                mark: mark.clone(),
+                text,
+            };
+        }
+        Requirement::Trust { required } => ReviewRequirement::Trust {
+            required: required.clone(),
+        },
+        Requirement::Audience {
+            required: AudienceRequirement::Public,
+        } => ReviewRequirement::PublicAudience,
+        Requirement::Audience {
+            required: AudienceRequirement::Readers(entries),
+        } => ReviewRequirement::Audience {
+            readers: entries.clone(),
+        },
+        Requirement::Effect { excludes } => ReviewRequirement::Effect {
+            excludes: excludes.clone(),
+        },
+    };
+    ReviewScopeItem::Requirement { requirement, text }
 }
 
 /// The most tools one bullet names before it counts the rest.
@@ -445,11 +482,13 @@ fn tool_list(tools: &[String], joined_by: ToolsJoinedBy) -> String {
     }
 }
 
-fn narrowing_bullets(narrows: &ReviewedNarrowing) -> Vec<String> {
+fn narrowing_items(narrows: &ReviewedNarrowing) -> Vec<ReviewScopeItem> {
+    let item = |narrowing, text| ReviewScopeItem::Narrowing { narrowing, text };
     match narrows {
-        ReviewedNarrowing::Unjudged => {
-            vec!["after this, some tools may be blocked or need approval in this conversation".to_string()]
-        }
+        ReviewedNarrowing::Unjudged => vec![item(
+            ReviewNarrowing::Unjudged,
+            "after this, some tools may be blocked or need approval in this conversation".to_string(),
+        )],
         ReviewedNarrowing::Judged {
             blocked,
             sign_off,
@@ -457,24 +496,42 @@ fn narrowing_bullets(narrows: &ReviewedNarrowing) -> Vec<String> {
             per_call,
         } => [
             (!blocked.is_empty()).then(|| {
-                format!(
-                    "after this, the agent can't use {} in this conversation",
-                    tool_list(blocked, ToolsJoinedBy::Or)
+                item(
+                    ReviewNarrowing::Blocked { tools: blocked.clone() },
+                    format!(
+                        "after this, the agent can't use {} in this conversation",
+                        tool_list(blocked, ToolsJoinedBy::Or)
+                    ),
                 )
             }),
             (!sign_off.is_empty()).then(|| {
-                format!(
-                    "after this, {} will need approval in this conversation",
-                    tool_list(sign_off, ToolsJoinedBy::And)
+                item(
+                    ReviewNarrowing::SignOff {
+                        tools: sign_off.clone(),
+                    },
+                    format!(
+                        "after this, {} will need approval in this conversation",
+                        tool_list(sign_off, ToolsJoinedBy::And)
+                    ),
                 )
             }),
             (!recipient_checked.is_empty()).then(|| {
-                format!(
-                    "after this, {} can only send to people allowed to read this data",
-                    tool_list(recipient_checked, ToolsJoinedBy::And)
+                item(
+                    ReviewNarrowing::RecipientChecked {
+                        tools: recipient_checked.clone(),
+                    },
+                    format!(
+                        "after this, {} can only send to people allowed to read this data",
+                        tool_list(recipient_checked, ToolsJoinedBy::And)
+                    ),
                 )
             }),
-            per_call.then(|| "other tools may also need approval, decided call by call".to_string()),
+            per_call.then(|| {
+                item(
+                    ReviewNarrowing::PerCall,
+                    "other tools may also need approval, decided call by call".to_string(),
+                )
+            }),
         ]
         .into_iter()
         .flatten()
@@ -536,6 +593,22 @@ mod tests {
         assert_eq!(one_line(&full), full);
         let over = "é".repeat(HEADLINE_WIDTH + 1);
         assert_eq!(one_line(&over), format!("{}…", "é".repeat(HEADLINE_WIDTH - 1)));
+    }
+
+    /// A command cannot restyle or reorder its headline row: escape, backspace, delete and
+    /// bidi controls in it are replaced.
+    #[test]
+    fn the_headline_replaces_terminal_controls_in_the_call() {
+        let headline = headline(&artifact(serde_json::json!({
+            "command": "rm -rf ~\u{1b}[2K\u{8}\u{7f}\u{202E}ls",
+            "description": "list\u{1b}]0;x\u{7}",
+        })));
+        assert_eq!(
+            headline,
+            "▄█▄▄▄█▄  ▀▀█  Approve this call?\n\
+             ██▄█▄██   ▄   $ rm -rf ~\u{FFFD}[2K\u{FFFD}\u{FFFD}\u{FFFD}ls\n\
+             \x20             list\u{FFFD}]0;x\u{FFFD}\n"
+        );
     }
 
     /// The review names the required recipients, each quoted on the one line of its
@@ -721,6 +794,174 @@ mod tests {
                 "  - attention: signoff\u{FFFD}\u{FFFD}extra",
             ]
         );
+    }
+
+    fn requirement_item(requirement: ReviewRequirement, text: &str) -> ReviewScopeItem {
+        ReviewScopeItem::Requirement {
+            requirement,
+            text: text.to_string(),
+        }
+    }
+
+    fn narrowing_item(narrowing: ReviewNarrowing, text: &str) -> ReviewScopeItem {
+        ReviewScopeItem::Narrowing {
+            narrowing,
+            text: text.to_string(),
+        }
+    }
+
+    #[test]
+    fn every_requirement_is_one_scope_item_with_its_identifiers_and_bullet() {
+        let scope = review_scope(&AuthorityArtifact {
+            requirements: vec![
+                Requirement::Trust {
+                    required: "trusted".to_string(),
+                },
+                Requirement::Audience {
+                    required: AudienceRequirement::Public,
+                },
+                Requirement::Audience {
+                    required: AudienceRequirement::Readers(vec!["internal".to_string(), "alice".to_string()]),
+                },
+                Requirement::Effect {
+                    excludes: "deploy".to_string(),
+                },
+                Requirement::Attention {
+                    mark: "signoff".to_string(),
+                },
+            ],
+            ..artifact(serde_json::json!({}))
+        });
+        assert_eq!(
+            scope,
+            [
+                requirement_item(
+                    ReviewRequirement::Trust {
+                        required: "trusted".to_string()
+                    },
+                    "unverified input for this step"
+                ),
+                requirement_item(ReviewRequirement::PublicAudience, "public sharing"),
+                requirement_item(
+                    ReviewRequirement::Audience {
+                        readers: vec!["internal".to_string(), "alice".to_string()]
+                    },
+                    "sharing with \"internal\", \"alice\""
+                ),
+                requirement_item(
+                    ReviewRequirement::Effect {
+                        excludes: "deploy".to_string()
+                    },
+                    "an earlier deploy action in this conversation"
+                ),
+                ReviewScopeItem::Attention {
+                    mark: "signoff".to_string(),
+                    text: "attention: signoff".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn each_impact_of_a_narrowing_is_one_scope_item_naming_every_tool() {
+        let seven = ["a", "b", "c", "d", "e", "f", "g"];
+        assert_eq!(
+            review_scope(&AuthorityArtifact {
+                requirements: vec![],
+                ..narrowing_review(judged(&["create_issue"], &seven, &["send_mail"], true))
+            }),
+            [
+                narrowing_item(
+                    ReviewNarrowing::Blocked {
+                        tools: tools(&["create_issue"])
+                    },
+                    "after this, the agent can't use `create_issue` in this conversation"
+                ),
+                narrowing_item(
+                    ReviewNarrowing::SignOff { tools: tools(&seven) },
+                    "after this, `a`, `b`, `c`, `d`, `e` and 2 more will need approval in this conversation"
+                ),
+                narrowing_item(
+                    ReviewNarrowing::RecipientChecked {
+                        tools: tools(&["send_mail"])
+                    },
+                    "after this, `send_mail` can only send to people allowed to read this data"
+                ),
+                narrowing_item(
+                    ReviewNarrowing::PerCall,
+                    "other tools may also need approval, decided call by call"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unjudged_narrowing_is_one_scope_item() {
+        assert_eq!(
+            review_scope(&AuthorityArtifact {
+                requirements: vec![],
+                ..narrowing_review(Some(ReviewedNarrowing::Unjudged))
+            }),
+            [narrowing_item(
+                ReviewNarrowing::Unjudged,
+                "after this, some tools may be blocked or need approval in this conversation"
+            )]
+        );
+    }
+
+    /// `(none)` in the text is an empty scope, known to accept nothing else.
+    #[test]
+    fn a_review_covering_nothing_has_an_empty_scope() {
+        let nothing = artifact(serde_json::json!({}));
+        assert_eq!(review_scope(&nothing), []);
+        assert_eq!(coverage(&nothing), ["  (none)"]);
+    }
+
+    /// An identifier stays exact for a host to match on; only its display text is made safe.
+    #[test]
+    fn a_scope_identifier_stays_exact_while_its_text_is_terminal_safe() {
+        let mark = "signoff\r\nextra".to_string();
+        assert_eq!(
+            review_scope(&AuthorityArtifact {
+                requirements: vec![Requirement::Attention { mark: mark.clone() }],
+                ..artifact(serde_json::json!({}))
+            }),
+            [ReviewScopeItem::Attention {
+                mark,
+                text: "attention: signoff\u{FFFD}\u{FFFD}extra".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn each_coverage_bullet_is_the_text_of_its_scope_item() {
+        let full = AuthorityArtifact {
+            requirements: vec![
+                Requirement::Attention {
+                    mark: "signoff".to_string(),
+                },
+                Requirement::Audience {
+                    required: AudienceRequirement::Public,
+                },
+            ],
+            ..narrowing_review(judged(&["a"], &["b", "c"], &["d"], true))
+        };
+        let bullets = review_scope(&full)
+            .iter()
+            .map(|item| format!("  - {}", item.text()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bullets,
+            [
+                "  - attention: signoff",
+                "  - public sharing",
+                "  - after this, the agent can't use `a` in this conversation",
+                "  - after this, `b` and `c` will need approval in this conversation",
+                "  - after this, `d` can only send to people allowed to read this data",
+                "  - other tools may also need approval, decided call by call",
+            ]
+        );
+        assert_eq!(coverage(&full), bullets);
     }
 
     #[test]

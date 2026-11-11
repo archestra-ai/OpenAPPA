@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use appa_runtime::api::{EmbeddedPresentationOptions, RemedyOutcome, Runtime};
+use appa_runtime::api::{EmbeddedPresentationOptions, RemedyAttempt, RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
     ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnKind,
@@ -754,7 +754,12 @@ impl Run<'_> {
         let declares = offer.is_none();
         let outcome = match offer {
             Some(offer) => self.agent.runtime.execute_remedy_with(&acting, offer, arguments).await,
-            None => self.agent.runtime.declare_return_ahead(&acting, arguments).await,
+            None => {
+                self.agent
+                    .runtime
+                    .declare_return_ahead(&acting, arguments, RemedyAttempt::fresh())
+                    .await
+            }
         };
         let (record, reply) = match outcome {
             RemedyOutcome::Returned { value } if declares => (

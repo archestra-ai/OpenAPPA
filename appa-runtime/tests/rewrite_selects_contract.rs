@@ -7,11 +7,14 @@ use common::{actor, offer_of, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
 
-use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
+use appa_eventlog::{Backend, LogStore};
+use appa_runtime::api::{AuditEvent, NoAnswerClass, RemedyOutcome, RemedyRefusal, Runtime};
 use appa_runtime::{config::Config, hooks};
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::Router;
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::post;
 
 /// The public contract at 0 routes through an annotator that owns the recipients the call
@@ -70,6 +73,8 @@ struct Stubs {
     sanitizations: Arc<Mutex<Vec<serde_json::Value>>>,
     /// The argument object the sanitizer answers with.
     rewrite: Arc<Mutex<serde_json::Value>>,
+    /// The status the annotator fails with instead of answering, while set.
+    failing: Arc<Mutex<Option<StatusCode>>>,
 }
 
 async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
@@ -77,6 +82,7 @@ async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
         consults: Arc::new(Mutex::new(Vec::new())),
         sanitizations: Arc::new(Mutex::new(Vec::new())),
         rewrite: Arc::new(Mutex::new(rewrite)),
+        failing: Arc::new(Mutex::new(None)),
     };
     let router = Router::new()
         .route(
@@ -84,6 +90,9 @@ async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
             post(|State(stubs): State<Stubs>, body: String| async move {
                 let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
                 stubs.consults.lock().unwrap().push(request);
+                if let Some(status) = *stubs.failing.lock().unwrap() {
+                    return status.into_response();
+                }
                 axum::Json(serde_json::json!({
                     "version": 1,
                     "answer": {
@@ -96,6 +105,7 @@ async fn serve_stubs(rewrite: serde_json::Value) -> (String, Stubs) {
                         "emits": [],
                     },
                 }))
+                .into_response()
             }),
         )
         .route(
@@ -129,19 +139,21 @@ fn read_file(path: &str) -> ProposedCall {
 
 /// A runtime whose audience is narrowed to `hr`, with the sanitizer answering `rewrite`.
 async fn narrowed(dir: &tempfile::TempDir, rewrite: serde_json::Value) -> (Arc<Runtime>, Stubs) {
-    narrowed_under(dir, rewrite, policy).await
+    let (runtime, stubs, _) = narrowed_under(dir, rewrite, policy).await;
+    (runtime, stubs)
 }
 
 async fn narrowed_under(
     dir: &tempfile::TempDir,
     rewrite: serde_json::Value,
     policy: fn(&str) -> String,
-) -> (Arc<Runtime>, Stubs) {
+) -> (Arc<Runtime>, Stubs, Arc<LogStore>) {
     let (base, stubs) = serve_stubs(rewrite).await;
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, policy(&base)).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
-    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+    let store = Arc::new(LogStore::open(Backend::Memory).expect("an in-memory log opens"));
+    let runtime = Arc::new(Runtime::open_with_store(config, Arc::clone(&store), None).expect("the deployment opens"));
     assert_eq!(
         hooks::handle(
             &runtime,
@@ -167,7 +179,7 @@ async fn narrowed_under(
         HookDecision::AllowCall { spawn: None }
     );
     ran(&runtime, read_hr()).await;
-    (runtime, stubs)
+    (runtime, stubs, store)
 }
 
 fn rewritten_path(outcome: RemedyOutcome) -> String {
@@ -242,6 +254,68 @@ async fn a_rewrite_into_the_public_contract_consults_its_annotator_about_the_rew
     );
 }
 
+/// The root actor's control hook for `plan`, which vouches for the execution that follows.
+async fn vouch(runtime: &Arc<Runtime>, plan: &serde_json::Value) {
+    assert_eq!(
+        propose(
+            runtime,
+            ProposedCall {
+                tool: appa_runtime_api::CONTROL_TOOL.into(),
+                arguments: raw(plan.clone()),
+                cwd: None,
+            },
+        )
+        .await,
+        HookDecision::PassControl
+    );
+}
+
+#[tokio::test]
+async fn an_unanswered_annotation_refuses_the_embedded_remedy_and_a_fresh_vouch_retries_it() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (runtime, stubs, store) = narrowed_under(&dir, serde_json::json!({ "path": "public/q3.md" }), policy).await;
+    let family = appa_eventlog::TrajectoryId::new(root().0);
+    let engine_facts = || store.log(&family).expect("the family log reads").facts().len();
+
+    let hop = offer_of(&propose(&runtime, read_file("private/q3.md")).await);
+    let plan = serde_json::json!({ "offer_id": hop.0 });
+    let acting = actor();
+    let execute = || runtime.execute_embedded_remedy(&acting, serde_json::from_value(plan.clone()).expect("a plan"));
+    let before = engine_facts();
+
+    *stubs.failing.lock().unwrap() = Some(StatusCode::SERVICE_UNAVAILABLE);
+    vouch(&runtime, &plan).await;
+    assert_eq!(
+        execute().await,
+        RemedyOutcome::Refused {
+            reason: RemedyRefusal::Unanswered {
+                annotator: "classify".to_string(),
+                class: NoAnswerClass::NonSuccess { status: 503 },
+            },
+        }
+    );
+    assert_eq!(
+        engine_facts(),
+        before,
+        "the unanswered attempt committed no engine facts"
+    );
+    assert_eq!(
+        execute().await,
+        RemedyOutcome::Refused {
+            reason: RemedyRefusal::Unvouched
+        },
+        "the attempt spent its vouch"
+    );
+
+    *stubs.failing.lock().unwrap() = None;
+    vouch(&runtime, &plan).await;
+    assert_eq!(rewritten_path(execute().await), "public/q3.md");
+    assert!(
+        engine_facts() > before,
+        "the answered attempt committed its engine facts"
+    );
+}
+
 /// The policy with one context provider the `/resolve` stub answers.
 fn policy_with_context(base: &str) -> String {
     policy(base) + &format!("\n[externals.context.origin]\nurl = \"{base}/resolve\"\n")
@@ -252,7 +326,7 @@ fn policy_with_context(base: &str) -> String {
 #[tokio::test]
 async fn a_rewrite_is_annotated_in_the_directory_the_proposal_reported() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (runtime, stubs) =
+    let (runtime, stubs, _) =
         narrowed_under(&dir, serde_json::json!({ "path": "public/q3.md" }), policy_with_context).await;
 
     let mut proposal = read_file("private/q3.md");
