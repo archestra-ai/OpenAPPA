@@ -41,7 +41,7 @@ delete process.env.APPA_CLAUDE_BASH_SELFTEST;
 
 const GUIDANCE = `
 
-Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com, and cargo needs index.crates.io and static.crates.io, not crates.io. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/, ~/.npm/ or ~/.cargo/registry/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json.`;
+Every Bash call runs in a sandbox confined to what it declares. Pass absolute paths in input_files for every file, directory or Unix socket the command reads, absolute paths in output_files for every file it writes, and hosts (example.com, *.example.com, host:port) in network_hosts for every host it connects to. Name only the hosts the command needs: a host other than a package registry's can lower the session's trust, go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com, and cargo needs index.crates.io and static.crates.io, not crates.io. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). Declare a package manager's download cache this way too, such as ~/go/pkg/mod/, ~/.npm/ or ~/.cargo/registry/, so a later call reads what it downloaded and needs no network host. A credential file such as .env inside a declared directory stays hidden unless the call names it. Declare a socket such as /var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends. System directories, the directories on PATH and installed toolchains are readable. Every other file in the workspace, the home directory and /tmp is hidden from the command, so \`ls\`, \`find\` and globs there show only what the call declares, and an empty listing does not mean a file is missing; a write to an undeclared path does not reach the disk. To list a directory, declare it in input_files. An output file that exists is read as well, so a command may rewrite it, as npm install does package.json. A command that replaces a file rather than rewriting it, such as cargo add or sed -i, declares the file's directory with a trailing / instead.`;
 
 /** The exports of every embedded chunk whose source contains all of `needles`. */
 async function modulesWith(...needles) {
@@ -169,7 +169,9 @@ bash.prompt = async function (...args) {
 // it lacked instead of concluding that the file is gone or the tool cannot work here.
 const HINTS = [
   {
-    // A listing or a comparison against git shows only what the call declared.
+    // A listing or a comparison against git shows only what the call declared; a call that
+    // declares the working directory sees all of it but its credentials.
+    partial: true,
     command: /(^|[\s;&|(`])(ls|find|tree|fd|du|git\s+(status|diff|ls-files|add|clean|stash))\b|\*/,
     text: "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing or git status here is incomplete. To see a directory, declare it in input_files.",
   },
@@ -186,7 +188,11 @@ const HINTS = [
 /** `shown` with the hints that `input` and everything it printed, `printed`, call for. */
 function hinted(input, shown, printed) {
   const command = input?.command;
-  const hints = HINTS.filter((hint) => (hint.command ? hint.command.test(command ?? "") : hint.output.test(printed)));
+  const whole = (input?.input_files ?? []).some((declared) => {
+    const relative = typeof declared === "string" ? path.relative(declared, process.cwd()) : "..";
+    return !relative.startsWith("..") && !path.isAbsolute(relative);
+  });
+  const hints = HINTS.filter((hint) => (hint.partial && whole ? false : hint.command ? hint.command.test(command ?? "") : hint.output.test(printed)));
   const ran = JSON.stringify([input?.input_files, input?.output_files, input?.network_hosts]);
   const fallback = defaults();
   if (DEFAULTED.delete(command) && ran === JSON.stringify([fallback.input_files, fallback.output_files, fallback.network_hosts])) {
