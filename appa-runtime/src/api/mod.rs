@@ -347,13 +347,17 @@ pub enum RemedyRefusal {
     Superseded,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,
+    /// An annotator the plan consults gave no answer. This attempt committed no engine facts,
+    /// did not authorize the call, and did not consume the offer; a retry needs a fresh vouch,
+    /// which a control hook writes.
+    Unanswered { annotator: String, class: NoAnswerClass },
     /// Runtime storage or execution failure.
     Runtime { detail: String },
 }
 
 impl RemedyRefusal {
-    pub fn detail(&self) -> &str {
-        match self {
+    pub fn detail(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(match self {
             Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
             Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
             Self::Superseded => {
@@ -369,8 +373,14 @@ impl RemedyRefusal {
             Self::AmbiguousReplay => "more than one session declared under this attempt",
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
+            Self::Unanswered { annotator, class } => {
+                return std::borrow::Cow::Owned(format!(
+                    "annotator {annotator} gave no answer ({class}), so the plan was not applied. Nothing changed \
+                     and the offer still stands: call execute_remedy_plan again with the same offer id."
+                ));
+            }
             Self::Runtime { detail } => detail,
-        }
+        })
     }
 }
 
@@ -389,8 +399,8 @@ impl RemedyAttempt {
 /// What one whole `execute_remedy_plan` act produced: the engine's
 /// answer, or the control channel's own refusal. `Refused` covers a
 /// quote this trajectory pursues no offer for, an offer already
-/// executing, and a storage failure — never an engine decision, and it
-/// never says which.
+/// executing, an annotator that gave no answer, and a storage failure —
+/// never an engine decision.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
     Authorized { call: ProposedCall },
@@ -402,11 +412,17 @@ pub enum RemedyOutcome {
 
 impl From<EventError> for RemedyOutcome {
     fn from(error: EventError) -> RemedyOutcome {
-        RemedyOutcome::Refused {
-            reason: RemedyRefusal::Runtime {
+        let reason = match error {
+            EventError::AnnotationRefused {
+                annotator,
+                no_answer: Some(class),
+                ..
+            } => RemedyRefusal::Unanswered { annotator, class },
+            error => RemedyRefusal::Runtime {
                 detail: error.to_string(),
             },
-        }
+        };
+        RemedyOutcome::Refused { reason }
     }
 }
 
@@ -666,6 +682,9 @@ pub(crate) enum EventError {
         annotator: String,
         reason: String,
         next_action: &'static str,
+        /// Why the external Annotator gave no answer; `None` when the runtime refused an
+        /// answer it had.
+        no_answer: Option<NoAnswerClass>,
     },
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
@@ -684,7 +703,17 @@ pub(crate) enum EventError {
 }
 
 impl EventError {
+    /// The engine refused an annotation it had.
     fn annotation_refused(annotator: String, reason: String) -> Self {
+        Self::annotation(annotator, reason, None)
+    }
+
+    /// The external Annotator gave no answer.
+    fn annotation_unanswered(annotator: String, reason: &crate::external::NoAnswerReason) -> Self {
+        Self::annotation(annotator, reason.diagnostic(), Some(reason.into()))
+    }
+
+    fn annotation(annotator: String, reason: String, no_answer: Option<NoAnswerClass>) -> Self {
         let next_action = if annotator == "claude-code.undeclared-tool" {
             "; this tool has no exact policy contract; run /appa-guide to write rules for this tool"
         } else {
@@ -694,6 +723,7 @@ impl EventError {
             annotator,
             reason,
             next_action,
+            no_answer,
         }
     }
 
@@ -3573,11 +3603,7 @@ impl Runtime {
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
             Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
             Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
-            Err(error) => RemedyOutcome::Refused {
-                reason: RemedyRefusal::Runtime {
-                    detail: error.to_string(),
-                },
-            },
+            Err(error) => error.into(),
         }
     }
 
