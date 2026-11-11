@@ -65,22 +65,11 @@ impl NoAnswerReason {
     pub fn diagnostic(&self) -> String {
         match self {
             NoAnswerReason::MalformedAnswer(detail) => format!("malformed {detail}"),
-            NoAnswerReason::Unregistered => "unregistered".to_string(),
-            NoAnswerReason::Unreachable => "unreachable".to_string(),
-            #[cfg(feature = "daemon")]
-            NoAnswerReason::Dismissed => "dismissed".to_string(),
-            NoAnswerReason::NonSuccess { status, detail: None } => format!("non_success status={status}"),
             NoAnswerReason::NonSuccess {
                 status,
                 detail: Some(detail),
             } => format!("non_success status={status} detail={detail:?}"),
-            NoAnswerReason::Timeout => "timeout".to_string(),
-            NoAnswerReason::Transport => "transport".to_string(),
-            NoAnswerReason::Malformed => "malformed".to_string(),
-            NoAnswerReason::Oversized => "oversized".to_string(),
-            NoAnswerReason::UnsupportedVersion => "unsupported_version".to_string(),
-            NoAnswerReason::ModuleError => "module_error".to_string(),
-            NoAnswerReason::ModulePanicked => "module_panicked".to_string(),
+            other => crate::events::NoAnswerClass::from(other).to_string(),
         }
     }
 }
