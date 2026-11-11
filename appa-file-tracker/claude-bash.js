@@ -183,6 +183,11 @@ const HINTS = [
     output: /Device or resource busy|EBUSY/,
     text: "[appa] A declared output file is rewritten in place and cannot be replaced or removed. A command that replaces files, such as git checkout or sed -i, declares their directory with a trailing / in output_files. The sandbox never lets a command write some files, such as .git/config.",
   },
+  {
+    // What `ls -l` shows of /dev/null mounted where a protected file is absent (`PROTECTED`).
+    output: /^c\S{9}\s.*\s1,\s+3\s/m,
+    text: "[appa] An entry listed as character device 1, 3, such as .bashrc or .vscode, is /dev/null, which the sandbox mounts where a protected file does not exist so that the command cannot create it. There is no such file.",
+  },
 ];
 
 /** `shown` with the hints that `input` and everything it printed, `printed`, call for. */
@@ -293,6 +298,63 @@ bash.call = async function (input, context, ...rest) {
 
 // --- the sandbox: each command gets its own call's filesystem and hosts ---
 
+// Claude Code's sandbox keeps a command from writing these, below its working directory, in
+// every call. One that does not exist there is kept from being created by /dev/null mounted
+// read-only on an empty entry, and git lists that entry as an untracked file, which
+// `git add -A` refuses to add. Git in the command leaves out those the call starts without.
+const PROTECTED = [
+  ...[".gitconfig", ".gitmodules", ".bashrc", ".bash_profile", ".zshrc", ".zprofile", ".profile"],
+  ...[".ripgreprc", ".mcp.json", ".vscode", ".idea", ".claude/commands", ".claude/agents"],
+];
+
+/** The prelude line that keeps git in a command from listing the protected paths absent here. */
+function unlisted(tmpdir) {
+  const cwd = process.cwd();
+  const absent = PROTECTED.filter((name) => {
+    let found;
+    try {
+      found = fs.lstatSync(path.join(cwd, name));
+    } catch {
+      return true;
+    }
+    // The mount point the sandbox makes for a command still running, such as one in the
+    // background, is an empty read-only file on the disk until that command ends.
+    return found.isFile() && found.size === 0 && (found.mode & 0o777) === 0o444;
+  });
+  if (absent.length === 0) return "";
+  // The repository the working directory is in, or the one `git init` would make there. A
+  // worktree's .git is a file naming its git directory.
+  let top = cwd;
+  while (!fs.existsSync(path.join(top, ".git")) && path.dirname(top) !== top) top = path.dirname(top);
+  if (!fs.existsSync(path.join(top, ".git"))) top = cwd;
+  let gitdir = path.join(top, ".git");
+  try {
+    const named = /^gitdir: (.+)$/m.exec(fs.readFileSync(gitdir, "utf8"))?.[1];
+    if (named) gitdir = path.resolve(top, named.trim());
+  } catch {}
+  const glob = (text) => text.replace(/[\\*?[ ]/g, "\\$&");
+  const excludes = path.join(tmpdir, "appa-git-excludes");
+  const config = path.join(tmpdir, "appa-git-config");
+  fs.writeFileSync(excludes, absent.map((name) => `/${glob(path.relative(top, path.join(cwd, name)))}\n`).join(""));
+  fs.writeFileSync(config, `[core]\n\texcludesFile = "${excludes.replace(/[\\"]/g, "\\$&")}"\n`);
+  // Only in that repository: the same name at the top of another one is a file of its own.
+  const quoted = (text) => `'${text.replace(/'/g, `'\\''`)}'`;
+  const at = "${GIT_CONFIG_COUNT:-0}";
+  return `export GIT_CONFIG_KEY_${at}=${quoted(`includeIf.gitdir:${glob(gitdir)}.path`)} GIT_CONFIG_VALUE_${at}=${quoted(config)} GIT_CONFIG_COUNT=$((${at}+1))\n`;
+}
+
+// Before every sandboxed command Claude Code makes .claude/.cc-writes in its working
+// directory, where it stages its own writes of the settings, and leaves it there. What it
+// made for this session goes when Claude Code ends, if nothing was put in it.
+const staging = [".claude/.cc-writes", ".claude"].map((name) => path.join(process.cwd(), name)).filter((dir) => !fs.existsSync(dir));
+process.on("exit", () => {
+  for (const dir of staging) {
+    try {
+      fs.rmdirSync(dir);
+    } catch {}
+  }
+});
+
 const wrap = sandbox.wrapWithSandbox;
 sandbox.wrapWithSandbox = async function (command, shell, custom, signal, options) {
   const current = calls.getStore();
@@ -320,7 +382,7 @@ sandbox.wrapWithSandbox = async function (command, shell, custom, signal, option
   }
   const perCall = { ...(custom ?? {}), filesystem, network: { ...(custom?.network ?? {}), ...current.confined.network } };
   // The prelude points TMPDIR at the call's own directory and gives git the person's identity.
-  const confinedCommand = (current.confined.prelude ?? "") + command;
+  const confinedCommand = (current.confined.prelude ?? "") + unlisted(current.confined.tmpdir) + command;
   const wrapped = await wrapping.run(current, () =>
     wrap.call(this, confinedCommand, shell, perCall, signal, { ...(options ?? {}), commandId: current.nonce }),
   );
@@ -495,6 +557,32 @@ async function selfTest() {
       fs.readFileSync(path.join(project, "CLAUDE.md"), "utf8") === "ORIGINAL\n",
       "a file guarded for writing in a directory output is written",
     );
+
+    // In a working directory the call writes, git lists the real untracked files alone, not
+    // what the sandbox mounts where a protected file is absent, and the protection holds.
+    const repo = path.join(dir, "repo");
+    if (spawnSync("git", ["init", "-q", repo]).status === 0) {
+      fs.writeFileSync(path.join(repo, "real.txt"), "REAL\n");
+      const home = process.cwd();
+      process.chdir(repo);
+      try {
+        // Twice: the second runs while the first one's mount points are still on the disk.
+        for (const _ of [1, 2]) {
+          const listed = await confinedRun(
+            { command: "true", input_files: [repo], output_files: [`${repo}/`], network_hosts: [] },
+            "git status --porcelain --untracked-files=all; echo x > .bashrc",
+            repo,
+          );
+          check(listed.stdout === "?? real.txt\n", `git lists files that do not exist: ${listed.stdout}${listed.stderr}`);
+        }
+      } finally {
+        process.chdir(home);
+      }
+      check(
+        !fs.statSync(path.join(repo, ".bashrc"), { throwIfNoEntry: false })?.size,
+        "a protected file absent from a directory output is written",
+      );
+    }
   } finally {
     delete process.env.APPA_SELFTEST_TOKEN;
     fs.rmSync(dir, { recursive: true, force: true });
