@@ -54,7 +54,6 @@ max_body_bytes = 65536
 for (const path of ['SKILL.md', 'references/core.md', 'references/opencode.md']) {
   files.set(`guide/${path}`, await readFile(join(root, 'integrations/appa-guide', path), 'utf8'))
 }
-files.set('contracts.md', await readFile(join(root, 'website/content/docs/contracts.md'), 'utf8'))
 let stale = false
 for (const [path, text] of files) {
   const target = join(destination, path)

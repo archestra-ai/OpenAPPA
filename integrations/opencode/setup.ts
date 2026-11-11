@@ -74,10 +74,13 @@ export async function configuration(config: string, binary: string) {
       case 'battery': {
         const battery = catalog.find(item => item.name === input.battery)
         if (!battery) throw new Error('Choose a battery from the inspected catalog.')
+        // The operator launcher supplies the contract reference of the runtime it runs.
+        const contracts = process.env.APPA_OPENCODE_SETUP_CONTRACTS
+        if (!contracts || !isAbsolute(contracts)) throw new Error('Setup requires the contract reference path from the operator launcher.')
         return JSON.stringify({ ...battery, deployment_target: target, files: Object.fromEntries(await Promise.all(
           ['appa-package.toml', 'appa.toml', 'README.md', ...(battery.target_policy ? [battery.target_policy] : [])]
             .map(async name => [name, await readFile(join(store, battery.name, name), 'utf8')]))),
-          contracts: await readFile(assets ? join(assets, 'contracts.md') : join(checkout, 'website/content/docs/contracts.md'), 'utf8') })
+          contracts: await readFile(contracts, 'utf8') })
       }
       case 'publish': {
         if (!input.policy || !input.expected_digest) throw new Error('Publish requires the approved complete policy and inspected digest.')
@@ -184,6 +187,7 @@ if (import.meta.main) {
       { stdin: 'inherit', stdout: 'inherit', stderr: 'inherit', env: { ...process.env,
         OPENCODE_CONFIG_PROJECT_DISABLE: '', OPENCODE_CONFIG_CONTENT: setupSettings,
         APPA_OPENCODE_SETUP_GUIDE: setupGuide,
+        APPA_OPENCODE_SETUP_CONTRACTS: join(checkout, 'website/content/docs/contracts.md'),
         APPA_OPENCODE_SETUP_CONFIG: config, APPA_OPENCODE_SETUP_BINARY: binary, APPA_OPENCODE_RUNTIME_URL: `http://127.0.0.1:${port}` } })
       const stop = () => { session.kill() }
       process.once('SIGINT', stop)
