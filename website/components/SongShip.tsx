@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { songPosition, subscribeSong } from "@/lib/song";
+import { setSongMuted, SONG_SECONDS, songPosition, subscribeSong, subscribeSongMuted } from "@/lib/song";
 
 /* The "Check the Flow" music video, playing in the middle of the page while
    the song does: a pixel ship at night with a crew of appas in hats dancing
@@ -865,8 +865,6 @@ function render(frame: HTMLElement, t: number) {
   set("black", "opacity", Math.max(1 - seg(t, 0, 0.5), seg(t, 124.9, 125.9)).toFixed(3));
 }
 
-/* The video's own length, until the browser reports the clip's. */
-const SONG_SECONDS = 126;
 const FADE_IN = 1.2;
 const FADE_OUT = 2.5;
 /* How long the leaving animation (globals.css) runs before the scene unmounts. */
@@ -881,12 +879,16 @@ type Phase = "hidden" | "sailing" | "leaving";
 
 export function SongShip() {
   const [phase, setPhase] = useState<Phase>("hidden");
+  // Whether the song is muted, for the mute button; null hides the button,
+  // which only a start from the `/nfc` link gets (lib/song).
+  const [muted, setMuted] = useState<boolean | null>(null);
   const stage = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     let frame = 0;
     let leave: ReturnType<typeof setTimeout> | null = null;
+    let isMuted = false;
     const stopLoop = () => {
       cancelAnimationFrame(frame);
       frame = 0;
@@ -901,10 +903,19 @@ export function SongShip() {
       leave = setTimeout(() => setPhase("hidden"), LEAVE_MS);
     };
     // A click anywhere but the frame dismisses the video and keeps the song.
+    // Not while the song is muted: that click is the one that brings the
+    // sound in (lib/song), and it should not also end the video.
+    // Nor on the mute button, which belongs to the video.
     const onPointerDown = (event: PointerEvent) => {
+      if (isMuted) return;
+      if (event.target instanceof Element && event.target.closest("[data-song-mute]")) return;
       if (event.target instanceof Node && stage.current?.contains(event.target)) return;
       sinkAway();
     };
+    const unsubscribeMuted = subscribeSongMuted((value) => {
+      isMuted = value === true;
+      setMuted(value);
+    });
     const unsubscribe = subscribeSong((audio) => {
       stopLoop();
       if (!audio) {
@@ -926,6 +937,7 @@ export function SongShip() {
     });
     return () => {
       unsubscribe();
+      unsubscribeMuted();
       stopLoop();
     };
   }, []);
@@ -935,11 +947,11 @@ export function SongShip() {
   const outer = { x: -FRAME, y: -FRAME, width: STAGE + 2 * FRAME, height: STAGE + 2 * FRAME };
   const viewBox = `${outer.x} ${outer.y} ${outer.width} ${outer.height}`;
   return (
-    <div className={`song-ship${phase === "leaving" ? " is-leaving" : ""}`} aria-hidden="true">
+    <div className={`song-ship${phase === "leaving" ? " is-leaving" : ""}`}>
       {/* The frame fades with the song from the first rendered frame on. */}
       <div ref={stage} className="song-ship-frame" style={{ opacity: 0 }}>
         {/* the night and the rigging, behind the sail */}
-        <svg className="song-ship-sky" viewBox={viewBox} shapeRendering="crispEdges">
+        <svg className="song-ship-sky" viewBox={viewBox} shapeRendering="crispEdges" aria-hidden="true">
           <defs>
             {WAVES.map((wave, j) => (
               <pattern key={j} id={`song-wave-${j}`} width="72" height="36" patternUnits="userSpaceOnUse">
@@ -1004,10 +1016,10 @@ export function SongShip() {
         </svg>
 
         {/* the sail is the screen */}
-        <div className="song-sail" dangerouslySetInnerHTML={{ __html: SAIL_HTML }} />
+        <div className="song-sail" aria-hidden="true" dangerouslySetInnerHTML={{ __html: SAIL_HTML }} />
 
         {/* the deck and the sea, in front of the sail */}
-        <svg className="song-ship-deck" viewBox={viewBox} shapeRendering="crispEdges">
+        <svg className="song-ship-deck" viewBox={viewBox} shapeRendering="crispEdges" aria-hidden="true">
           <g mask="url(#song-frame)">
             <g data-ship="ship">
               {/* hull */}
@@ -1056,6 +1068,28 @@ export function SongShip() {
             <rect data-ship="black" {...outer} fill="#000" opacity="1" />
           </g>
         </svg>
+
+        {/* on the sea, in the scene's bottom-right corner */}
+        {muted !== null && (
+          <button
+            type="button"
+            className="song-mute"
+            data-song-mute=""
+            data-muted={muted || undefined}
+            onClick={() => setSongMuted(!muted)}
+            aria-label={muted ? "Unmute the song" : "Mute the song"}
+            title={muted ? "Unmute" : "Mute"}
+          >
+            <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true" shapeRendering="crispEdges">
+              <path fill="currentColor" d="M2 6h3l4-3v10l-4-3H2z" />
+              {muted ? (
+                <path fill="currentColor" d="M11 6h1v1h-1zM12 7h1v2h-1zM13 6h1v1h-1zM11 9h1v1h-1zM13 9h1v1h-1z" />
+              ) : (
+                <path fill="currentColor" d="M11 6h1v4h-1zM13 4h1v8h-1z" />
+              )}
+            </svg>
+          </button>
+        )}
       </div>
     </div>
   );

@@ -11,7 +11,7 @@ use crate::contract::{
     AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec, SelectorPlaceholder, ToolAnnotation,
     ToolDeclaration,
 };
-use crate::fact::EffectKind;
+use crate::fact::{EffectKind, EffectSet};
 use crate::label::{
     Audience, AudienceSpelling, ChainAudience, Clause, DeclaredAudience, Evaluation, Expansions, GroupRef,
     MembershipContext, ReaderId, SymbolicAtom, Trust,
@@ -649,6 +649,10 @@ pub struct RegistryConfig {
     pub annotators: Vec<AnnotatorDeclaration>,
     pub authorities: Vec<Authority>,
     pub sanitizers: Vec<Sanitizer>,
+    /// The recorder each tool declaration names, keyed by the declaration's written name — the
+    /// tool name with its argument selector, or the wildcard's `"*"`. A key that names no
+    /// declaration is a load error. Routing only: a recorder never enters a decision.
+    pub recorders: BTreeMap<String, crate::names::RecorderName>,
     /// The audience side of the policy: registered sources, the chain mappings, the configured
     /// named audiences, and the identity implementation. All of it is policy meaning; how a
     /// deployment reaches a source or the identity implementation never enters.
@@ -690,6 +694,8 @@ pub enum LoadError {
     DuplicateAnnotator(String),
     #[error("tool {tool} names annotator {annotator}, which the policy does not register")]
     UnknownAnnotator { tool: String, annotator: String },
+    #[error("recorder {recorder} is bound to {tool}, which the policy does not declare")]
+    UnknownRecorderTool { tool: String, recorder: String },
     #[error(
         "provider-run tool {0} routes through an Annotator: its result reaches the model inside the inference call, so nothing would consume a per-call annotation"
     )]
@@ -700,6 +706,10 @@ pub enum LoadError {
     DuplicateSanitizer(String),
     #[error("authority {0} has an empty mandate (covers nothing)")]
     EmptyMandate(String),
+    #[error(
+        "authority {authority} excepts tag {tag:?}, which no tool carries or which its own `tags` name — the exception would cover nothing"
+    )]
+    ExceptedTag { authority: String, tag: String },
     #[error("authority {0} permits `blocked`, the reserved mark no authority may attend")]
     ReservedMark(String),
     #[error("trust rank {rank} out of the chain (length {len}) in {context}")]
@@ -818,6 +828,10 @@ impl Default for PlannerCap {
 /// intended shape.
 pub const MAX_HINT_CHARS: usize = 512;
 
+/// The longest [`ContextHint`](crate::authority::ContextHint): a context provider's hint or the
+/// deployment's. It describes an environment rather than one component, so it may run longer.
+pub const MAX_CONTEXT_HINT_CHARS: usize = 2048;
+
 /// The remedy components the planner-cap lint counts against: every registered authority and
 /// sanitizer, and the policy's whole mark vocabulary, which is what a catch-all authority attends.
 struct Remedies<'a> {
@@ -826,11 +840,97 @@ struct Remedies<'a> {
     attention_marks: &'a BTreeSet<MarkName>,
 }
 
+/// The checkable tools a blocked call may redispatch through, indexed once so the planner-cap lint
+/// does not rescan the catalogue for every declaration.
+#[derive(Default)]
+struct RedispatchCandidates<'a> {
+    annotated: usize,
+    emitting: usize,
+    emitters: BTreeMap<&'a EffectKind, usize>,
+    /// Per kind, every effect set of two or more kinds holding it. Such a candidate is in
+    /// `emitters` once per kind, but a declaration counts it once however many priors it meets.
+    overlapping: BTreeMap<&'a EffectKind, Vec<WideEffectSet>>,
+}
+
+struct WideEffectSet {
+    ordinal: usize,
+    candidates: usize,
+}
+
+impl<'a> RedispatchCandidates<'a> {
+    fn new(tools: &[&'a ToolDeclaration]) -> Self {
+        let mut index = Self::default();
+        let mut wide_sets: BTreeMap<&EffectSet, usize> = BTreeMap::new();
+        for candidate in tools {
+            match candidate {
+                ToolDeclaration::Annotated { .. } => index.annotated += 1,
+                ToolDeclaration::Declared(tool) if tool.emits.is_empty() => {}
+                ToolDeclaration::Declared(tool) => {
+                    index.emitting += 1;
+                    for kind in tool.emits.iter() {
+                        *index.emitters.entry(kind).or_default() += 1;
+                    }
+                    if tool.emits.len() > 1 {
+                        *wide_sets.entry(&tool.emits).or_default() += 1;
+                    }
+                }
+            }
+        }
+        for (ordinal, (set, candidates)) in wide_sets.into_iter().enumerate() {
+            for kind in set.iter() {
+                let sets = index.overlapping.entry(kind).or_default();
+                sets.push(WideEffectSet { ordinal, candidates });
+            }
+        }
+        index
+    }
+
+    fn redispatches(&self, declaration: &ToolDeclaration) -> usize {
+        let tool = match declaration {
+            // What the Annotator may require is unknown at load, so every candidate that emits
+            // at all stays counted.
+            ToolDeclaration::Annotated { .. } => return self.annotated + self.emitting,
+            ToolDeclaration::Declared(tool) => tool,
+        };
+        let priors: BTreeSet<&EffectKind> = tool
+            .requires
+            .history
+            .iter()
+            .filter_map(|requirement| match requirement {
+                HistoryRequirement::Prior(kind) => Some(kind),
+                HistoryRequirement::NoPrior(_) => None,
+            })
+            .collect();
+        let emitted: usize = priors.iter().filter_map(|kind| self.emitters.get(kind)).sum();
+        // An Annotated candidate's emits are unknown at load; the cap is the only bound, so it
+        // stays counted wherever a prior could match it.
+        match priors.len() {
+            0 => 0,
+            1 => self.annotated + emitted,
+            _ => {
+                let mut met: Vec<&WideEffectSet> = priors
+                    .iter()
+                    .filter_map(|prior| self.overlapping.get(prior))
+                    .flatten()
+                    .collect();
+                // Stable: each kind's sets are already in ordinal order, so this merges runs.
+                met.sort_by_key(|set| set.ordinal);
+                let repeated: usize = met
+                    .windows(2)
+                    .filter(|pair| pair[0].ordinal == pair[1].ordinal)
+                    .map(|pair| pair[1].candidates)
+                    .sum();
+                self.annotated + emitted - repeated
+            }
+        }
+    }
+}
+
 fn worst_case_plan_alternatives(
     declaration: &ToolDeclaration,
     confined: bool,
     context_control: bool,
-    tools: &[&ToolDeclaration],
+    candidates: &RedispatchCandidates<'_>,
     remedies: &Remedies<'_>,
     context: &MembershipContext<'_>,
 ) -> u128 {
@@ -850,13 +950,13 @@ fn worst_case_plan_alternatives(
     let trust_cap_competent = || {
         authorities
             .iter()
-            .filter(|authority| authority.scope.covers(tags) && authority.mandate.trust_ceiling.is_some())
+            .filter(|authority| authority.in_scope(tags) && authority.mandate.trust_ceiling.is_some())
             .count()
     };
     let reader_cap_competent = || {
         authorities
             .iter()
-            .filter(|authority| authority.scope.covers(tags) && authority.mandate.reader_ceiling.is_some())
+            .filter(|authority| authority.in_scope(tags) && authority.mandate.reader_ceiling.is_some())
             .count()
     };
     // A static `includes` is decided at load wherever the derivability calculus settles it.
@@ -867,7 +967,7 @@ fn worst_case_plan_alternatives(
         authorities
             .iter()
             .filter(|authority| {
-                if authority.mandate.reader_ceiling.is_none() || !authority.scope.covers(tags) {
+                if authority.mandate.reader_ceiling.is_none() || !authority.in_scope(tags) {
                     return false;
                 }
                 let gap = Gap::Includes {
@@ -1012,32 +1112,7 @@ fn worst_case_plan_alternatives(
         multiply(worst_case_return_options(sanitizers));
     }
 
-    // What the Annotator may require is unknown at load, so every candidate that emits at all
-    // stays counted as a redispatch.
-    let priors: Vec<&EffectKind> = match declaration {
-        ToolDeclaration::Annotated { .. } => Vec::new(),
-        ToolDeclaration::Declared(tool) => tool
-            .requires
-            .history
-            .iter()
-            .filter_map(|requirement| match requirement {
-                HistoryRequirement::Prior(kind) => Some(kind),
-                HistoryRequirement::NoPrior(_) => None,
-            })
-            .collect(),
-    };
-    let any_prior = matches!(declaration, ToolDeclaration::Annotated { .. });
-    let redispatches = tools
-        .iter()
-        .filter(|candidate| match candidate {
-            ToolDeclaration::Declared(tool) => {
-                tool.emits.iter().any(|kind| priors.contains(&kind)) || (any_prior && !tool.emits.is_empty())
-            }
-            // An Annotated candidate's emits are unknown at load; the cap is the only bound, so
-            // it stays counted wherever a prior could match it.
-            ToolDeclaration::Annotated { .. } => any_prior || !priors.is_empty(),
-        })
-        .count() as u128;
+    let redispatches = candidates.redispatches(declaration) as u128;
     let input_hops = sanitizers
         .iter()
         .filter(|sanitizer| sanitizer.on.input && sanitizer.applies_to(tags))
@@ -1103,6 +1178,10 @@ pub struct Registry {
     /// tool call without a matching explicit contract resolves to. In no tool-name listing; the
     /// policy identity carries it through the declared configuration.
     wildcard: Option<ToolDeclaration>,
+    /// The recorder each declaration names: by base name and ordinal within `tools`, and the
+    /// wildcard's apart.
+    recorders: BTreeMap<(ToolName, usize), crate::names::RecorderName>,
+    wildcard_recorder: Option<crate::names::RecorderName>,
     annotators: BTreeMap<AnnotatorName, AnnotatorMandate>,
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,
@@ -1208,11 +1287,20 @@ impl Registry {
             }
         }
 
+        let carried_tags: BTreeSet<TagName> = config
+            .tools
+            .iter()
+            .flat_map(|declaration| declaration.tags().iter().cloned())
+            .collect();
         let mut tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>> = BTreeMap::new();
         let mut tool_order = Vec::new();
         let mut provider_run: BTreeMap<ToolName, ToolAnnotation> = BTreeMap::new();
         let mut wildcard: Option<ToolDeclaration> = None;
+        let mut unbound_recorders = config.recorders;
+        let mut recorders = BTreeMap::new();
+        let mut wildcard_recorder = None;
         for mut declaration in config.tools {
+            let recorder = unbound_recorders.remove(declaration.name().as_str());
             let (contract, matcher) = parse_tool_selector(declaration.name().as_str())?;
             // An audience argument binding implies its schema: the argument is a required
             // top-level string, so a minted call always carries a value the binding can read.
@@ -1240,6 +1328,7 @@ impl Registry {
                     if wildcard.replace(declaration).is_some() {
                         return Err(LoadError::DuplicateWildcard);
                     }
+                    wildcard_recorder = recorder;
                     continue;
                 }
             };
@@ -1332,8 +1421,17 @@ impl Registry {
                     return Err(LoadError::TooManyToolVariants(declaration.name().as_str().to_string()));
                 }
                 tool_order.push((declaration.name().clone(), variants.len()));
+                if let Some(recorder) = recorder {
+                    recorders.insert((declaration.name().clone(), variants.len()), recorder);
+                }
                 variants.push((matcher, declaration));
             }
+        }
+        if let Some((tool, recorder)) = unbound_recorders.into_iter().next() {
+            return Err(LoadError::UnknownRecorderTool {
+                tool,
+                recorder: recorder.as_str().to_string(),
+            });
         }
 
         let mut seen_authorities = BTreeMap::new();
@@ -1354,6 +1452,17 @@ impl Registry {
             }
             if seen_authorities.insert(authority.name.clone(), ()).is_some() {
                 return Err(LoadError::DuplicateAuthority(authority.name.as_str().to_string()));
+            }
+            // An excepted tag no tool carries excepts nothing: a misspelt one would leave the
+            // authority covering the very tools the deployer meant to keep from it.
+            for tag in &authority.except {
+                let excepted = || LoadError::ExceptedTag {
+                    authority: authority.name.as_str().to_string(),
+                    tag: tag.as_str().to_string(),
+                };
+                if authority.scope.tags.contains(tag) || !carried_tags.contains(tag) {
+                    return Err(excepted());
+                }
             }
         }
 
@@ -1395,12 +1504,13 @@ impl Registry {
             .flat_map(|(_, variants)| variants)
             .map(|(_, d)| d)
             .collect();
+        let redispatch_candidates = RedispatchCandidates::new(&checkable_tools);
         for declaration in tools.values().flatten().map(|(_, d)| d).chain(wildcard.as_ref()) {
             let count = worst_case_plan_alternatives(
                 declaration,
                 profile.confines_result(declaration.name()),
                 profile.context_control(),
-                &checkable_tools,
+                &redispatch_candidates,
                 &Remedies {
                     authorities: &config.authorities,
                     sanitizers: &sanitizer_list,
@@ -1488,6 +1598,8 @@ impl Registry {
             mcp_order,
             provider_run,
             wildcard,
+            recorders,
+            wildcard_recorder,
             annotators,
             authorities: config.authorities,
             attention_marks,
@@ -1674,6 +1786,56 @@ impl Registry {
                 .as_ref()
                 .map(|declaration| (ToolDeclarationId::default(), declaration)),
         }
+    }
+
+    /// The recorder the declaration this registry selects for `call` names, where it names one.
+    pub fn recorder(&self, call: &crate::value::ResolvedCall) -> Option<&crate::names::RecorderName> {
+        let (name, arguments) = (call.tool(), call.arguments());
+        match self.classify(name)? {
+            ToolKind::Declared => {
+                let selected = self
+                    .matching_keys(name.clone())
+                    .find(|(matcher, _)| matcher.matches(arguments));
+                match selected {
+                    Some((_, key)) => self.recorders.get(&key),
+                    None => self.wildcard.as_ref().and(self.wildcard_recorder.as_ref()),
+                }
+            }
+            ToolKind::ProviderRun => None,
+            ToolKind::Wildcard => self.wildcard_recorder.as_ref(),
+        }
+    }
+
+    /// Every recorder a declaration names, once each.
+    pub fn recorders(&self) -> BTreeSet<&crate::names::RecorderName> {
+        self.recorders.values().chain(&self.wildcard_recorder).collect()
+    }
+
+    /// [`Registry::matching_variants`] in the same order, each with its key in `tools`.
+    fn matching_keys(&self, name: ToolName) -> impl Iterator<Item = (&ToolMatcher, (ToolName, usize))> {
+        let overlap = name
+            .as_str()
+            .strip_prefix("mcp/")
+            .and_then(|name| name.split_once('/'))
+            .and_then(|(_, leaf)| self.mcp_order.get(leaf));
+        let exact = if overlap.is_none() {
+            self.tools.get_key_value(&name)
+        } else {
+            None
+        };
+        let exact = exact.into_iter().flat_map(|(key, variants)| {
+            variants
+                .iter()
+                .enumerate()
+                .map(move |(ordinal, (matcher, _))| (matcher, (key.clone(), ordinal)))
+        });
+        exact.chain(
+            overlap
+                .into_iter()
+                .flatten()
+                .filter(move |(rule, _)| rule.matches_name(&name))
+                .map(|(rule, ordinal)| (&self.tools[rule][*ordinal].0, (rule.clone(), *ordinal))),
+        )
     }
 
     /// The ordinal of the declaration this registry selects for `call`.
@@ -2100,6 +2262,7 @@ mod tests {
 
     fn base() -> RegistryConfig {
         RegistryConfig {
+            recorders: Default::default(),
             trust_chain: chain(),
             tools: vec![],
             annotators: vec![],
@@ -2177,6 +2340,7 @@ mod tests {
 
     fn attends_authority(name: &str) -> Authority {
         Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff")]),
@@ -2211,6 +2375,7 @@ mod tests {
         let mut cfg = base();
         cfg.tools = declared(vec![review, denied]);
         cfg.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("anyone"),
             mandate: Mandate {
                 attends: Attends::Any,
@@ -2238,6 +2403,7 @@ mod tests {
     fn an_authority_naming_the_reserved_denial_is_refused() {
         let mut cfg = base();
         cfg.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("overreach"),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff"), MarkName::new(MarkName::BLOCKED)]),
@@ -2327,6 +2493,7 @@ mod tests {
 
         let mut ceiling = base();
         ceiling.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 reader_ceiling: Some(DeclaredAudience::literal(named.clone())),
@@ -2458,6 +2625,7 @@ mod tests {
     fn public_and_the_empty_set_stay_loadable_audiences() {
         let mut public_ceiling = base();
         public_ceiling.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 reader_ceiling: Some(DeclaredAudience::literal(Audience::public())),
@@ -2663,6 +2831,7 @@ mod tests {
             )]))),
         ];
         let officer = Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 reader_ceiling: Some(DeclaredAudience::restricted([ReaderId::new("auditor")])),
@@ -3139,6 +3308,7 @@ mod tests {
     fn refuses_empty_mandate() {
         let mut cfg = base();
         cfg.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("noop"),
             mandate: Mandate::default(),
             scope: Scope::default(),
@@ -3148,6 +3318,39 @@ mod tests {
             Registry::build_covered(cfg),
             Err(LoadError::EmptyMandate(name)) if name == "noop"
         ));
+    }
+
+    /// An exception that excepts nothing is refused: a misspelt tag would leave the authority
+    /// covering the tools the deployer meant to keep from it.
+    #[test]
+    fn refuses_an_excepted_tag_no_tool_carries_or_the_scope_names() {
+        let excepting = |scope: &[&str], except: &str| {
+            let mut cfg = base();
+            cfg.tools = declared(vec![ToolAnnotation {
+                tags: vec![TagName::new("legacy")],
+                ..tool("send")
+            }]);
+            cfg.authorities = vec![Authority {
+                except: vec![TagName::new(except)],
+                name: AuthorityName::new("rollout"),
+                mandate: Mandate {
+                    trust_ceiling: Some(Trust::new(1)),
+                    ..Mandate::default()
+                },
+                scope: Scope {
+                    tags: scope.iter().map(|tag| TagName::new(*tag)).collect(),
+                },
+                hint: None,
+            }];
+            Registry::build_covered(cfg).map(|_| ())
+        };
+        assert_eq!(excepting(&[], "legacy"), Ok(()));
+        for (scope, except) in [(&[][..], "legasy"), (&["legacy"][..], "legacy")] {
+            assert!(matches!(
+                excepting(scope, except),
+                Err(LoadError::ExceptedTag { authority, tag }) if authority == "rollout" && tag == except
+            ));
+        }
     }
 
     #[test]
@@ -3490,6 +3693,7 @@ mod tests {
             ..Requires::default()
         };
         let attester = |name: String| Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("m1"), MarkName::new("m2")]),
@@ -3547,6 +3751,7 @@ mod tests {
     fn an_annotated_declaration_takes_the_worst_case_on_every_mandate_dimension() {
         let wide = |n: usize| {
             let officer = |name: String| Authority {
+                except: Vec::new(),
                 name: AuthorityName::new(name),
                 mandate: Mandate {
                     trust_ceiling: Some(Trust::new(1)),
@@ -3583,6 +3788,7 @@ mod tests {
         ))];
         cfg.tools = declared(vec![emit]);
         let capped_at = |name: &str, ceiling: DeclaredAudience| Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 reader_ceiling: Some(ceiling),
@@ -3774,6 +3980,52 @@ mod tests {
     }
 
     #[test]
+    fn redispatches_count_each_candidate_once_on_every_small_catalogue() {
+        let kinds = |bits: usize| {
+            (0..3)
+                .filter(move |k| bits & (1 << k) != 0)
+                .map(|k| EffectKind::new(k.to_string()))
+        };
+        let annotated = ToolDeclaration::Annotated {
+            name: ToolName::new("annotated"),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: AnnotatorName::new("any"),
+        };
+        let emitters: Vec<ToolDeclaration> = (0..8)
+            .map(|bits| {
+                let mut emitter = tool("emitter");
+                emitter.emits = EffectSet::new(kinds(bits)).unwrap();
+                ToolDeclaration::Declared(emitter)
+            })
+            .collect();
+        for chosen in 0..256usize {
+            // Each chosen emitter twice, so a repeated effect set keeps its multiplicity.
+            let masks: Vec<usize> = (0..8).filter(|bits| chosen & (1 << bits) != 0).collect();
+            let doubled = masks.iter().flat_map(|bits| [&emitters[*bits], &emitters[*bits]]);
+            let plain: Vec<&ToolDeclaration> = doubled.collect();
+            let with_annotated: Vec<&ToolDeclaration> = plain.iter().copied().chain([&annotated]).collect();
+            for (tools, extra) in [(&plain, 0), (&with_annotated, 1)] {
+                let index = RedispatchCandidates::new(tools);
+                let emitting = 2 * masks.iter().filter(|bits| **bits != 0).count();
+                assert_eq!(index.redispatches(&annotated), emitting + extra);
+                for priors in 0..8usize {
+                    let mut requiring = tool("requiring");
+                    requiring.requires.history = kinds(priors)
+                        .chain(kinds(priors))
+                        .map(HistoryRequirement::Prior)
+                        .chain(kinds(!priors & 7).map(HistoryRequirement::NoPrior))
+                        .collect();
+                    let met = 2 * masks.iter().filter(|bits| **bits & priors != 0).count();
+                    let expected = if priors == 0 { 0 } else { met + extra };
+                    assert_eq!(index.redispatches(&ToolDeclaration::Declared(requiring)), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn families_that_fit_alone_still_refuse_when_their_sum_exceeds_the_cap() {
         let mut target = tool("wire");
         target.requires = Requires {
@@ -3794,6 +4046,7 @@ mod tests {
         bystander.emits = EffectSet::new([EffectKind::new("other")]).unwrap();
         tools.push(bystander);
         let officer = |name: String| Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 trust_ceiling: Some(Trust::new(1)),

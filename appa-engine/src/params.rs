@@ -23,6 +23,8 @@ const MAX_ARGUMENT_NODES: usize = 4096;
 const MAX_ARRAY_ELEMENTS: usize = 4096;
 const MAX_NUMBER_TOKEN_BYTES: usize = 64;
 const MAX_SAFE_INTEGER: i64 = (1 << 53) - 1;
+/// RFC 8785 renders a binary64 of smaller magnitude without a fraction or an exponent.
+const CANONICAL_EXPONENT_FORM_FROM: f64 = 1e21;
 
 /// A dialect violation in an authored `APPA Tool Parameters v1` schema. Every variant is a
 /// load error: the schema never reaches a contract.
@@ -577,18 +579,27 @@ fn compile_numeric_bounds(map: &serde_json::Map<String, Value>) -> Result<Numeri
     Ok(NumericBounds { lower, upper })
 }
 
-/// Could a legal argument carry this authored number? Argument scanning refuses an
-/// integer-formed token outside the safe-integer range, so a `const`, an `enum` member or a
-/// bound beyond it names a value no call can supply. Inside the range every value is exact
-/// in `f64`, which is what validation and scalar equality compare through; outside it, two
-/// distinct authored integers can compare equal. A number authored in a non-integer form
-/// carries no such bound, and the scanner applies none to it either.
+/// Could a legal argument carry this authored number? Argument scanning refuses a number
+/// whose canonical form is an integer outside the safe-integer range, so a `const`, an `enum`
+/// member or a bound there names a value no call can supply. Inside the range every value is
+/// exact in `f64`, which is what validation and scalar equality compare through; outside it,
+/// two distinct authored integers can compare equal.
 fn suppliable(number: &serde_json::Number) -> bool {
-    match (number.as_u64(), number.as_i64()) {
-        (Some(n), _) => n <= MAX_SAFE_INTEGER as u64,
-        (None, Some(n)) => n.unsigned_abs() <= MAX_SAFE_INTEGER as u64,
-        (None, None) => true,
+    match (number.as_u64(), number.as_i64(), number.as_f64()) {
+        (Some(n), _, _) => n <= MAX_SAFE_INTEGER as u64,
+        (None, Some(n), _) => n.unsigned_abs() <= MAX_SAFE_INTEGER as u64,
+        (None, None, Some(n)) => !renders_as_unsafe_integer(n),
+        (None, None, None) => false,
     }
+}
+
+/// Does RFC 8785 render this binary64 as an integer-formed token outside the safe range? Every
+/// binary64 past the range is integral, and below [`CANONICAL_EXPONENT_FORM_FROM`] its canonical
+/// form has neither fraction nor exponent: the scanner must refuse it at intake, or the
+/// canonical text it produces could not be admitted again.
+fn renders_as_unsafe_integer(n: f64) -> bool {
+    let magnitude = n.abs();
+    magnitude > MAX_SAFE_INTEGER as f64 && magnitude < CANONICAL_EXPONENT_FORM_FROM
 }
 
 fn is_schema_integer(value: &Value) -> bool {
@@ -831,10 +842,10 @@ fn validate_constraint(constraint: &ScalarConstraint, value: &Value, path: &str)
 }
 
 /// Scalar equality for const/enum. Numbers compare by value, not representation: every
-/// accepted number is exactly a binary64 (the scanner's safe-integer rule), and canonical
-/// persistence re-parses an authored `1.0` as `1`, so representation-sensitive equality
-/// would make an initially valid dispatch fail replay. Non-numbers compare exactly — a
-/// string never matches a number, so no coercion enters.
+/// accepted number is exactly a binary64 (the scanner's safe-integer rule), and an argument
+/// carries its canonical form, which spells a supplied `1.0` as `1`, so an authored `const`
+/// of `1.0` must still match it. Non-numbers compare exactly — a string never matches a
+/// number, so no coercion enters.
 fn scalar_eq(value: &Value, expected: &Value) -> bool {
     match (value.as_f64(), expected.as_f64()) {
         (Some(a), Some(b)) => a == b,
@@ -847,7 +858,9 @@ fn scalar_eq(value: &Value, expected: &Value) -> bool {
 /// the value. The canonical text is computed exactly once, by the validating
 /// constructors, which stay the only writers: a stored rendering can never drift from
 /// the value it renders, and the hot path (digest, dispatch body, authority crossing)
-/// borrows it instead of re-canonicalizing per access.
+/// borrows it instead of re-canonicalizing per access. The canonical text is the identity:
+/// the value is parsed back from it, not kept from the input, so inputs with one canonical
+/// text (`1.0` and `1`) are one value live and after reload, and equality is text equality.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CanonicalArguments {
     value: Value,
@@ -882,12 +895,12 @@ impl CanonicalArguments {
     }
 
     fn from_raw_unchecked(bytes: &[u8]) -> Result<Self, ArgumentError> {
-        let value = strict_parse(bytes)?;
-        let rendered = canonical_bytes(&value);
+        let rendered = canonical_bytes(&strict_parse(bytes)?);
         if rendered.len() > MAX_ARGUMENT_BYTES {
             return Err(ArgumentError::TooLarge);
         }
         let canonical = String::from_utf8(rendered).expect("canonical JSON is UTF-8");
+        let value = serde_json::from_str(&canonical).expect("canonical JSON parses");
         Ok(CanonicalArguments { value, canonical })
     }
 
@@ -1196,7 +1209,6 @@ impl Scanner<'_> {
             Some('1'..='9') => self.digits(),
             _ => return Err(self.syntax("invalid number")),
         }
-        let integer_end = self.index;
         let mut integer_form = true;
         if matches!(self.peek(), Some('.')) {
             integer_form = false;
@@ -1220,18 +1232,22 @@ impl Scanner<'_> {
         if self.index - start > MAX_NUMBER_TOKEN_BYTES {
             return Err(ArgumentError::NumberTokenTooLong);
         }
-        if integer_form {
+        let token = &self.text[start..self.index];
+        let unsafe_integer = match integer_form {
             // An integer-formed token must be an exact safe integer; a wider literal is an
             // unsupported numeric form even when it fits the token-length limit.
-            let token = &self.text[start..integer_end];
-            let parsed: i128 = token.parse().map_err(|_| ArgumentError::UnsafeInteger)?;
             // unsigned_abs: `abs` would overflow (and panic) on i128::MIN, which fits the
             // 64-byte token limit and is exactly an input this check must reject.
-            if parsed.unsigned_abs() > MAX_SAFE_INTEGER as u128 {
-                return Err(ArgumentError::UnsafeInteger);
-            }
+            true => !token
+                .parse::<i128>()
+                .is_ok_and(|parsed| parsed.unsigned_abs() <= MAX_SAFE_INTEGER as u128),
+            // A fraction or exponent form is refused where its canonical form is integer-formed.
+            false => token.parse::<f64>().is_ok_and(renders_as_unsafe_integer),
+        };
+        match unsafe_integer {
+            true => Err(ArgumentError::UnsafeInteger),
+            false => Ok(()),
         }
-        Ok(())
     }
 
     fn digits(&mut self) {
@@ -1396,8 +1412,12 @@ mod tests {
             Err(ParamsError::BadNumericBound)
         );
 
-        // The edge of the range, and a non-integer form, both stay authorable: the scanner
-        // bounds an integer-formed token and nothing else.
+        // A non-integer form whose canonical form is such an integer refuses the same way.
+        assert_eq!(scalar("const", json!(1e20)), Err(ParamsError::BadConst));
+        assert_eq!(scalar("maximum", json!(-1e20)), Err(ParamsError::BadNumericBound));
+
+        // The edge of the range, and a non-integer form canonically spelled with a fraction or
+        // an exponent, both stay authorable.
         assert!(scalar("const", json!(9007199254740991u64)).is_ok());
         assert!(scalar("const", json!(-9007199254740991i64)).is_ok());
         assert!(scalar("const", json!(1.5e300)).is_ok());
@@ -1749,7 +1769,13 @@ mod tests {
             raw(br#"{"n":-170141183460469231731687303715884105728}"#),
             Err(ArgumentError::UnsafeInteger)
         );
-        // Fraction and exponent forms are binary64, not integers — in range they pass.
+        // Fraction and exponent forms are binary64. They pass unless their canonical form is an
+        // integer outside the safe range: RFC 8785 spells 1e20 as 100000000000000000000.
+        assert!(raw(br#"{"n":9007199254740991.0}"#).is_ok());
+        assert_eq!(raw(br#"{"n":9007199254740992.0}"#), Err(ArgumentError::UnsafeInteger));
+        assert_eq!(raw(br#"{"n":1e20}"#), Err(ArgumentError::UnsafeInteger));
+        assert_eq!(raw(br#"{"n":-1e20}"#), Err(ArgumentError::UnsafeInteger));
+        assert!(raw(br#"{"n":1e21}"#).is_ok());
         assert!(raw(br#"{"n":1e30}"#).is_ok());
         assert!(matches!(raw(br#"{"n":1e999}"#), Err(ArgumentError::Syntax(_))));
         // A number token wider than 64 source bytes refuses regardless of value.
@@ -1842,8 +1868,10 @@ mod tests {
             CanonicalArguments::from_value(&json!({ "mode": "medium" }), &constrained),
             Err(ArgumentError::Schema(_))
         ));
+        // Validation reads the canonical value the tool receives, which spells `1.0` as `1`.
+        assert!(CanonicalArguments::from_value(&json!({ "version": 1.0 }), &constrained).is_ok());
         assert!(matches!(
-            CanonicalArguments::from_value(&json!({ "version": 1.0 }), &constrained),
+            CanonicalArguments::from_value(&json!({ "version": 1.5 }), &constrained),
             Err(ArgumentError::Schema(_))
         ));
     }
@@ -1869,8 +1897,8 @@ mod tests {
     fn canonical_expansion_cannot_create_an_unreplayable_payload() {
         let raw = format!(
             "{{{}}}",
-            (0..9_000)
-                .map(|index| format!(r#""k{index}":1e20"#))
+            (0..15_000)
+                .map(|index| format!(r#""k{index}":9e15"#))
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -1913,5 +1941,42 @@ mod tests {
         assert!(serde_json::from_str::<CanonicalArguments>("\"{\\\"a\\\":1,\\\"a\\\":1}\"").is_err());
         assert!(serde_json::from_str::<CanonicalArguments>("\"[1]\"").is_err());
         assert!(serde_json::from_str::<CanonicalArguments>("\"{\\\"a\\\": 1}\"").is_err());
+    }
+
+    #[test]
+    fn arguments_with_one_canonical_text_are_one_value() {
+        let fraction = raw(br#"{"x":1.0}"#).unwrap();
+        let integer = raw(br#"{"x":1}"#).unwrap();
+        assert_eq!(fraction, integer);
+        assert_eq!(fraction.value(), integer.value());
+        let reloaded: CanonicalArguments = serde_json::from_str(&serde_json::to_string(&fraction).unwrap()).unwrap();
+        assert_eq!(reloaded, fraction);
+    }
+
+    mod laws {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn number_token() -> impl Strategy<Value = String> {
+            let finite = prop_oneof![any::<f64>(), -1e22f64..1e22f64].prop_filter("finite", |n| n.is_finite());
+            prop_oneof![
+                finite.clone().prop_map(|n| format!("{n}")),
+                finite.clone().prop_map(|n| format!("{n:?}")),
+                finite.prop_map(|n| format!("{n:e}")),
+                any::<i64>().prop_map(|n| n.to_string()),
+            ]
+        }
+
+        proptest! {
+            #[test]
+            fn admitted_arguments_reload_as_themselves(tokens in prop::collection::vec(number_token(), 1..4)) {
+                let raw = format!(r#"{{"n":[{}]}}"#, tokens.join(","));
+                if let Ok(admitted) = CanonicalArguments::parse(raw.as_bytes()) {
+                    let wire = serde_json::to_string(&admitted).unwrap();
+                    let reloaded: CanonicalArguments = serde_json::from_str(&wire).unwrap();
+                    prop_assert_eq!(reloaded, admitted);
+                }
+            }
+        }
     }
 }

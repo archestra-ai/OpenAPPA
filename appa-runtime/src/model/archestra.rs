@@ -1,15 +1,17 @@
 //! The `archestra` builtin: the rendered [`ModelPrompt`] posted to an endpoint the embedding
 //! host supplies, which picks and calls the model itself. The host sees what an `llm`
 //! provider would — the declaration in `system`, the redacted artifact in `input`, the
-//! per-kind output schema in `schema` — plus, in `attribution`, the trajectory the consult
-//! is made for, and answers with the schema object as the body.
+//! per-kind output schema in `schema` — plus, in `kind`, which component is asking
+//! (`annotation`, `sanitizer` or `authority`), so the host can serve each the model, output
+//! cap and logging it needs, and, in `attribution`, the trajectory the consult is made for.
+//! The host answers with the schema object as the body.
 
 use std::time::Duration;
 
 use super::consult_with_retries;
 use crate::config::{Endpoint, EndpointHost, EndpointToken, ModelLimits};
-use crate::consult::ModelPrompt;
-use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, Transcript, error_line, read_body};
+use crate::consult::{ConsultKind, ModelPrompt};
+use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, Transcript, read_body, refusal_detail};
 use appa_engine::value::TrajectoryId;
 use appa_policy::AnnotatorBuiltin;
 
@@ -43,6 +45,7 @@ pub(crate) async fn within<T>(context: Option<&str>, attribution: Attribution, f
 
 #[derive(serde::Serialize)]
 struct Request<'a> {
+    kind: &'static str,
     system: &'a str,
     input: &'a str,
     schema: &'a serde_json::Value,
@@ -83,6 +86,7 @@ impl ArchestraBackend {
     /// One consult, retried as [`consult_with_retries`] retries a transient failure.
     pub(crate) async fn consult(
         &self,
+        kind: ConsultKind,
         prompt: &ModelPrompt,
         name: &str,
         seen: Option<&mut Transcript>,
@@ -94,16 +98,17 @@ impl ArchestraBackend {
             self.max_body_bytes,
             name,
             seen,
-            || self.send(prompt),
+            || self.send(kind, prompt),
         )
         .await
     }
 
     /// One request; the answer text is read to one byte past `max_body_bytes`, enough for
     /// the caller to call it oversized.
-    async fn send(&self, prompt: &ModelPrompt) -> Result<String, NoAnswerReason> {
+    async fn send(&self, kind: ConsultKind, prompt: &ModelPrompt) -> Result<String, NoAnswerReason> {
         let scope = SCOPE.try_with(Clone::clone).ok();
         let body = Request {
+            kind: kind.wire_name(),
             system: &prompt.system,
             input: &prompt.input,
             schema: &prompt.schema,
@@ -135,7 +140,7 @@ impl ArchestraBackend {
             .await;
             return Err(NoAnswerReason::NonSuccess {
                 status: status.as_u16(),
-                detail: host_message(&body),
+                detail: refusal_detail(&body),
             });
         }
         let mut text = Vec::new();
@@ -153,17 +158,6 @@ impl ArchestraBackend {
     }
 }
 
-/// What the host said about a consult it refused: the `message` of its error envelope
-/// (`{"error":{"message":…}}`), else the last line of whatever it wrote; none when it
-/// wrote nothing.
-fn host_message(body: &[u8]) -> Option<String> {
-    let envelope: Option<String> = serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|value| value.get("error")?.get("message")?.as_str().map(str::to_string));
-    let line = error_line(envelope.as_deref().unwrap_or(&String::from_utf8_lossy(body)));
-    (!line.is_empty()).then_some(line)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -175,7 +169,7 @@ mod tests {
     use super::*;
     use crate::config::Token;
     use crate::model::MAX_ATTEMPTS;
-    use crate::recorder::ConsultBackend;
+    use crate::transcriber::ConsultBackend;
 
     type Requests = Arc<Mutex<Vec<(HeaderMap, serde_json::Value)>>>;
 
@@ -215,7 +209,9 @@ mod tests {
         let (url, requests) = serve(StatusCode::OK, "{\"ruling\":\"approve\"}").await;
         let mut seen = Transcript::of(ConsultBackend::Archestra);
 
-        let answer = backend(url, 65_536).consult(&prompt(), "judge", Some(&mut seen)).await;
+        let answer = backend(url, 65_536)
+            .consult(ConsultKind::Annotation, &prompt(), "judge", Some(&mut seen))
+            .await;
 
         assert_eq!(answer, Ok(serde_json::json!({ "ruling": "approve" })));
         let requests = requests.lock().unwrap().clone();
@@ -225,6 +221,7 @@ mod tests {
         assert_eq!(
             *body,
             serde_json::json!({
+                "kind": "annotation",
                 "system": prompt().system,
                 "input": prompt().input,
                 "schema": prompt().schema,
@@ -248,13 +245,17 @@ mod tests {
         within(
             Some("token-1"),
             attribution(Some("toolu_1")),
-            backend.consult(&prompt(), "judge", None),
+            backend.consult(ConsultKind::Annotation, &prompt(), "judge", None),
         )
         .await
         .unwrap();
-        within(None, attribution(None), backend.consult(&prompt(), "judge", None))
-            .await
-            .unwrap();
+        within(
+            None,
+            attribution(None),
+            backend.consult(ConsultKind::Annotation, &prompt(), "judge", None),
+        )
+        .await
+        .unwrap();
 
         let requests = requests.lock().unwrap().clone();
         let [(headers, body), (bare_headers, bare_body)] = &requests[..] else {
@@ -285,7 +286,9 @@ mod tests {
         .await;
         let mut seen = Transcript::of(ConsultBackend::Archestra);
 
-        let answer = backend(url, 65_536).consult(&prompt(), "judge", Some(&mut seen)).await;
+        let answer = backend(url, 65_536)
+            .consult(ConsultKind::Annotation, &prompt(), "judge", Some(&mut seen))
+            .await;
 
         let message =
             "The model call failed: anthropic/claude-sonnet-5 was rejected upstream with 401: API key is invalid.";
@@ -305,7 +308,9 @@ mod tests {
         let (url, _) = serve(StatusCode::BAD_GATEWAY, "").await;
         let mut seen = Transcript::of(ConsultBackend::Archestra);
         assert_eq!(
-            backend(url, 65_536).consult(&prompt(), "judge", Some(&mut seen)).await,
+            backend(url, 65_536)
+                .consult(ConsultKind::Annotation, &prompt(), "judge", Some(&mut seen))
+                .await,
             Err(NoAnswerReason::NonSuccess {
                 status: 502,
                 detail: None
@@ -319,7 +324,9 @@ mod tests {
         let (url, requests) = serve(StatusCode::INTERNAL_SERVER_ERROR, "boom").await;
         let mut seen = Transcript::of(ConsultBackend::Archestra);
         assert_eq!(
-            backend(url, 65_536).consult(&prompt(), "judge", Some(&mut seen)).await,
+            backend(url, 65_536)
+                .consult(ConsultKind::Annotation, &prompt(), "judge", Some(&mut seen))
+                .await,
             Err(NoAnswerReason::NonSuccess {
                 status: 500,
                 detail: Some("boom".to_string())
@@ -330,7 +337,9 @@ mod tests {
 
         let (url, requests) = serve(StatusCode::BAD_REQUEST, "no").await;
         assert_eq!(
-            backend(url, 65_536).consult(&prompt(), "judge", None).await,
+            backend(url, 65_536)
+                .consult(ConsultKind::Annotation, &prompt(), "judge", None)
+                .await,
             Err(NoAnswerReason::NonSuccess {
                 status: 400,
                 detail: Some("no".to_string())
@@ -340,14 +349,18 @@ mod tests {
 
         let (url, _) = serve(StatusCode::OK, "not json").await;
         assert_eq!(
-            backend(url, 65_536).consult(&prompt(), "judge", None).await,
+            backend(url, 65_536)
+                .consult(ConsultKind::Annotation, &prompt(), "judge", None)
+                .await,
             Err(NoAnswerReason::Malformed)
         );
 
         let (url, _) = serve(StatusCode::OK, "{\"ruling\":\"approve\",\"reason\":\"long enough\"}").await;
         let mut seen = Transcript::of(ConsultBackend::Archestra);
         assert_eq!(
-            backend(url, 16).consult(&prompt(), "judge", Some(&mut seen)).await,
+            backend(url, 16)
+                .consult(ConsultKind::Annotation, &prompt(), "judge", Some(&mut seen))
+                .await,
             Err(NoAnswerReason::Oversized)
         );
         assert_eq!(seen.raw_response.map(|raw| raw.len()), Some(16));

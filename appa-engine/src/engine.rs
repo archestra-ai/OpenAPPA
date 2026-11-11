@@ -50,7 +50,7 @@ pub enum EngineError {
     #[error("invalid call: {0}")]
     InvalidCall(ArgumentError),
     #[error("invalid file basis evidence: {0}")]
-    InvalidFileEvidence(String),
+    InvalidHeldEvidence(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -559,20 +559,31 @@ impl Engine {
         crate::route::search(&self.registry, &views, &context, depth)
     }
 
-    /// Publication label for a file mutation released by this validated dispatch.
-    pub fn file_output_label(
+    /// The label a released call publishes to its recorder: `trajectory ⊓ forwards ⊓ delta`.
+    /// `trajectory` is the label the call's `DispatchOpened` pinned as it was released — the
+    /// substituted label, for a call an input sanitizer rewrote, because that is what the call
+    /// sent. `forwards` labels the content the call sends beyond its arguments, and `delta` the
+    /// content it brings back, which a call can write where the trajectory never sees it. Derived
+    /// from the dispatch's own record — both as the releasing revision pinned them — so it is the
+    /// same on every replay of the log and after any reload.
+    pub fn published_label(
         &self,
         view: &EngineView,
         dispatch: &DispatchId,
-    ) -> Result<Option<crate::label::Label>, TransitionError> {
+    ) -> Result<crate::label::Label, TransitionError> {
         let view = &*self.current(view)?;
         let views = view.projection().view(dispatch.trajectory());
         let call = views.dispatch_call(dispatch).ok_or(TransitionError::UnknownDispatch)?;
-        let receiving = views
-            .receiving_bound(dispatch)
-            .ok_or(TransitionError::UnknownDispatch)?;
+        let sent = views.sent_label(dispatch).ok_or(TransitionError::UnknownDispatch)?;
         let contract = self.outcome_contract(&views, dispatch, call)?;
-        Ok(call.file_output_label_from(&contract.output_label(), receiving))
+        Ok(sent
+            .combine(&crate::check::forwarded_label(&contract.contract))
+            .combine(&contract.output_label()))
+    }
+
+    /// The recorder the declaration this call selects names, where it names one.
+    pub fn recorder(&self, call: &ResolvedCall) -> Option<&crate::names::RecorderName> {
+        self.registry.recorder(call)
     }
 
     /// What the runtime must resolve before it can execute one live offer.
@@ -592,8 +603,11 @@ impl Engine {
         if let Some(end) = &recorded.end {
             return Ok(OfferConsult::Replay(replay_outcome(recorded, end)));
         }
+        let stale = || OfferConsult::Stale {
+            subject: recorded.subject.clone(),
+        };
         if recorded.basis != views.basis_for(&recorded.subject) {
-            return Ok(OfferConsult::Stale);
+            return Ok(stale());
         }
         match &recorded.subject {
             crate::basis::SubjectKey::Call { .. } => match recorded.plan.hop() {
@@ -610,10 +624,11 @@ impl Engine {
                 None => Ok(OfferConsult::Authorities {
                     call: self.offer_call(&views, recorded),
                     required: recorded.plan.required.clone(),
+                    narrowing: recorded.plan.narrowing().cloned(),
                 }),
             },
             // No stage stands on a return: it crosses at the child's stop or is refused there.
-            crate::basis::SubjectKey::Return(_) => Ok(OfferConsult::Stale),
+            crate::basis::SubjectKey::Return(_) => Ok(stale()),
             crate::basis::SubjectKey::ConfinedResult(dispatch) => match recorded.plan.hop() {
                 Some(sanitizer) => {
                     let DerivedCandidate::Result { value, .. } =
@@ -632,7 +647,7 @@ impl Engine {
                 }
                 None => Ok(OfferConsult::Accept { sanitizer: None }),
             },
-            crate::basis::SubjectKey::Approval(_) => Ok(OfferConsult::Stale),
+            crate::basis::SubjectKey::Approval(_) => Ok(stale()),
         }
     }
 
@@ -678,6 +693,22 @@ impl Engine {
             id: batch,
         };
         (0..decided.proposals.len()).any(|position| views.pending_block(&composing.subject(position)).is_some())
+    }
+
+    /// Would `policy` stand as this trajectory's return declaration now? The checks a declaration
+    /// at the spawn passes, at the trajectory's current label. A runtime holds a declaration made
+    /// ahead of the spawn by them and applies it through the spawn's own declaration offer.
+    pub fn check_return_declaration(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        policy: &ReturnPolicy,
+    ) -> Result<(), crate::plan::ReturnPolicyRefusal> {
+        let views = view.crossed_to(self);
+        match views.views(trajectory) {
+            Some(views) => plan::declared_return_policy(&self.registry, &views, &policy.route(), policy),
+            None => Err(crate::plan::ReturnPolicyRefusal::RouteMismatch),
+        }
     }
 
     /// The fork one child was bound to, or `None` for a trajectory that never forked.
@@ -919,21 +950,34 @@ impl Engine {
         let (block_id, offers) = views
             .pending_block(subject)
             .unwrap_or_else(|| (proposal_block(nonce, subject, &call), Vec::new()));
+        let mut block = plan::plan(
+            &self.registry,
+            views,
+            BlockedCall {
+                call: &call,
+                contract: &contract,
+                raw: &raw,
+                stage: &stage,
+                role,
+            },
+            &self.context(act),
+        )?;
+        // A pending offer shows the plan it recorded: a planner that changed since it opened can
+        // number another plan the same.
+        if !offers.is_empty() {
+            let recorded = offers
+                .iter()
+                .filter_map(|(offer, _)| views.offer(offer))
+                .map(|open| plan::RemedyPlan::Executable(open.plan.clone()));
+            block.plans = recorded
+                .chain(block.plans.into_iter().filter(|plan| plan.executable().is_none()))
+                .collect();
+        }
         Ok(Recheck::Blocked(Box::new(Blocked {
-            block: plan::plan(
-                &self.registry,
-                views,
-                BlockedCall {
-                    call: &call,
-                    contract: &contract,
-                    raw: &raw,
-                    stage: &stage,
-                    role,
-                },
-                &self.context(act),
-            )?,
+            block,
             call,
             block_id,
+            spawn: role.spawn(),
             offers,
         })))
     }
@@ -1079,7 +1123,7 @@ fn sanitizer_evidence(evidence: &[Evidence], sanitizer: &SanitizerName, source: 
             source: from,
             derived,
         } if named == sanitizer && from == &source => Some(derived.clone()),
-        Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } | Evidence::File { .. } => None,
+        Evidence::Sanitizer { .. } | Evidence::Rewrite { .. } | Evidence::Held { .. } => None,
     })
 }
 

@@ -10,9 +10,9 @@ dependencies = [
     "appa-bench-concurrency==0.1.0",
     "appa-bench-publish==0.1.0",
     "claude-agent-sdk==0.2.152",
-    "inspect-ai==0.3.252",
+    "inspect-ai==0.3.287",
     "inspect-evals @ git+https://github.com/UKGovernmentBEIS/inspect_evals.git@0c737b01627b772db84aa223f68775c31199fdc9",
-    "openai==2.54.0",
+    "openai==3.42.1",
 ]
 
 [project.scripts]

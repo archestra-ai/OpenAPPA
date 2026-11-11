@@ -47,8 +47,10 @@ OpenAPPA combines these files into one config.
 | Annotators | Each annotator name must be unique. |
 | Script path | A script path is relative to the config file that names it. |
 | Audience sources | A battery binds the membership service it ships and declares its selector templates. A root entry for the same provider is a duplicate. |
-| Confined results | A battery can list its own tools in `confined_results`, so an output sanitizer it ships has a result to run on. The names join the root's list. Other `[policy.deployment]` settings stay in the root. |
+| Context providers | A battery binds the context helper it ships, with an optional `hint` on reading its answers. The hint reaches every annotation the provider contributes to, not only the battery's own tools. A root entry for the same provider is a duplicate, so the root cannot replace the battery's hint. |
+| Confined results | A battery can list its own tools in `confined_results`, so an output sanitizer it ships has a result to run on. The names join the root's list while a bound output sanitizer can reach them. Other `[policy.deployment]` settings, `hint` included, stay in the root. |
 | Bindings | A battery binds the helper scripts it ships, and a sanitizer to a stock `builtin` such as `redact-secrets`. A `url`, a model, or a stock authority is the root's to bind. |
+| Model components | An annotator can name a model on its declaration with `builtin = "claude-code"` or `builtin = "llm"`. The model for a battery's sanitizer is configured in the deployment, not in the battery: the root binds it under `[externals.sanitizers]` to a model the deployment has, and a sanitizer the root does not bind is not offered. The Claude Code plugin's default config binds every battery sanitizer to `claude-code` except `opencode.strip-instructions`; other shipped configs bind none. A root declaration with the same name replaces the battery's, so the root can change its model or hint. |
 
 OpenAPPA checks the combined config before using it. If a reload fails, the current config keeps running.
 
@@ -209,31 +211,25 @@ include = [
 version = 2
 
 [[policy.tool]]
-name = "host/claude-code/Bash(command:kubectl)"
+name = "host/claude-code/WebFetch(url:https://admin.example.com/*)"
 requires = { attention = ["blocked"] }
-delta = { trust = "suspicious", audience = ["internal"] }
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:kubectl *)"
-requires = { attention = ["blocked"] }
-delta = { trust = "suspicious", audience = ["internal"] }
 
 [[policy.annotator]]
-name = "local.read-sensitivity"
+name = "local.canvas-sensitivity"
 audiences = []
 marks = ["human-approval"]
 
-# This root rule runs before the battery's Read rules.
+# This root rule runs before the Slack battery's canvas rule.
 [[policy.tool]]
-name = "host/claude-code/Read"
-annotator = "local.read-sensitivity"
+name = "mcp/claude_ai_Slack/slack_read_canvas"
+annotator = "local.canvas-sensitivity"
 
-[externals.annotators."local.read-sensitivity"]
-command = ["python3", "./local/read-sensitivity.py"]
+[externals.annotators."local.canvas-sensitivity"]
+command = ["python3", "./local/canvas-sensitivity.py"]
 ```
 
-`blocked` is the reserved mark no authority can permit, so both `kubectl` contracts have no remedy, even under the plugin's catch-all `hitl` authority.
-Every other Bash call reaches the battery's model annotator. The root also
-replaces the battery's `host/claude-code/Read` rules with a local script.
+`blocked` is the reserved mark no authority can permit, so a fetch from `admin.example.com` has no remedy, even under the plugin's catch-all `hitl` authority.
+Every other fetch reaches the `coding` battery's rules. The root also
+replaces the Slack battery's canvas rule with a local script.
 
 The battery files stay unchanged.

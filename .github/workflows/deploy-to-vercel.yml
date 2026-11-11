@@ -14,10 +14,13 @@ name: Deploy to Vercel
 # integration did. The CLI runs from the repository root; the project's Root
 # Directory setting (website) is applied server-side.
 #
-# Required repository secrets:
-#   VERCEL_TOKEN      - Vercel API token scoped to the team
-#   VERCEL_ORG_ID     - "orgId" from `vercel link` (.vercel/project.json)
-#   VERCEL_PROJECT_ID - "projectId" from `vercel link` (.vercel/project.json)
+# Required configuration:
+#   VERCEL_TOKEN      - secret in the `production` environment (main only):
+#                       Vercel API token scoped to the team
+#   VERCEL_ORG_ID     - repository variable: "orgId" from `vercel link`
+#                       (.vercel/project.json)
+#   VERCEL_PROJECT_ID - repository variable: "projectId" from `vercel link`
+#                       (.vercel/project.json)
 
 on:
   push:
@@ -30,6 +33,7 @@ jobs:
   deploy-production:
     name: Deploy Production
     runs-on: ubuntu-latest
+    environment: production # Holds the Vercel token; deploys from main only.
     timeout-minutes: 20
     concurrency:
       group: "vercel-production"
@@ -42,8 +46,8 @@ jobs:
           fetch-depth: 1
 
       - name: Deploy production
-        uses: archestra-ai/.github/actions/vercel-deploy@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
+        uses: archestra-ai/.github/actions/vercel-deploy@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
         with:
           token: ${{ secrets.VERCEL_TOKEN }}
-          org-id: ${{ secrets.VERCEL_ORG_ID }}
-          project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          org-id: ${{ vars.VERCEL_ORG_ID }}
+          project-id: ${{ vars.VERCEL_PROJECT_ID }}

@@ -6,7 +6,7 @@ use appa_engine::contract::{AudienceRequirement, DeltaAudience, RecipientSpec, S
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, GroupRef, ReaderId, Trust};
 use appa_engine::names::{AnnotatorName, AuthorityName, GroupName, SanitizerName, TagName};
 use appa_engine::profile::{BindingMode, ExecutorClass, neutral_starting_label};
-use appa_engine::registry::{LoadError, MAX_HINT_CHARS};
+use appa_engine::registry::{LoadError, MAX_CONTEXT_HINT_CHARS, MAX_HINT_CHARS};
 use appa_engine::value::ToolName;
 
 use crate::{AnnotatorBuiltin, Config, ConfigError};
@@ -122,6 +122,22 @@ fn declaration_only_policy_builds_the_engine_registry() {
     assert_eq!(config.registry_config().tools.len(), 2);
 }
 
+/// `except_tags` reaches the engine as the authority's exception, beside its scope.
+#[test]
+fn an_authority_excepts_the_tags_it_names() {
+    let policy = DECLARATIONS
+        .replace("name = \"send\"", "name = \"send\"\ntags = [\"legacy\"]")
+        .replace("[authority.permits]", "except_tags = [\"legacy\"]\n[authority.permits]");
+    let config = load(&policy).expect("the excepting policy compiles");
+    let approver = config
+        .engine()
+        .registry()
+        .authority(&AuthorityName::new("approver"))
+        .expect("the authority registers");
+    assert_eq!(approver.except, vec![appa_engine::names::TagName::new("legacy")]);
+    assert!(approver.scope.is_unscoped());
+}
+
 #[test]
 fn server_qualification_preserves_the_contract_and_deployment_references() {
     let qualified = DECLARATIONS.replace("name = \"lookup\"", "name = \"lookup\"\nserver = \"demo\"");
@@ -213,6 +229,21 @@ fn an_inline_binding_on_the_reserved_attest_schema_is_refused() {
         load(policy),
         Err(ConfigError::ForbiddenInlineBinding { kind: "sanitizer", name }) if name == "attest-schema"
     ));
+}
+
+#[test]
+fn a_model_builtin_on_the_reserved_attest_schema_is_refused() {
+    for builtin in ["llm", "claude-code"] {
+        let policy = format!(
+            "version = 2\n\
+             [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\nbuiltin = \"{builtin}\"\n\
+             [sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n"
+        );
+        assert!(
+            matches!(load(&policy), Err(ConfigError::ReservedSanitizerBuiltin { builtin: found }) if found == builtin),
+            "attest-schema accepted builtin {builtin}"
+        );
+    }
 }
 
 #[test]
@@ -627,6 +658,35 @@ fn an_annotator_hint_is_runtime_owned_and_bounded() {
         load(&refused),
         Err(ConfigError::Registry(LoadError::HintTooLong { context, len, max }))
             if context == "annotator classifier" && len == MAX_HINT_CHARS + 1 && max == MAX_HINT_CHARS
+    ));
+}
+
+/// The `[deployment] hint` is runtime-owned prose: it loads beside the profile, is bounded in
+/// characters, and adding, editing or removing it never moves the policy identity.
+#[test]
+fn the_deployment_hint_is_runtime_owned_bounded_and_outside_the_identity() {
+    let hinted = |hint: &str| DECLARATIONS.replace("[deployment]", &format!("[deployment]\nhint = \"{hint}\""));
+    let config = load(&hinted("corp.example and its forge are ours.")).expect("the hinted deployment loads");
+    assert_eq!(
+        config.deployment_hint().map(|hint| hint.as_str()),
+        Some("corp.example and its forge are ours.")
+    );
+    let base = load(DECLARATIONS).expect("loads");
+    assert_eq!(base.deployment_hint(), None);
+    assert_eq!(load(&hinted(" ")).expect("loads").deployment_hint(), None);
+
+    let identity = |source: &str| load(source).expect("loads").engine().identity();
+    assert_eq!(
+        identity(&hinted("corp.example and its forge are ours.")),
+        identity(DECLARATIONS)
+    );
+    assert_eq!(identity(&hinted("only corp.example is ours.")), identity(DECLARATIONS));
+
+    assert!(load(&hinted(&"é".repeat(MAX_CONTEXT_HINT_CHARS))).is_ok());
+    assert!(matches!(
+        load(&hinted(&"é".repeat(MAX_CONTEXT_HINT_CHARS + 1))),
+        Err(ConfigError::Registry(LoadError::HintTooLong { context, len, max }))
+            if context == "deployment" && len == MAX_CONTEXT_HINT_CHARS + 1 && max == MAX_CONTEXT_HINT_CHARS
     ));
 }
 
@@ -1644,4 +1704,56 @@ delta = {}
         refused(serde_json::json!({ "trust": "vetted" })),
         Err(ConfigError::UnknownTrustRank { name, .. }) if name == "vetted"
     ));
+}
+
+/// A recorder binds to the declaration that names it: the first matching selector wins, a call
+/// the explicit declarations do not cover falls to the wildcard's recorder, and a declaration
+/// that names none has none.
+#[test]
+fn a_recorder_follows_the_declaration_a_call_selects() {
+    let config = load(
+        r#"
+version = 2
+
+[[annotator]]
+name = "file-tracker"
+
+[[tool]]
+name = "Write(file_path:/scratch/*)"
+delta = {}
+
+[[tool]]
+name = "Write"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[tool]]
+name = "*"
+annotator = "file-tracker"
+recorder = "catch-all"
+"#,
+    )
+    .expect("the policy loads");
+    let engine = config.engine();
+    let recorder = |tool: &str, arguments: &str| {
+        let call = engine
+            .resolve_call(ToolName::new(tool), arguments.as_bytes())
+            .expect("the call resolves");
+        engine.recorder(&call).map(|name| name.as_str().to_string())
+    };
+    assert_eq!(recorder("Write", r#"{"file_path":"/scratch/a"}"#), None);
+    assert_eq!(
+        recorder("Write", r#"{"file_path":"/repo/a"}"#).as_deref(),
+        Some("file-tracker")
+    );
+    assert_eq!(recorder("Unwritten", "{}").as_deref(), Some("catch-all"));
+    assert_eq!(
+        engine
+            .registry()
+            .recorders()
+            .into_iter()
+            .map(|name| name.as_str())
+            .collect::<Vec<_>>(),
+        ["catch-all", "file-tracker"]
+    );
 }

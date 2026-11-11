@@ -136,6 +136,22 @@ pub struct ExecutableRemedyPlan {
 }
 
 impl ExecutableRemedyPlan {
+    /// Does this plan only declare a marked spawn's return? Such a plan asks no authority.
+    pub fn declares_only(&self) -> bool {
+        matches!(self.steps.as_slice(), [RemedyStep::Return(_)])
+    }
+
+    /// Is this plan rulings alone, each by an authority `rules` accepts? Such a plan accepts no
+    /// narrowing, treats no result and declares no return, so executing it settles nothing the
+    /// agent would otherwise choose.
+    pub fn asks_only(&self, rules: impl Fn(&AuthorityName) -> bool) -> bool {
+        !self.steps.is_empty()
+            && self
+                .steps
+                .iter()
+                .all(|step| matches!(step, RemedyStep::Authorize(authority) if rules(authority)))
+    }
+
     /// The narrowing this plan asks the agent to accept, where its route carries one.
     /// A raw release path orders that acceptance before its rulings; an output-sanitizer path
     /// accepts no residual up front and has none here.
@@ -262,7 +278,7 @@ pub struct PlannedBlock {
     /// Kept out of `plans` so the emptiness assertion stays about remedies.
     pub fork_advice: Option<ForkAdvice>,
     /// Advice, never a remedy: what accepting the block's narrowing does to the rest of the
-    /// policy's argument-free tools. `None` when nothing narrows or nothing gets worse.
+    /// policy's argument-free tools. `None` when nothing narrows, or nothing gets worse and no tool is labeled per call.
     pub narrowing_impact: Option<NarrowingImpact>,
 }
 
@@ -271,11 +287,14 @@ pub struct PlannedBlock {
 /// lose every authority and input sanitizer that could clear them. `recipient_checked` names the tools
 /// with a declared variant that checks recipients from its arguments against an audience this
 /// narrowing reduces; they are not judged, since the verdict depends on the recipients.
+/// `per_call` names each contract an Annotator labels per call, the wildcard `*` among them, once
+/// each; they are not judged either, since their labels exist only per call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NarrowingImpact {
     pub sign_off: Vec<ToolName>,
     pub blocked: Vec<ToolName>,
     pub recipient_checked: Vec<ToolName>,
+    pub per_call: Vec<ToolName>,
 }
 
 /// Advice, never a remedy, on delegating a blocked call to a child. The planner decides which
@@ -364,6 +383,8 @@ pub(crate) fn plan(
         call,
         stage,
         role,
+        Declaring::of(role, views, call),
+        denied,
         floor.as_ref(),
         context,
     )?
@@ -393,7 +414,7 @@ pub(crate) fn plan(
             preserving_output: preserving_output_offered(
                 registry,
                 contract,
-                &call.output_label(contract, &current),
+                &call.output_label(contract),
                 &current,
                 &plans,
                 context,
@@ -473,7 +494,6 @@ fn narrowing_impact(
             !input_hops(
                 registry,
                 annotation,
-                check::CallReads::Static,
                 &CallStage::default(),
                 CallRole::Ordinary,
                 gaps,
@@ -499,6 +519,7 @@ fn narrowing_impact(
         sign_off: Vec::new(),
         blocked: Vec::new(),
         recipient_checked: Vec::new(),
+        per_call: Vec::new(),
     };
     let audience_narrows = narrowing.to.audience != narrowing.from.audience;
     for name in registry.tool_names() {
@@ -531,14 +552,83 @@ fn narrowing_impact(
             Standing::Clear => {}
         }
     }
-    (!impact.sign_off.is_empty() || !impact.blocked.is_empty() || !impact.recipient_checked.is_empty())
-        .then_some(impact)
+    for tool in registry.semantic_tools().map(|(_, tool)| tool) {
+        if let ToolDeclaration::Annotated { name, .. } = tool
+            && !impact.per_call.contains(name)
+        {
+            impact.per_call.push(name.clone());
+        }
+    }
+    (!impact.sign_off.is_empty()
+        || !impact.blocked.is_empty()
+        || !impact.recipient_checked.is_empty()
+        || !impact.per_call.is_empty())
+    .then_some(impact)
+}
+
+/// How a call's return declaration enters its plans.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Declaring {
+    /// An ordinary call, or a marked spawn whose declaration stands: no plan declares.
+    No,
+    /// A marked spawn with no declaration: each plan is one return route, with no authority
+    /// and no settlement. The retry is planned on whatever else blocks it.
+    Separately(crate::transition::SpawnKind),
+    /// Every gap plan with every return route: the menu an earlier planner recorded for a
+    /// marked spawn. Read only to replay those offers.
+    Bundled(crate::transition::SpawnKind),
+}
+
+impl Declaring {
+    pub(crate) fn of(role: CallRole, views: &Views, call: &ResolvedCall) -> Declaring {
+        match role {
+            CallRole::MarkedSpawn(kind) if views.declaration(call).is_none() => Declaring::Separately(kind),
+            CallRole::MarkedSpawn(_) | CallRole::Ordinary => Declaring::No,
+        }
+    }
+}
+
+/// The menu an earlier planner recorded for a marked spawn with no declaration: each gap plan
+/// bundled with each return route. Replay reads it for offers recorded under that planner; no
+/// block offers it.
+pub(crate) fn bundled_spawn_menu(
+    registry: &Registry,
+    views: &Views,
+    blocked: BlockedCall<'_>,
+    context: &MembershipContext<'_>,
+) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
+    let CallRole::MarkedSpawn(kind) = blocked.role else {
+        return Ok(Vec::new());
+    };
+    let no_denials = BTreeSet::new();
+    let denied = views.denied_authorities(&blocked.call.digest()).unwrap_or(&no_denials);
+    Ok(enumerate_plans(
+        registry,
+        blocked.contract,
+        &views.current_label(),
+        &|kind| views.has_effect(kind),
+        &|kind| views.has_reservation(kind),
+        blocked.call,
+        blocked.stage,
+        blocked.role,
+        Declaring::Bundled(kind),
+        denied,
+        floor_of(registry, views).as_ref(),
+        context,
+    )?
+    .into_iter()
+    .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
+    .collect())
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
 /// history predicates. The log supplies them for a live block; a recovery route supplies the
 /// state it has reached (RMD-20). A membership read no pinned answer decides refuses the
 /// whole enumeration with the union of every undecided atom, never a smaller menu.
+///
+/// A marked spawn's return declaration is never bundled with a gap's authority: an undeclared
+/// spawn is offered the declarations alone, and once one stands its retry is planned on its
+/// remaining gaps (see [`Declaring`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn enumerate_plans(
     registry: &Registry,
@@ -549,6 +639,8 @@ pub(crate) fn enumerate_plans(
     call: &ResolvedCall,
     stage: &CallStage,
     role: CallRole,
+    declaring: Declaring,
+    denied: &BTreeSet<AuthorityName>,
     floor: Option<&Floor>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
@@ -561,7 +653,7 @@ pub(crate) fn enumerate_plans(
         stage,
         context,
     )?;
-    if role == CallRole::Ordinary && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
+    if declaring == Declaring::No && block.requirement_gaps.is_empty() && block.narrowing.is_none() {
         return Ok(Vec::new());
     }
 
@@ -569,7 +661,6 @@ pub(crate) fn enumerate_plans(
     let mut candidates: Vec<PlanCandidate> = input_hops(
         registry,
         contract,
-        check::CallReads::Resolved(call),
         stage,
         role,
         &block.requirement_gaps,
@@ -590,16 +681,16 @@ pub(crate) fn enumerate_plans(
             registry,
             current,
             contract,
-            &call.output_label(contract, current),
+            &call.output_label(contract),
             block.narrowing.as_ref(),
             floor,
             context,
             &mut needs,
         );
-        // An ordinary call declares no return policy; a marked spawn declares exactly one.
-        let returns: Vec<Option<ReturnRoute>> = match role {
-            CallRole::Ordinary => vec![None],
-            CallRole::MarkedSpawn(kind) => return_options(registry, current, floor, kind)
+        // Only the bundled menu declares beside a gap plan.
+        let returns: Vec<Option<ReturnRoute>> = match declaring {
+            Declaring::No | Declaring::Separately(_) => vec![None],
+            Declaring::Bundled(kind) => return_options(registry, current, floor, kind)
                 .into_iter()
                 .map(Some)
                 .collect(),
@@ -628,11 +719,32 @@ pub(crate) fn enumerate_plans(
         }
     }
     needs.refuse_if_any()?;
+    // An undeclared spawn is offered its declarations alone, where its other gaps have a plan.
+    // A plan naming an authority that denied this call does not count: the caller drops it.
+    if let Declaring::Separately(kind) = declaring {
+        let unblocked = block.requirement_gaps.is_empty() && block.narrowing.is_none();
+        let planned = candidates.iter().any(|candidate| {
+            !candidate
+                .required
+                .iter()
+                .any(|ruling| denied.contains(&ruling.authority))
+        });
+        if !unblocked && !planned {
+            return Ok(Vec::new());
+        }
+        candidates = return_options(registry, current, floor, kind)
+            .into_iter()
+            .map(|route| PlanCandidate {
+                steps: vec![RemedyStep::Return(route)],
+                required: Vec::new(),
+            })
+            .collect();
+    }
     Ok(least_mandate_first(
         registry,
         &block.requirement_gaps,
         candidates,
-        &check::forwarded_label(contract, check::CallReads::Resolved(call)).audience,
+        &check::forwarded_label(contract).audience,
         context,
     )
     .into_iter()
@@ -1025,7 +1137,6 @@ fn narrowing_remedies(
 fn input_hops(
     registry: &Registry,
     contract: &ToolAnnotation,
-    reads: check::CallReads<'_>,
     stage: &CallStage,
     role: CallRole,
     gaps: &[Gap],
@@ -1040,7 +1151,7 @@ fn input_hops(
         return Vec::new();
     }
     let released = stage.released(current);
-    let forwarded = check::forwarded_label(contract, reads);
+    let forwarded = check::forwarded_label(contract);
     registry
         .sanitizers()
         .filter(|sanitizer| !stage.lineage().contains(&sanitizer.name))
@@ -1420,10 +1531,10 @@ pub(crate) fn gap_cover(
     let mandate = &authority.mandate;
     match gap {
         Gap::TrustFloor { required, .. } => Evaluation::of_exact(
-            authority.scope.covers(tags) && mandate.trust_ceiling.is_some_and(|ceiling| ceiling >= *required),
+            authority.in_scope(tags) && mandate.trust_ceiling.is_some_and(|ceiling| ceiling >= *required),
         ),
         Gap::Includes { recipients } => {
-            if !authority.scope.covers(tags) {
+            if !authority.in_scope(tags) {
                 return Evaluation::Fails;
             }
             match &mandate.reader_ceiling {
@@ -1431,7 +1542,7 @@ pub(crate) fn gap_cover(
                 Some(ceiling) => Audience::of_declared(ceiling).includes(recipients, context),
             }
         }
-        Gap::NoPrior(kind) => Evaluation::of_exact(authority.scope.covers(tags) && mandate.waivers.contains(kind)),
+        Gap::NoPrior(kind) => Evaluation::of_exact(authority.in_scope(tags) && mandate.waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark — never by scope.
         Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
         Gap::Prior(_) => Evaluation::Fails,
@@ -1459,7 +1570,7 @@ pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &
     let has = |wanted: fn(&Gap) -> bool| raw.requirement_gaps.iter().any(wanted);
     if has(|gap| matches!(gap, Gap::Includes { .. })) {
         for authority in registry.authorities() {
-            if authority.scope.covers(&contract.tags) {
+            if authority.in_scope(&contract.tags) {
                 atoms.extend(authority.mandate.needed_atoms(providers));
             }
         }
@@ -1578,6 +1689,7 @@ mod tests {
 
     fn config(tools: Vec<ToolAnnotation>) -> RegistryConfig {
         RegistryConfig {
+            recorders: Default::default(),
             annotators: vec![],
             trust_chain: chain(),
             tools: declared(tools),
@@ -1613,6 +1725,7 @@ mod tests {
 
     fn mandated(name: &str, mandate: Mandate) -> Authority {
         Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate,
             scope: Scope::default(),
@@ -1632,6 +1745,7 @@ mod tests {
 
     fn registry(tools: Vec<ToolAnnotation>, authorities: Vec<Authority>, sanitizers: Vec<Sanitizer>) -> Registry {
         build(RegistryConfig {
+            recorders: Default::default(),
             authorities,
             sanitizers,
             ..config(tools)
@@ -1828,6 +1942,7 @@ mod tests {
         );
         let log = vec![opened(Label::new(TRUSTED, internal))];
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             tools: vec![ToolDeclaration::Annotated {
                 name: ToolName::new("wire"),
                 tags: vec![],
@@ -1850,6 +1965,7 @@ mod tests {
             crate::names::AnnotatorName::new("classifier"),
             unpinned.digest(),
             ProducedAnnotation {
+                evidence: None,
                 delta: annotation.delta,
                 forwards: annotation.forwards,
                 emits: annotation.emits,
@@ -1986,6 +2102,7 @@ mod tests {
         pinned.parameters = crate::params::test_string_argument_schema("room");
         let finance = Audience::restricted([ReaderId::new("finance")]);
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             tools: vec![ToolDeclaration::Annotated {
                 name: ToolName::new("lookup"),
                 tags: vec![],
@@ -2024,6 +2141,7 @@ mod tests {
             crate::names::AnnotatorName::new("directory"),
             unpinned.digest(),
             ProducedAnnotation {
+                evidence: None,
                 delta: pinned.delta,
                 forwards: pinned.forwards,
                 emits: pinned.emits,
@@ -2279,6 +2397,7 @@ mod tests {
         let tool = gated("wire", floor(TRUSTED));
         let officer = |name: &str, ceiling: Trust| trusted_up_to(name, ceiling);
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "executive".into()]),
             authorities: vec![officer("executive", Trust::new(2)), officer("officer", TRUSTED)],
             ..config(vec![tool])
@@ -2351,6 +2470,7 @@ mod tests {
             )
         };
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             authorities: vec![desk("desk", TRUSTED)],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
@@ -2418,6 +2538,7 @@ mod tests {
 
         fn authority(name: &str, ceiling: &str, scope: &[&str]) -> Authority {
             Authority {
+                except: Vec::new(),
                 name: AuthorityName::new(name),
                 mandate: Mandate {
                     reader_ceiling: Some(group(ceiling)),
@@ -2454,6 +2575,11 @@ mod tests {
         /// unscoped) read `legal`; `far` (authority, tag `unrelated`), `aside` (output, tag
         /// `unrelated`) and the `note` tool's delta read `press`.
         fn registry(confined_results: &[&str]) -> Registry {
+            registry_of(confined_results, authority("desk", "team", &["mail"]), &["mail"])
+        }
+
+        /// The gathering registry with `desk` and the tags `send` carries as given.
+        fn registry_of(confined_results: &[&str], desk: Authority, send_tags: &[&str]) -> Registry {
             let named = |name: &str| crate::audience::NamedAudience {
                 name: GroupName::new(name),
                 within: None,
@@ -2463,10 +2589,8 @@ mod tests {
                 }],
             };
             let config = RegistryConfig {
-                authorities: vec![
-                    authority("desk", "team", &["mail"]),
-                    authority("far", "press", &["unrelated"]),
-                ],
+                recorders: Default::default(),
+                authorities: vec![desk, authority("far", "press", &["unrelated"])],
                 sanitizers: vec![
                     sanitizer("scrub", INPUT, "legal", &[]),
                     sanitizer("redact", OUTPUT, "legal", &[]),
@@ -2484,7 +2608,7 @@ mod tests {
                     ..crate::audience::AudienceConfig::default()
                 },
                 ..config(vec![
-                    tool("send", &["mail"], Delta::NONE),
+                    tool("send", send_tags, Delta::NONE),
                     tool(
                         "note",
                         &[],
@@ -2525,6 +2649,18 @@ mod tests {
             Gap::Includes {
                 recipients: group("team"),
             }
+        }
+
+        /// An authority that excepts one of the tool's tags rules on none of its label gaps, so
+        /// the block asks no directory for that authority's mandate.
+        #[test]
+        fn a_block_reads_no_authority_that_excepts_the_tool() {
+            let desk = Authority {
+                except: tags(&["kept"]),
+                ..authority("desk", "team", &["mail"])
+            };
+            let registry = registry_of(&[], desk, &["mail", "kept"]);
+            assert!(block_atoms(&registry, &send(&registry), &raw(vec![includes()], false)).is_empty());
         }
 
         #[test]
@@ -2634,6 +2770,7 @@ mod tests {
             },
         );
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             authorities: vec![team_desk, global],
             audience: crate::audience::AudienceConfig {
                 sources: vec![crate::audience::SourceRegistration {
@@ -2760,7 +2897,7 @@ mod tests {
             receiving: Label::new(TRUSTED, Audience::public()),
             proposed_effects: annotation.emits.clone(),
             annotation: None,
-            file_basis: None,
+            held: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
             terms: crate::fact::ReleaseTerms::none(),
@@ -2892,6 +3029,7 @@ mod tests {
             )
         };
         let registry = build(RegistryConfig {
+            recorders: Default::default(),
             trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into(), "executive".into()]),
             authorities: vec![
                 officer("strong", Trust::new(2), Audience::public()),
@@ -3141,6 +3279,66 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowing_marks_the_tools_an_annotator_labels_per_call() {
+        let fetch = ToolAnnotation {
+            delta: Delta {
+                trust: None,
+                audience: Some(DeltaAudience::Static(DeclaredAudience::restricted([ReaderId::new(
+                    "insider",
+                )]))),
+            },
+            ..plain_tool("fetch")
+        };
+        let annotated = |name: &str| ToolDeclaration::Annotated {
+            name: ToolName::new(name),
+            tags: vec![],
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: crate::names::AnnotatorName::new("classifier"),
+        };
+        let with = |others: Vec<ToolDeclaration>| {
+            build(RegistryConfig {
+                tools: std::iter::once(ToolDeclaration::Declared(fetch.clone()))
+                    .chain(others)
+                    .collect(),
+                annotators: vec![crate::registry::AnnotatorDeclaration {
+                    name: crate::names::AnnotatorName::new("classifier"),
+                    trust: None,
+                    audiences: None,
+                    marks: None,
+                    effects: None,
+                }],
+                ..config(vec![])
+            })
+        };
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        assert_eq!(
+            plan_of(&with(vec![]), &log, &call("fetch", json!({}))).narrowing_impact,
+            None,
+            "a policy of fixed labels only has nothing the narrowing leaves unjudged"
+        );
+        assert_eq!(
+            plan_of(
+                &with(vec![annotated("shell"), annotated("mcp/*/search"), annotated("*")]),
+                &log,
+                &call("fetch", json!({}))
+            )
+            .narrowing_impact,
+            Some(NarrowingImpact {
+                sign_off: vec![],
+                blocked: vec![],
+                recipient_checked: vec![],
+                per_call: vec![
+                    ToolName::new("shell"),
+                    ToolName::new("mcp/*/search"),
+                    ToolName::new("*")
+                ],
+            }),
+            "the annotated tool, the annotated name selector and the wildcard are labeled per call, so the impact marks them unjudged"
+        );
+    }
+
+    #[test]
     fn a_narrowing_names_the_tools_it_moves_to_sign_off_or_blocked() {
         let alice = || DeclaredAudience::restricted([ReaderId::new("alice")]);
         let insider = || DeclaredAudience::restricted([ReaderId::new("insider")]);
@@ -3191,6 +3389,7 @@ mod tests {
                 tool("reply", &[], vec![RecipientSpec::Placeholder("to".to_string())]),
             ],
             vec![Authority {
+                except: Vec::new(),
                 name: AuthorityName::new("desk"),
                 mandate: Mandate {
                     reader_ceiling: Some(alice()),
@@ -3224,6 +3423,7 @@ mod tests {
                 sign_off: vec![ToolName::new("post")],
                 blocked: vec![ToolName::new("drain"), ToolName::new("read")],
                 recipient_checked: vec![ToolName::new("post"), ToolName::new("reply")],
+                per_call: vec![],
             }),
             "post needs desk; read's org variant has no remedy, and drain's consumed is committed by accepting \
              fetch; share and notify (an input hop through scrub), gated (a call to approve) and reply (its arguments) are \
@@ -3286,6 +3486,7 @@ mod tests {
                 },
             ],
             vec![Authority {
+                except: Vec::new(),
                 name: AuthorityName::new("desk"),
                 mandate: Mandate {
                     reader_ceiling: Some(alice()),
@@ -3320,6 +3521,7 @@ mod tests {
                 sign_off: vec![ToolName::new("lookup"), ToolName::new("post")],
                 blocked: vec![],
                 recipient_checked: vec![],
+                per_call: vec![],
             }),
             "audit's org variant is blocked before and after, so its other variant's move is no news"
         );
@@ -3329,6 +3531,7 @@ mod tests {
                 sign_off: vec![ToolName::new("post")],
                 blocked: vec![],
                 recipient_checked: vec![],
+                per_call: vec![],
             }),
             "under a trusted floor lookup's drop to suspicious never settles, before or after"
         );
@@ -3517,6 +3720,7 @@ mod tests {
             ..plain_tool("wire")
         };
         let officer = Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff")]),
@@ -3534,6 +3738,46 @@ mod tests {
             exec(&planned.plans[0]).steps,
             vec![RemedyStep::Authorize(AuthorityName::new("officer"))]
         );
+    }
+
+    /// An excepted tag takes a tool out of an authority's jurisdiction for its label gaps and
+    /// leaves the authority's attention routing alone.
+    #[test]
+    fn an_excepted_tag_leaves_a_label_gap_terminal_and_an_attention_gap_routed() {
+        let legacy = TagName::new("legacy");
+        let signoff = Requires {
+            attention: vec![MarkName::new("signoff")],
+            ..Requires::default()
+        };
+        let rollout = Authority {
+            except: vec![legacy.clone()],
+            ..mandated(
+                "rollout",
+                Mandate {
+                    trust_ceiling: Some(TRUSTED),
+                    attends: Attends::Named(vec![MarkName::new("signoff")]),
+                    ..Mandate::default()
+                },
+            )
+        };
+        let kept = ToolAnnotation {
+            tags: vec![legacy.clone()],
+            ..gated("send", floor(TRUSTED))
+        };
+        let marked = ToolAnnotation {
+            tags: vec![legacy],
+            ..requiring("wire", signoff)
+        };
+        let registry = registry(vec![kept, gated("post", floor(TRUSTED)), marked], vec![rollout], vec![]);
+        let log = vec![opened(Label::new(SUSPICIOUS, Audience::public()))];
+        let steps = |tool: &str| {
+            let planned = plan_of(&registry, &log, &call(tool, json!({})));
+            planned.plans.first().map(|plan| exec(plan).steps.clone())
+        };
+        let authorized = Some(vec![RemedyStep::Authorize(AuthorityName::new("rollout"))]);
+        assert_eq!(steps("send"), None, "no authority covers the excepted tool's trust gap");
+        assert_eq!(steps("post"), authorized, "the same gap on an untagged tool is covered");
+        assert_eq!(steps("wire"), authorized, "an attention gap routes by its mark");
     }
 
     #[test]
@@ -3799,6 +4043,7 @@ mod tests {
             ],
         )
             .prop_map(move |(trust_ceiling, reader_ceiling, waivers, attends)| Authority {
+                except: Vec::new(),
                 name: name.clone(),
                 mandate: Mandate {
                     trust_ceiling,
@@ -3889,6 +4134,7 @@ mod tests {
         sanitizers: Vec<Sanitizer>,
     ) -> Result<Option<Registry>, TestCaseError> {
         let built = Registry::build_covered(RegistryConfig {
+            recorders: Default::default(),
             authorities,
             sanitizers,
             ..config(tools)
@@ -4099,7 +4345,7 @@ mod tests {
             let parts = crate::label::TestContext::default();
 
             let competent = |authority: &Authority, gap: &Gap| -> bool {
-                let scoped = authority.scope.covers(&contract.tags);
+                let scoped = authority.in_scope(&contract.tags);
                 match gap {
                     Gap::TrustFloor { required, .. } =>
                         scoped && authority.mandate.trust_ceiling.is_some_and(|c| c >= *required),

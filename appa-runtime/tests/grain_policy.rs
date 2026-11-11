@@ -4,7 +4,7 @@ mod common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw, root};
+use common::{actor, battery_runtime, members_source, propose, ran, raw, root, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -20,7 +20,7 @@ async fn accept_and_run(runtime: &Arc<Runtime>, call: ProposedCall) {
     let decision = propose(runtime, call.clone()).await;
     if !matches!(decision, HookDecision::AllowCall { .. }) {
         assert!(matches!(
-            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }
         ));
         assert_eq!(

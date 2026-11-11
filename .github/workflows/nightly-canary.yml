@@ -11,12 +11,17 @@ name: Nightly Canary
 # Results stay internal: the run directory is uploaded as a workflow
 # artifact, the verdict goes to Slack, and nothing is committed back.
 #
-# Required repository secrets: OPENROUTER_API_KEY (model access),
-# APPA_CANARY_SLACK_WEBHOOK_URL (incoming webhook; skipped when absent).
+# Model access: the OpenRouter key is the ci-appa-canary-openrouter-api-key
+# secret in GCP Secret Manager, not a GitHub secret. The keyless account
+# ci-appa-canary reads it and nothing else, and trusts only this file on main
+# (infra gcp/workload_identity/ci-secrets.tf and ci-workflow-trust.tf). To
+# rotate the key, add a new version (infra gcp/workload_identity/README.md,
+# "Rotating a CI secret").
+# Slack: APPA_CANARY_SLACK_WEBHOOK_URL in the `canary` environment (incoming
+# webhook; skipped when absent). The environment admits main only.
 # Optional GCS copy of the run records: set the APPA_CANARY_GCS_BUCKET
-# repository variable (bucket name, no gs:// prefix) and grant the
-# APPA_GCP_SERVICE_ACCOUNT / APPA_GCP_WORKLOAD_IDENTITY_PROVIDER identity
-# write access to it.
+# repository variable (bucket name, no gs:// prefix). The upload uses
+# appa-demo-image-push, which trusts this file only on main.
 
 on:
   schedule:
@@ -33,10 +38,14 @@ jobs:
   canary:
     name: Defended vs empty
     runs-on: ubuntu-latest
+    # Holds the Slack webhook; deploys from main only.
+    environment:
+      name: canary
+      deployment: false # A secrets and branch gate; nothing is deployed.
     timeout-minutes: 150
     permissions:
       contents: read
-      id-token: write # Workload Identity Federation for the optional GCS upload.
+      id-token: write # Workload Identity Federation: the key read and the GCS upload.
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -48,13 +57,47 @@ jobs:
         run: rustup show
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
+      # Authenticates as the read-only secrets account. The GCS upload below
+      # authenticates again as appa-demo-image-push, which replaces it.
+      - name: Authenticate to read the canary key
+        uses: archestra-ai/.github/actions/google-auth@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
+        with:
+          service_account: ci-appa-canary@friendly-path-465518-r6.iam.gserviceaccount.com
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
+
+      - name: Read the canary key
+        id: canary-secrets
+        uses: google-github-actions/get-secretmanager-secrets@bc9c54b29fdffb8a47776820a7d26e77b379d262 # v3.0.0
+        with:
+          secrets: |-
+            openrouter_api_key:friendly-path-465518-r6/ci-appa-canary-openrouter-api-key
+
+      - name: Check the canary key
+        env:
+          OPENROUTER_API_KEY: ${{ steps.canary-secrets.outputs.openrouter_api_key }}
+        run: |
+          # A placeholder version (not an OpenRouter key) would otherwise fail
+          # every model call and read as a harness failure.
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::error::ci-appa-canary-openrouter-api-key is empty. Add a version in Secret Manager (infra gcp/workload_identity/README.md, \"Rotating a CI secret\")."
+            exit 1
+          fi
+          echo "::add-mask::$OPENROUTER_API_KEY"
+          case "$OPENROUTER_API_KEY" in
+            sk-or-*) ;;
+            *)
+              echo "::error::ci-appa-canary-openrouter-api-key does not hold an OpenRouter key (no sk-or- prefix). Add a version with the real key."
+              exit 1
+              ;;
+          esac
+
       - name: Run canary
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_API_KEY: ${{ steps.canary-secrets.outputs.openrouter_api_key }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: uv run --project bench/corp bench-corp canary
 
@@ -74,10 +117,10 @@ jobs:
 
       - name: Authenticate to Google Cloud
         if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}
-        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
+        uses: archestra-ai/.github/actions/google-auth@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
         with:
-          service_account: ${{ secrets.APPA_GCP_SERVICE_ACCOUNT }}
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: appa-demo-image-push@friendly-path-465518-r6.iam.gserviceaccount.com
+          workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
 
       - name: Set up Google Cloud
         if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}

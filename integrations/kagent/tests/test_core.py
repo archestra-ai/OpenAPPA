@@ -181,7 +181,7 @@ def test_the_github_battery_blocks_repository_text_at_a_public_write(stack):
                 "tool": "get_file_contents",
                 "args": {"owner": "acme", "repo": "status-page", "path": "RELEASE.md"},
             },
-            {"remedy": "accept lower trust"},
+            {"remedy": "trust drops"},
             {
                 "tool": "get_file_contents",
                 "args": {"owner": "acme", "repo": "status-page", "path": "RELEASE.md"},

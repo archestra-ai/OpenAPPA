@@ -576,18 +576,23 @@ impl Engine {
                 return Err(PlanError::RulingAssignmentMismatch.into());
             }
         }
-        execute::rulings_cover(
-            &self.registry,
-            contract,
-            raw,
-            evidence.iter().map(|given| (&given.authority, given.covers.as_slice())),
-            &self.context(act),
-        )
-        .map_err(|error| match error {
-            // The undecided atoms surface as the act's ask, exactly as the gates raise them.
-            PlanError::MembershipNeeded(needed) => TransitionError::from(needed),
-            other => TransitionError::Plan(other),
-        })?;
+        // A plan that only declares a spawn's return covers none of its gaps: its retry is
+        // planned on them.
+        let declares_only = recorded.plan.declares_only();
+        if !declares_only {
+            execute::rulings_cover(
+                &self.registry,
+                contract,
+                raw,
+                evidence.iter().map(|given| (&given.authority, given.covers.as_slice())),
+                &self.context(act),
+            )
+            .map_err(|error| match error {
+                // The undecided atoms surface as the act's ask, exactly as the gates raise them.
+                PlanError::MembershipNeeded(needed) => TransitionError::from(needed),
+                other => TransitionError::Plan(other),
+            })?;
+        }
         if evidence.iter().any(|given| given.offer != execution.offer) {
             return Err(PlanError::EvidenceOfferMismatch.into());
         }
@@ -601,13 +606,21 @@ impl Engine {
         }
         // One current approval per call. A second would leave the release picking between two
         // plans the agent selected separately, and only one of them is the choice it made;
-        // the approval that stands is released by proposing its call.
-        if views.current_approval(call).is_some() {
+        // the approval that stands is released by proposing its call. A marked spawn's
+        // declaration stands beside it.
+        if views.approval_pending(call, declares_only) {
             return Err(TransitionError::ApprovalPending);
         }
-        // A marked spawn's plan declares the child's return policy the parent now supplies.
+        // A marked spawn's plan declares the child's return policy the parent now supplies; a
+        // plan for a declared spawn's other gaps carries the declaration that stands.
+        let declared = match views.call_role(&recorded.subject) {
+            crate::check::CallRole::MarkedSpawn(_) => views
+                .declaration(call)
+                .and_then(|(_, declaration)| declaration.return_policy.clone()),
+            crate::check::CallRole::Ordinary => None,
+        };
         let return_policy = match (recorded.plan.return_step(), &execution.return_policy) {
-            (None, None) => None,
+            (None, None) => declared,
             (Some(step), Some(policy)) => {
                 plan::declared_return_policy(&self.registry, views, step, policy)?;
                 Some(policy.clone())

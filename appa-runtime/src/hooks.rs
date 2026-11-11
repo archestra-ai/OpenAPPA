@@ -15,6 +15,7 @@ use crate::api::{
     OfferId, RemedyPresentation, Runtime, Session, SpawnResultDecision, ToolCallDecision, ToolResultDecision,
     is_control_tool,
 };
+use appa_eventlog::EndKind;
 
 fn wire(decision: &HookDecision) -> serde_json::Value {
     serde_json::to_value(WireDecision::of(decision)).expect("a wire decision serializes")
@@ -73,7 +74,11 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         yell_tool: served_yell_tool(runtime),
         ..EmbeddedPresentationOptions::default()
     };
-    let handled = handle_internal(runtime, event, presentation).await;
+    let call_ids = match adapter.name {
+        appa_runtime_api::AdapterName::ClaudeCode => ToolCallIds::Named,
+        _ => ToolCallIds::Unnamed,
+    };
+    let handled = handle_internal(runtime, event, presentation, call_ids).await;
     runtime.record(Some(&root), handled.event);
     let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
@@ -216,6 +221,10 @@ fn continued(
             root: id(root),
             child: id(child),
             spawn,
+        },
+        HookEvent::ChildTurnEnd { root, child } => HookEvent::ChildTurnEnd {
+            root: id(root),
+            child: id(child),
         },
         HookEvent::ChildEnd { root, child, value } => HookEvent::ChildEnd {
             root: id(root),
@@ -367,9 +376,10 @@ fn bare_hook(
 fn hook_root(event: &HookEvent) -> &TrajectoryId {
     match event {
         HookEvent::SessionStart { root, .. } => root,
-        HookEvent::ChildStart { root, .. } | HookEvent::ChildEnd { root, .. } | HookEvent::ChildReturn { root, .. } => {
-            root
-        }
+        HookEvent::ChildStart { root, .. }
+        | HookEvent::ChildEnd { root, .. }
+        | HookEvent::ChildTurnEnd { root, .. }
+        | HookEvent::ChildReturn { root, .. } => root,
         HookEvent::Prompt { actor, .. }
         | HookEvent::TurnEnd { actor }
         | HookEvent::ToolCall { actor, .. }
@@ -398,22 +408,6 @@ pub(crate) fn withheld_return_instruction(cause: &str) -> String {
 /// What a cleared session is told when its family could not start over.
 const CLEAR_KEPT: &str = "APPA kept this session's label across /clear: a subagent or a call it started is still \
                           running or owed. Run /clear again after it finishes to start with a clean label.";
-
-fn file_tracking_context(runtime: &Runtime) -> String {
-    "APPA file tracking is enabled. Use appa_read_file(file_path), appa_write_file(file_path, content), \
-     appa_edit_file(file_path, old_string, new_string), and \
-     appa_copy_file/appa_move_file(source_path, destination_path) from this plugin's MCP server. \
-     Paths resolve within this root session's working directory. The first file call binds the root \
-     and its subagents to that shared workspace. After binding, APPA refuses the harness's native \
-     filesystem and shell tools. Other policy-approved tools remain available. APPA does not track \
-     observations that the harness makes before a call."
-        .to_owned()
-        + if runtime.file_process_enabled() {
-            " appa_process_files(input_paths, output_path, command) runs in isolation: read inputs/<path> and write output/result."
-        } else {
-            ""
-        }
-}
 
 /// The runtime's reporting tool as a policy names it.
 #[cfg(feature = "daemon")]
@@ -444,9 +438,14 @@ const NAMED_TRANSCRIPT: &str = "this call names a subagent's transcript or outpu
 /// entry that [`handle_internal`] also builds. Only `answer` — the one path a live harness
 /// reaches — keeps it.
 pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
-    handle_internal(runtime, event, EmbeddedPresentationOptions::default())
-        .await
-        .decision
+    handle_internal(
+        runtime,
+        event,
+        EmbeddedPresentationOptions::default(),
+        ToolCallIds::Unnamed,
+    )
+    .await
+    .decision
 }
 
 /// Dispatches one hook for an embedded host, returning a typed `EmbeddedHookOutcome`.
@@ -460,7 +459,7 @@ pub async fn handle_embedded_with_options(
     event: HookEvent,
     presentation: EmbeddedPresentationOptions,
 ) -> EmbeddedHookOutcome {
-    let handled = handle_internal(runtime, event, presentation).await;
+    let handled = handle_internal(runtime, event, presentation, ToolCallIds::Unnamed).await;
     EmbeddedHookOutcome {
         decision: handled.decision,
         presentation: handled.presentation,
@@ -481,15 +480,33 @@ pub(crate) struct Handled {
     pub(crate) event: crate::events::RuntimeEvent,
 }
 
+/// Whether the host's MCP client names, in each tool call it sends this runtime, the call id its
+/// hook carried. Claude Code's does, in the request's `_meta`. A declaration ahead of the spawn
+/// is then vouched under that one call, so two sessions declaring alike never share its key.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolCallIds {
+    Named,
+    Unnamed,
+}
+
 pub(crate) async fn handle_internal(
     runtime: &Runtime,
     event: HookEvent,
     presentation_options: EmbeddedPresentationOptions,
+    call_ids: ToolCallIds,
 ) -> Handled {
     let (kind, tool) = hook_shape(&event);
     let mut dispatch = None;
     let mut presentation = None;
-    let decision = dispatch_event(runtime, event, &mut dispatch, &mut presentation, &presentation_options).await;
+    let decision = dispatch_event(
+        runtime,
+        event,
+        &mut dispatch,
+        &mut presentation,
+        &presentation_options,
+        call_ids,
+    )
+    .await;
     let presentation = presentation.or_else(|| presentation_for(&decision));
     let (outcome, mut offers) = hook_result(&decision);
     if let Some(presentation) = &presentation {
@@ -519,7 +536,7 @@ fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
         HookEvent::SpawnResume { call, .. } => (HookKind::SpawnResume, Some(call.tool.clone())),
         HookEvent::ToolResult { call, .. } => (HookKind::ToolResult, Some(call.tool.clone())),
         HookEvent::ChildStart { .. } => (HookKind::ChildStart, None),
-        HookEvent::ChildEnd { .. } => (HookKind::ChildEnd, None),
+        HookEvent::ChildEnd { .. } | HookEvent::ChildTurnEnd { .. } => (HookKind::ChildEnd, None),
         HookEvent::ChildReturn { .. } => (HookKind::ChildReturn, None),
         HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
     }
@@ -554,12 +571,14 @@ async fn dispatch_event(
     dispatch: &mut Option<EngineDispatchId>,
     presentation: &mut Option<RemedyPresentation>,
     presentation_options: &EmbeddedPresentationOptions,
+    call_ids: ToolCallIds,
 ) -> HookDecision {
     let mut dispatcher = Dispatcher {
         runtime,
         dispatch,
         presentation,
         options: presentation_options,
+        call_ids,
     };
     match event {
         HookEvent::SessionStart {
@@ -607,6 +626,7 @@ async fn dispatch_event(
         }
         HookEvent::ChildStart { root, child, spawn } => dispatcher.child_start(root, child, spawn),
         HookEvent::ChildEnd { root, child, value } => dispatcher.child_end(root, child, value).await,
+        HookEvent::ChildTurnEnd { root, child } => dispatcher.child_turn_end(root, child).await,
         HookEvent::ChildReturn { root, child, value } => dispatcher.child_return(root, child, value).await,
     }
 }
@@ -621,6 +641,7 @@ struct Dispatcher<'a> {
     /// What a denial or a replacement carries for an embedded harness.
     presentation: &'a mut Option<RemedyPresentation>,
     options: &'a EmbeddedPresentationOptions,
+    call_ids: ToolCallIds,
 }
 
 impl Dispatcher<'_> {
@@ -655,13 +676,10 @@ impl Dispatcher<'_> {
         {
             tracing::warn!(root = %root.0, %error, "the session's peer identity was not recorded");
         }
-        let context = [
-            matches!(launched, LaunchedStart::ClearKept(_)).then_some(CLEAR_KEPT.to_owned()),
-            runtime.file_tracking_enabled().then(|| file_tracking_context(runtime)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let context = [matches!(launched, LaunchedStart::ClearKept(_)).then_some(CLEAR_KEPT.to_owned())]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
         match opened.and_then(|_| runtime.live(&root, &root)) {
             Ok(()) if context.is_empty() => HookDecision::Ack,
             Ok(()) => HookDecision::Context {
@@ -742,7 +760,7 @@ impl Dispatcher<'_> {
         {
             tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
         }
-        if let Err(error) = self.runtime.record_turn_end(&actor) {
+        if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
             tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
         }
         HookDecision::Ack
@@ -779,12 +797,15 @@ impl Dispatcher<'_> {
             {
                 return fold(error, Refusal::Deny);
             }
-            if let Err(error) = self.runtime.record_turn_end(&actor) {
+            // A housekeeping end: it settles what the interrupted turn left open, and leaves
+            // the return this turn declared ahead to the spawn it was declared for.
+            if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Housekeeping) {
                 return fold(error, Refusal::Deny);
             }
         }
         if is_control_tool(&call.tool) {
-            return control_call(self.runtime, &actor, &call, ruling);
+            let named = call_id.as_deref().filter(|_| self.call_ids == ToolCallIds::Named);
+            return control_call(self.runtime, &actor, &call, named, ruling);
         }
         let sent = match call.tool == SEND_MESSAGE {
             true => match self.runtime.peer_send(&actor.root, &call) {
@@ -885,11 +906,6 @@ impl Dispatcher<'_> {
             tracing::debug!(trajectory = %actor.root.0, "control tool outcome absorbed");
             return HookDecision::Ack;
         }
-        if self.runtime.file_tracking_enabled() && crate::api::files::owns(&call) {
-            // The runtime-owned tool admitted its observation before returning via MCP.
-            // A transport/argument failure before execution leaves its reservation intact.
-            return HookDecision::Ack;
-        }
         let failed = matches!(outcome, ToolOutcome::Failure { .. });
         match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
             let (call, call_id, outcome) = (call.clone(), call_id.clone(), outcome.clone());
@@ -955,6 +971,31 @@ impl Dispatcher<'_> {
         }
     }
 
+    async fn child_turn_end(&mut self, root: TrajectoryId, child: TrajectoryId) -> HookDecision {
+        match on_child(
+            self.runtime,
+            &root,
+            &child,
+            MissingStart::Refuse,
+            self.options,
+            |session| async move { session.on_child_turn_end().await },
+        )
+        .await
+        {
+            Ok(decision) => {
+                let actor = Actor {
+                    root,
+                    child: Some(child),
+                };
+                if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
+                    tracing::warn!(%error, "the empty child turn's end was not recorded");
+                }
+                return_decision(None, decision)
+            }
+            Err(error) => refuse(error),
+        }
+    }
+
     /// The subagent's return is checked here and blocked when it may not cross; a block
     /// keeps the subagent running until it returns what may. A child the family never saw
     /// start is blocked too: its return has no fork to cross on.
@@ -982,7 +1023,7 @@ impl Dispatcher<'_> {
                         root: root.clone(),
                         child: Some(child.clone()),
                     };
-                    if let Err(error) = self.runtime.record_turn_end(&actor) {
+                    if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
                         tracing::warn!(root = %root.0, child = %child.0, %error, "the child's end was not recorded");
                     }
                 }
@@ -1101,10 +1142,32 @@ fn continues_for(session: &Session, principal: Option<&ReaderId>) -> Result<(), 
     }
 }
 
-fn control_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall, ruling: Option<Ruling>) -> HookDecision {
+/// `named` is the call's id where the host's MCP client names it to the tool as well.
+fn control_call(
+    runtime: &Runtime,
+    actor: &Actor,
+    call: &ProposedCall,
+    named: Option<&str>,
+    ruling: Option<Ruling>,
+) -> HookDecision {
     let quoted = match quoted_offer(call) {
         Ok(Some(quoted)) => quoted,
         Ok(None) => {
+            // A declaration ahead of the spawn quotes no offer: its arguments and the call name
+            // it. It can be a root's first call, which opens the root as any root call does.
+            if let Ok(args) = serde_json::from_str::<crate::api::ExecuteRemedyPlanArgs>(call.arguments.get()) {
+                if actor.child.is_none()
+                    && let Err(error) =
+                        open_or_reopen(runtime, &actor.root, None, EmbeddedPresentationOptions::default())
+                {
+                    return fold(error, Refusal::Deny);
+                }
+                // Unlike an offer's vouch, a declaration's that did not land is reported: its
+                // execution would otherwise answer as one no hook vouched for.
+                if let Err(error) = runtime.record_vouch(&crate::api::declaration_key(&args, named), actor, ruling) {
+                    return fold(error, Refusal::Deny);
+                }
+            }
             tracing::debug!(trajectory = %actor.root.0, "control tool quotes no offer id");
             return HookDecision::PassControl;
         }
@@ -1648,6 +1711,114 @@ mod tests {
         assert_eq!(late.1["decision"], "block", "a result for the closed call is refused");
     }
 
+    /// A background subagent runs past its parent's turn. Neither the turn end nor the
+    /// settle at the next prompt's first call closes its identified spawn, so the return the
+    /// subagent crosses later still reaches the parent through the spawn's result.
+    #[tokio::test]
+    async fn the_next_prompts_first_call_leaves_a_running_subagents_spawn_open() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        let child = TrajectoryId("cc:s1:a1".to_string());
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let spawn = || HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: spawn_call(),
+            call_id: Some("toolu-spawn".to_string()),
+            spawn: Some(appa_runtime_api::SpawnKind::Single),
+            prompt: None,
+            ruling: None,
+        };
+        let HookDecision::DenyCall { offers, .. } = handle(&runtime, spawn()).await else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(&runtime, &root, &offers).await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = handle(&runtime, spawn()).await else {
+            panic!("the declared spawn releases with its binding");
+        };
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: child.clone(),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            handle(&runtime, HookEvent::TurnEnd { actor: actor.clone() }).await,
+            HookDecision::Ack
+        );
+        handle(
+            &runtime,
+            HookEvent::Prompt {
+                actor: actor.clone(),
+                text: "anything new?".into(),
+                settles: None,
+                peer: None,
+                title: None,
+            },
+        )
+        .await;
+        let next = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: actor.clone(),
+                call: crate::api::ProposedCall {
+                    tool: "host/claude-code/Bash".to_string(),
+                    arguments: crate::api::raw(serde_json::json!({"command": "ls"})),
+                    cwd: None,
+                },
+                call_id: Some("toolu-ls".to_string()),
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+        .await;
+        assert_eq!(next, HookDecision::AllowCall { spawn: None });
+        assert!(!runtime.prompted(&actor), "the first call settled the prompt");
+        assert_eq!(
+            runtime.open_dispatches(&root, &root).len(),
+            2,
+            "the settle left the running subagent's spawn open beside the new call"
+        );
+
+        handle(
+            &runtime,
+            HookEvent::ChildEnd {
+                root: root.clone(),
+                child: child.clone(),
+                value: Some("found it".to_string()),
+            },
+        )
+        .await;
+        let returned = handle(
+            &runtime,
+            HookEvent::SpawnResult {
+                actor: actor.clone(),
+                call: spawn_call(),
+                call_id: Some("toolu-spawn".to_string()),
+                outcome: appa_runtime_api::ToolOutcome::Success {
+                    body: appa_runtime_api::OutcomeBody::Available(r#"{"agentId":"a1"}"#.to_string()),
+                },
+                child: Some(child),
+                value: Some("found it".to_string()),
+            },
+        )
+        .await;
+        assert_eq!(
+            returned,
+            HookDecision::Ack,
+            "the return replays through the spawn's result"
+        );
+        assert_eq!(runtime.open_dispatches(&root, &root).len(), 1, "the spawn closed");
+    }
+
     /// The user typed while the command ran: Claude Code queues the message
     /// and fires the prompt hook at once, then reports the command's
     /// outcome when it finishes. The result must land on the still-open
@@ -1870,6 +2041,69 @@ mod tests {
         assert_eq!(answer["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
+    /// A declaration's vouch that does not land refuses its control call, so the execution
+    /// after it never answers as one no hook vouched for.
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn a_declaration_vouch_that_does_not_land_refuses_the_control_call() {
+        use crate::api::{ExecuteRemedyPlanArgs, Holder, LabelArgs, declaration_key};
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let control = async |label: serde_json::Value| {
+            let event = serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "session_id": "s1",
+                "tool_name": CONTROL_TOOL_FIXTURE_NAME,
+                "tool_input": { "label": label },
+            });
+            let parsed = through_the_codec(&event).expect("the control call parses");
+            handle_internal(
+                &runtime,
+                parsed,
+                EmbeddedPresentationOptions::default(),
+                ToolCallIds::Unnamed,
+            )
+            .await
+            .decision
+        };
+        // Another declaration's control call opens the root first.
+        assert!(matches!(
+            control(serde_json::json!({ "trust": "trusted" })).await,
+            HookDecision::PassControl
+        ));
+        let args = || ExecuteRemedyPlanArgs {
+            offer_id: None,
+            label: Some(LabelArgs {
+                trust: None,
+                audience: None,
+            }),
+            return_schema: None,
+        };
+        runtime.store().fail_commit_after(0);
+        let refused = control(serde_json::json!({})).await;
+        assert!(!matches!(refused, HookDecision::PassControl), "{refused:?}");
+        assert_eq!(
+            runtime
+                .discover_holder(&declaration_key(&args(), None))
+                .expect("the discovery reads"),
+            Holder::Nobody,
+            "nothing was vouched"
+        );
+        assert!(matches!(
+            control(serde_json::json!({})).await,
+            HookDecision::PassControl
+        ));
+        let declared = runtime.execute_remedy_plan(args(), None, None).await;
+        assert!(!declared.is_error, "{}", declared.text);
+        assert_eq!(
+            runtime
+                .discover_holder(&declaration_key(&args(), None))
+                .expect("the discovery reads"),
+            Holder::Nobody,
+            "the declaration spent the vouch"
+        );
+    }
+
     #[tokio::test]
     async fn the_control_tool_opens_no_dispatch() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -1887,7 +2121,13 @@ mod tests {
         // The control call is passed through rather than released: the engine never sees it,
         // so its entry names no dispatch, where an ordinary call's names the one it opened.
         let parsed = through_the_codec(&event).expect("the control call parses");
-        let control = handle_internal(&runtime, parsed, EmbeddedPresentationOptions::default()).await;
+        let control = handle_internal(
+            &runtime,
+            parsed,
+            EmbeddedPresentationOptions::default(),
+            ToolCallIds::Unnamed,
+        )
+        .await;
         assert!(
             matches!(control.decision, HookDecision::PassControl),
             "the control tool is passed through, not checked: {:?}",
@@ -1909,6 +2149,7 @@ mod tests {
             &runtime,
             through_the_codec(&call).expect("the call parses"),
             EmbeddedPresentationOptions::default(),
+            ToolCallIds::Unnamed,
         )
         .await;
         assert!(

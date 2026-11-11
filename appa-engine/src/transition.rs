@@ -20,7 +20,7 @@ use crate::profile::PolicyRevision;
 use crate::projection::{Projection, Views};
 use crate::registry::TrustChain;
 use crate::value::{
-    ChildReturnId, DispatchId, FileBasis, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
+    ChildReturnId, DispatchId, ForkId, Provenance, RawResultDigest, ResolvedCall, TrajectoryId, ValueBody,
 };
 
 /// The identity of one complete policy-content payload for one trajectory. Runtime
@@ -190,6 +190,8 @@ pub enum OfferConsult {
     Authorities {
         call: ResolvedCall,
         required: Vec<crate::plan::RequiredRuling>,
+        /// The narrowing approving this offer also accepts, so a reviewer can be told.
+        narrowing: Option<crate::check::Narrowing>,
     },
     /// An input-substitution hop: the sanitizer rewrites the arguments of the call this offer
     /// stands on. The runtime derives the sanitizer's input from the call, and annotates the
@@ -208,7 +210,10 @@ pub enum OfferConsult {
         tool: Option<crate::value::ToolName>,
     },
     Replay(OfferOutcome),
-    Stale,
+    /// Nothing executes: the offer's basis moved, or its subject holds no stage to settle.
+    Stale {
+        subject: crate::basis::SubjectKey,
+    },
 }
 
 /// What the runtime resolved for a selected offer. There is no "no answer" variant: a consult that
@@ -328,8 +333,12 @@ pub enum OutcomeBody {
 /// engine event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Evidence {
-    /// Trusted host pin for the file operation at `position` in a proposal batch.
-    File { position: usize, basis: FileBasis },
+    /// The held peer message the proposal at `position` in a proposal batch reads, pinned by the
+    /// trusted runtime from its own store.
+    Held {
+        position: usize,
+        message: crate::value::HeldMessage,
+    },
     /// An output sanitizer's derivation of a withheld value.
     Sanitizer {
         sanitizer: SanitizerName,
@@ -404,6 +413,8 @@ pub struct Blocked {
     pub call: ResolvedCall,
     pub block: PlannedBlock,
     pub block_id: crate::value::BlockId,
+    /// The kind of spawn a marked spawn's block holds, or `None` for an ordinary call.
+    pub spawn: Option<SpawnKind>,
     /// The offer opened for each engine-side plan, paired with the plan it binds. Runtime renders
     /// these to the model and routes `execute_remedy_plan` by them; it mints none of its own.
     pub offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
@@ -495,7 +506,7 @@ pub enum TransitionError {
     #[error("the report contradicts the observation this dispatch already checkpointed")]
     ObservationMismatch,
     #[error("a failure carries a body only for a call that touches a tracked file")]
-    FailureBodyOutsideFile,
+    FailureBodyOutsideHeld,
     #[error(
         "this dispatch closed as indeterminate and observed nothing, so a later report has no observation to check against"
     )]
@@ -1268,12 +1279,12 @@ impl<'a> Sequence<'a> {
                 receiving,
                 proposed_effects,
                 annotation,
-                file_basis,
+                held,
                 evidence,
                 terms,
                 ..
             } => {
-                let call = crate::projection::opened_call(tool, arguments, annotation, file_basis);
+                let call = crate::projection::opened_call(tool, arguments, annotation, held);
                 self.opened(trajectory, dispatch, &call, released, evidence)?;
                 self.dispatch_opened_contract(trajectory, &call, proposed_label, receiving, proposed_effects, terms)?;
             }
@@ -1483,7 +1494,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::EffectsMismatch);
         }
         let current = views.current_label();
-        if proposed_label != &current.combine(&call.output_label(&checked, &current)) || receiving != &current {
+        if proposed_label != &current.combine(&call.output_label(&checked)) || receiving != &current {
             return Err(TransitionRefusal::ForgedLabel);
         }
         // The terms a release pins are the contract it was checked under, exactly.
@@ -1525,9 +1536,7 @@ impl<'a> Sequence<'a> {
                 Err(TransitionRefusal::ContradictedSuccess)
             }
             (CloseOutcome::FailureWithBody { .. }, false)
-                if views
-                    .dispatch_call(dispatch)
-                    .is_none_or(|call| call.file_basis().is_none()) =>
+                if views.dispatch_call(dispatch).is_none_or(|call| call.held().is_none()) =>
             {
                 Err(TransitionRefusal::ForgedEvidence)
             }
@@ -1762,7 +1771,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::BlockReused);
         }
         let expansions = self.recorded_expansions(evidence)?;
-        let menu = self.stage_menu(&views, trajectory, act, call, subject, &expansions)?;
+        let menu = self.stage_menu(&views, trajectory, act, call, subject, plan, &expansions)?;
         self.audit_reads(&expansions);
         if !menu.contains(plan) {
             return Err(TransitionRefusal::UnbackedOffer);
@@ -1782,6 +1791,7 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn stage_menu(
         &self,
         views: &Views,
@@ -1789,6 +1799,7 @@ impl<'a> Sequence<'a> {
         act: &crate::basis::DecidedAct,
         call: &crate::value::CanonicalDigest,
         subject: &crate::basis::SubjectKey,
+        plan: &crate::plan::ExecutableRemedyPlan,
         expansions: &Expansions,
     ) -> Result<Vec<crate::plan::ExecutableRemedyPlan>, TransitionRefusal> {
         // The pins of the record the surfacing act continues are inherited evidence.
@@ -1836,26 +1847,34 @@ impl<'a> Sequence<'a> {
                 // The live act answered this whole gate before planning; the enumeration may
                 // read less, but the gathered evidence is still the operation's own ask.
                 self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &block));
-                Ok(crate::plan::plan(
-                    self.engine.registry(),
-                    views,
-                    crate::plan::BlockedCall {
-                        call: candidate,
-                        contract: &contract,
-                        raw: &block,
-                        stage: &stage,
-                        role,
-                    },
-                    &context,
-                )
+                let blocked = || crate::plan::BlockedCall {
+                    call: candidate,
+                    contract: &contract,
+                    raw: &block,
+                    stage: &stage,
+                    role,
+                };
                 // A recorded act whose pinned evidence leaves an enumeration read undecided
                 // reconstructed a menu the evidence cannot back.
-                .map_err(TransitionRefusal::from)?
-                .plans
-                .iter()
-                .filter_map(crate::plan::RemedyPlan::executable)
-                .cloned()
-                .collect())
+                let menu: Vec<crate::plan::ExecutableRemedyPlan> =
+                    crate::plan::plan(self.engine.registry(), views, blocked(), &context)
+                        .map_err(TransitionRefusal::from)?
+                        .plans
+                        .iter()
+                        .filter_map(crate::plan::RemedyPlan::executable)
+                        .cloned()
+                        .collect();
+                // A log an earlier planner wrote offers an undeclared spawn its bundled menu.
+                if !menu.contains(plan)
+                    && crate::plan::Declaring::of(role, views, candidate) != crate::plan::Declaring::No
+                {
+                    let bundled = crate::plan::bundled_spawn_menu(self.engine.registry(), views, blocked(), &context)
+                        .map_err(TransitionRefusal::from)?;
+                    if bundled.contains(plan) {
+                        return Ok(bundled);
+                    }
+                }
+                Ok(menu)
             }
             crate::basis::SubjectKey::ConfinedResult(dispatch) => {
                 if dispatch.trajectory() != trajectory || dispatch.digest() != call {
@@ -1972,10 +1991,11 @@ impl<'a> Sequence<'a> {
         // One approval per offer, and one current approval per call: a second would leave the
         // release choosing between two plans the agent selected separately, and only one of them
         // is the choice it made.
-        if views.approval(offer).is_some() || views.current_approval(call).is_some() {
+        // A marked spawn's declaration stands beside the approval of its other gaps.
+        let offered = &recorded.plan;
+        if views.approval(offer).is_some() || views.approval_pending(call, offered.declares_only()) {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
-        let offered = &recorded.plan;
         if views.standing_call(&recorded.subject) != Some(call)
             || call.digest() != recorded.call
             || plan != &offered.id
@@ -1990,8 +2010,18 @@ impl<'a> Sequence<'a> {
         }) {
             return Err(TransitionRefusal::UnbackedApproval);
         }
+        let marked = matches!(
+            views.call_role(&recorded.subject),
+            crate::check::CallRole::MarkedSpawn(_)
+        );
         match (offered.return_step(), return_policy) {
-            (None, None) => {}
+            (None, None) if !marked => {}
+            // The plan of a declared spawn's other gaps carries the declaration that stands.
+            (None, Some(policy))
+                if marked
+                    && views
+                        .declaration(call)
+                        .is_some_and(|(_, declaration)| declaration.return_policy.as_ref() == Some(policy)) => {}
             (Some(step), Some(policy)) => {
                 crate::plan::declared_return_policy(self.engine.registry(), &views, step, policy)
                     .map_err(|_| TransitionRefusal::UnbackedReturnPolicy)?;
@@ -2127,6 +2157,52 @@ impl<'a> Sequence<'a> {
         Ok(())
     }
 
+    /// The declaration-only approvals current beside a covering approval that is spent: they
+    /// declare the same return for the same call, and the covering one carried it.
+    fn declarations_beside(
+        &self,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+    ) -> Vec<crate::value::OfferId> {
+        let views = self.projection.view(trajectory);
+        let Some(spent) = views
+            .approval(offer)
+            .filter(|spent| spent.return_policy.is_some() && !spent.declares_only())
+        else {
+            return Vec::new();
+        };
+        views
+            .approvals_for(&spent.call)
+            .filter(|(declared, approval)| {
+                declared != offer
+                    && approval.declares_only()
+                    && approval.return_policy == spent.return_policy
+                    && self.stood(
+                        trajectory,
+                        &crate::basis::SubjectKey::Approval(*declared),
+                        &approval.basis,
+                    )
+            })
+            .map(|(declared, _)| declared)
+            .collect()
+    }
+
+    /// Did a record at `recorded` stand where the act being decided began? The walk that
+    /// derives the act's advance stands there itself; admission reads that point back through
+    /// what the act still owes, as [`Self::may_spend`] does.
+    fn stood(
+        &self,
+        trajectory: &TrajectoryId,
+        subject: &crate::basis::SubjectKey,
+        recorded: &crate::basis::PolicyBasis,
+    ) -> bool {
+        let now = self.projection.view(trajectory).basis_for(subject);
+        match &self.declared {
+            Some(open) => recorded.advanced_by(&open.owed, trajectory, subject) == now,
+            None => *recorded == now,
+        }
+    }
+
     /// A staged candidate is taken the way an approval is spent, except that only its own
     /// subject must have stood still. The flow moves on every admitted value, and a narrowing
     /// must leave the derivation takeable: the proposal that takes it is judged against the
@@ -2242,8 +2318,13 @@ impl<'a> Sequence<'a> {
             } => effect_advance(!effects.is_empty()),
             // A denial changes what may be offered for that rendered call.
             Fact::Denial { trajectory, .. } => BasisAdvance::flow(trajectory),
-            Fact::CallApprovalConsumed { offer, .. } => BasisAdvance {
-                subjects: vec![crate::basis::SubjectKey::Approval(*offer)],
+            // A covering approval carried the declaration that stood beside it, so spending it
+            // spends that declaration too: a declaration covers one spawn.
+            Fact::CallApprovalConsumed { trajectory, offer, .. } => BasisAdvance {
+                subjects: std::iter::once(*offer)
+                    .chain(self.declarations_beside(trajectory, offer))
+                    .map(crate::basis::SubjectKey::Approval)
+                    .collect(),
                 ..BasisAdvance::default()
             },
             Fact::OfferAccepted { trajectory, offer } => match self.projection.view(trajectory).offer(offer) {
@@ -2347,11 +2428,11 @@ impl<'a> Sequence<'a> {
                     annotation,
                     subject,
                     evidence,
-                    file_basis,
+                    held,
                     ..
                 },
             ) if dispatch == &next.dispatch => {
-                let opened = crate::projection::opened_call(tool, arguments, annotation, file_basis);
+                let opened = crate::projection::opened_call(tool, arguments, annotation, held);
                 if opened != next.call || subject != &next.subject {
                     return Err(TransitionRefusal::UnbackedDecision);
                 }
@@ -2515,11 +2596,12 @@ impl<'a> Sequence<'a> {
                 views
                     .approvals_for(call)
                     .map(|(offer, approval)| (offer, approval.basis))
-                    .find(|(offer, basis)| {
+                    .filter(|(offer, basis)| {
                         self.may_spend(trajectory, &crate::basis::SubjectKey::Approval(*offer), basis)
                             .is_ok()
                     })
                     .map(|(offer, _)| offer)
+                    .collect()
             },
             &|views, call, taken| {
                 views
@@ -2670,7 +2752,7 @@ impl<'a> Sequence<'a> {
                                 Some(crate::plan::OutputRemedy::Sanitize(name)) => crate::plan::bound_contribution(
                                     self.engine.registry(),
                                     &contract,
-                                    &call.output_label(&contract, &views.current_label()),
+                                    &call.output_label(&contract),
                                     name,
                                     &self.context(expansions),
                                 )
@@ -2804,10 +2886,10 @@ impl<'a> Sequence<'a> {
                             } else {
                                 self.observed_as(trajectory, dispatch, &digest)?;
                             }
-                            let receiving = views
+                            views
                                 .receiving_bound(dispatch)
                                 .ok_or(TransitionRefusal::UnknownDispatch)?;
-                            call.output_label_from(&contract.output_label(), receiving)
+                            call.output_label_from(&contract.output_label())
                         }
                     },
                 };
@@ -3162,7 +3244,7 @@ impl<'a> Sequence<'a> {
                 .projection
                 .dispatch_call_of(dispatch)
                 .expect("dispatch_contract resolved this dispatch's recorded call")
-                .output_label_from(&contract.output_label(), &receiving),
+                .output_label_from(&contract.output_label()),
             Some((body, _)) => body.label.clone(),
         };
         let label = sanitized_label(registered.derive_output(
@@ -3293,7 +3375,7 @@ impl<'a> Sequence<'a> {
         }
         // A rewrite carries only the arguments and a fresh annotation pin, never a host-pinned
         // file basis.
-        if registry.selects_alike(call, predecessor) && call.file_basis().is_some() {
+        if registry.selects_alike(call, predecessor) && call.held().is_some() {
             return Err(TransitionRefusal::ForgedLabel);
         }
         let stage = views.call_stage(subject);
@@ -3605,6 +3687,7 @@ mod tests {
     /// The test policy over the trust chain `ranks`, lowest first.
     fn engine_over(ranks: &[&str]) -> Engine {
         let config = crate::registry::RegistryConfig {
+            recorders: Default::default(),
             trust_chain: crate::registry::TrustChain::new(ranks.iter().map(|rank| rank.to_string()).collect()),
             tools: vec![crate::contract::ToolDeclaration::Declared(note_tool())],
             annotators: vec![],
@@ -3738,7 +3821,7 @@ mod tests {
     }
 
     #[test]
-    fn pinned_file_basis_changes_batch_authorization() {
+    fn pinned_held_changes_batch_authorization() {
         let engine = engine();
         let first = vec![opening(&engine, &traj())];
         let call = engine.resolve_call(ToolName::new("note"), b"{}").unwrap();
@@ -3747,11 +3830,11 @@ mod tests {
             arguments: call.canonical_arguments().canonical_bytes().to_vec(),
             annotation: None,
         };
-        let basis = FileBasis::Read(crate::value::FileSource {
-            version: "v1".into(),
+        let basis = crate::value::HeldMessage {
+            id: "v1".into(),
             digest: "content".into(),
             label: Label::new(Trust::new(0), Audience::restricted([ReaderId::new("insider")])),
-        });
+        };
         let event = EngineEvent::Proposals(ProposalBatch {
             id: ProposalBatchId::new("file-read"),
             trajectory: traj(),
@@ -3759,9 +3842,9 @@ mod tests {
             proposals: vec![proposal],
             spawn: None,
             offer_nonce: nonce(),
-            evidence: vec![Evidence::File {
+            evidence: vec![Evidence::Held {
                 position: 0,
-                basis: basis.clone(),
+                message: basis.clone(),
             }],
             audience: crate::audience::AudienceEvidence::default(),
         });
@@ -3953,6 +4036,7 @@ mod tests {
     /// The test policy over two ranks with `note` declared as `note`, at `revision`.
     fn engine_noting(note: Option<ToolAnnotation>, revision: u64) -> Engine {
         let config = crate::registry::RegistryConfig {
+            recorders: Default::default(),
             trust_chain: crate::registry::TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
             tools: note
                 .into_iter()

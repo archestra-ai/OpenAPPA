@@ -1,9 +1,11 @@
 name: Publish OCI images
 
-# Builds the five OpenAPPA images, merges the four multi-arch indexes, and
-# attaches the caller's tags. Release callers pass one immutable v* tag.
+# Builds the five OpenAPPA images into ghcr.io/archestra-ai/ci staging,
+# merges the four multi-arch indexes, and attaches the caller's tags. Release
+# callers pass one immutable v* tag; release.yml then has
+# archestra-ai/release-publisher publish the staged digests to ghcr.io/archestra-ai.
 # CI callers pass rolling sha-/pr-/main/latest tags. Charts stay in
-# release.yml: their versions are SemVer without v and must not be GC'd.
+# release.yml. Nothing here writes the public ghcr.io/archestra-ai names.
 #
 # Repository variable APPA_YELL_ENDPOINT, the receiver `appa yell` reports to,
 # is exported into the appa-runtime image so a runtime in a cluster can send.
@@ -42,14 +44,27 @@ on:
         required: false
         type: boolean
         default: false
-    secrets:
-      APPA_GCP_WORKLOAD_IDENTITY_PROVIDER:
-        required: true
+    outputs:
+      appa_runtime_digest:
+        description: Staged appa-runtime index digest
+        value: ${{ jobs.publish-shared-images.outputs.appa_runtime_digest }}
+      appa_kagent_adk_digest:
+        description: Staged appa-kagent-adk index digest
+        value: ${{ jobs.publish-shared-images.outputs.appa_kagent_adk_digest }}
+      appa_demo_tools_digest:
+        description: Staged appa-demo-tools index digest
+        value: ${{ jobs.publish-shared-images.outputs.appa_demo_tools_digest }}
+      appa_demo_mocks_digest:
+        description: Staged appa-demo-mocks index digest
+        value: ${{ jobs.publish-shared-images.outputs.appa_demo_mocks_digest }}
+      appa_kagent_adk_go_digest:
+        description: Staged appa-kagent-adk-go (and golang-adk) digest
+        value: ${{ jobs.publish-images.outputs.go_digest }}
 
 permissions: {}
 
 env:
-  REGISTRY: europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public
+  REGISTRY: ghcr.io/archestra-ai/ci
 
 jobs:
   publish-shared-image-legs:
@@ -94,7 +109,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read # Required to check out the source that is published.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      packages: write # Required to push to the ghcr.io/archestra-ai/ci staging packages.
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,12 +118,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Authenticate to Artifact Registry
-        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
-          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          registry: europe-west1-docker.pkg.dev
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
@@ -228,8 +243,15 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: read # Required to download image digest artifacts.
+      attestations: write # Required to record build provenance for the published images.
       contents: read # Required to check out the source that is published.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      id-token: write # Required to sign the build provenance.
+      packages: write # Required to push to staging and store its provenance there.
+    outputs:
+      appa_runtime_digest: ${{ steps.merge.outputs.appa_runtime_digest }}
+      appa_kagent_adk_digest: ${{ steps.merge.outputs.appa_kagent_adk_digest }}
+      appa_demo_tools_digest: ${{ steps.merge.outputs.appa_demo_tools_digest }}
+      appa_demo_mocks_digest: ${{ steps.merge.outputs.appa_demo_mocks_digest }}
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -269,20 +291,21 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
 
-      - name: Authenticate to Artifact Registry
-        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
-          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          registry: europe-west1-docker.pkg.dev
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       - name: Merge and tag image manifests
+        id: merge
         env:
           IMMUTABLE: ${{ inputs.immutable }}
           SOURCE_COMMIT: ${{ inputs.source_commit }}
           TAGS: ${{ inputs.tags }}
         run: |
-          test "$(python3 scripts/appa-oci-tags.py registry)" = "$REGISTRY"
+          test "$(python3 scripts/appa-oci-tags.py staging)" = "$REGISTRY"
           mapfile -t tags < <(printf '%s\n' "$TAGS" | awk 'NF')
           if [ "${#tags[@]}" -eq 0 ]; then
             echo "::error::no image tags to publish"
@@ -325,6 +348,11 @@ jobs:
             # Record the root plus platform manifests from this exact digest.
             # The release descriptor is assembled only after every build ends.
             digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${REGISTRY}/${image}:${tags[0]}")
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::${image} did not resolve to a manifest digest"
+              exit 1
+            fi
+            echo "${image//-/_}_digest=${digest}" >> "$GITHUB_OUTPUT"
             case "$image" in
               appa-runtime) role=runtime ;;
               appa-kagent-adk) role=python ;;
@@ -335,6 +363,38 @@ jobs:
               | python3 scripts/appa-image-descriptor.py "$digest" \
               > "/tmp/appa-generation-images/${role}.json"
           done
+
+      - name: Attest appa-runtime provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-runtime
+          subject-digest: ${{ steps.merge.outputs.appa_runtime_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest appa-kagent-adk provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-kagent-adk
+          subject-digest: ${{ steps.merge.outputs.appa_kagent_adk_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest appa-demo-tools provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-demo-tools
+          subject-digest: ${{ steps.merge.outputs.appa_demo_tools_digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest appa-demo-mocks provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-demo-mocks
+          subject-digest: ${{ steps.merge.outputs.appa_demo_mocks_digest }}
+          push-to-registry: true
+          create-storage-record: false
 
       - name: Upload shared image identities
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -349,8 +409,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
+      attestations: write # Required to record build provenance for the published image.
       contents: read # Required to check out the source that is published.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      id-token: write # Required to sign the build provenance.
+      packages: write # Required to push to staging and store its provenance there.
+    outputs:
+      go_digest: ${{ steps.go-image.outputs.digest }}
     steps:
       - name: Checkout project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -359,12 +423,12 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Authenticate to Artifact Registry
-        uses: archestra-ai/.github/actions/google-auth@840a8b2c85a9deb01869cc956c9c77fbf50ccd68 # v1.1.0
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
-          service_account: appa-release-publish@friendly-path-465518-r6.iam.gserviceaccount.com
-          workload_identity_provider: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          registry: europe-west1-docker.pkg.dev
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
@@ -445,6 +509,7 @@ jobs:
             org.opencontainers.image.version=${{ inputs.version_label }}
 
       - name: Alias the Go image to the name kagent derives
+        id: go-image
         env:
           GO_DIGEST: ${{ steps.tags.outputs.published_digest || steps.adk-go.outputs.digest }}
           PUBLISHED: ${{ steps.tags.outputs.published_digest }}
@@ -473,10 +538,27 @@ jobs:
             echo "::error::golang-adk resolves to ${alias_digest}, not ${GO_DIGEST}"
             exit 1
           fi
+          echo "digest=${GO_DIGEST}" >> "$GITHUB_OUTPUT"
           mkdir -p /tmp/appa-generation-images
           docker buildx imagetools inspect --raw "${REGISTRY}/golang-adk@${GO_DIGEST}" \
             | python3 scripts/appa-image-descriptor.py "$GO_DIGEST" --single-platform linux/amd64 \
             > /tmp/appa-generation-images/go.json
+
+      - name: Attest appa-kagent-adk-go provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/appa-kagent-adk-go
+          subject-digest: ${{ steps.go-image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Attest golang-adk provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/golang-adk
+          subject-digest: ${{ steps.go-image.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
       - name: Upload Go image identity
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

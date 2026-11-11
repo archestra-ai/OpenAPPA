@@ -3,7 +3,7 @@ mod common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw, root};
+use common::{actor, battery_runtime, members_source, propose, ran, raw, root, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -22,6 +22,10 @@ fn execute(name: &str) -> ProposedCall {
 }
 
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
+    runtime_binding(dir, "").await
+}
+
+async fn runtime_binding(dir: &tempfile::TempDir, bindings: &str) -> Arc<Runtime> {
     let source = members_source().await;
     battery_runtime(
         dir.path(),
@@ -43,15 +47,71 @@ review_timeout_ms = 600000
 max_body_bytes = 1048576
 
 [externals.authorities.sentry-operator]
-builtin = "approve"
+# Approves when asked. The stock "approve" is applied at the block, which this test reads.
+command = ["/bin/sh", "-c", 'cat > /dev/null; printf "%s" "{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}"']
 
 [externals.audience.people]
 url = "{source}"
 selectors = [{{ template = "members", feeds = "internal" }}]
-"#
+{bindings}"#
         ),
     )
     .await
+}
+
+/// Public redaction is offered only on issue and event records. A DSN, an attachment, or
+/// a name outside the catalog returns nothing a model could safely release to `public`,
+/// so those results offer instruction stripping alone.
+#[tokio::test]
+async fn public_redaction_is_offered_only_on_issue_and_event_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime_binding(
+        &dir,
+        r#"
+[externals.sanitizers."sentry.strip-instructions"]
+builtin = "claude-code"
+
+[externals.sanitizers."sentry.redact-for-public"]
+builtin = "claude-code"
+"#,
+    )
+    .await;
+    let offered = |decision: &HookDecision, sanitizer: &str| match decision {
+        HookDecision::DenyCall { feedback, .. } => feedback.contains(&format!("Use sanitizer {sanitizer}'s result")),
+        other => panic!("the call narrows the trajectory, got {other:?}"),
+    };
+
+    for record in [
+        execute("get_issue_details"),
+        execute("search_issue_events"),
+        call("search_events", serde_json::json!({ "organizationSlug": "acme" })),
+    ] {
+        let decision = propose(&runtime, record.clone()).await;
+        assert!(
+            offered(&decision, "sentry.redact-for-public"),
+            "{}: {decision:?}",
+            record.arguments
+        );
+        assert!(
+            offered(&decision, "sentry.strip-instructions"),
+            "{}: {decision:?}",
+            record.arguments
+        );
+    }
+    for other in [
+        execute("find_dsns"),
+        execute("get_event_attachment"),
+        execute("not_a_catalog_tool"),
+    ] {
+        let decision = propose(&runtime, other.clone()).await;
+        assert!(
+            !offered(&decision, "sentry.redact-for-public"),
+            "{}: {decision:?}",
+            other.arguments
+        );
+    }
+    let dsns = propose(&runtime, execute("find_dsns")).await;
+    assert!(offered(&dsns, "sentry.strip-instructions"), "{dsns:?}");
 }
 
 /// A catalog read behind the proxy narrows the trajectory like the listed reads; the
@@ -63,7 +123,7 @@ async fn the_proxy_is_read_by_its_inner_tool_name() {
     let runtime = runtime(&dir).await;
 
     let read = execute("get_issue_details");
-    let offer = offer_of(&propose(&runtime, read.clone()).await);
+    let offer = unsanitized_offer_of(&propose(&runtime, read.clone()).await);
     assert!(matches!(
         runtime.execute_remedy(&actor(), offer).await,
         RemedyOutcome::Authorized { .. }
@@ -125,7 +185,7 @@ async fn a_write_needs_review_and_records_its_effect() {
         let decision = propose(&runtime, write.clone()).await;
         assert!(!matches!(decision, HookDecision::AllowCall { .. }));
         assert!(matches!(
-            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }
         ));
         assert_eq!(

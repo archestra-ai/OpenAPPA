@@ -2,46 +2,47 @@
 
 ## Release Please PR authentication
 
-`Release OpenAPPA` creates and updates release PRs as `archestra-ci[bot]`, the
-same organization-owned **Archestra CI** App used by Archestra's Release Please
-workflow. Its installation already includes `archestra-ai/OpenAPPA`.
+`Release OpenAPPA` creates and updates release PRs, and creates release tags, as
+`archestra-releaser[bot]`, the organization-owned **archestra-releaser** App.
+Its installation includes `archestra-ai/OpenAPPA`. It is the only bypass actor
+on the `v*` tag ruleset.
 
-The `release-pr` job requests a token for **OpenAPPA only**, with Contents,
-Issues, and Pull requests write permissions. Both Release Please and the
-lockfile/marketplace synchronization push use that token. App-authenticated PR
-events start CI without the workflow approval required for PR events generated
-with `GITHUB_TOKEN`. The job's `GITHUB_TOKEN` has Contents read access, checkout
-does not persist credentials, and the token action revokes its token on completion.
-Release creation and asset publication keep their separate credentials.
+Release Please runs through the organization's shared workflow,
+`archestra-ai/.github/.github/workflows/release-please.yml`, which always
+authenticates as the App and never with `GITHUB_TOKEN`. `create-releases` creates
+the draft release for a merged release PR, and `release-pr` then creates or
+updates the next release PR. The shared workflow requests a token for the
+calling repository only, with Contents and Pull requests write permissions, and
+its job holds no `GITHUB_TOKEN` permissions. `sync-release-pr` pushes the
+lockfile/marketplace synchronization with its own token for **OpenAPPA only**,
+with Contents write. App-authenticated PR events start CI without the workflow
+approval required for PR events generated with `GITHUB_TOKEN`. Checkout does not
+persist credentials, and every token is revoked when its job completes. Asset
+publication keeps its separate credentials.
 
-An organization owner configures these **OpenAPPA Actions repository secrets**:
+The App's credentials are secrets of the **`releaser` environment**. Only `main`
+can deploy to it, and admins cannot bypass that rule. Pull request workflows
+therefore cannot read the key. The environment is defined in
+`archestra-ai/infra` (`github/org/environments.tf`).
 
 | Secret | Value |
 | --- | --- |
-| `ARCHESTRA_RELEASER_GITHUB_APP_ID` | `1667068` |
-| `ARCHESTRA_RELEASER_GITHUB_APP_PRIVATE_KEY` | The complete PEM key for Archestra CI |
+| `APP_ID` | `5655681` |
+| `APP_PRIVATE_KEY` | The complete PEM key for archestra-releaser |
 
-App settings: `https://github.com/organizations/archestra-ai/settings/apps/archestra-ci`.
-Keep the existing selected-repository installation and App permissions. The
-workflow does not request Actions or Workflows write access, or any ruleset bypass.
+App settings: `https://github.com/organizations/archestra-ai/settings/apps/archestra-releaser`.
 
 An App private key can mint tokens for every repository in its installation;
-the workflow's token restriction does not restrict the key itself. The owner must
-approve making this credential available to OpenAPPA and enter it directly in
-GitHub's secure secret UI. GitHub cannot reveal Archestra's existing secret value.
-Do not paste private keys into chat, files, logs, or PRs.
-
-After configuration and merge, verify the next release PR update starts CI as
-`archestra-ci[bot]`. Existing runs awaiting approval still need maintainer
-approval or a subsequent App-authenticated PR update. This change does not
-approve or merge release PRs.
+the workflow's token restriction does not restrict the key itself. An
+organization owner enters it directly with `gh secret set APP_PRIVATE_KEY --env
+releaser -R archestra-ai/OpenAPPA`. Do not paste private keys into chat, files,
+logs, or PRs.
 
 ## Runtime update automation
 
 After `Release OpenAPPA` publishes a complete GitHub release, it calls
-`Update OpenAPPA in Archestra`. The `release: published` event also handles
-releases published manually. The explicit call is needed because GitHub does
-not start another release workflow for releases created with `GITHUB_TOKEN`.
+`Update OpenAPPA in Archestra`. For a release published any other way, dispatch
+the updater on main with the release tag (see [Retry or backfill](#retry-or-backfill)).
 
 Only canonical stable tags such as `v1.2.3` are supported. Drafts and prereleases
 do not produce updates. The updater verifies the published release, resolves
@@ -106,10 +107,12 @@ release publishing, or organization permission is required.
 
 After approving registration and installation, an organization owner uses
 GitHub's secure UI to generate/download the App private key and enter it directly
-as an Actions repository secret in **OpenAPPA**:
+as an Actions secret of the **OpenAPPA** `archestra-update` environment. That
+environment admits main only, and only the publishing job names it:
 
-- Actions variable: `APPA_ARCHESTRA_UPDATER_APP_ID` (the registered numeric App ID).
-- Actions secret: `APPA_ARCHESTRA_UPDATER_PRIVATE_KEY` (the complete PEM key).
+- Actions repository variable: `APPA_ARCHESTRA_UPDATER_APP_ID` (the registered numeric App ID).
+- Actions environment secret: `APPA_ARCHESTRA_UPDATER_PRIVATE_KEY` in
+  `archestra-update` (the complete PEM key).
 
 Do not paste the key into chat, source files, logs, or a PR. Do not share the
 secret with other repositories. App IDs are public configuration; private keys

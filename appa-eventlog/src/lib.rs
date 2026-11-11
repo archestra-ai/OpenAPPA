@@ -1,14 +1,13 @@
-//! # appa-eventlog — authoritative trajectory and workspace event streams
+//! # appa-eventlog — the authoritative trajectory log
 //!
 //! This crate stores append-only histories and enforces compare-and-swap ordering for every
 //! state transition they own. A root trajectory and its branches append to one shared log. It
 //! holds two streams at one position: the engine's lasting facts, and the host's own observations —
 //! what a harness saw of its inventory, its calls, its turns and the standing it recorded for them. The stored
 //! policy files are immutable, content-addressed inputs, and each deployment's policy revisions
-//! name them in order. A canonical file workspace has its own
-//! event stream because independent root families can share it. Everything else — a branch's
-//! parent, whether it has ended, which dispatch is open, whether an offer still stands, file
-//! versions, Labels, receipts and reservations — is projected by replaying the owning stream.
+//! name them in order. Everything else — a branch's parent, whether it has ended, which dispatch
+//! is open, whether an offer still stands, receipts and reservations — is projected by replaying
+//! the log.
 //!
 //! This crate is where the log is written and read. The record encoding, the database, and the
 //! conditional append are private to it: a caller hands it [`Fact`]s and gets [`Log`]s back, and
@@ -19,7 +18,6 @@
 //! The durable structures are:
 //!
 //! - the log itself, one row per appended batch, keyed by the root trajectory;
-//! - workspace file events, one row per appended transition, keyed by canonical workspace;
 //! - the stored policy files, content addressed by the SHA-256 of their exact bytes, write-once
 //!   and shared by every revision that names them;
 //! - deployments and their policy revisions: each deployment's head revision, and the policy
@@ -28,8 +26,6 @@
 //!   same transaction as the record that names it. This is the one derived table: it answers
 //!   which families stand behind a key without a pass over every family's rows, and it cannot
 //!   disagree with the log because a record and its key row commit or roll back together;
-//! - file roots, a derived root-to-workspace lookup written in the same transaction as the
-//!   authoritative `RootBound` workspace event;
 //! - operations and processed results — typed receipts for idempotent claims, each pending one
 //!   under the lease of the owner that claimed it. They are not engine facts. SQLite and Memory
 //!   keep them beside the log; PostgreSQL hosts install the equivalent `openappa_*` tables
@@ -65,7 +61,8 @@
 //! moves the head therefore orders against every such append: each stamped batch committed after
 //! it was decided at the revision it published, and a batch decided before it is refused as
 //! [`AppendError::PolicyMoved`] for its caller to decide again. A decided batch that names no
-//! revision is refused as [`AppendError::Unstamped`]; a host-only batch is not fenced.
+//! revision is refused as [`AppendError::Unstamped`]; a host-only batch is fenced only when its
+//! writer judged it under a revision ([`Step::append_host_fenced`]).
 //!
 //! A log whose opening names no deployment was opened before policy revisions. It is refused on
 //! read as [`ReadError::LegacyFamily`].
@@ -89,11 +86,11 @@ use appa_runtime_api::{
     AdapterName, LaunchToken, PeerAddress, PeerDigest, Ruling, SessionTitle, inventory::ToolInventory,
 };
 
+mod ahead;
 pub mod embedded;
 mod encoding;
 #[cfg(feature = "postgres")]
 pub mod encryption;
-pub mod files;
 mod held;
 mod label;
 #[cfg(feature = "postgres")]
@@ -104,6 +101,7 @@ mod sqlite;
 use encoding::encode;
 use sqlite::Sqlite;
 
+pub use ahead::{AheadAttempt, AheadOutcome, DeclaredArguments, EndKind, InvocationNonce, LabelSpelling, SpentVouch};
 use embedded::{DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, ReadTake};
 pub use held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage};
 pub use label::StoredLabel;
@@ -153,6 +151,11 @@ struct FaultPoints {
     /// What the next foreign writer records rather than nothing, so a caller's re-derivation
     /// meets a changed state and not only a moved position.
     contending_record: std::sync::Mutex<Option<(TrajectoryId, TrajectoryId, HostObservation)>>,
+    /// The policy file a foreign publisher makes the next revision of the deployment before
+    /// the next append.
+    publishing: std::sync::Mutex<Option<(DeploymentName, Vec<u8>)>>,
+    /// The root whose next log reads fail, and how many of them.
+    failing_root_reads: std::sync::Mutex<Option<(TrajectoryId, u64)>>,
 }
 
 pub use appa_engine::profile::DeploymentName;
@@ -211,6 +214,9 @@ pub enum HostObservation {
         /// and no call, so this is what binds them to the spawn's fork.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// The declaration ahead this spawn took, on the call's first record only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ahead: Option<AheadAttempt>,
     },
     /// The host reported this bound call finished. A fan-out spawn's fork binds no new child
     /// after it.
@@ -223,6 +229,9 @@ pub enum HostObservation {
         trajectory: TrajectoryId,
         call_id: String,
         batch: String,
+        /// The declaration ahead this spawn reserved, on the call's first record only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ahead: Option<AheadAttempt>,
     },
     /// This actor stands behind this key, with the ruling its harness attached where it
     /// reviewed through a channel of its own.
@@ -244,8 +253,13 @@ pub enum HostObservation {
     PromptSeen { actor: HostActor },
     /// What the prompt left open is settled, and the actor's standing survives it.
     PromptSettled { actor: HostActor },
-    /// This actor's turn ended: its prompt mark and every vouch it still held are over.
-    TurnEnded { actor: HostActor },
+    /// This actor's turn ended: its prompt mark and every vouch it still held are over. Only a
+    /// boundary ends the return the actor declared ahead.
+    TurnEnded {
+        actor: HostActor,
+        #[serde(default, skip_serializing_if = "EndKind::is_boundary")]
+        end_kind: EndKind,
+    },
     /// This root receives peer messages at `address`.
     Addressed { address: PeerAddress },
     /// This root's host shows it under `title`.
@@ -266,6 +280,29 @@ pub enum HostObservation {
     LaunchMoved { launch: LaunchToken, to: TrajectoryId },
     /// The host continues this family under `host`, another of its own session ids.
     Aliased { host: TrajectoryId },
+    /// This actor declared ahead what its next single spawn's return may carry, checked at
+    /// `label`. A daemon declaration also spends the vouch its control hook recorded.
+    AheadDeclared {
+        actor: HostActor,
+        attempt: AheadAttempt,
+        arguments: DeclaredArguments,
+        label: StoredLabel,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spends: Option<SpentVouch>,
+    },
+    /// A spawn the host gave no call id took this trajectory's declaration, in the invocation
+    /// `invocation` names.
+    AheadReserved {
+        trajectory: TrajectoryId,
+        attempt: AheadAttempt,
+        invocation: InvocationNonce,
+    },
+    /// The declaration this trajectory made under `attempt` is settled.
+    AheadSettled {
+        trajectory: TrajectoryId,
+        attempt: AheadAttempt,
+        outcome: AheadOutcome,
+    },
 }
 
 impl HostObservation {
@@ -280,6 +317,7 @@ impl HostObservation {
             Self::PeerSent { digest, .. } => Some(peer_sent_key(digest)),
             Self::Launched { launch } => Some(launch_key(launch)),
             Self::Aliased { host } => Some(host_alias_key(host)),
+            Self::AheadDeclared { attempt, .. } => Some(attempt.key()),
             Self::Inventory { .. }
             | Self::CallBound { .. }
             | Self::CallSettled { .. }
@@ -288,7 +326,9 @@ impl HostObservation {
             | Self::PromptSettled { .. }
             | Self::TurnEnded { .. }
             | Self::PeerAdmitted { .. }
-            | Self::LaunchMoved { .. } => None,
+            | Self::LaunchMoved { .. }
+            | Self::AheadReserved { .. }
+            | Self::AheadSettled { .. } => None,
         }
     }
 }
@@ -423,6 +463,7 @@ impl Log {
                 call_id,
                 dispatch,
                 prompt,
+                ..
             } => Some(CallBinding {
                 trajectory,
                 call_id,
@@ -442,6 +483,7 @@ impl Log {
                 trajectory: owner,
                 call_id: id,
                 batch,
+                ..
             } if owner == trajectory && id == call_id => Some(batch.as_str()),
             _ => None,
         })
@@ -709,6 +751,26 @@ impl Step<'_> {
     /// [`LogStore::append_host`] within this step.
     pub fn append_host(self, based_on: &Log, observation: &HostObservation) -> Result<(), AppendError> {
         self.write(based_on, Batch::of(based_on, &[], Some(observation))?, None)
+    }
+
+    /// One host observation alone, fenced like a decided batch: it commits only while
+    /// `revision` is still the deployment's head, for a record judged under that revision. It
+    /// carries no stamp, so a reader still reads it as a host-only batch.
+    pub fn append_host_fenced(
+        self,
+        based_on: &Log,
+        observation: &HostObservation,
+        revision: PolicyRevision,
+    ) -> Result<(), AppendError> {
+        let batch = Batch {
+            bytes: encode(&[], Some(observation)),
+            key: observation.key(),
+            fence: Some(Fence {
+                deployment: &based_on.deployment,
+                revision,
+            }),
+        };
+        self.write(based_on, batch, None)
     }
 
     /// [`LogStore::append_holding_embedded_read`] within this step.
@@ -1000,120 +1062,12 @@ impl LogStore {
     pub fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
         #[cfg(feature = "fault-injection")]
         self.read_refused()?;
+        #[cfg(feature = "fault-injection")]
+        self.read_of_refused(root)?;
         match &self.store {
             Store::Sqlite(sqlite) => sqlite.log(root),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.log(root),
-        }
-    }
-
-    /// Open a canonical workspace's append-only file history. Concurrent creators may race;
-    /// the winning opening remains authoritative and callers validate its deployment and Label.
-    pub(crate) fn open_workspace(
-        &self,
-        workspace: &str,
-        policy: &str,
-        initial: &appa_engine::label::Label,
-    ) -> Result<(), files::FileStoreError> {
-        let event = files::WorkspaceEvent::Opened {
-            policy: policy.to_owned(),
-            initial: initial.clone(),
-        };
-        let payload = serde_json::to_vec(&event)?;
-        match &self.store {
-            Store::Sqlite(sqlite) => sqlite.create_workspace(workspace, &payload),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.create_workspace(workspace, payload),
-        }
-    }
-
-    /// Read and strictly decode one canonical workspace's complete event history.
-    pub(crate) fn workspace_log(&self, workspace: &str) -> Result<files::WorkspaceLog, files::FileStoreError> {
-        let batches = match &self.store {
-            Store::Sqlite(sqlite) => sqlite.workspace_batches(workspace)?,
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.workspace_batches(workspace)?,
-        };
-        if batches.is_empty() {
-            return Err(files::FileStoreError::Corrupt(
-                "the workspace event log is missing".into(),
-            ));
-        }
-        let events = batches
-            .iter()
-            .map(|batch| serde_json::from_slice(batch))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(files::WorkspaceLog {
-            workspace: workspace.to_owned(),
-            basis: events.len() as u64,
-            events,
-        })
-    }
-
-    /// Append one transition if the workspace history still stands at the read position.
-    pub(crate) fn append_workspace(
-        &self,
-        based_on: &files::WorkspaceLog,
-        event: &files::WorkspaceEvent,
-    ) -> Result<(), files::FileStoreError> {
-        let payload = serde_json::to_vec(event)?;
-        let root = match event {
-            files::WorkspaceEvent::RootBound { root } => Some(root),
-            _ => None,
-        };
-        match &self.store {
-            Store::Sqlite(sqlite) => sqlite.append_workspace(&based_on.workspace, based_on.basis, &payload, root),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.append_workspace(&based_on.workspace, based_on.basis, payload, root.cloned()),
-        }
-    }
-
-    /// Bind a root to a workspace by appending the binding event and its rebuildable index row
-    /// in one transaction. An identical existing binding is idempotent.
-    pub(crate) fn bind_workspace_root(
-        &self,
-        workspace: &str,
-        root: &TrajectoryId,
-    ) -> Result<(), files::FileStoreError> {
-        loop {
-            let log = self.workspace_log(workspace)?;
-            let event_exists = log
-                .events
-                .iter()
-                .any(|event| matches!(event, files::WorkspaceEvent::RootBound { root: bound } if bound == root));
-            if let Some(bound) = self.workspace_for_root(root)? {
-                if bound != workspace {
-                    return Err(files::FileStoreError::Configuration(
-                        "a root cannot change its tracked workspace".into(),
-                    ));
-                }
-                return if event_exists {
-                    Ok(())
-                } else {
-                    Err(files::FileStoreError::Corrupt(
-                        "the derived root index has no authoritative binding event".into(),
-                    ))
-                };
-            }
-            if event_exists {
-                return Err(files::FileStoreError::Corrupt(
-                    "an authoritative root binding is missing from its derived index".into(),
-                ));
-            }
-            match self.append_workspace(&log, &files::WorkspaceEvent::RootBound { root: root.clone() }) {
-                Ok(()) => return Ok(()),
-                Err(files::FileStoreError::Conflict { .. }) => continue,
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    /// Resolve the derived root-binding index. The binding event remains the authority.
-    pub(crate) fn workspace_for_root(&self, root: &TrajectoryId) -> Result<Option<String>, files::FileStoreError> {
-        match &self.store {
-            Store::Sqlite(sqlite) => sqlite.workspace_for_root(root),
-            #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.workspace_for_root(root),
         }
     }
 
@@ -1170,6 +1124,8 @@ impl LogStore {
                 if self.contention_fires() {
                     self.contend(&mut appender, root)?;
                 }
+                #[cfg(feature = "fault-injection")]
+                self.publish_fires(&mut appender)?;
                 appender.append(root, basis, &batch, || {
                     #[cfg(feature = "fault-injection")]
                     if self.failure_fires() {
@@ -1637,6 +1593,28 @@ impl LogStore {
         self.contend_next_appends(1);
     }
 
+    /// Arm the publication point once: before the next append opens its transaction, a
+    /// foreign publisher makes `policy_file` the next revision of `deployment`, in a committed
+    /// transaction of its own, as another process's publish would. The append then meets a
+    /// head that moved after its caller judged. A PostgreSQL store never consults it.
+    pub fn publish_before_next_append(&self, deployment: &DeploymentName, policy_file: &[u8]) {
+        *self
+            .faults
+            .publishing
+            .lock()
+            .expect("the injection mutex is never poisoned") = Some((deployment.clone(), policy_file.to_vec()));
+    }
+
+    /// Arm the read fail point for one family: its next `count` log reads answer with a
+    /// failure, and every other family reads as stored.
+    pub fn fail_reads_of(&self, root: &TrajectoryId, count: u64) {
+        *self
+            .faults
+            .failing_root_reads
+            .lock()
+            .expect("the injection mutex is never poisoned") = Some((root.clone(), count));
+    }
+
     /// Forget every stored policy file, leaving each root's opening naming a
     /// file this database no longer holds. Damage stated in this
     /// crate's own vocabulary, so a caller can pin how it refuses without
@@ -1678,6 +1656,34 @@ impl LogStore {
     fn read_refused(&self) -> Result<(), ReadError> {
         match consume(&self.faults.failing_reads) {
             Some(_) => Err(ReadError::Injected),
+            None => Ok(()),
+        }
+    }
+
+    fn read_of_refused(&self, root: &TrajectoryId) -> Result<(), ReadError> {
+        let mut armed = self
+            .faults
+            .failing_root_reads
+            .lock()
+            .expect("the injection mutex is never poisoned");
+        match armed.as_mut() {
+            Some((failing, count)) if failing == root && *count > 0 => {
+                *count -= 1;
+                Err(ReadError::Injected)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn publish_fires(&self, appender: &mut sqlite::Appender<'_>) -> Result<(), AppendError> {
+        let armed = self
+            .faults
+            .publishing
+            .lock()
+            .expect("the injection mutex is never poisoned")
+            .take();
+        match armed {
+            Some((deployment, policy_file)) => appender.foreign_publish(&deployment, &policy_file),
             None => Ok(()),
         }
     }
@@ -1737,7 +1743,7 @@ mod tests {
         }
     }
 
-    const POLICY: &str = r#"
+    pub(crate) const POLICY: &str = r#"
         version = 2
     "#;
 
@@ -2105,6 +2111,73 @@ mod tests {
         );
     }
 
+    /// A host record judged under the first revision, held in a step while `publisher` moves
+    /// `line` to the second: the fenced append writes nothing and the head stays moved. An
+    /// unfenced host record still lands, and so does one fenced at the new head.
+    fn fences_a_host_only_append(store: &LogStore, publisher: &LogStore, root: &TrajectoryId, line: &DeploymentName) {
+        let next = PolicyRevision::new(2);
+        let observation = observed(root.as_str(), "demo");
+        let step = store.step(root).expect("the step holds the family");
+        let read = step.log().expect("the step reads");
+        publisher
+            .publish(line, Some(PolicyRevision::FIRST), b"version = 2\n# next")
+            .expect("the publish commits while the step is open");
+        assert!(
+            matches!(
+                step.append_host_fenced(&read, &observation, PolicyRevision::FIRST),
+                Err(AppendError::PolicyMoved { head: Some(head) }) if head == next
+            ),
+            "a record judged at the previous head does not commit after the publish"
+        );
+        let log = store.log(root).expect("the log reads");
+        assert_eq!(
+            (log.basis(), log.host_records()),
+            (read.basis(), read.host_records()),
+            "the refused append wrote nothing"
+        );
+        assert_eq!(
+            store.head(line).expect("the head reads").map(|head| head.revision),
+            Some(next)
+        );
+        store
+            .append_host(&log, &observation)
+            .expect("an unfenced host record lands");
+        let log = store.log(root).expect("the log reads");
+        store
+            .step(root)
+            .expect("the step holds the family")
+            .append_host_fenced(&log, &observation, next)
+            .expect("a record judged at the new head lands");
+        let landed = store.log(root).expect("the log reads");
+        assert_eq!(landed.basis(), log.basis() + 1);
+        assert_eq!(landed.stamp(), log.stamp(), "a fenced host record carries no stamp");
+    }
+
+    #[test]
+    fn a_publish_fences_a_host_only_append_it_raced() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let open = || {
+            LogStore::open(Backend::Sqlite {
+                path: dir.path().join("log.db"),
+            })
+            .expect("the SQLite store opens")
+        };
+        let (store, publisher) = (open(), open());
+        create(&store, opening(&root())).expect("a fresh root opens");
+        fences_a_host_only_append(&store, &publisher, &root(), &deployment());
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
+    fn postgres_a_publish_fences_a_host_only_append_it_raced() {
+        let (store, publisher) = (postgres_store(2), postgres_store(1));
+        let root = postgres_root(&store, "fenced-host");
+        let line = DeploymentName::new(format!("line:{}", root.as_str()));
+        fences_a_host_only_append(&store, &publisher, &root, &line);
+        forget_postgres_roots(&store, vec![root]);
+    }
+
     /// A decided batch commits only while the revision that decided it is its deployment's
     /// head; a batch of host observations alone is not fenced and carries the stamp before it.
     #[test]
@@ -2203,37 +2276,6 @@ mod tests {
         assert_eq!(store.log(&root()).expect("the log reads").basis(), 2);
     }
 
-    #[test]
-    fn workspace_events_share_the_log_compare_and_swap_contract() {
-        let dir = tempfile::tempdir().expect("a database directory exists");
-        let path = dir.path().join("events.db");
-        let first = LogStore::open(Backend::Sqlite { path: path.clone() }).expect("the first store opens");
-        let second = LogStore::open(Backend::Sqlite { path }).expect("the second store opens");
-        first
-            .open_workspace("/workspace", "policy", &appa_engine::label::Label::top())
-            .expect("the workspace opens");
-        let first_read = first.workspace_log("/workspace").expect("the first read succeeds");
-        let stale = second.workspace_log("/workspace").expect("the second read succeeds");
-        first
-            .append_workspace(
-                &first_read,
-                &files::WorkspaceEvent::RootBound {
-                    root: TrajectoryId::new("first"),
-                },
-            )
-            .expect("the first event lands");
-        assert!(matches!(
-            second.append_workspace(
-                &stale,
-                &files::WorkspaceEvent::RootBound {
-                    root: TrajectoryId::new("second"),
-                },
-            ),
-            Err(files::FileStoreError::Conflict { actual: 2, .. })
-        ));
-        assert_eq!(second.workspace_log("/workspace").unwrap().basis, 2);
-    }
-
     pub(crate) fn observed(actor: &str, server: &str) -> HostObservation {
         HostObservation::Inventory {
             actor: TrajectoryId::new(actor),
@@ -2303,6 +2345,7 @@ mod tests {
             call_id: "toolu_1".to_string(),
             dispatch: dispatch.clone(),
             prompt: None,
+            ahead: None,
         };
         store.append(&log, &decided(&punctuation()), Some(&bound)).unwrap();
 
@@ -2643,6 +2686,7 @@ mod tests {
                 params![b"version = 2\n# other".to_vec()],
             )
             .expect("the damage lands");
+        assert!(matches!(store.log(&root()), Err(ReadError::PolicyFileMismatch { .. })));
         assert!(matches!(
             store.policy_file(&deployment(), PolicyRevision::FIRST),
             Err(ReadError::PolicyFileMismatch { .. })
@@ -3114,6 +3158,7 @@ mod tests {
                 0,
             ),
             prompt: None,
+            ahead: None,
         };
         let bindings = |log: &Log| {
             log.call_bindings()
@@ -4792,97 +4837,6 @@ mod tests {
                 Ok(())
             })
             .expect("the embedded rows clean up");
-    }
-
-    /// The workspace position is the primary key: of appends racing at one basis exactly one
-    /// lands, and a loser's root binding rolls back with it. A bound root refuses another
-    /// workspace.
-    #[cfg(feature = "postgres")]
-    #[test]
-    #[ignore = "requires OPENAPPA_TEST_DATABASE_URL and host migrations"]
-    fn postgres_a_stale_workspace_append_conflicts_and_a_root_binds_one_workspace() {
-        const WRITERS: usize = 4;
-        let store = postgres_store(WRITERS);
-        let suffix = uuid::Uuid::new_v4().to_string();
-        let (workspace, other) = (format!("pg-workspace:{suffix}"), format!("pg-workspace-other:{suffix}"));
-        for opened in [&workspace, &workspace, &other] {
-            store
-                .open_workspace(opened, "policy", &Label::top())
-                .expect("the workspace opens");
-        }
-        let stale = store.workspace_log(&workspace).expect("the workspace reads");
-        assert_eq!(stale.basis, 1, "a second opening writes nothing");
-        let roots: Vec<TrajectoryId> = (0..WRITERS)
-            .map(|index| TrajectoryId::new(format!("pg-workspace-root:{index}:{suffix}")))
-            .collect();
-        let leased: Vec<LogStore> = (0..WRITERS)
-            .map(|_| store.lease().expect("a connection leases"))
-            .collect();
-        let barrier = std::sync::Barrier::new(WRITERS);
-        let appended: Vec<_> = std::thread::scope(|scope| {
-            let racers: Vec<_> = leased
-                .iter()
-                .zip(&roots)
-                .map(|(store, root)| {
-                    let (barrier, stale) = (&barrier, &stale);
-                    scope.spawn(move || {
-                        barrier.wait();
-                        store.append_workspace(stale, &files::WorkspaceEvent::RootBound { root: root.clone() })
-                    })
-                })
-                .collect();
-            racers.into_iter().map(|racer| racer.join().unwrap()).collect()
-        });
-        drop(leased);
-        let winner = appended.iter().position(Result::is_ok).expect("one append lands");
-        for (index, outcome) in appended.iter().enumerate().filter(|(index, _)| *index != winner) {
-            assert!(
-                matches!(outcome, Err(files::FileStoreError::Conflict { expected: 1, actual: 2 })),
-                "{index}: {outcome:?}"
-            );
-            assert_eq!(
-                store.workspace_for_root(&roots[index]).unwrap(),
-                None,
-                "a losing append's root binding rolled back"
-            );
-        }
-        assert_eq!(
-            store.workspace_for_root(&roots[winner]).unwrap(),
-            Some(workspace.clone())
-        );
-        store
-            .bind_workspace_root(&workspace, &roots[winner])
-            .expect("an identical binding is idempotent");
-
-        let other_log = store.workspace_log(&other).expect("the other workspace reads");
-        assert!(matches!(
-            store.append_workspace(
-                &other_log,
-                &files::WorkspaceEvent::RootBound {
-                    root: roots[winner].clone()
-                }
-            ),
-            Err(files::FileStoreError::Configuration(_))
-        ));
-        assert_eq!(
-            store.workspace_log(&other).expect("the other workspace reads").basis,
-            1,
-            "a refused binding writes no event"
-        );
-
-        store
-            .lease()
-            .unwrap()
-            .postgres()
-            .unwrap()
-            .with_client(move |client| {
-                for cleaned in [&workspace, &other] {
-                    client.execute("DELETE FROM openappa_file_events WHERE workspace = $1", &[cleaned])?;
-                    client.execute("DELETE FROM openappa_file_roots WHERE workspace = $1", &[cleaned])?;
-                }
-                Ok(())
-            })
-            .expect("the workspace rows clean up");
     }
 
     /// A host whose receipt tables are keyed without the organization, or with its columns in

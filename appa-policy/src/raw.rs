@@ -38,6 +38,8 @@ pub(crate) struct RawDeployment {
     pub(crate) confined_results: Vec<String>,
     #[serde(default)]
     pub(crate) provider_surfaces: BTreeMap<String, SurfaceMode>,
+    /// Runtime-owned prose for the Annotators, never part of the engine's deployment profile.
+    pub(crate) hint: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +149,9 @@ pub(crate) struct RawTool {
     /// The registered `[[annotator]]` that produces this tool's semantics per call. Replaces
     /// the static `delta`/`forwards`/`requires`/`effects` — a declaration carries one recipe.
     pub(crate) annotator: Option<String>,
+    /// The `[externals.recorders]` entry that receives the label each released call of this
+    /// declaration publishes. Routing only: it changes no decision.
+    pub(crate) recorder: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -194,6 +199,8 @@ pub(crate) struct RawAuthority {
     pub(crate) permits: RawPermits,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) except_tags: Vec<String>,
     pub(crate) implementation: Option<toml::Value>,
 }
 
@@ -215,6 +222,10 @@ pub(crate) struct RawSanitizer {
     pub(crate) on: Vec<String>,
     #[serde(default)]
     pub(crate) hint: Option<String>,
+    /// The model transport this Sanitizer carries: `"claude-code"` or `"llm"`. A Sanitizer
+    /// that names one takes no deployment binding, as an Annotator that names one does.
+    #[serde(default)]
+    pub(crate) builtin: Option<String>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
     pub(crate) permits: RawSanitizerPermits,

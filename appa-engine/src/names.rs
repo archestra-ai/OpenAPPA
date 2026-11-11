@@ -1,4 +1,4 @@
-//! Name newtypes for the registry's four kinds and the routing vocabulary. Names are routing
+//! Name newtypes for the registry's kinds and the routing vocabulary. Names are routing
 //! identity, never algebraic — they do not fold and never enter a check.
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +36,11 @@ impl SanitizerName {
 }
 
 name_newtype!(AnnotatorName);
+name_newtype!(
+    /// A recorder: the external component a tool declaration names to receive the label each
+    /// released call publishes, and the outcome that settles it.
+    RecorderName
+);
 name_newtype!(GroupName);
 name_newtype!(
     /// An audience provider: the namespace of one registered audience source, and the prefix

@@ -70,6 +70,7 @@ fn engine() -> Engine {
         },
     };
     let officer = Authority {
+        except: Vec::new(),
         name: AuthorityName::new(OFFICER),
         mandate: Mandate {
             trust_ceiling: Some(TRUSTED),
@@ -90,6 +91,7 @@ fn engine() -> Engine {
         },
         planner_cap: PlannerCap::default(),
         registry: RegistryConfig {
+            recorders: Default::default(),
             trust_chain: chain,
             tools: vec![ToolDeclaration::Declared(wire)],
             annotators: vec![],

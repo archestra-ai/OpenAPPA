@@ -343,6 +343,37 @@ async fn setup_asks_for_the_credentials_of_the_deployment_target() {
     assert!(!invalid.0.wait().unwrap().success());
 }
 
+/// A battery that is not installed cannot become ready: the command refuses at once and
+/// announces no page, instead of waiting out the setup timeout.
+#[test]
+fn setup_of_a_battery_that_is_not_installed_refuses_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("appa.toml");
+    std::fs::write(&config, "[policy]\nversion = 2\n").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_appa"));
+    command
+        .args([
+            "ui",
+            "--no-open",
+            "--battery",
+            "not-installed-fixture",
+            "--runtime-url",
+            "http://127.0.0.1:1",
+            "--config",
+        ])
+        .arg(&config)
+        .env_remove("APPA_BATTERY_TARGET")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut process = Process(command.spawn().unwrap());
+    let mut line = String::new();
+    std::io::BufReader::new(process.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert!(line.is_empty(), "no page is announced: {line}");
+    assert!(!process.0.wait().unwrap().success());
+}
+
 /// The page reads a runtime's credentials only when it serves the page's deployment target:
 /// a multi-user runtime is not the single-user page's runtime.
 #[tokio::test(flavor = "multi_thread")]

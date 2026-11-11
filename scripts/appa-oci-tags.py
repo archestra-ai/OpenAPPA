@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Tag contract for OpenAPPA images and charts in appa-public.
+"""Tag contract for OpenAPPA images and charts.
 
-Release images use an immutable v* tag. Rolling CI tags are sha-, pr-,
-main, and latest. Chart versions stay SemVer without a v prefix and live
-under charts/, so GAR prefix matching can garbage-collect CI images
-without deleting releases or charts.
+Every build pushes to ghcr.io/archestra-ai/ci staging: rolling CI tags
+(sha-, pr-, main, latest) and release candidates (v*). archestra-ai/release-publisher
+publishes a release's attested digests from there to ghcr.io/archestra-ai under
+an immutable v* tag, its charts under charts/ (SemVer without a v prefix), and
+moves :latest to the newest stable release.
+
+The cleanup helpers below mirror the Artifact Registry policies of appa-public,
+which keeps the releases published there before GHCR.
 """
 
 from __future__ import annotations
@@ -15,10 +19,8 @@ import re
 import sys
 from pathlib import Path
 
-GAR_HOST = "europe-west1-docker.pkg.dev"
-GAR_PROJECT = "friendly-path-465518-r6"
-GAR_REPOSITORY = "appa-public"
-REGISTRY = f"{GAR_HOST}/{GAR_PROJECT}/{GAR_REPOSITORY}"
+REGISTRY = "ghcr.io/archestra-ai"
+STAGING = f"{REGISTRY}/ci"
 CHARTS_OCI = f"oci://{REGISTRY}/charts"
 
 IMAGE_PACKAGES = (
@@ -50,6 +52,10 @@ POLICY_PATH = Path(__file__).with_name("appa-gar-cleanup-policies.json")
 
 def registry() -> str:
     return REGISTRY
+
+
+def staging() -> str:
+    return STAGING
 
 
 def charts_oci() -> str:
@@ -167,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("registry")
+    sub.add_parser("staging")
     sub.add_parser("charts-oci")
 
     release = sub.add_parser("release-image")
@@ -184,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "registry":
         return _print_lines([registry()])
+    if args.command == "staging":
+        return _print_lines([staging()])
     if args.command == "charts-oci":
         return _print_lines([charts_oci()])
     if args.command == "release-image":

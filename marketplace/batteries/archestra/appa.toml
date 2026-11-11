@@ -1,33 +1,47 @@
-# Archestra battery: the sharing tools of Archestra's built-in MCP server.
+# Archestra battery: the tools of Archestra's built-in MCP server.
 #
-# Each tool below makes something readable by more people: the whole
-# organization, one or more teams, or named members. A share is a write
-# those people read, so it needs trusted data they may already see: the
-# organization is `internal`, a team is `@archestra:team/<team>`, a member
-# is `@archestra:user/<user>`. A share that narrows access, or that keeps a
-# resource with its owner, requires nothing. The `archestra` audience
-# source resolves each collection through Archestra's own API.
+# Every tool the server lists has a rule here, except the ones Archestra
+# rules itself: `yell` (`mcp/appa/yell`), `run_tool` (ruled as the tool it
+# runs), `execute_remedy_plan`, `get_remedy_plans`, `list_peer_messages`,
+# `read_peer_message`, `preview_app_tool` (ruled as the app tool it runs) and
+# the app-runtime tools no agent lists.
 #
-# A tool that takes a list of teams names one collection per team, so
-# sharing with teams A and B requires what A's members and B's members
-# may see. OpenAPPA reads at most 100 teams per call.
+# Archestra's configuration, rosters, runs and files are the organization's,
+# so a read of them adds `internal`. A read that returns text strangers can
+# write, such as synced mail and tickets, a server's logs or a run's tool
+# results, also adds `suspicious`. A write that changes what other people's
+# agents run or read, or that removes or controls a shared resource,
+# requires `trusted` data, so an injected instruction cannot choose it. A
+# write that other members read also needs data the organization may read:
+# `internal`. A write that a later read returns as trusted, such as a
+# persistent file, a prompt, an app spec or a knowledge base description,
+# requires `trusted` too, so suspicious text cannot come back trusted.
 #
-# An update that sends a team or member list replaces who the resource is
-# shared with, whatever scope it already has, so a sent list is checked
-# even without a scope: `(teams:*)` selects any call that sent one. A call
-# that sends both a team list and a member list requires `internal`, which
-# holds every team and member. Every rule of a tool declares its lists as
-# arrays of strings, so a malformed list is refused rather than read as
-# no list.
+# A share names who may read: the organization is `internal`, a team is
+# `@archestra:team/<team>`, a member is `@archestra:user/<user>`. A tool
+# that takes a list of teams names one collection per team, and OpenAPPA
+# reads at most 100 teams per call. An update that sends a team list
+# replaces who the resource is shared with, so `(team_ids:*)` checks a sent
+# list even without a visibility. Every rule of such a tool declares its
+# lists as arrays of strings, so a malformed list is refused rather than
+# read as no list.
 #
-# The root config maps `internal` onto the source — the README shows the
-# wiring.
+# The Archestra proxy adds two string-array arguments before evaluation,
+# since no selector reads an array of objects: `initialGrantPrincipals`
+# names each principal of a sent `initialGrants` as `<type>:<id>`, and
+# `transferModes` names each transferred credential `value` or `link`. A
+# create that sends grants requires `internal`, which holds every principal
+# a grant can name.
+#
+# The root config maps `internal` onto the `archestra` audience source,
+# which resolves each collection through Archestra's own API. The README
+# shows the wiring.
 
 [policy]
 version = 2
 
-# --- discovery: search_tools lists tools, search_files lists files, and
-# load_skill loads a skill's instructions and bundled files ---
+# --- discovery and the session's own surfaces: listing tools and files,
+# loading a skill, asking the user, the todo list and the agent's own name ---
 
 [[policy.tool]]
 name = "mcp/archestra/search_tools"
@@ -41,13 +55,168 @@ delta = {}
 name = "mcp/archestra/load_skill"
 delta = {}
 
-# --- reporting: yell files a guardrails report with the organization's
-# admins. It is how an agent escalates a block, so no label a session
-# picked up can refuse it ---
+[[policy.tool]]
+name = "mcp/archestra/ask_user"
+delta = {}
 
 [[policy.tool]]
-name = "mcp/archestra/yell"
+name = "mcp/archestra/todo_write"
 delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/whoami"
+delta = {}
+
+# --- the chat sandbox: each command is labeled per call. An Archestra root
+# answers this annotator with its own model (`builtin = "archestra"`) ---
+
+[[policy.annotator]]
+name = "archestra.run-command"
+builtin = "claude-code"
+hint = "run_command runs a shell command in this conversation's sandbox, a scratch workspace. A command that only lists, reads or changes ordinary files in the sandbox, with no network access, keeps the neutral annotation unless a file it reads visibly holds credentials or secrets."
+ranks = ["suspicious", "trusted"]
+marks = []
+effects = []
+
+[[policy.tool]]
+name = "mcp/archestra/run_command"
+description = "Runs one shell command in the conversation's sandbox and returns its output."
+annotator = "archestra.run-command"
+
+# --- guardrails: the policy, its validations, yells and helper consults are
+# the organization's. A preview or a validation saves nothing and sends
+# nothing. A publish, a repository connection, a sync or a credential
+# binding changes the guardrails of every session ---
+
+[[policy.tool]]
+name = "mcp/archestra/get_guardrails_policy"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/inspect_guardrails_server"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_guardrails_battery_fits"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/validate_guardrails_policy"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/preview_guardrails_policy_change"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/preview_guardrails_validation_change"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_guardrails_policy_change_status"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_openappa_policy_tests"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/run_openappa_policy_tests"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_openappa_yell"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_openappa_yells"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_openappa_consults"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/resolve_openappa_yell"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/update_guardrails_policy"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/update_guardrails_validation"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/create_guardrails_repository"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/connect_guardrails_repository"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/sync_guardrails_repository"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/bind_guardrails_credential"
+delta = {}
+requires = { trust = "trusted" }
+
+# --- credentials: metadata only, never a secret. A setup request shows the
+# user a card. A transfer can carry a secret into a run's workspace; a
+# link-only transfer declares a key and label every reader of the agent
+# sees ---
+
+[[policy.tool]]
+name = "mcp/archestra/list_runtime_credentials"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_runtime_credential"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/request_runtime_credential_setup"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/request_battery_credentials"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/create_runtime_credential"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/update_runtime_credential"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_runtime_credential"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/transfer_credential(transferModes:link)"
+parameters = { type = "object", properties = { transferModes = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/transfer_credential"
+parameters = { type = "object", properties = { transferModes = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 # --- agent runs: a run and its workspace are one container the
 # organization may read, since admins can open any run. What enters it,
@@ -56,10 +225,7 @@ delta = {}
 # This holds on every host: a host without the LLM Proxy's proof starts
 # and reads a run as a plain tool call, with no crossing of its own. A
 # cancel returns only the run's state. A list names the organization's
-# agents, requesters, and channels.
-#
-# The run's posts stay with the deployment's annotator: a post reaches a
-# messaging thread whose readers no source here can list ---
+# agents, requesters, and channels ---
 
 [[policy.tool]]
 name = "mcp/archestra/start_agent_run"
@@ -106,115 +272,455 @@ delta = {}
 name = "mcp/archestra/list_agent_runs"
 delta = { audience = ["internal"] }
 
-# --- projects ---
+# --- the same run tools under the names Archestra 1.4 lists them by ---
 
 [[policy.tool]]
-name = "mcp/archestra/set_project_share(visibility:organization)"
-parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+name = "mcp/archestra/start_run"
+delta = {}
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/steer_run"
+delta = {}
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/get_run"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_runs"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/cancel_run"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/post_run_message"
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/set_project_share(visibility:team)"
-parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, required = ["team_ids"], additionalProperties = true }
+name = "mcp/archestra/post_run_file"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_ids"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+# --- run posts and workspaces: a post reaches a messaging thread, and a
+# workspace delete discards a run's files ---
 
 [[policy.tool]]
-name = "mcp/archestra/set_project_share(team_ids:*)"
-parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_ids"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/set_project_share"
-parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-
-# --- apps ---
-
-[[policy.tool]]
-name = "mcp/archestra/publish_app(scope:org)"
-parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+name = "mcp/archestra/post_agent_run_message"
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/publish_app(scope:team)"
-parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, required = ["teams"], additionalProperties = true }
+name = "mcp/archestra/post_agent_run_file"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
-
-# --- knowledge bases: a new one is org-wide unless it says otherwise ---
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/create_knowledge_base(visibility:private,teamIds:*)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+name = "mcp/archestra/delete_workspace"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+requires = { trust = "trusted" }
+
+# --- scheduled tasks: a schedule's message runs later, unattended, as its
+# actor. A run's transcript quotes every tool result the run read ---
 
 [[policy.tool]]
-name = "mcp/archestra/create_knowledge_base(visibility:private)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+name = "mcp/archestra/list_schedule_triggers"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_schedule_trigger"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_schedule_trigger_runs"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_schedule_trigger_run"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_schedule_trigger_run_transcript"
+delta = { audience = ["internal"], trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp/archestra/create_schedule_trigger"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_schedule_trigger"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/enable_schedule_trigger"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/disable_schedule_trigger"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/run_schedule_trigger_now"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_schedule_trigger"
+delta = {}
+requires = { trust = "trusted" }
+
+# --- agents, MCP gateways and hooks: a system prompt, a tool assignment or
+# a hook script runs in other members' sessions ---
+
+[[policy.tool]]
+name = "mcp/archestra/get_agent"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_agents"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_llm_models"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_agent_skill_policy"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_mcp_gateway"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_hooks"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/create_agent(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_agent"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_agent"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_mcp_gateway(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_mcp_gateway"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 
 [[policy.tool]]
-name = "mcp/archestra/create_knowledge_base(visibility:team-scoped)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
+name = "mcp/archestra/edit_mcp_gateway"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_hook"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/update_hook"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/patch_agent_skill_policy"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_hook"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/bulk_assign_tools_to_agents"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/bulk_remove_tools_from_agents"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/bulk_assign_tools_to_mcp_gateways"
+delta = {}
+requires = { trust = "trusted" }
+
+# --- MCP servers: a configuration selects the image, command or URL that
+# runs and where its credentials go. A server's logs record what its users
+# sent ---
+
+[[policy.tool]]
+name = "mcp/archestra/search_private_mcp_registry"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_mcp_servers"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_mcp_server_tools"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_mcp_server_deployments"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_mcp_server_logs"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/create_mcp_server(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/create_mcp_server"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_mcp_config"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_mcp_description"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/deploy_mcp_server"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/reload_mcp_server_tools"
+delta = {}
+
+# --- teams: membership decides who reads what a team shares, so an added
+# member or group must already be allowed to read the session's data ---
+
+[[policy.tool]]
+name = "mcp/archestra/get_team"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_teams"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_team_members"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_team_external_groups"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/create_team"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_team"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_team"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/update_team_member_role"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/remove_team_member"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/add_team_external_group"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/remove_team_external_group"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/add_team_member"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@archestra:user/$user"] } }
+
+# --- limits and usage ---
+
+[[policy.tool]]
+name = "mcp/archestra/get_limits"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_agent_token_usage"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_llm_proxy_token_usage"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/create_limit"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/update_limit"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_limit"
+delta = {}
+requires = { trust = "trusted" }
+
+# --- LLM logs: a session list carries usage metadata only; a request log
+# carries the prompts, responses, and tool results the agent read ---
+
+[[policy.tool]]
+name = "mcp/archestra/list_llm_sessions"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_llm_interactions"
+delta = { audience = ["internal"], trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp/archestra/get_llm_interaction"
+delta = { audience = ["internal"], trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp/archestra/get_llm_session_logs"
+delta = { audience = ["internal"], trust = "suspicious" }
+
+# --- knowledge: a search returns what the connected sources synced, mail
+# and tickets strangers wrote among them. An assignment shows a knowledge
+# base to an agent's users. A connector update is checked against the
+# visibility or team list it sends; auto-synced permissions mirror the
+# connected system's own ACLs, which no source here can read ---
+
+[[policy.tool]]
+name = "mcp/archestra/query_knowledge_sources"
+delta = { audience = ["internal"], trust = "suspicious" }
+
+[[policy.tool]]
+name = "mcp/archestra/get_knowledge_bases"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_knowledge_base"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_knowledge_connectors"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_knowledge_connector"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/create_knowledge_base(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/create_knowledge_base"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/update_knowledge_base(visibility:org-wide)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/update_knowledge_base(visibility:team-scoped)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/update_knowledge_base(teamIds:*)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/update_knowledge_base"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-
-# --- knowledge connectors: a new one is org-wide unless it says otherwise ---
-#
-# Auto-synced permissions mirror the connected system's own ACLs, which no
-# source here can read, so such a connector must be sharable with anyone.
-
-[[policy.tool]]
-name = "mcp/archestra/create_knowledge_connector(visibility:team-scoped)"
-parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, required = ["team_ids"], additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$team_ids"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/create_knowledge_connector(visibility:auto-sync-permissions)"
-parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_knowledge_base"
+delta = {}
+requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/create_knowledge_connector"
-parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_knowledge_connector"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/assign_knowledge_connector_to_knowledge_base"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/unassign_knowledge_connector_from_knowledge_base"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/assign_knowledge_base_to_agent"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/unassign_knowledge_base_from_agent"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/assign_knowledge_connector_to_agent"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/unassign_knowledge_connector_from_agent"
+delta = {}
+requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/update_knowledge_connector(visibility:org-wide)"
@@ -245,132 +751,206 @@ name = "mcp/archestra/update_knowledge_connector"
 parameters = { type = "object", properties = { team_ids = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 
-# --- plugins: personal unless scoped wider; a personal one is shared with `userIds` ---
+# --- skills and plugins: other members' agents load their instructions and
+# files ---
 
 [[policy.tool]]
-name = "mcp/archestra/create_plugin(scope:org)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+name = "mcp/archestra/list_skills"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_plugins"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_plugin"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/create_skill"
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/create_plugin(teamIds:*,userIds:*)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+name = "mcp/archestra/update_skill"
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/create_plugin(scope:team)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
+name = "mcp/archestra/edit_skill"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/create_plugin(teamIds:*)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+name = "mcp/archestra/create_plugin(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/create_plugin(userIds:*)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:user/$userIds"] } }
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/create_plugin"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
-
-[[policy.tool]]
-name = "mcp/archestra/update_plugin(scope:org)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/update_plugin(teamIds:*,userIds:*)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/update_plugin(scope:team)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, required = ["teamIds"], additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/update_plugin(teamIds:*)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teamIds"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/update_plugin(userIds:*)"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:user/$userIds"] } }
+requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/update_plugin"
-parameters = { type = "object", properties = { teamIds = { type = "array", items = { type = "string" } }, userIds = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
-
-# --- agents and MCP gateways: personal unless scoped wider ---
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/edit_agent(scope:org)"
+name = "mcp/archestra/edit_plugin"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_plugin"
+delta = {}
+requires = { trust = "trusted" }
+
+# --- projects and files: a project's or app's files may be shared with
+# teams or the organization ---
+
+[[policy.tool]]
+name = "mcp/archestra/list_projects"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_project"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/read_file"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/read_file_raw"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/create_project_from_conversation"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/link_app_to_project"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/unlink_app_from_project"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/upload_file"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/download_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/save_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/edit_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/copy_file"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_file"
+delta = {}
+requires = { trust = "trusted" }
+
+# --- apps: an app's HTML and tools run for everyone it is shared with, with
+# their own credentials ---
+
+[[policy.tool]]
+name = "mcp/archestra/list_apps"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/list_app_versions"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/read_app"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/render_app"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_app_diagnostics"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/refine_app"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/set_app_labels"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/validate_app"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/scaffold_app(initialGrantPrincipals:*)"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/scaffold_app"
+parameters = { type = "object", properties = { initialGrantPrincipals = { type = "array", items = { type = "string" } } }, additionalProperties = true }
+delta = {}
+
+[[policy.tool]]
+name = "mcp/archestra/edit_app"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/restore_app_version"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/set_app_tools"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/set_app_lock"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/delete_app"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/publish_app(scope:org)"
 parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 [[policy.tool]]
-name = "mcp/archestra/edit_agent(scope:team)"
+name = "mcp/archestra/publish_app(scope:team)"
 parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, required = ["teams"], additionalProperties = true }
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/edit_agent(teams:*)"
-parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/edit_agent"
-parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-
-[[policy.tool]]
-name = "mcp/archestra/edit_mcp_gateway(scope:org)"
-parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/edit_mcp_gateway(scope:team)"
-parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, required = ["teams"], additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/edit_mcp_gateway(teams:*)"
-parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
-
-[[policy.tool]]
-name = "mcp/archestra/edit_mcp_gateway"
-parameters = { type = "object", properties = { teams = { type = "array", items = { type = "string" } } }, additionalProperties = true }
-delta = {}
-
-# --- team membership: the new member reads what the team shares ---
-
-[[policy.tool]]
-name = "mcp/archestra/add_team_member"
-delta = {}
-requires = { trust = "trusted", audience = { contains = ["@archestra:user/$user"] } }
 
 [externals.audience.archestra]
 command = ["python3", "audience-source.py"]

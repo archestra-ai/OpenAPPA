@@ -20,6 +20,63 @@ updates:
           - minor
           - patch
 
+  # The website (pnpm), the OpenCode marketplace plugin, and the Claude Code
+  # CLI that CI's live harness check installs.
+  - package-ecosystem: npm
+    directories:
+      - /website
+      - /marketplace/plugins/opencode
+      - /.github/tools/claude-code
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: deps
+      prefix-development: deps
+    groups:
+      npm-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: bun
+    directories:
+      - /integrations/opencode
+      - /integrations/opencode/smoke
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: deps
+      prefix-development: deps
+    groups:
+      bun-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: gomod
+    directory: /integrations/kagent/appa-kagent-adk-go
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: deps
+    groups:
+      go-dependencies:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: github-actions
     directories:
       - /

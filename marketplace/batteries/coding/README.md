@@ -20,7 +20,20 @@ claude-code` includes both. A rule no map binds is inactive.
 
 - **shell** — A command that names a credential path (`.env`, `.ssh/`,
   `.netrc`, `.claude.json`, `.aws/`, `.gnupg/`, a private key, ...) narrows
-  the session to `self`, the requester. Before any other command runs, the
+  the session to `self`, the requester. A credential file name matches as a
+  path: after a space, `/` or `=`, at the end or before a space, or
+  double-quoted. A dotenv file also matches with a mode suffix (`.env.local`,
+  `.env.production`, `.env.development`, `.env.staging`, `.env.test`). A name
+  inside a word or a string literal, a single-quoted name, and a template such
+  as `.env.example` reach the Annotator. Where a client's map entry sets
+  `confined = true` and the root binds `coding.strip-secrets` (the Claude Code
+  default does both for Bash and PowerShell), the command's
+  result is withheld and the battery offers
+  `coding.strip-secrets` beside the narrowing: the model replaces
+  every secret value in the output with `[redacted-secret]`, and the masked
+  output returns at `internal`, not `self`. It never reaches `public` without
+  another remedy. The sanitizer is tagged `credentials`, so it applies only to
+  the credential rules, not to a command the Annotator narrowed. Before any other command runs, the
   `claude-code.bash-requirements` Annotator decides what trust and fresh
   attention it requires and labels its output for trust and audience, inside
   the vocabulary static rules write: a command that visibly reads the
@@ -68,11 +81,31 @@ claude-code` includes both. A rule no map binds is inactive.
   (`.claude/settings*`) and hooks (`.claude/hooks/`), its MCP server list
   (`.mcp.json`), and the deployment's policy (`appa/appa.toml`,
   `appa/batteries/`). Every other path takes the session's label as it is.
-- **fetch_url, web_search** — A page or search result is a `suspicious`
-  source. A fetch URL is a `public` sink, except that a fetch from a listed
-  documentation host keeps the session's label. A search, through
-  `web_search` or a Google search URL, requires no audience: the query goes
-  only to the search provider.
+- **fetch_url, web_search** — A fetch from a listed documentation host keeps
+  the session's label. Any other fetch goes to the
+  `claude-code.fetch-requirements` Annotator: a page that one accountable
+  publisher controls, such as vendor docs or a release index, is `trusted`;
+  a page anyone can write to, such as a forum answer or a package README, is
+  `suspicious`; and data the URL or body carries requires the readers it
+  reaches. The root's `[policy.deployment] hint` can mark a source trusted
+  or suspicious either way. A search result is a `suspicious` source. A
+  search, through `web_search` or a Google search URL, requires no audience:
+  the query goes only to the search provider. Where the deployment confines
+  the result (the Claude Code default root confines WebFetch but not
+  WebSearch), a fetch the Annotator labels `suspicious` or a confined search
+  offers `coding.strip-instructions` beside the trust narrowing: the model
+  removes every instruction from the result and keeps its facts, code and
+  links, and the result returns at the session's own trust. The sanitizer is
+  tagged `web`.
+
+The model for both sanitizers is configured in the deployment, not in the
+battery. A deployment runs one by binding it under `[externals.sanitizers]`,
+for example to `builtin = "llm"` or, where the `claude` CLI is installed,
+`builtin = "claude-code"`; the Claude Code
+plugin's default config binds both. A sanitizer the root does not bind is
+not offered. APPA does not verify what the model removed: binding a
+sanitizer registers it as trusted. A root rule for a tool precedes the
+battery's, and a root rule without the battery's tag offers no sanitizer.
 
 The Annotators run the local `claude` command (`builtin = "claude-code"`); on
 Windows it must resolve to `claude.exe`. An Annotator reads the client's call

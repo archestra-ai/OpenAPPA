@@ -11,8 +11,9 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use appa_engine::audience::{DeclaredTemplate, SelectorTemplate, SourceRegistration, well_formed_reader};
+use appa_engine::authority::{ContextHint, HintTooLong};
 use appa_engine::label::{ChainAudience, ReaderId};
-use appa_engine::names::ProviderName;
+use appa_engine::names::{ContextProviderName, ProviderName, SanitizerName};
 use appa_package::BatteryTarget;
 use appa_policy::AnnotatorBuiltin;
 use appa_runtime_api::PrincipalSource;
@@ -62,9 +63,6 @@ pub struct Config {
     /// Deliberately outside [`PolicyFile`]: changing one must not move the policy file key
     /// that every session's opening binds to.
     pub reporting: Reporting,
-    /// Root-local file tracking configuration. Its presence enables one in-memory file
-    /// ledger per root trajectory; it is not part of the stored policy bytes.
-    pub file_tracking: Option<FileTrackingConfig>,
     included_batteries: Vec<String>,
     /// Whether the deployment serves `appa/do_something`. Never read from the document: a
     /// replay opts in with [`Config::with_do_something`], so no policy file can serve it.
@@ -77,22 +75,6 @@ pub struct Reporting {
     /// May an agent send a report on its own, through the `yell` tool? Off unless the
     /// deployment says otherwise, so an upgrade never starts an agent reporting.
     pub agent_yell: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FileTrackingConfig {
-    pub initial_trust: String,
-    pub initial_audience: InitialFileAudience,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum InitialFileAudience {
-    #[serde(rename = "self")]
-    Self_,
-    Internal,
-    Public,
 }
 
 /// The runtime's own environment namespace: its wiring (`APPA_CONFIG`, `APPA_DB`,
@@ -304,6 +286,13 @@ pub struct Externals {
     /// One context provider per `[externals.context.<name>]`, under its name: asked about
     /// every call an Annotator judges, before the Annotator.
     pub context: BTreeMap<String, Transport>,
+    /// The deployer's instruction on reading each context provider's facts, for every provider
+    /// in `context` that declares a `hint`.
+    pub context_hints: BTreeMap<ContextProviderName, ContextHint>,
+    /// One recorder per `[externals.recorders.<name>]`, under its name: delivered the dispatch
+    /// records of every call whose declaration names it, after they are appended. Never
+    /// consulted: a recorder neither denies nor delays a call.
+    pub recorders: BTreeMap<String, Transport>,
     /// Deployment knobs for the stock `claude-code` builtin.
     pub claude_code: ClaudeCode,
     /// The profile the stock `llm` builtin consults, where the deployment declares one.
@@ -766,6 +755,8 @@ pub enum ConfigError {
     TraversingInclude { path: String },
     #[error("the root config includes {path:?} more than once")]
     DuplicateInclude { path: String },
+    #[error("include path {path:?} is not a valid glob: {reason}")]
+    GlobInclude { path: String, reason: String },
     #[error("{BATTERY_TARGET_VARIABLE} is {value:?}, which is neither single-user nor multi-user")]
     InvalidBatteryTarget { value: String },
     #[error("{SESSION_PRINCIPAL_VARIABLE} is {value:?}, which is neither none nor wire")]
@@ -776,7 +767,7 @@ pub enum ConfigError {
         source: Box<appa_package::ManifestError>,
     },
     #[error(
-        "the root config includes {path:?}, a battery's target policy; include the battery's base, and {BATTERY_TARGET_VARIABLE} picks the target policy"
+        "the root config includes {path:?} from a battery with target policies; include the battery's base instead, and {BATTERY_TARGET_VARIABLE} picks the target policy"
     )]
     TargetPolicyIncluded { path: String },
     #[error(
@@ -904,6 +895,8 @@ pub enum ConfigError {
     },
     #[error("the {section} entry {name:?} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
     LlmNotConfigured { section: &'static str, name: String },
+    #[error("the context entry {name:?} hint is {len} characters, over the maximum {max}")]
+    ContextHintTooLong { name: String, len: usize, max: usize },
     #[error("the {section} entry {name:?} command must contain at least one non-empty argument")]
     InvalidCommand { section: &'static str, name: String },
     #[error("a hosted document declares {key:?}, which is the host's to declare, not the policy's")]
@@ -946,15 +939,18 @@ pub(crate) enum Section {
     Audience,
     /// One context provider per `[externals.context.<name>]`.
     Context,
+    /// One recorder per `[externals.recorders.<name>]`.
+    Recorders,
 }
 
 impl Section {
-    pub(crate) const ALL: [Section; 5] = [
+    pub(crate) const ALL: [Section; 6] = [
         Section::Authorities,
         Section::Sanitizers,
         Section::Annotators,
         Section::Audience,
         Section::Context,
+        Section::Recorders,
     ];
 
     pub(crate) fn name(self) -> &'static str {
@@ -964,6 +960,7 @@ impl Section {
             Section::Annotators => "annotators",
             Section::Audience => "audience",
             Section::Context => "context",
+            Section::Recorders => "recorders",
         }
     }
 
@@ -982,7 +979,7 @@ impl Section {
     /// on its policy declaration instead, and an audience entry is never a builtin.
     fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
         let allowed = match self {
-            Section::Annotators | Section::Audience | Section::Context => {
+            Section::Annotators | Section::Audience | Section::Context | Section::Recorders => {
                 return Err(ConfigError::BuiltinNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
@@ -1013,8 +1010,6 @@ struct RawConfig {
     /// reaches [`PolicyFile::bytes`]. See [`Config::load`].
     #[serde(default)]
     reporting: RawReporting,
-    /// Root-file only, and stripped before the composed document is rendered.
-    file_tracking: Option<FileTrackingConfig>,
     /// Offline packaging inputs, not part of the policy identity.
     #[serde(default)]
     bundle: RawBundle,
@@ -1084,7 +1079,9 @@ struct RawExternals {
     #[serde(default)]
     audience: BTreeMap<String, RawAudienceBinding>,
     #[serde(default)]
-    context: BTreeMap<String, RawBinding>,
+    context: BTreeMap<String, RawContextBinding>,
+    #[serde(default)]
+    recorders: BTreeMap<String, RawBinding>,
     claude_code: Option<RawClaudeCode>,
     llm: Option<RawLlm>,
     jev: Option<RawJev>,
@@ -1097,7 +1094,7 @@ impl RawExternals {
             (Section::Authorities, &self.authorities),
             (Section::Sanitizers, &self.sanitizers),
             (Section::Annotators, &self.annotators),
-            (Section::Context, &self.context),
+            (Section::Recorders, &self.recorders),
         ];
         bindings
             .into_iter()
@@ -1107,6 +1104,12 @@ impl RawExternals {
                     .filter(|(_, binding)| binding.command.is_some())
                     .map(move |(name, _)| (section, name.as_str()))
             })
+            .chain(
+                self.context
+                    .iter()
+                    .filter(|(_, provider)| provider.command.is_some())
+                    .map(|(name, _)| (Section::Context, name.as_str())),
+            )
             .chain(
                 self.audience
                     .iter()
@@ -1166,6 +1169,37 @@ struct RawBinding {
     token_env: Option<RawTokenEnv>,
     builtin: Option<String>,
     command: Option<Vec<String>>,
+}
+
+/// A context provider's binding and the deployer's `hint` on reading its answers. Only this
+/// section takes a `hint`: every other binding stays a bare [`RawBinding`].
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawContextBinding {
+    url: Option<String>,
+    token_env: Option<RawTokenEnv>,
+    builtin: Option<String>,
+    command: Option<Vec<String>>,
+    hint: Option<String>,
+}
+
+impl RawContextBinding {
+    fn split(self) -> (RawBinding, Option<String>) {
+        let RawContextBinding {
+            url,
+            token_env,
+            builtin,
+            command,
+            hint,
+        } = self;
+        let binding = RawBinding {
+            url,
+            token_env,
+            builtin,
+            command,
+        };
+        (binding, hint)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1244,13 +1278,13 @@ impl Config {
                 field: "credentials".to_string(),
             });
         }
-        // The reporting and file-tracking knobs are this machine's, not the policy's, and
+        // The reporting knobs are this machine's, not the policy's, and
         // the packaging inputs are authored, not composed. They are read from the root
         // file's own parse and dropped from the composed document, so the stored text — and
         // with it the policy file key every opening binds to — is byte-identical whether or
         // not the deployment set them.
         let _ = &root.bundle.files;
-        for local in ["include", "reporting", "file_tracking", "bundle"] {
+        for local in ["include", "reporting", "bundle"] {
             table.remove(local);
         }
 
@@ -1258,27 +1292,42 @@ impl Config {
         composition.origins = root_command_origins(&root, &source_dir)?;
         let mut seen = std::collections::BTreeSet::new();
         let mut included_batteries = std::collections::BTreeSet::new();
+        // A file an entry names on its own is composed at that entry, and the root is not an
+        // include of itself; a glob passes over both.
+        let mut named = named_include_files(&root.include, &source_dir, battery_dirs);
+        named.insert(std::fs::canonicalize(path).map_err(|source| unreadable(path, source))?);
         for authored in &root.include {
-            let include = Path::new(authored);
-            if include.is_absolute() {
+            if Path::new(authored).is_absolute() {
                 return Err(ConfigError::AbsoluteInclude { path: authored.clone() });
             }
-            let include_path = crate::batteries::resolve_include(authored, &source_dir, battery_dirs);
-            let include_path =
-                std::fs::canonicalize(&include_path).map_err(|source| unreadable(&include_path, source))?;
-            let battery = crate::batteries::name_from_include(include);
-            if let Some(name) = &battery {
-                included_batteries.insert(name.clone());
-            }
-            for policy_path in target_policies(include_path, target)? {
-                if !seen.insert(policy_path.clone()) {
-                    return Err(ConfigError::DuplicateInclude { path: authored.clone() });
+            // The files the entry names, each with the entry that names it alone.
+            let files = match IncludeGlob::parse(authored)? {
+                Some(glob) => glob
+                    .files(&source_dir)?
+                    .into_iter()
+                    .filter(|(_, file)| !named.contains(file))
+                    .collect(),
+                None => {
+                    let file = crate::batteries::resolve_include(authored, &source_dir, battery_dirs);
+                    let file = std::fs::canonicalize(&file).map_err(|source| unreadable(&file, source))?;
+                    vec![(authored.clone(), file)]
                 }
-                let included_text =
-                    std::fs::read_to_string(&policy_path).map_err(|source| unreadable(&policy_path, source))?;
-                let included = parse_toml(&policy_path, &included_text)?;
-                let origin = tool_aliases::MapOrigin::Battery(battery.clone().unwrap_or_else(|| authored.clone()));
-                composition.include(included, &policy_path, origin)?;
+            };
+            for (entry, file) in files {
+                let battery = crate::batteries::name_from_include(Path::new(&entry));
+                if let Some(name) = &battery {
+                    included_batteries.insert(name.clone());
+                }
+                for policy_path in target_policies(file, target)? {
+                    if !seen.insert(policy_path.clone()) {
+                        return Err(ConfigError::DuplicateInclude { path: entry.clone() });
+                    }
+                    let included_text =
+                        std::fs::read_to_string(&policy_path).map_err(|source| unreadable(&policy_path, source))?;
+                    let included = parse_toml(&policy_path, &included_text)?;
+                    let origin = tool_aliases::MapOrigin::Battery(battery.clone().unwrap_or_else(|| entry.clone()));
+                    composition.include(included, &policy_path, origin)?;
+                }
             }
         }
         let (mut document, origins) = composition.finish()?;
@@ -1287,7 +1336,6 @@ impl Config {
         let reporting = Reporting {
             agent_yell: root.reporting.agent_yell,
         };
-        let file_tracking = root.file_tracking.clone();
         let composed = toml::to_string(&document).map_err(|source| ConfigError::UnrenderablePolicy { source })?;
         let raw: RawConfig = toml::from_str(&composed).map_err(|source| ConfigError::UnparsablePolicy { source })?;
         add_composed_metadata(&mut document, &raw.externals, &origins)?;
@@ -1296,7 +1344,6 @@ impl Config {
             stored,
             raw,
             reporting,
-            file_tracking,
             origins,
             included_batteries.into_iter().collect(),
             keys,
@@ -1458,7 +1505,6 @@ impl Config {
             rendered,
             raw,
             Reporting::default(),
-            None,
             BTreeMap::new(),
             included_batteries.into_iter().collect(),
             keys,
@@ -1552,12 +1598,10 @@ impl Config {
             .into_iter()
             .map(|key| (key, source_dir.to_path_buf()))
             .collect();
-        let file_tracking = raw.file_tracking.clone();
         Config::validate_composed(
             text,
             raw,
             Reporting::default(),
-            file_tracking,
             origins,
             Vec::new(),
             KeySource::Lookup(&lookup),
@@ -1568,7 +1612,6 @@ impl Config {
         text: String,
         raw: RawConfig,
         reporting: Reporting,
-        file_tracking: Option<FileTrackingConfig>,
         origins: BTreeMap<String, PathBuf>,
         included_batteries: Vec<String>,
         keys: KeySource<'_>,
@@ -1583,6 +1626,7 @@ impl Config {
             annotators,
             audience,
             context,
+            recorders,
             claude_code,
             llm,
             jev,
@@ -1610,6 +1654,7 @@ impl Config {
         let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {
             resolve_bindings(section, entries, &origins, keys, llm.is_some())
         };
+        let (context, context_hints) = split_context(context)?;
         Ok(Config {
             credential_store: None,
             keys: keys.keys(),
@@ -1618,7 +1663,6 @@ impl Config {
             credentials: raw.credentials,
             inventory: raw.appa_inventory,
             reporting,
-            file_tracking,
             included_batteries,
             do_something: crate::do_something::DoSomething::Refused,
             externals: Externals {
@@ -1633,6 +1677,11 @@ impl Config {
                     .collect(),
                 audience: resolve_audience_bindings(audience, &origins, keys)?,
                 context: resolve(Section::Context, context)?
+                    .into_iter()
+                    .map(|(name, implementation)| (name, transport_only(implementation)))
+                    .collect(),
+                context_hints,
+                recorders: resolve(Section::Recorders, recorders)?
                     .into_iter()
                     .map(|(name, implementation)| (name, transport_only(implementation)))
                     .collect(),
@@ -1703,11 +1752,153 @@ fn take_include(document: &mut toml::Value) -> Result<Vec<String>, ConfigError> 
     let mut seen = std::collections::BTreeSet::new();
     for entry in &entries {
         refuse_include_entry(entry)?;
+        // The host answers each entry with one battery; a glob names files beside a root
+        // config file, which a hosted document does not have.
+        if IncludeGlob::parse(entry)?.is_some() {
+            return Err(ConfigError::GlobInclude {
+                path: entry.clone(),
+                reason: "a hosted policy has no files beside it to match".into(),
+            });
+        }
         if !seen.insert(entry) {
             return Err(ConfigError::DuplicateInclude { path: entry.clone() });
         }
     }
     Ok(entries)
+}
+
+/// An include entry that names every policy file in one folder beside the root config,
+/// such as `mcp/*.toml`. `*` matches any run of characters in a file name; only the last
+/// segment may hold it, and the pattern ends in `.toml`. The matches compose in file-name
+/// order, at the entry's place in `include`, each as if the entry named it alone. Only a
+/// regular file the folder holds matches: a hidden file, a folder and a symbolic link never
+/// do. A folder that does not exist matches nothing.
+///
+/// Whoever can add a file to the folder adds policy, so the folder stays inside the root
+/// config's own: the entry cannot hold a `..` segment or reach another folder through a
+/// symbolic link.
+struct IncludeGlob<'a> {
+    authored: &'a str,
+    folder: &'a str,
+    pattern: &'a str,
+}
+
+impl<'a> IncludeGlob<'a> {
+    /// The entry as a glob, or `None` when it names one file.
+    fn parse(authored: &'a str) -> Result<Option<Self>, ConfigError> {
+        if !authored.contains('*') {
+            return Ok(None);
+        }
+        let (folder, pattern) = authored.rsplit_once('/').unwrap_or(("", authored));
+        let glob = Self {
+            authored,
+            folder,
+            pattern,
+        };
+        if folder.contains('*') {
+            return Err(glob.invalid("only the file name may hold `*`"));
+        }
+        if !pattern.ends_with(".toml") {
+            return Err(glob.invalid("the file name must end in `.toml`"));
+        }
+        if Path::new(folder)
+            .components()
+            .any(|component| component == Component::ParentDir)
+        {
+            return Err(glob.invalid("the folder must not contain a \"..\" component"));
+        }
+        Ok(Some(glob))
+    }
+
+    fn invalid(&self, reason: &str) -> ConfigError {
+        ConfigError::GlobInclude {
+            path: self.authored.to_string(),
+            reason: reason.to_string(),
+        }
+    }
+
+    /// Each matching file in name order, with the entry that would name it alone.
+    /// `source_dir` is canonical.
+    fn files(&self, source_dir: &Path) -> Result<Vec<(String, PathBuf)>, ConfigError> {
+        let folder = source_dir.join(self.folder);
+        let dir = match std::fs::canonicalize(&folder) {
+            Ok(dir) => dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(unreadable(&folder, source)),
+        };
+        if !dir.starts_with(source_dir) {
+            return Err(self.invalid("the folder leads out of the root config's folder through a symbolic link"));
+        }
+        let listing = std::fs::read_dir(&dir).map_err(|source| unreadable(&dir, source))?;
+        let mut names = Vec::new();
+        for item in listing {
+            let item = item.map_err(|source| unreadable(&dir, source))?;
+            // A name that is not UTF-8 cannot match a pattern written in TOML.
+            let Ok(name) = item.file_name().into_string() else {
+                continue;
+            };
+            if name.starts_with('.') || !file_name_matches(self.pattern, &name) {
+                continue;
+            }
+            // The entry's own type, which a symbolic link does not pass on.
+            let kind = item.file_type().map_err(|source| unreadable(&item.path(), source))?;
+            if kind.is_file() {
+                names.push(name);
+            }
+        }
+        names.sort();
+        names
+            .into_iter()
+            .map(|name| {
+                let path = dir.join(&name);
+                let path = std::fs::canonicalize(&path).map_err(|source| unreadable(&path, source))?;
+                let entry = if self.folder.is_empty() {
+                    name
+                } else {
+                    format!("{}/{name}", self.folder)
+                };
+                Ok((entry, path))
+            })
+            .collect()
+    }
+}
+
+/// Whether `name` matches `pattern`, where `*` matches any run of characters, including
+/// none, and every other character matches itself.
+fn file_name_matches(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        // No `*`: the whole name is the first part.
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
+/// The files the root's single-file entries name, so a glob does not compose them twice.
+/// An entry that cannot be read is reported where the loop reaches it.
+fn named_include_files(
+    include: &[String],
+    source_dir: &Path,
+    battery_dirs: &[PathBuf],
+) -> std::collections::BTreeSet<PathBuf> {
+    include
+        .iter()
+        .filter(|authored| !authored.contains('*'))
+        .filter_map(|authored| {
+            std::fs::canonicalize(crate::batteries::resolve_include(authored, source_dir, battery_dirs)).ok()
+        })
+        .collect()
 }
 
 /// One include entry, as authored: a spelling this runtime resolves beside the root
@@ -1834,16 +2025,24 @@ fn declaration_name(declaration: &toml::Value) -> Option<&str> {
     declaration.as_table()?.get("name")?.as_str()
 }
 
-/// The annotator names a policy declares; a root's set decides which included
-/// defaults its own declarations replace.
-fn declared_annotators(policy: &toml::Value) -> std::collections::BTreeSet<String> {
-    policy
-        .get("annotator")
-        .and_then(toml::Value::as_array)
+/// The named components a root may replace in an included default: Annotators and
+/// Sanitizers. Each is one named policy component, not an ordered matcher.
+const REPLACEABLE: [&str; 2] = ["annotator", "sanitizer"];
+
+/// The annotator and sanitizer names a policy declares, by field; a root's set decides
+/// which included defaults its own declarations replace.
+fn declared_components(policy: &toml::Value) -> std::collections::BTreeSet<(String, String)> {
+    REPLACEABLE
         .into_iter()
-        .flatten()
-        .filter_map(declaration_name)
-        .map(str::to_owned)
+        .flat_map(|field| {
+            policy
+                .get(field)
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(declaration_name)
+                .map(move |name| (field.to_owned(), name.to_owned()))
+        })
         .collect()
 }
 
@@ -1947,17 +2146,66 @@ fn refuse_ungranted_credentials(battery: &HostedBattery<'_>, included: &toml::Ta
 struct Composition {
     document: toml::Value,
     version: i64,
-    root_annotators: std::collections::BTreeSet<String>,
-    replaced_annotators: std::collections::BTreeSet<String>,
+    root_components: std::collections::BTreeSet<(String, String)>,
+    /// The root components that name their builtin, and so take no binding.
+    root_builtin_components: std::collections::BTreeSet<(String, String)>,
+    /// The annotators and sanitizers the root binds under its own `[externals]`.
+    root_bound: std::collections::BTreeSet<(String, String)>,
+    /// The included Sanitizer declarations a root declaration replaced: their scope says
+    /// which included confinements they were there for.
+    replaced_sanitizers: Vec<toml::Value>,
+    replaced_components: std::collections::BTreeSet<(String, String)>,
     origins: BTreeMap<String, PathBuf>,
     tool_maps: Vec<(tool_aliases::MapOrigin, tool_aliases::ToolMaps)>,
+    /// The included Sanitizers that name no builtin: each runs only where the deployment
+    /// binds it, and is left out of the composed policy where nothing does.
+    included_sanitizers: std::collections::BTreeSet<String>,
+    /// The root's own `confined_results`, which composition never drops.
+    root_confined: std::collections::BTreeSet<String>,
+    /// Each result an included fragment confines, with the tags of the fragment's rules for
+    /// that tool: an included confinement stays only while a Sanitizer can reach it.
+    included_confined: BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl Composition {
     fn new(mut document: toml::Value) -> Result<Composition, ConfigError> {
         let policy = document.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
         let version = policy_version(policy).ok_or(ConfigError::InvalidPolicyVersion)?;
-        let root_annotators = declared_annotators(policy);
+        let root_components = declared_components(policy);
+        let root_builtin_components = REPLACEABLE
+            .into_iter()
+            .flat_map(|field| {
+                policy
+                    .get(field)
+                    .and_then(toml::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|declaration| declaration.get("builtin").is_some())
+                    .filter_map(declaration_name)
+                    .map(move |name| (field.to_owned(), name.to_owned()))
+            })
+            .collect();
+        let root_bound = [("sanitizer", Section::Sanitizers), ("annotator", Section::Annotators)]
+            .into_iter()
+            .flat_map(|(component, section)| {
+                document
+                    .get("externals")
+                    .and_then(|externals| externals.get(section.name()))
+                    .and_then(toml::Value::as_table)
+                    .into_iter()
+                    .flat_map(|table| table.keys())
+                    .map(move |name| (component.to_owned(), name.clone()))
+            })
+            .collect();
+        let root_confined = policy
+            .get("deployment")
+            .and_then(|deployment| deployment.get("confined_results"))
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_owned)
+            .collect();
         // Fragments append their externals to the root's table, so an absent one is the
         // empty table a root file without fragment externals holds.
         let table = document.as_table_mut().expect("a TOML document parses as a table");
@@ -1967,10 +2215,16 @@ impl Composition {
         Ok(Composition {
             document,
             version,
-            root_annotators,
-            replaced_annotators: std::collections::BTreeSet::new(),
+            root_components,
+            root_builtin_components,
+            root_bound,
+            replaced_sanitizers: Vec::new(),
+            replaced_components: std::collections::BTreeSet::new(),
             origins: BTreeMap::new(),
             tool_maps: Vec::new(),
+            included_sanitizers: std::collections::BTreeSet::new(),
+            root_confined,
+            included_confined: BTreeMap::new(),
         })
     }
 
@@ -2040,7 +2294,9 @@ impl Composition {
             .and_then(toml::Value::as_table_mut)
             .expect("a composition's root policy is a table");
         if let Some(deployment) = included_policy.remove("deployment") {
-            compose_included_confinement(root_policy, &included_policy, deployment, path)?;
+            for (tool, tags) in compose_included_confinement(root_policy, &included_policy, deployment, path)? {
+                self.included_confined.entry(tool).or_default().extend(tags);
+            }
         }
         for (field, value) in included_policy {
             if field == "version" {
@@ -2052,18 +2308,35 @@ impl Composition {
             let toml::Value::Array(mut declarations) = value else {
                 return Err(refused(field));
             };
-            if field == "annotator" {
-                // An Annotator is one named policy component, not an ordered matcher. The root
-                // may replace one included default so a deployment can own its trusted hint and
-                // mandate without editing a battery. A second included declaration with that
-                // name remains in the composed policy, where normal duplicate validation refuses
-                // it instead of silently choosing between two batteries.
+            if REPLACEABLE.contains(&field.as_str()) {
+                // An Annotator or a Sanitizer is one named policy component, not an ordered
+                // matcher. The root may replace one included default so a deployment can own
+                // its trusted hint, mandate, and model builtin without editing a battery. A
+                // second included declaration with that name remains in the composed policy,
+                // where normal duplicate validation refuses it instead of silently choosing
+                // between two batteries.
                 declarations.retain(|declaration| {
                     let Some(name) = declaration_name(declaration) else {
                         return true;
                     };
-                    !(self.root_annotators.contains(name) && self.replaced_annotators.insert(name.to_string()))
+                    let key = (field.clone(), name.to_string());
+                    let replaced = self.root_components.contains(&key) && self.replaced_components.insert(key);
+                    if replaced && field == "sanitizer" {
+                        self.replaced_sanitizers.push(declaration.clone());
+                    }
+                    !replaced
                 });
+            }
+            if field == "sanitizer" {
+                self.included_sanitizers.extend(
+                    declarations
+                        .iter()
+                        .filter(|declaration| declaration.get("builtin").is_none())
+                        .filter_map(declaration_name)
+                        // The engine applies `attest-schema` itself; it takes no binding.
+                        .filter(|name| *name != SanitizerName::ATTEST_SCHEMA)
+                        .map(str::to_owned),
+                );
             }
             let Some(destination) = root_policy
                 .entry(field.clone())
@@ -2117,7 +2390,25 @@ impl Composition {
                 .ok_or_else(|| ConfigError::RootField {
                     field: format!("externals.{section_name}"),
                 })?;
+            let component = match section {
+                Some(Section::Sanitizers) => Some("sanitizer"),
+                Some(Section::Annotators) => Some("annotator"),
+                _ => None,
+            };
             for (name, entry) in entries {
+                // An included binding for a component the root declares belongs to the
+                // declaration the root replaces. The root's own binding, or a builtin on its
+                // declaration, takes its place; a root declaration with neither keeps the
+                // included binding. This reads only the root, so it holds whichever of a
+                // battery's files declares the component and whichever binds it, in any order.
+                if let Some(component) = component {
+                    let key = (component.to_owned(), name.clone());
+                    if self.root_components.contains(&key)
+                        && (self.root_bound.contains(&key) || self.root_builtin_components.contains(&key))
+                    {
+                        continue;
+                    }
+                }
                 if destination.contains_key(&name) {
                     let path = display.to_string();
                     return Err(match section {
@@ -2140,6 +2431,13 @@ impl Composition {
 
     fn finish(self) -> Result<(toml::Value, BTreeMap<String, PathBuf>), ConfigError> {
         let mut document = self.document;
+        leave_out_unbound_included_sanitizers(
+            &mut document,
+            &self.included_sanitizers,
+            &self.replaced_sanitizers,
+            &self.root_confined,
+            &self.included_confined,
+        );
         let aliases = aliases::of_document(&document)?;
         tool_aliases::lower(&mut document, self.tool_maps, &aliases)?;
         Ok((document, self.origins))
@@ -2155,7 +2453,7 @@ fn compose_included_confinement(
     included_policy: &toml::map::Map<String, toml::Value>,
     deployment: toml::Value,
     include_path: &Path,
-) -> Result<(), ConfigError> {
+) -> Result<Vec<(String, Vec<String>)>, ConfigError> {
     let refused = |field: &str| ConfigError::IncludedPolicyField {
         path: include_path.display().to_string(),
         field: format!("deployment.{field}"),
@@ -2199,13 +2497,138 @@ fn compose_included_confinement(
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
         .ok_or_else(|| refused("confined_results"))?;
+    let mut tagged = Vec::new();
     for tool in confined {
         if !destination.iter().any(|entry| entry.as_str() == Some(&tool)) {
-            destination.push(toml::Value::String(tool));
+            destination.push(toml::Value::String(tool.clone()));
         }
+        let tags = included_policy
+            .get("tool")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|rule| declaration_name(rule).is_some_and(|name| name.split('(').next().unwrap_or(name) == tool))
+            .filter_map(|rule| rule.get("tags").and_then(toml::Value::as_array))
+            .flatten()
+            .filter_map(toml::Value::as_str)
+            .map(str::to_owned)
+            .collect();
+        tagged.push((tool, tags));
     }
-    Ok(())
+    Ok(tagged)
 }
+
+/// An included Sanitizer that names no builtin says what to remove, not which model
+/// removes it: that is the deployment's to say, by binding it under `[externals.sanitizers]`
+/// or by re-declaring it. One nothing binds is left out of the composed policy, so no plan
+/// offers a consult that cannot answer, and the deployment decides as it would without the
+/// Sanitizer. Leaving one out only removes remedies; it never permits a flow. An included
+/// confinement a left-out output Sanitizer could reach (untagged, or sharing a tag with the
+/// fragment's rule for the tool) goes with it, unless a remaining one reaches it too. The
+/// root's own Sanitizers and confinements are its declarations and are never left out.
+fn leave_out_unbound_included_sanitizers(
+    document: &mut toml::Value,
+    included_sanitizers: &std::collections::BTreeSet<String>,
+    replaced_sanitizers: &[toml::Value],
+    root_confined: &std::collections::BTreeSet<String>,
+    included_confined: &BTreeMap<String, std::collections::BTreeSet<String>>,
+) {
+    let bound: std::collections::BTreeSet<String> = document
+        .get("externals")
+        .and_then(|externals| externals.get(Section::Sanitizers.name()))
+        .and_then(toml::Value::as_table)
+        .map(|table| table.keys().cloned().collect())
+        .unwrap_or_default();
+    let Some(policy) = document.get_mut("policy").and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    let scope = |declaration: &toml::Value| -> Option<Option<Vec<String>>> {
+        let on_output = declaration
+            .get("on")
+            .and_then(toml::Value::as_array)
+            .is_some_and(|on| on.iter().any(|stage| stage.as_str() == Some("tool_output")));
+        // An empty tag list is unscoped, as in the engine's `Scope::covers`.
+        on_output.then(|| {
+            declaration
+                .get("tags")
+                .and_then(toml::Value::as_array)
+                .filter(|tags| !tags.is_empty())
+                .map(|tags| tags.iter().filter_map(toml::Value::as_str).map(str::to_owned).collect())
+        })
+    };
+    let mut kept_scopes = Vec::new();
+    // A replaced included sanitizer is gone too: the root's replacement, kept below, decides
+    // which of its confinements still have a sanitizer to run on.
+    let mut left_out_scopes: Vec<Option<Vec<String>>> = replaced_sanitizers.iter().filter_map(scope).collect();
+    if let Some(sanitizers) = policy.get_mut("sanitizer").and_then(toml::Value::as_array_mut) {
+        sanitizers.retain(|declaration| {
+            let Some(name) = declaration_name(declaration) else {
+                return true;
+            };
+            let kept = !included_sanitizers.contains(name) || bound.contains(name);
+            if !kept {
+                tracing::info!(
+                    sanitizer = name,
+                    "an included sanitizer is not bound by this deployment and is not offered"
+                );
+                left_out_scopes.extend(scope(declaration));
+            }
+            kept
+        });
+        // `attest-schema` runs only on a child's return, never on a confined tool result.
+        kept_scopes.extend(
+            sanitizers
+                .iter()
+                .filter(|declaration| declaration_name(declaration) != Some(SanitizerName::ATTEST_SCHEMA))
+                .filter_map(scope),
+        );
+    }
+    let reaches = |scopes: &[Option<Vec<String>>], tool: &str| {
+        let tags = included_confined.get(tool);
+        scopes.iter().any(|scope| match (scope, tags) {
+            (None, _) => true,
+            (Some(scope), Some(tags)) => scope.iter().any(|tag| tags.contains(tag)),
+            (Some(_), None) => false,
+        })
+    };
+    // Only a confinement a left-out Sanitizer was there for goes with it; one a battery
+    // keeps for its own sake, such as withholding a result with effects, stays.
+    let reached = |tool: &str| {
+        !included_confined.contains_key(tool) || !reaches(&left_out_scopes, tool) || reaches(&kept_scopes, tool)
+    };
+    if let Some(confined) = policy
+        .get_mut("deployment")
+        .and_then(|deployment| deployment.get_mut("confined_results"))
+        .and_then(toml::Value::as_array_mut)
+    {
+        confined.retain(|entry| {
+            entry
+                .as_str()
+                .is_none_or(|tool| root_confined.contains(tool) || reached(tool))
+        });
+    }
+}
+
+/// The context section's bindings, and the hint of every provider that declares one.
+fn split_context(raw: BTreeMap<String, RawContextBinding>) -> Result<SplitContext, ConfigError> {
+    let mut bindings = BTreeMap::new();
+    let mut hints = BTreeMap::new();
+    for (name, entry) in raw {
+        let (binding, hint) = entry.split();
+        if let Some(hint) = hint.filter(|hint| !hint.trim().is_empty()) {
+            let hint = ContextHint::new(hint).map_err(|HintTooLong { len, max }| ConfigError::ContextHintTooLong {
+                name: name.clone(),
+                len,
+                max,
+            })?;
+            hints.insert(ContextProviderName::new(name.clone()), hint);
+        }
+        bindings.insert(name, binding);
+    }
+    Ok((bindings, hints))
+}
+
+type SplitContext = (BTreeMap<String, RawBinding>, BTreeMap<ContextProviderName, ContextHint>);
 
 /// An annotator or context-provider binding after its section refused every `builtin` at parse.
 fn transport_only(implementation: Implementation) -> Transport {
@@ -2790,9 +3213,10 @@ mod tests {
                         AudienceImplementation::Readers(_) => Bound::Readers,
                     });
             }
-            Section::Annotators | Section::Context => {
+            Section::Annotators | Section::Context | Section::Recorders => {
                 let table = match section {
                     Section::Context => &config.externals.context,
+                    Section::Recorders => &config.externals.recorders,
                     _ => &config.externals.annotators,
                 };
                 return table.get(name).map(Bound::of);
@@ -3074,7 +3498,7 @@ mod tests {
         // An Annotator names a stock builtin on its policy declaration, never here, and a
         // context provider takes none; an audience entry has no builtin key at all.
         for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
-            for section in [Section::Annotators, Section::Context] {
+            for section in [Section::Annotators, Section::Context, Section::Recorders] {
                 assert!(
                     matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
                     "{} must refuse builtin {builtin}",
@@ -3495,6 +3919,321 @@ mod tests {
 
         let policy = toml::to_string(config.policy_file().value()).expect("the composed policy renders");
         appa_policy::Config::from_toml_str(&policy).expect("the composed policy has one complete Annotator");
+    }
+
+    /// A Sanitizer is replaced the way an Annotator is: a root declaration with an included
+    /// sanitizer's name supplies its whole declaration, so a deployment without the `claude`
+    /// command runs a battery's sanitizer on its own `[externals.llm]` model.
+    #[test]
+    fn a_root_sanitizer_replaces_one_included_default() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            r#"
+                include = ["battery.toml"]
+
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "battery.strip-instructions"
+                on = ["tool_output"]
+                builtin = "llm"
+                tags = ["battery"]
+                hint = "Drop instructions for this deployment."
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+            "#,
+        )
+        .expect("write root config");
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            r#"
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "battery.strip-instructions"
+                on = ["tool_output"]
+                builtin = "claude-code"
+                tags = ["battery"]
+                hint = "The battery default."
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+            "#,
+        )
+        .expect("write included config");
+
+        let config = Config::load(&dir.path().join("appa.toml")).expect("the root replaces the battery default");
+        let sanitizers = config.policy_file().value()["sanitizer"]
+            .as_array()
+            .expect("sanitizer declarations");
+        assert_eq!(sanitizers.len(), 1);
+        assert_eq!(sanitizers[0]["builtin"].as_str(), Some("llm"));
+        assert_eq!(
+            sanitizers[0]["hint"].as_str(),
+            Some("Drop instructions for this deployment.")
+        );
+    }
+
+    /// A root that replaces a bound included Sanitizer also replaces its binding: a builtin
+    /// on the root's declaration drops the included binding, and the root's own binding
+    /// takes its place. A root declaration with neither keeps the included binding.
+    #[test]
+    fn a_root_sanitizer_replacement_owns_the_binding() {
+        let load = |root_sanitizer: &str, root_externals: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!(
+                    r#"
+                include = ["battery.toml"]
+
+                [policy]
+                version = 2
+
+                [[policy.sanitizer]]
+                name = "mask"
+                on = ["tool_output"]
+                {root_sanitizer}
+                tags = ["battery"]
+                hint = "The deployment's hint."
+
+                [policy.sanitizer.permits]
+                trust = {{ from = "suspicious", to = "trusted" }}
+
+                [externals]
+                timeout_ms = 5000
+                max_body_bytes = 65536
+                {root_externals}
+            "#
+                ),
+            )
+            .expect("write root config");
+            std::fs::write(
+                dir.path().join("battery.toml"),
+                r#"
+                [policy]
+                version = 2
+
+                [[policy.tool]]
+                name = "lookup"
+                delta = { trust = "suspicious" }
+                tags = ["battery"]
+
+                [[policy.sanitizer]]
+                name = "mask"
+                on = ["tool_output"]
+                tags = ["battery"]
+
+                [policy.sanitizer.permits]
+                trust = { from = "suspicious", to = "trusted" }
+
+                [policy.deployment]
+                confined_results = ["lookup"]
+
+                [externals.sanitizers.mask]
+                builtin = "redact-secrets"
+            "#,
+            )
+            .expect("write included config");
+            Config::load(&dir.path().join("appa.toml")).map(|config| config.externals.sanitizers.get("mask").cloned())
+        };
+
+        assert!(
+            load(r#"builtin = "llm""#, "")
+                .expect("a builtin replaces the binding")
+                .is_none()
+        );
+        assert!(matches!(
+            load("", "[externals.sanitizers.mask]\nbuiltin = \"claude-code\"").expect("the root binding wins"),
+            Some(Implementation::Builtin(builtin)) if builtin == "claude-code"
+        ));
+        assert!(matches!(
+            load("", "").expect("the included binding stays"),
+            Some(Implementation::Builtin(builtin)) if builtin == "redact-secrets"
+        ));
+    }
+
+    /// Root replacement reads only the root, so it holds when a battery's target file binds a
+    /// sanitizer before its base declares it, and the replacement's own scope decides which
+    /// of the replaced sanitizer's confinements stay.
+    #[test]
+    fn a_root_sanitizer_replacement_is_independent_of_include_order_and_scope() {
+        let base = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "lookup"
+            delta = { trust = "suspicious" }
+            tags = ["battery"]
+
+            [[policy.sanitizer]]
+            name = "mask"
+            on = ["tool_output"]
+            tags = ["battery"]
+
+            [policy.sanitizer.permits]
+            trust = { from = "suspicious", to = "trusted" }
+
+            [policy.deployment]
+            confined_results = ["lookup"]
+        "#;
+        let target = "[policy]\nversion = 2\n[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+        let load = |root_sanitizer: &str, root_externals: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            std::fs::write(dir.path().join("base.toml"), base).expect("write base");
+            std::fs::write(dir.path().join("target.toml"), target).expect("write target");
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!(
+                    "include = [\"target.toml\", \"base.toml\"]\n[policy]\nversion = 2\n\
+                     [[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n{root_sanitizer}\n\
+                     [policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n\
+                     [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n{root_externals}"
+                ),
+            )
+            .expect("write root");
+            let config = Config::load(&dir.path().join("appa.toml")).expect("the deployment composes");
+            let confined: Vec<String> = config
+                .policy_file()
+                .value()
+                .get("deployment")
+                .and_then(|deployment| deployment.get("confined_results"))
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect();
+            (config.externals.sanitizers.get("mask").cloned(), confined)
+        };
+
+        let (binding, confined) = load("builtin = \"llm\"\ntags = [\"battery\"]", "");
+        assert!(binding.is_none(), "a root builtin replaces the target's binding");
+        assert_eq!(confined, ["lookup"]);
+        let (binding, _) = load(
+            "tags = [\"battery\"]",
+            "[externals.sanitizers.mask]\nbuiltin = \"claude-code\"\n",
+        );
+        assert!(
+            matches!(binding, Some(Implementation::Builtin(builtin)) if builtin == "claude-code"),
+            "the root binding wins over the target's"
+        );
+        let (_, confined) = load("builtin = \"llm\"\ntags = [\"other\"]", "");
+        assert!(
+            confined.is_empty(),
+            "a replacement that cannot reach `lookup` releases its confinement"
+        );
+    }
+
+    /// An included Sanitizer that names no builtin runs only where the deployment binds it.
+    /// Unbound, it is left out with the confinement only it could reach, so the composed
+    /// policy is the one the battery would compose to without it. The root's own
+    /// confinement stays either way.
+    #[test]
+    fn an_unbound_included_sanitizer_is_left_out_with_the_confinement_it_needs() {
+        let battery = r#"
+            [policy]
+            version = 2
+
+            [[policy.tool]]
+            name = "mcp/tracker/read"
+            delta = { audience = ["internal"] }
+            tags = ["tracker"]
+
+            [[policy.tool]]
+            name = "mcp/tracker/list"
+            delta = { audience = ["internal"] }
+            tags = ["listing"]
+
+            [[policy.sanitizer]]
+            name = "tracker.redact"
+            on = ["tool_output"]
+            tags = ["tracker"]
+            hint = "Remove personal data."
+
+            [policy.sanitizer.permits]
+            audience = { from = ["internal"], to = ["public"] }
+
+            [policy.deployment]
+            confined_results = ["mcp/tracker/read", "mcp/tracker/list"]
+        "#;
+        let composed_with = |battery_tail: &str, root_tail: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            std::fs::write(dir.path().join("battery.toml"), format!("{battery}{battery_tail}")).expect("write battery");
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!(
+                    "include = [\"battery.toml\"]\n[policy]\nversion = 2\n[policy.deployment]\nconfined_results = [\"mcp/tracker/list\"]\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n{root_tail}"
+                ),
+            )
+            .expect("write root");
+            let config = Config::load(&dir.path().join("appa.toml")).expect("the deployment composes");
+            let policy = config.policy_file().value().clone();
+            let sanitizers: Vec<String> = policy
+                .get("sanitizer")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|declaration| declaration_name(declaration).map(str::to_owned))
+                .collect();
+            let confined: Vec<String> = policy["deployment"]["confined_results"]
+                .as_array()
+                .expect("confined results")
+                .iter()
+                .filter_map(|entry| entry.as_str().map(str::to_owned))
+                .collect();
+            (sanitizers, confined)
+        };
+        let composed = |root_tail: &str| composed_with("", root_tail);
+
+        assert_eq!(
+            composed(""),
+            (Vec::new(), vec!["mcp/tracker/list".to_string()]),
+            "unbound: the sanitizer and the confinement only it reaches are left out; the root's stays"
+        );
+        assert_eq!(
+            composed("[externals.sanitizers.\"tracker.redact\"]\nbuiltin = \"redact-email\"\n"),
+            (
+                vec!["tracker.redact".to_string()],
+                vec!["mcp/tracker/list".to_string(), "mcp/tracker/read".to_string()]
+            ),
+            "bound: the sanitizer runs and keeps the confinement its tag reaches"
+        );
+
+        // `attest-schema` is the engine's: it takes no binding, so an included one stays, and
+        // it never runs on a tool result, so a root one keeps no battery confinement.
+        let attest = "\n[[policy.sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\n[policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        // An explicit `tags = []` is unscoped, as in the engine: bound, it reaches every
+        // result, so it keeps the confinement the left-out `tracker.redact` needed.
+        let unscoped = "\n[[policy.sanitizer]]\nname = \"tracker.all\"\non = [\"tool_output\"]\ntags = []\n[policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        assert_eq!(
+            composed_with(
+                unscoped,
+                "[externals.sanitizers.\"tracker.all\"]\nbuiltin = \"redact-email\"\n"
+            ),
+            (
+                vec!["tracker.all".to_string()],
+                vec!["mcp/tracker/list".to_string(), "mcp/tracker/read".to_string()]
+            ),
+            "a bound sanitizer with empty tags reaches every confined result"
+        );
+
+        for (battery_tail, root_tail) in [(attest, ""), ("", attest)] {
+            assert_eq!(
+                composed_with(battery_tail, root_tail),
+                (vec!["attest-schema".to_string()], vec!["mcp/tracker/list".to_string()]),
+                "attest-schema declared by the {}",
+                if battery_tail.is_empty() { "root" } else { "battery" }
+            );
+        }
     }
 
     /// A command's working directory is its declaring file's, in every section, and the
@@ -4331,10 +5070,6 @@ mod tests {
             ("include", "include = [\"battery.toml\"]"),
             ("appa_composed", "[appa_composed]\ncommand_cwd = {}"),
             ("reporting", "[reporting]\nagent_yell = true"),
-            (
-                "file_tracking",
-                "[file_tracking]\ninitial_trust = \"suspicious\"\ninitial_audience = \"public\"",
-            ),
             ("bundle", "[bundle]\nfiles = []"),
             ("appa_inventory", "[appa_inventory]\ntools = []"),
         ] {
@@ -4441,6 +5176,147 @@ mod tests {
         assert!(stored.contains(VAR), "the variable name is persisted");
         assert!(!stored.contains("sekret"), "the secret never reaches the stored bytes");
         assert_eq!(from_file.policy_file().bytes(), config.policy_file().bytes());
+    }
+
+    /// One rule file for one tool, as an included file holds it.
+    fn rule_file(tool: &str) -> String {
+        format!("[policy]\nversion = 2\n[[policy.tool]]\nname = \"{tool}\"\ndelta = {{}}\n")
+    }
+
+    #[test]
+    fn a_glob_includes_each_matching_file_beside_the_root_in_name_order() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        std::fs::write(
+            &root,
+            "include = [\"mcp/helpdesk.toml\", \"mcp/*.toml\"]\n[policy]\nversion = 2\n[[policy.tool]]\nname = \"root__read\"\ndelta = {}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write root config");
+        let folder = dir.path().join("mcp");
+        std::fs::create_dir_all(folder.join("drafts.toml")).expect("create folders");
+        for (file, tool) in [
+            ("payments_api.toml", "payments_api__refund"),
+            ("helpdesk.toml", "helpdesk__read"),
+            ("crm.toml", "crm__read"),
+            (".hidden.toml", "hidden__read"),
+            ("notes.md", "notes__read"),
+        ] {
+            std::fs::write(folder.join(file), rule_file(tool)).expect("write included config");
+        }
+        std::fs::write(folder.join("drafts.toml").join("draft.toml"), rule_file("draft__read"))
+            .expect("write nested config");
+        #[cfg(unix)]
+        let outside = tempfile::tempdir().expect("temp directory");
+        #[cfg(unix)]
+        {
+            std::fs::write(outside.path().join("linked.toml"), rule_file("linked__read"))
+                .expect("write outside config");
+            std::os::unix::fs::symlink(outside.path().join("linked.toml"), folder.join("linked.toml"))
+                .expect("link a file outside");
+            std::os::unix::fs::symlink("crm.toml", folder.join("alias.toml")).expect("link a file beside");
+            std::os::unix::fs::symlink(outside.path(), folder.join("outside.toml")).expect("link a folder");
+        }
+
+        let config = Config::load(&root).expect("the glob composes");
+        // The file named on its own composes there, the glob's other matches follow in name
+        // order; a hidden file, another extension, a nested folder and a symbolic link never
+        // match.
+        assert_eq!(
+            tool_names(&config),
+            ["root__read", "helpdesk__read", "crm__read", "payments_api__refund"]
+        );
+    }
+
+    #[test]
+    fn a_glob_matches_files_in_one_folder_or_none() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        let write_root = |include: &str| {
+            std::fs::write(
+                &root,
+                format!(
+                    "include = [{include}]\n[policy]\nversion = 2\n[[policy.tool]]\nname = \"root__read\"\ndelta = {{}}\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n"
+                ),
+            )
+            .expect("write root config");
+        };
+
+        // A folder that does not exist yet holds no file to include.
+        write_root("\"mcp/*.toml\"");
+        assert_eq!(
+            tool_names(&Config::load(&root).expect("no match composes")),
+            ["root__read"]
+        );
+
+        write_root("\"*/rules.toml\"");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::GlobInclude { path, .. }) if path == "*/rules.toml"
+        ));
+        write_root("\"mcp/*\"");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::GlobInclude { path, .. }) if path == "mcp/*"
+        ));
+        // The folder stays inside the root's, whether or not the one named exists.
+        write_root("\"../outside/*.toml\"");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::GlobInclude { path, .. }) if path == "../outside/*.toml"
+        ));
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().expect("temp directory");
+            std::fs::write(outside.path().join("crm.toml"), rule_file("crm__read")).expect("write outside config");
+            std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).expect("link a folder");
+            write_root("\"linked/*.toml\"");
+            assert!(matches!(
+                Config::load(&root),
+                Err(ConfigError::GlobInclude { path, .. }) if path == "linked/*.toml"
+            ));
+        }
+
+        std::fs::create_dir_all(dir.path().join("mcp")).expect("create folder");
+        std::fs::write(dir.path().join("mcp/crm.toml"), rule_file("crm__read")).expect("write included config");
+        // Two globs that match one file name that file, as two entries naming it would.
+        write_root("\"mcp/*.toml\", \"mcp/c*.toml\"");
+        assert!(matches!(
+            Config::load(&root),
+            Err(ConfigError::DuplicateInclude { path }) if path == "mcp/crm.toml"
+        ));
+
+        // A glob beside the root passes over the root itself.
+        std::fs::write(dir.path().join("team.toml"), rule_file("team__read")).expect("write included config");
+        write_root("\"*.toml\"");
+        assert_eq!(
+            tool_names(&Config::load(&root).expect("the files beside the root compose")),
+            ["root__read", "team__read"]
+        );
+
+        assert!(super::file_name_matches("*.toml", "crm.toml"));
+        assert!(super::file_name_matches(
+            "team-*-rules.toml",
+            "team-payments-rules.toml"
+        ));
+        assert!(!super::file_name_matches("team-*-rules.toml", "team-rules.toml"));
+        assert!(super::file_name_matches("a*a.toml", "aa.toml"));
+        assert!(!super::file_name_matches("*.toml", "crm.toml.bak"));
+    }
+
+    #[test]
+    fn a_hosted_document_refuses_a_glob() {
+        let unasked = |_: &str| -> Result<HostedBattery<'static>, IncludeResolution> {
+            panic!("a refused document is never resolved")
+        };
+        assert!(matches!(
+            Config::hosted_included(
+                "include = [\"mcp/*.toml\"]\n[policy]\nversion = 2\n",
+                HOST_DEFAULTS,
+                unasked,
+                host_secrets,
+            ),
+            Err(ConfigError::GlobInclude { path, .. }) if path == "mcp/*.toml"
+        ));
     }
 
     #[test]
@@ -4646,50 +5522,6 @@ mod tests {
         assert!(matches!(Config::load(&path), Err(ConfigError::Unparsable { .. })));
     }
 
-    #[test]
-    fn file_tracking_is_off_without_its_complete_root_table() {
-        let dir = tempfile::tempdir().expect("temp directory");
-        assert!(reporting_config(dir.path(), "").file_tracking.is_none());
-
-        let enabled = reporting_config(
-            dir.path(),
-            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"self\"\n",
-        )
-        .file_tracking
-        .expect("the complete table enables file tracking");
-        assert_eq!(enabled.initial_trust, "suspicious");
-        assert_eq!(enabled.initial_audience, InitialFileAudience::Self_);
-
-        for table in [
-            "[file_tracking]\ninitial_trust=\"suspicious\"\n",
-            "[file_tracking]\ninitial_audience=\"public\"\n",
-            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"unknown\"\n",
-            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"public\"\nextra=true\n",
-        ] {
-            let path = dir.path().join("appa.toml");
-            std::fs::write(
-                &path,
-                format!("[policy]\nversion=2\n[externals]\ntimeout_ms=5000\nmax_body_bytes=65536\n{table}"),
-            )
-            .expect("the configuration is written");
-            assert!(
-                matches!(Config::load(&path), Err(ConfigError::Unparsable { .. })),
-                "{table}"
-            );
-        }
-    }
-
-    #[test]
-    fn file_tracking_settings_do_not_move_the_policy_file_key() {
-        let dir = tempfile::tempdir().expect("temp directory");
-        let without = reporting_config(dir.path(), "");
-        let with = reporting_config(
-            dir.path(),
-            "[file_tracking]\ninitial_trust=\"suspicious\"\ninitial_audience=\"public\"\n",
-        );
-        assert_eq!(without.policy_file().bytes(), with.policy_file().bytes());
-    }
-
     /// A fragment confines the results of tools it declares itself, and nothing else of the
     /// deployment: the names join the root's list, a foreign tool is refused, and every
     /// other deployment key stays the root's.
@@ -4746,6 +5578,8 @@ mod tests {
         for deployment in [
             "[policy.deployment]\ncontext_control = true\n",
             "[policy.deployment]\nconfined_results = \"fetch\"\n",
+            "[policy.deployment]\nhint = \"The battery's own hosts.\"\n",
+            "[policy.deployment]\nconfined_results = [\"fetch\"]\nhint = \"The battery's own hosts.\"\n",
         ] {
             std::fs::write(
                 &battery,
@@ -4757,6 +5591,96 @@ mod tests {
                 "{deployment} is root-only"
             );
         }
+    }
+
+    /// A context provider's `hint` is that section's alone, bounded in characters, and a
+    /// fragment's provider carries its hint into the composed deployment.
+    #[test]
+    fn a_context_provider_hint_loads_bounded_and_composes_from_a_fragment() {
+        let provider = |hint: &str| {
+            format!(
+                "{MINIMAL}\n[externals.context.github]\ncommand = [\"python3\", \"context.py\"]\nhint = \"{hint}\"\n"
+            )
+        };
+        let config = parse(&provider("Private repositories of acme are internal.")).expect("a hinted provider loads");
+        assert_eq!(
+            config
+                .externals
+                .context_hints
+                .get(&ContextProviderName::new("github"))
+                .map(ContextHint::as_str),
+            Some("Private repositories of acme are internal.")
+        );
+        assert!(config.externals.context.contains_key("github"));
+        let unhinted = MINIMAL.to_string() + "\n[externals.context.github]\ncommand = [\"python3\", \"context.py\"]\n";
+        assert!(parse(&unhinted).expect("loads").externals.context_hints.is_empty());
+        assert!(
+            parse(&provider("  "))
+                .expect("loads")
+                .externals
+                .context_hints
+                .is_empty()
+        );
+
+        let max = appa_engine::registry::MAX_CONTEXT_HINT_CHARS;
+        assert!(parse(&provider(&"é".repeat(max))).is_ok());
+        assert!(matches!(
+            parse(&provider(&"é".repeat(max + 1))),
+            Err(ConfigError::ContextHintTooLong { name, len, .. }) if name == "github" && len == max + 1
+        ));
+
+        for section in ["authorities", "sanitizers", "annotators", "audience"] {
+            let text = format!("{MINIMAL}\n[externals.{section}.x]\ncommand = [\"python3\", \"x.py\"]\nhint = \"h\"\n");
+            assert!(toml::from_str::<RawConfig>(&text).is_err(), "{section} refuses a hint");
+        }
+
+        let dir = tempfile::tempdir().expect("temp directory");
+        let root = dir.path().join("appa.toml");
+        std::fs::write(
+            &root,
+            "include = [\"battery.toml\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write root config");
+        std::fs::write(
+            dir.path().join("battery.toml"),
+            "[policy]\nversion = 2\n[externals.context.github]\ncommand = [\"python3\", \"context.py\"]\n\
+             hint = \"The battery's reading.\"\n",
+        )
+        .expect("write battery");
+        let composed = Config::load(&root).expect("the fragment composes");
+        assert_eq!(
+            composed
+                .externals
+                .context_hints
+                .get(&ContextProviderName::new("github"))
+                .map(ContextHint::as_str),
+            Some("The battery's reading.")
+        );
+    }
+
+    /// The deployment hint is the root's: a hosted battery's base or target that declares it
+    /// is refused like any other deployment key but `confined_results`.
+    #[test]
+    fn a_hosted_battery_cannot_declare_the_deployment_hint() {
+        let hinted = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"fetch\"\ndelta = {}\n[policy.deployment]\n\
+                      confined_results = [\"fetch\"]\nhint = \"The battery's own hosts.\"\n";
+        let plain = "[policy]\nversion = 2\n";
+        for (base, target) in [(hinted, None), (plain, Some(hinted))] {
+            assert!(matches!(
+                hosted_composed(
+                    HOSTED_ROOT,
+                    &[HostedBattery {
+                        name: "fetcher",
+                        base,
+                        target,
+                        token_env: &[],
+                    }],
+                ),
+                Err(ConfigError::IncludedPolicyField { field, .. }) if field == "deployment.hint"
+            ));
+        }
+        let root = format!("{HOSTED_ROOT}[policy.deployment]\nhint = \"The root's own hosts.\"\n");
+        assert!(hosted_composed(&root, &[]).is_ok(), "the root declares it");
     }
 
     #[test]

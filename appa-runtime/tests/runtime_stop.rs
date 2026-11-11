@@ -11,7 +11,7 @@ mod common;
 #[path = "common/init_fixture.rs"]
 mod init_fixture;
 use common::{RefusingPort, http, serve_runtime};
-use init_fixture::shipped_default_config;
+use init_fixture::write_shipped_default_config;
 
 fn stop(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_appa"))
@@ -41,8 +41,7 @@ fn process_exists(pid: i32) -> bool {
 
 fn fixture_config() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let config = directory.path().join("appa.toml");
-    std::fs::write(&config, shipped_default_config()).expect("the config is written");
+    let config = write_shipped_default_config(directory.path());
     let db = directory.path().join("appa.db");
     (directory, config, db)
 }

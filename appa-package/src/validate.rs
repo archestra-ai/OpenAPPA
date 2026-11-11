@@ -121,6 +121,8 @@ pub enum PackageError {
     ToolWithoutBareVariant { policy: PathBuf, tool: String },
     #[error("{policy} is a targeted battery's base, which loads alone, yet binds `{external}` without declaring it")]
     BaseBindingUndeclared { policy: PathBuf, external: NamedExternal },
+    #[error("{policy} binds `{external}`, whose declaration names its builtin and so takes no binding")]
+    BindsBuiltinDeclaration { policy: PathBuf, external: NamedExternal },
     #[error("{policy} declares `{variant}` after the bare `{tool}`, which matches first")]
     UnreachableVariant {
         policy: PathBuf,
@@ -194,6 +196,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                     field: "battery.policy",
                 });
             }
+            check_builtin_bindings(&policy, &[&base_document])?;
             if battery.targets.policies().is_none() {
                 check_lookup_routes(&policy, &base)?;
             }
@@ -221,6 +224,7 @@ pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
                         &document,
                     )?;
                     check_composes(&policy_path, &base, &bindings)?;
+                    check_builtin_bindings(&policy_path, &[&base_document, &document])?;
                     // Variants shadow each other as composed: target before base, canonical
                     // rules lowered through either policy's map.
                     let mut map = base.tool_map.clone();
@@ -544,6 +548,38 @@ fn source_mentions(document: &Value) -> impl Iterator<Item = &str> {
         .filter(|entry| entry.starts_with('@') && entry.contains(':'))
 }
 
+/// The runtime refuses a binding beside a declaration that names its builtin
+/// (`OpenError::BoundBuiltin`), wherever the composed policy gets each from: the base, or
+/// a target policy composed with it.
+fn check_builtin_bindings(policy: &Path, documents: &[&Value]) -> Result<(), PackageError> {
+    let bound: BTreeSet<NamedExternal> = documents
+        .iter()
+        .flat_map(|document| externals(document).map(|(external, _)| external))
+        .collect();
+    let conflict = DeclarationKind::ALL.into_iter().find_map(|kind| {
+        documents
+            .iter()
+            .flat_map(|document| declarations(document, kind.field()))
+            .filter(|declaration| declaration.get("builtin").is_some())
+            .filter_map(|declaration| declaration.get("name").and_then(Value::as_str))
+            .map(|name| {
+                NamedDeclaration {
+                    kind,
+                    name: name.to_owned(),
+                }
+                .binding()
+            })
+            .find(|binding| bound.contains(binding))
+    });
+    match conflict {
+        Some(external) => Err(PackageError::BindsBuiltinDeclaration {
+            policy: policy.to_path_buf(),
+            external,
+        }),
+        None => Ok(()),
+    }
+}
+
 /// A targeted battery's base is loaded alone wherever the sandbox is off, so it
 /// runs no helper, every tool and annotator it names resolves within it, and every
 /// declaration the runtime opens only with a binding is bound within it.
@@ -584,7 +620,7 @@ fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(
         .flat_map(|kind| {
             declarations(base, kind.field()).filter_map(move |declaration| {
                 let name = declaration.get("name").and_then(Value::as_str)?;
-                kind.binds_at_open(name, declaration).then(|| NamedDeclaration {
+                kind.binds_at_open(declaration).then(|| NamedDeclaration {
                     kind,
                     name: name.to_owned(),
                 })
@@ -723,18 +759,15 @@ impl DeclarationKind {
 
     /// Whether the runtime refuses to open a policy that declares this without an
     /// `[externals]` binding: an authority may stay unbound, an annotator naming a
-    /// builtin is complete as written, and the engine applies its reserved sanitizer.
-    fn binds_at_open(self, name: &str, declaration: &Value) -> bool {
+    /// builtin is complete as written, and a battery's sanitizer is never required: the
+    /// deployment binds the ones it serves, and composition leaves the rest out.
+    fn binds_at_open(self, declaration: &Value) -> bool {
         match self {
-            Self::Authority => false,
+            Self::Authority | Self::Sanitizer => false,
             Self::Annotator => declaration.get("builtin").is_none(),
-            Self::Sanitizer => name != RESERVED_SANITIZER,
         }
     }
 }
-
-/// The sanitizer the engine applies itself (`SanitizerName::ATTEST_SCHEMA`).
-const RESERVED_SANITIZER: &str = "attest-schema";
 
 /// One `[[policy.<kind>]]` declaration, by name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -971,6 +1004,9 @@ fn check_binding(
             // audience entry; the loader resolves the name in the composed config.
             "lookup"
                 if external.starts_with("audience.") && value.as_str().is_some_and(|target| !target.is_empty()) => {}
+            // A context provider carries the deployer's hint on reading its answers; the loader
+            // bounds its length.
+            "hint" if external.starts_with("context.") && value.is_str() => {}
             _ => return Err(refuse()),
         }
     }
@@ -1880,6 +1916,29 @@ mod tests {
         }
     }
 
+    /// A context provider carries the deployer's hint on reading its answers;
+    /// no other external, and no value but a string, carries one.
+    #[test]
+    fn a_context_binding_may_carry_a_hint() {
+        let provider = "[externals.context.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+        let hinted = format!("{BATTERY_POLICY}\n{provider}hint = \"Private repositories are internal.\"\n");
+        assert!(validate_package(battery(&hinted).path()).is_ok());
+
+        let audience = "[externals.audience.github]\ncommand = [\"python3\", \"audience-source.py\"]\n";
+        for refused in [
+            format!("{BATTERY_POLICY}\n{provider}hint = 3\n"),
+            BATTERY_POLICY.replace(audience, &format!("{audience}hint = \"h\"\n")),
+        ] {
+            assert!(
+                matches!(
+                    validate_package(battery(&refused).path()),
+                    Err(PackageError::PolicyExternalCommand { .. })
+                ),
+                "accepted {refused}"
+            );
+        }
+    }
+
     /// An audience source may route its member lookups to another audience
     /// entry by name; no other external, and no other value, carries one.
     #[test]
@@ -2315,35 +2374,29 @@ mod tests {
             directory
         };
 
-        for (base, target_binding, kind, name) in [
-            (
-                annotator.as_str(),
-                "[externals.annotators.classifier]\ncommand = [\"python3\", \"classifier.py\"]\n",
-                DeclarationKind::Annotator,
-                "classifier",
-            ),
-            (sanitizer.as_str(), stock_mask, DeclarationKind::Sanitizer, "mask"),
-        ] {
-            let expected = NamedDeclaration {
-                kind,
-                name: name.to_owned(),
-            };
-            assert!(matches!(
-                validate_package(with_targets(base, target_binding).path()),
-                Err(PackageError::BaseDeclarationUnbound { declaration, .. }) if declaration == expected
-            ));
-        }
+        let expected = NamedDeclaration {
+            kind: DeclarationKind::Annotator,
+            name: "classifier".to_owned(),
+        };
+        assert!(matches!(
+            validate_package(with_targets(
+                &annotator,
+                "[externals.annotators.classifier]\ncommand = [\"python3\", \"classifier.py\"]\n"
+            ).path()),
+            Err(PackageError::BaseDeclarationUnbound { declaration, .. }) if declaration == expected
+        ));
 
         let builtin_annotator =
             annotator.replace("name = \"classifier\"\n", "name = \"classifier\"\nbuiltin = \"llm\"\n");
         let base_bound_sanitizer = format!("{sanitizer}\n{stock_mask}");
-        let reserved_sanitizer = sanitizer.replace("\"mask\"", &format!("\"{RESERVED_SANITIZER}\""));
+        // A sanitizer the base leaves unbound is the deployment's to bind, or is left out.
+        let unbound_sanitizer = format!("{sanitizer}\n");
         let unbound_authority =
             format!("{TARGETED_BASE}\n[[policy.authority]]\nname = \"operator\"\nhint = \"Ask the operator.\"\n");
         for base in [
             builtin_annotator,
             base_bound_sanitizer,
-            reserved_sanitizer,
+            unbound_sanitizer,
             unbound_authority,
         ] {
             validate_package(with_targets(&base, "").path()).unwrap();
@@ -2371,6 +2424,41 @@ mod tests {
             validate_package(directory.path()),
             Err(PackageError::BaseBindingUndeclared { external, .. }) if external == expected
         ));
+    }
+
+    /// A declaration that names its builtin takes no binding: the runtime refuses the pair
+    /// at open, so a package carrying both does not validate, whether the binding sits beside
+    /// the declaration in an ordinary battery or a targeted base, or in a target policy.
+    #[test]
+    fn a_package_does_not_bind_a_declaration_that_names_its_builtin() {
+        let declaration = "\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_input\"]\nbuiltin = \"claude-code\"\n\
+             [policy.sanitizer.permits]\naudience = { from = [\"internal\"], to = [\"public\"] }\n";
+        let binding = "\n[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+        let expected = NamedExternal {
+            section: "sanitizers".to_owned(),
+            name: "mask".to_owned(),
+        };
+        let ordinary = battery(&format!("{BATTERY_POLICY}{declaration}{binding}"));
+        let base_bound = targeted(&format!("{TARGETED_BASE}{declaration}{binding}"), MULTI_USER_POLICY);
+        fs::write(base_bound.path().join("single-user.toml"), SINGLE_USER_POLICY).unwrap();
+        let target_bound = targeted(
+            &format!("{TARGETED_BASE}{declaration}"),
+            &format!("{MULTI_USER_POLICY}{binding}"),
+        );
+        fs::write(target_bound.path().join("single-user.toml"), SINGLE_USER_POLICY).unwrap();
+        for (case, directory) in [
+            ("ordinary battery", &ordinary),
+            ("targeted base", &base_bound),
+            ("target policy", &target_bound),
+        ] {
+            let result = validate_package(directory.path());
+            assert!(
+                matches!(&result, Err(PackageError::BindsBuiltinDeclaration { external, .. }) if *external == expected),
+                "{case}: {result:?}"
+            );
+        }
+        let unbound = battery(&format!("{BATTERY_POLICY}{declaration}"));
+        validate_package(unbound.path()).expect("a builtin declaration without a binding validates");
     }
 
     /// The engine picks a tool's first matching variant, target policy before base, and a

@@ -12,7 +12,13 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const REPOSITORY: &str = "archestra-ai/OpenAPPA";
-pub const IMAGE_REGISTRY: &str = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public";
+/// Where OpenAPPA publishes release images.
+pub const IMAGE_REGISTRY: &str = "ghcr.io/archestra-ai";
+/// Where the releases up to [`LAST_APPA_PUBLIC_RELEASE`] were published. It
+/// keeps them, read-only, so an older generation still pulls its own images.
+pub const APPA_PUBLIC_REGISTRY: &str = "europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public";
+/// The last release published to [`APPA_PUBLIC_REGISTRY`] (major, minor, patch).
+const LAST_APPA_PUBLIC_RELEASE: (u64, u64, u64) = (0, 38, 1);
 pub const DESCRIPTOR_FILE: &str = "appa-generation.json";
 pub const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 
@@ -210,14 +216,13 @@ pub enum Image {
 impl Image {
     pub const ALL: [Self; 3] = [Self::Runtime, Self::Python, Self::Go];
 
-    pub fn repository(self) -> String {
-        let name = match self {
+    pub fn name(self) -> &'static str {
+        match self {
             Self::Runtime => "appa-runtime",
             Self::Python => "appa-kagent-adk",
             // The ordinary kagent controller derives this repository name.
             Self::Go => "golang-adk",
-        };
-        format!("{IMAGE_REGISTRY}/{name}")
+        }
     }
 }
 
@@ -276,6 +281,23 @@ impl Published {
     }
     pub fn images(&self) -> &BTreeMap<Image, ImageDigests> {
         &self.images
+    }
+    /// The registry that holds this release's images: [`APPA_PUBLIC_REGISTRY`]
+    /// through [`LAST_APPA_PUBLIC_RELEASE`], [`IMAGE_REGISTRY`] after it.
+    pub fn image_registry(&self) -> &'static str {
+        let core = self.version().split(['-', '+']).next().unwrap_or_default();
+        let mut parts = core.split('.').map(str::parse::<u64>);
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)))
+                if (major, minor, patch) <= LAST_APPA_PUBLIC_RELEASE =>
+            {
+                APPA_PUBLIC_REGISTRY
+            }
+            _ => IMAGE_REGISTRY,
+        }
+    }
+    pub fn image_repository(&self, image: Image) -> String {
+        format!("{}/{}", self.image_registry(), image.name())
     }
     fn version(&self) -> &str {
         &self.release[1..]
@@ -603,6 +625,30 @@ mod tests {
             "binaries": Platform::ALL.into_iter().map(|p| (p, digest.clone())).collect::<BTreeMap<_, _>>(),
             "images": Image::ALL.into_iter().map(|i| (i, json!({"digest": digest,
                 "platforms": {"linux/amd64": digest}}))).collect::<BTreeMap<_, _>>()})
+    }
+
+    /// Releases through 0.38.1 stay in appa-public; every later one is on GHCR.
+    #[test]
+    fn a_release_pulls_images_from_the_registry_it_was_published_to() {
+        let registry = |release: &str| {
+            let mut value = fixture();
+            value["release"] = json!(release);
+            let generation = Generation::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+            generation.published().unwrap().image_registry()
+        };
+        for release in ["v0.14.1", "v0.38.0", "v0.38.1", "v0.38.1-rc.1"] {
+            assert_eq!(registry(release), APPA_PUBLIC_REGISTRY, "{release}");
+        }
+        for release in ["v0.38.2", "v0.39.0", "v0.39.0-rc.1", "v1.0.0"] {
+            assert_eq!(registry(release), IMAGE_REGISTRY, "{release}");
+        }
+        let mut value = fixture();
+        value["release"] = json!("v0.39.0");
+        let generation = Generation::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            generation.published().unwrap().image_repository(Image::Go),
+            "ghcr.io/archestra-ai/golang-adk"
+        );
     }
 
     #[test]

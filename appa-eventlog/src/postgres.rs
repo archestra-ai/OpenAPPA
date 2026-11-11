@@ -11,7 +11,7 @@
 //! that does not answer that reset, is dropped, and a later checkout opens
 //! another in its place.
 //!
-//! Receipts, held peer messages, embedded peer messages and file workspaces
+//! Receipts, held peer messages and embedded peer messages
 //! coordinate through rows alone. A primary key admits one row per identity
 //! (`INSERT … ON CONFLICT DO NOTHING`), and writers that must not interleave
 //! lock a row they share (`SELECT … FOR UPDATE`) for one transaction: the
@@ -45,7 +45,7 @@ use crate::embedded::{
     DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, NewEmbedded, ReadClaim, ReadTake,
     StoredEmbedded, TICKET_BOUND, TICKET_OPENING, classify_read, next_read_ticket, read_ticket, same_payload,
 };
-use crate::encoding::{contiguous, contiguous_from, decoded, extend, opening_key};
+use crate::encoding::{contiguous_from, decoded, extend, opening_key};
 use crate::held::{NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, SessionScope, StoredLease, StoredOperation, StoredOperationInput, StoredResult,
@@ -1522,130 +1522,6 @@ impl PostgresStore {
             Ok(())
         })?;
         Ok(step)
-    }
-
-    pub(super) fn workspace_batches(&self, workspace: &str) -> Result<Vec<Vec<u8>>, crate::files::FileStoreError> {
-        let workspace = workspace.to_owned();
-        let cipher = self.cipher.clone();
-        self.query(move |client| {
-            let rows = client.query(
-                "SELECT seq,payload FROM openappa_file_events WHERE workspace=$1 ORDER BY seq",
-                &[&workspace],
-            )?;
-            let batches = contiguous(rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
-                .map_err(|error| PostgresError(error.to_string()))?;
-            batches
-                .into_iter()
-                .enumerate()
-                .map(|(seq, bytes)| {
-                    cipher
-                        .open_bytes(
-                            &field_context(&["openappa_file_events", &workspace, &seq.to_string()]),
-                            &bytes,
-                        )
-                        .map_err(Into::into)
-                })
-                .collect()
-        })
-        .map_err(Into::into)
-    }
-
-    pub(super) fn create_workspace(
-        &self,
-        workspace: &str,
-        payload: Vec<u8>,
-    ) -> Result<(), crate::files::FileStoreError> {
-        let workspace = workspace.to_owned();
-        let payload = self
-            .cipher
-            .seal_bytes(
-                &field_context(&["openappa_file_events", &workspace, &0.to_string()]),
-                &payload,
-            )
-            .map_err(PostgresError::from)?;
-        self.query(move |client| {
-            client.execute(
-                "INSERT INTO openappa_file_events(workspace,seq,payload) VALUES ($1,0,$2) ON CONFLICT DO NOTHING",
-                &[&workspace, &payload],
-            )?;
-            Ok(())
-        })
-        .map_err(Into::into)
-    }
-
-    /// The compare-and-swap is the primary key: the event lands at `basis` only while no
-    /// event holds that position. A root binding lands in the same transaction, and a root
-    /// another workspace already bound refuses it.
-    pub(super) fn append_workspace(
-        &self,
-        workspace: &str,
-        basis: u64,
-        payload: Vec<u8>,
-        root: Option<TrajectoryId>,
-    ) -> Result<(), crate::files::FileStoreError> {
-        let workspace = workspace.to_owned();
-        let payload = self
-            .cipher
-            .seal_bytes(
-                &field_context(&["openappa_file_events", &workspace, &basis.to_string()]),
-                &payload,
-            )
-            .map_err(PostgresError::from)?;
-        self.transaction(move |client| {
-            let position = stored_position(basis)?;
-            let appended = client.execute(
-                "INSERT INTO openappa_file_events(workspace,seq,payload) VALUES ($1,$2,$3) \
-                 ON CONFLICT (workspace, seq) DO NOTHING",
-                &[&workspace, &position, &payload],
-            )?;
-            if appended == 0 {
-                let current = client
-                    .query_one(
-                        "SELECT COALESCE(MAX(seq)+1,0) FROM openappa_file_events WHERE workspace=$1",
-                        &[&workspace],
-                    )?
-                    .get::<_, i64>(0) as u64;
-                return Err(crate::files::FileStoreError::Conflict {
-                    expected: basis,
-                    actual: current,
-                });
-            }
-            if let Some(root) = root {
-                let root = root.as_str().to_owned();
-                client.execute(
-                    "INSERT INTO openappa_file_roots(root,workspace,seq) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-                    &[&root, &workspace, &position],
-                )?;
-                let bound: String = client
-                    .query_one("SELECT workspace FROM openappa_file_roots WHERE root=$1", &[&root])?
-                    .get(0);
-                if bound != workspace {
-                    return Err(crate::files::FileStoreError::Configuration(
-                        "a root cannot change its tracked workspace".into(),
-                    ));
-                }
-            }
-            Ok(())
-        })
-    }
-
-    pub(super) fn workspace_for_root(
-        &self,
-        root: &TrajectoryId,
-    ) -> Result<Option<String>, crate::files::FileStoreError> {
-        let root = root.as_str().to_owned();
-        self.query(move |client| {
-            let installed: bool = client
-                .query_one("SELECT to_regclass('openappa_file_roots') IS NOT NULL", &[])?
-                .get(0);
-            if !installed {
-                return Ok(None);
-            }
-            Ok(client
-                .query_opt("SELECT workspace FROM openappa_file_roots WHERE root=$1", &[&root])?
-                .map(|row| row.get(0)))
-        })
-        .map_err(Into::into)
     }
 
     /// See [`LogStore::roots_mentioning`].

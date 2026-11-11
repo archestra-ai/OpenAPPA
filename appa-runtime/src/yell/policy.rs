@@ -138,6 +138,8 @@ static SANITIZER: Table = Table {
         // Which surfaces this sanitizer binds to.
         ("on", Rule::Elements(Class::Surface)),
         ("hint", Rule::Never),
+        // A model transport's name, as an Annotator's `builtin` is: engine vocabulary.
+        ("builtin", Rule::Keep),
         ("tags", Rule::Elements(Class::Tag)),
         ("permits", Rule::Table(&SANITIZER_PERMITS)),
     ],
@@ -214,6 +216,7 @@ static DEPLOYMENT: Table = Table {
         ("provider_run_tools", Rule::Elements(Class::Tool)),
         ("confined_results", Rule::Elements(Class::Tool)),
         ("provider_surfaces", Rule::MapKeys(Class::Surface, &Rule::Keep)),
+        ("hint", Rule::Never),
     ],
 };
 

@@ -1,8 +1,10 @@
 # Google Workspace battery
 
 Rules for the claude.ai Google Drive connector, all 11 of its tools,
-and the `google-workspace` audience source, which builds a policy's
-audiences from the Workspace directory.
+the `google-workspace` audience source, which builds a policy's
+audiences from the Workspace directory, and the
+`google-workspace.drive-readers` annotator, which asks Drive who reads
+the target of a write.
 
 ## Rules
 
@@ -15,10 +17,41 @@ connection reaches. Anyone, inside or outside the organization, can
 share a file with the viewer or comment on one, so the text is
 untrusted.
 
-*Writes* — `create_file`, `copy_file`, `update_file`, `trash_file` need
-trusted data that `internal` may see, and record
-`google-workspace.changed`. A trashed file can be restored, so trashing
-needs no review.
+*Writes* — `create_file`, `copy_file`, `update_file` need trusted data
+that the target's readers may see. Drive gives a file the sharing of
+its folder, so the `google-workspace.drive-readers` annotator lists the
+permissions of the folder a file is created or copied into, and of the
+file that `update_file` renames or moves:
+
+| Target readers | Requirement |
+|---|---|
+| Only the viewer, as in the viewer's My Drive root | `self` |
+| Active Workspace users, the Workspace's own domain, or groups whose members all are | `internal` |
+| Anyone with the link, a published file, another domain, an outside account, or readers the token may not list | `public` |
+
+`copy_file` and a move by `update_file` also send the source file's
+content on Google's side, so the answer forwards the audience that
+already reads it: `public` when anyone may, `internal` when the
+Workspace's domain may, else `self`. Copying a file only the viewer
+reads into a folder the organization reads is refused.
+
+`update_file` with `inheritedPermissionsDisabled: false` gives a folder
+its parent's readers again, so it is checked as a move into that
+parent; a parent the token cannot see needs `public`. With
+`writersCanShare: true` any writer may share the file with anyone, so
+it needs `public`, as `share_file` does.
+
+Each write admits only the arguments the annotator reads or knows to
+change no readers. Any other argument refuses the call, including the
+snake_case spellings such as `parent_id` that the connector also
+accepts, and `update_file`'s `downloadRestriction`, since lifting it
+lets readers copy the content out. A published or metadata view counts
+among a target's readers but reads no content, so it never widens what
+a copy or a move forwards.
+
+`trash_file` needs trusted data that `internal` may see. A trashed file
+can be restored, so trashing needs no review. Every write records
+`google-workspace.changed`.
 
 *Sharing* — `share_file` exposes the whole file, which is not a value
 the policy tracks. It needs public input and the
@@ -41,11 +74,16 @@ builtin = "hitl"
 ## Limits
 
 A doc read through this battery is `self` data, even when the whole
-organization can see it: the file's sharing never reaches the policy. A
-trajectory that reads a file cannot then write to Drive or send what it
-read to `internal` without a remedy. A root rule can label one file by
+organization can see it: the read tools never report sharing. A
+trajectory that reads a file can then write only into a Drive target
+the viewer alone reads, and cannot send what it read to `internal`
+without a remedy. A root rule can label one file by
 argument, for a file the organization shares with `internal`; root
 rules run first.
+
+A write is checked against the target's sharing when the call is
+annotated. Sharing that changes later, for example a folder someone
+shares outside the organization after the write, is not seen.
 
 The Gmail and Calendar connectors are not covered. A tool the policy
 does not name is blocked, so add root rules for them.
@@ -53,17 +91,20 @@ does not name is blocked, so add root rules for them.
 ```sh
 cargo test --locked -p appa --test marketplace
 python3 marketplace/batteries/google-workspace/test_audience_source.py
+python3 marketplace/batteries/google-workspace/test_drive_readers.py
 ```
 
 ## Credentials
 
-The tool rules need no credential. The audience source does: the
+The audience source and the write annotator need a credential. The
 `self`, `internal`, and group audiences come from the Admin SDK
-Directory API, called with the organization's own OAuth client.
+Directory API, and a write target's readers from the Drive API, called
+with the organization's own OAuth client.
 
 A Workspace admin sets it up once per organization:
 
-1. Create a Google Cloud project and enable the Admin SDK API.
+1. Create a Google Cloud project and enable the Admin SDK API and the
+   Google Drive API.
 2. Configure the OAuth consent screen as *Internal*. Only accounts in
    the organization can use the client, and Google does not review it.
 3. Create an OAuth client of type *Desktop app* and share its client
@@ -130,5 +171,33 @@ Reads are directory-wide: `full-members` pages through every account.
 Size `externals.timeout_ms` and `externals.max_body_bytes` for your
 Workspace, not for a single annotation.
 
+**`drive-readers.py`** — the `google-workspace.drive-readers`
+annotator. It reads the token from the same
+`APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN`, which also needs the
+`drive.metadata.readonly` scope. It lists Drive permissions with
+`supportsAllDrives` and published views, and checks each user and group
+grantee against the directory. A 403 is an answer: a target needs
+`public` data and a source's content stays with the viewer. Any other
+API error stops the call. Its mandate admits `self` and `internal`;
+the script refuses another one (exit status 2) before it reads the
+token.
+
+**`test_drive_readers.py`** — fixture tests over recorded Drive and
+directory payloads, no network.
+
 **`test_audience_source.py`** — fixture tests over recorded Google API
 payloads, no network. Run with `python3 test_audience_source.py`.
+
+## Sanitizers
+
+When the deployment binds a sanitizer below, the battery confines the results of the six Drive reads. A read that narrows the session then offers, beside the plain narrowing, each sanitizer below that the deployment binds, and the agent chooses. A chosen sanitizer runs a model on the confined result with the sanitizer's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+
+| Sanitizer | `permits` | Effect |
+|---|---|---|
+| `google-workspace.strip-instructions` | `trust`: `suspicious` → `trusted` | Removes every instruction from the result and keeps the data. The read does not lower the session's trust, so it adds no trust gap to a later call that requires `trusted` data. The audience stays `self`. |
+
+A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts. A sanitizer never clears a requirement, such as a review mark.
+
+The model for each sanitizer is configured in the deployment, not in the battery. A sanitizer runs only when the root config binds it under `[externals.sanitizers]`: for example `builtin = "llm"` with an `[externals.llm]` profile, `builtin = "claude-code"` where the `claude` CLI is installed, or a `url`. The default config of the Claude Code plugin binds every battery sanitizer to `claude-code`, so in `clappa` sessions it is active once the battery is installed. A sanitizer that the root does not bind is not offered, and the results that only it covers are not confined. The battery then decides as it would without sanitizers.
+
+APPA does not verify what the model removed: binding a sanitizer registers it as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tag offers no sanitizer. To change a sanitizer's hint, declare a `[[policy.sanitizer]]` with the same name in the root config. The root declaration replaces the battery's whole, so copy its `on`, `tags`, and `permits`.

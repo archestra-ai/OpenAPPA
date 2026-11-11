@@ -6,8 +6,6 @@ mod agent_scan;
 mod annotate;
 pub mod api;
 pub mod batteries;
-#[cfg(feature = "daemon")]
-pub mod claude_files;
 pub mod config;
 mod credentials;
 pub mod describe;
@@ -66,9 +64,9 @@ mod external;
 mod label_guide;
 mod model;
 mod process_tree;
-mod recorder;
 mod secrets;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
+mod transcriber;
 pub mod yell;

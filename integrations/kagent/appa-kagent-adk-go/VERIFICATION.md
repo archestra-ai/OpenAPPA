@@ -115,7 +115,7 @@ Each parent opens the child under its own root id, so no parent takes
 the fork of another. The child trajectory id carries the root id
 (`appa-adapter-kagent/src/lib.rs`, `child`), and `bind_child` binds a
 start to the fork of that root
-(`appa-runtime/src/api/session.rs`). `openScope` therefore sends
+(`appa-runtime/src/api/session/child.rs`). `openScope` therefore sends
 `child_start` for each (root, child) pair it has not opened, and the
 pair — not the session — is what decides.
 
@@ -412,7 +412,7 @@ No in-process sub-agent runs on this baseline. The plugin gates only
 what the inventory spells, so a `transfer_to_agent` call is refused at
 the call gate like any undeclared tool. A sub-agent scope that opens in-process sends
 `child_start` with no spawn in flight, and the runtime refuses it
-(`SpawnNotTaken`, `appa-runtime/src/api/session.rs`). No test exercises
+(`SpawnNotTaken`, `appa-runtime/src/api/session/child.rs`). No test exercises
 `transfer_to_agent`. `TestARefusedChildScopeFailsClosed`
 (`plugin_test.go`) exercises only the plugin's fail-closed handling of a
 scripted `refuse` on that `child_start`, not the runtime's refusal.

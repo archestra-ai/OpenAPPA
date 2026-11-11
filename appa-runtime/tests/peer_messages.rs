@@ -1,6 +1,6 @@
 //! Peer messages between protected Claude Code sessions in one runtime. A send to a socket
-//! address reaches only another protected session's registered address; a send by name is a
-//! public sink. A delivered message enters directly when the label its senders stood behind
+//! address reaches only another protected session's registered address; a send by name is an
+//! internal sink. A delivered message enters directly when the label its senders stood behind
 //! does not narrow the receiver, and is held otherwise, to be read with `read_peer_message`.
 
 mod common;
@@ -32,7 +32,8 @@ fn config_from(dir: &Path, example: &str, extra: &str) -> Config {
     let (before, after) = example
         .split_once(deployment)
         .expect("the example carries the context-controlling deployment");
-    let text = format!("{before}{deployment}\n{extra}\n{after}");
+    // The extra rules go ahead of the deployment table, whose keys follow its header.
+    let text = format!("{before}{extra}\n{deployment}{after}");
     let path = dir.join(format!("appa-{}.toml", text.len()));
     std::fs::write(&path, including_session_tool_rules(dir, &text)).expect("the deployment writes");
     Config::load(&path).expect("the deployment loads")
@@ -41,6 +42,9 @@ fn config_from(dir: &Path, example: &str, extra: &str) -> Config {
 /// A Bash result narrows the session to `internal`.
 const INTERNAL_BASH: &str =
     "[[policy.tool]]\nname = \"host/claude-code/Bash\"\ndelta = { audience = [\"internal\"] }\n";
+
+/// A Bash result narrows the session to `self`.
+const SELF_BASH: &str = "[[policy.tool]]\nname = \"host/claude-code/Bash\"\ndelta = { audience = [\"self\"] }\n";
 
 fn open(dir: &Path) -> Runtime {
     Runtime::open(config(dir, INTERNAL_BASH), dir.join("appa.db"), None).expect("the deployment opens")
@@ -379,7 +383,7 @@ async fn a_send_whose_recipient_differs_from_to_is_refused() {
 }
 
 #[tokio::test]
-async fn a_send_by_name_is_a_public_sink_and_points_at_the_peers_address() {
+async fn a_send_by_name_is_an_internal_sink_and_points_at_the_peers_address() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let runtime = pair(dir.path()).await;
     let (decision, reason) = send(&runtime, "a", "peer-b", "hi", "a1").await;
@@ -387,9 +391,18 @@ async fn a_send_by_name_is_a_public_sink_and_points_at_the_peers_address() {
 
     narrowed(&runtime, "a", "a2").await;
     let (decision, reason) = send(&runtime, "a", "peer-b", "hi", "a3").await;
+    assert_eq!(decision, "allow", "{reason}");
+
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config(dir.path(), SELF_BASH), dir.path().join("appa.db"), None).expect("the deployment opens");
+    start(&runtime, "a", A_ADDRESS, None).await;
+    start(&runtime, "b", B_ADDRESS, None).await;
+    accepted(&runtime, "a", "Bash", json!({ "command": "cat report" }), "a4").await;
+    let (decision, reason) = send(&runtime, "a", "peer-b", "hi", "a5").await;
     assert_eq!(decision, "deny", "{reason}");
     assert!(reason.contains(B_ADDRESS), "the refusal names B's address: {reason}");
-    let (decision, reason) = send(&runtime, "a", B_ADDRESS, "hi", "a4").await;
+    let (decision, reason) = send(&runtime, "a", B_ADDRESS, "hi", "a6").await;
     assert_eq!(decision, "allow", "{reason}");
 }
 

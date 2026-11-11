@@ -5,6 +5,7 @@ members = [
     "appa-agent-python",
     "appa-builtin",
     "appa-engine",
+    "appa-file-tracker",
     "appa-package",
     "appa-eventlog",
     "appa-policy",
@@ -24,7 +25,7 @@ exclude = ["bench/corp-systems", "scripts/mixed-version"]
 [workspace.package]
 edition = "2024"
 publish = false
-version = "0.37.0"
+version = "0.42.0"
 
 [workspace.lints.rust]
 dead_code = "deny"
@@ -83,7 +84,7 @@ debug = "line-tables-only"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_json_canonicalizer = "0.3"
+serde_json_canonicalizer = "0.4"
 sha2 = "0.11"
 thiserror = "2"
 toml = "1"

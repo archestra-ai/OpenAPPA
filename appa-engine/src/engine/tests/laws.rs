@@ -94,12 +94,12 @@ mod held_view_law {
     /// Proposed with a host-pinned file basis, so their failures carry a body.
     const FILE_TOOLS: [&str; 2] = ["read_file", "strict_read"];
 
-    fn file_basis() -> crate::value::FileBasis {
-        crate::value::FileBasis::Read(crate::value::FileSource {
-            version: "v1".into(),
+    fn held() -> crate::value::HeldMessage {
+        crate::value::HeldMessage {
+            id: "v1".into(),
             digest: "content".into(),
             label: Label::new(SUSPICIOUS, Audience::public()),
-        })
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -273,6 +273,7 @@ mod held_view_law {
         let mut taint = plain_tool("taint");
         taint.delta = lowering;
         let officer = crate::authority::Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: crate::authority::Mandate {
                 trust_ceiling: Some(trusted),
@@ -306,6 +307,7 @@ mod held_view_law {
             .collect();
         provider_run_engine(
             RegistryConfig {
+                recorders: Default::default(),
                 trust_chain: chain,
                 authorities: if successor.officer { vec![officer] } else { Vec::new() },
                 ..test_config(tools)
@@ -391,7 +393,7 @@ mod held_view_law {
                 prop_assert!(
                     matches!(
                         consult,
-                        Ok(crate::transition::OfferConsult::Stale | crate::transition::OfferConsult::Replay(_))
+                        Ok(crate::transition::OfferConsult::Stale { .. } | crate::transition::OfferConsult::Replay(_))
                             | Err(_)
                     ),
                     "an offer opened before the publish is current after it: {consult:?}"
@@ -421,9 +423,9 @@ mod held_view_law {
                         .iter()
                         .enumerate()
                         .filter(|(_, tool)| FILE_TOOLS.contains(&PROPOSED[**tool]))
-                        .map(|(position, _)| Evidence::File {
+                        .map(|(position, _)| Evidence::Held {
                             position,
-                            basis: file_basis(),
+                            message: held(),
                         })
                         .collect();
                     let proposed = proposed

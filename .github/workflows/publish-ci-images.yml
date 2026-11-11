@@ -1,8 +1,7 @@
 name: Publish CI images
 
-# Rolling tags for appa-public. These are not releases. A new digest is
-# attached to sha-/main/latest on each image-changing push; GAR
-# deletes those prefixes after 30 days and keeps the last ten versions.
+# Rolling tags in ghcr.io/archestra-ai/ci staging. These are not releases. A
+# new digest is attached to sha-/main/latest on each image-changing push.
 
 on:
   push:
@@ -69,7 +68,6 @@ jobs:
               - 'scripts/appa-gar-cleanup-policies.json'
               - 'scripts/appa-refresh-batteries.py'
               - 'scripts/appa-guide-runtime.py'
-              - '.github/actions/auth-to-gar/**'
               - '.github/workflows/publish-oci-images.yml'
               - '.github/workflows/publish-ci-images.yml'
               - '.github/workflows/release.yml'
@@ -127,8 +125,10 @@ jobs:
     needs: tags
     permissions:
       actions: read # Required to download image digest artifacts.
+      attestations: write # Required to record build provenance for the published images.
       contents: read # Required to check out the source that is published.
-      id-token: write # Required for Workload Identity Federation when pushing images.
+      id-token: write # Required to sign the build provenance.
+      packages: write # Required to push to the ghcr.io/archestra-ai/ci staging packages.
     uses: $/.github/workflows/publish-oci-images.yml
     with:
       tags: ${{ needs.tags.outputs.tags }}
@@ -136,5 +136,3 @@ jobs:
       version_label: ${{ needs.tags.outputs.version_label }}
       checkout_ref: ${{ needs.tags.outputs.source_commit }}
       immutable: false
-    secrets:
-      APPA_GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.APPA_GCP_WORKLOAD_IDENTITY_PROVIDER }}

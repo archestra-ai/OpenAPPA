@@ -11,7 +11,7 @@ use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
 use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
 use axum::{Json, Router, extract::Path as Segments, http::StatusCode, routing::get};
-use common::{actor, offer_of, propose, ran, raw, repo_root, root, serve};
+use common::{actor, propose, ran, raw, repo_root, root, serve, unsanitized_offer_of};
 
 const ROOT: &str = r#"
 [policy]
@@ -145,7 +145,7 @@ fn private_write() -> ProposedCall {
 /// first, as the audit records it.
 async fn admitted(runtime: &Arc<Runtime>, read: ProposedCall) -> (String, String) {
     if let decision @ HookDecision::DenyCall { .. } = propose(runtime, read.clone()).await {
-        let outcome = runtime.execute_remedy(&actor(), offer_of(&decision)).await;
+        let outcome = runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await;
         assert!(matches!(outcome, RemedyOutcome::Authorized { .. }), "{outcome:?}");
     }
     assert_eq!(

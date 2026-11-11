@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use appa_engine::authority::{
-    Attends, Authority, DeclaredTransition, Hint, HintTooLong, Mandate, Sanitizer, SanitizerPoints, Scope,
+    Attends, Authority, ContextHint, DeclaredTransition, Hint, HintTooLong, Mandate, Sanitizer, SanitizerPoints, Scope,
 };
 use appa_engine::contract::{
     AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
@@ -12,9 +12,10 @@ use appa_engine::label::{Audience, DeclaredAudience, Label, Trust};
 use appa_engine::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, SurfaceName, TagName};
 use appa_engine::params::ToolParameters;
 use appa_engine::profile::{BindingMode, ExecutorClass, ProfileDeclaration, neutral_starting_label};
-use appa_engine::registry::{AudienceVocabulary, LoadError, MAX_HINT_CHARS, TrustChain, url_host_wildcards};
+use appa_engine::registry::{AudienceVocabulary, LoadError, TrustChain, url_host_wildcards};
 use appa_engine::value::ToolName;
 
+use crate::annotator::AnnotatorBuiltin;
 use crate::error::ConfigError;
 use crate::raw::{
     RawAuthority, RawBoundary, RawDelta, RawDeployment, RawPermits, RawRequires, RawSanitizer, RawSanitizerPermits,
@@ -276,6 +277,7 @@ impl RawAuthority {
             scope: Scope {
                 tags: self.tags.into_iter().map(TagName::new).collect(),
             },
+            except: self.except_tags.into_iter().map(TagName::new).collect(),
             hint,
         })
     }
@@ -309,12 +311,27 @@ fn parse_attends(attention: Vec<String>, context: &str) -> Result<Attends, Confi
 }
 
 impl RawSanitizer {
-    pub(crate) fn convert(self, chain: &TrustChain) -> Result<Sanitizer, ConfigError> {
+    /// The registered sanitizer, and the model builtin its declaration names, if any.
+    pub(crate) fn convert(self, chain: &TrustChain) -> Result<(Sanitizer, Option<AnnotatorBuiltin>), ConfigError> {
         refuse_inline_binding("sanitizer", &self.name, self.implementation.as_ref())?;
+        if self.name == SanitizerName::ATTEST_SCHEMA
+            && let Some(builtin) = self.builtin
+        {
+            return Err(ConfigError::ReservedSanitizerBuiltin { builtin });
+        }
+        let builtin = self
+            .builtin
+            .map(|builtin| {
+                AnnotatorBuiltin::parse_sanitizer(&builtin).ok_or_else(|| ConfigError::UnknownSanitizerBuiltin {
+                    name: self.name.clone(),
+                    builtin,
+                })
+            })
+            .transpose()?;
         let on = parse_points(&self.on, &self.name)?;
         let transition = self.permits.convert(chain, &self.name)?;
         let hint = parse_hint(self.hint, &format!("sanitizer {}", self.name))?;
-        Ok(Sanitizer {
+        let sanitizer = Sanitizer {
             name: SanitizerName::new(self.name),
             on,
             transition,
@@ -322,7 +339,8 @@ impl RawSanitizer {
                 tags: self.tags.into_iter().map(TagName::new).collect(),
             },
             hint,
-        })
+        };
+        Ok((sanitizer, builtin))
     }
 }
 
@@ -392,12 +410,23 @@ pub(crate) fn refuse_inline_binding(
 }
 
 pub(crate) fn parse_hint(hint: Option<String>, context: &str) -> Result<Option<Hint>, ConfigError> {
-    hint.map(Hint::new).transpose().map_err(|HintTooLong { len }| {
-        ConfigError::Registry(LoadError::HintTooLong {
-            context: context.to_string(),
-            len,
-            max: MAX_HINT_CHARS,
-        })
+    hint.map(Hint::new)
+        .transpose()
+        .map_err(|too_long| hint_too_long(too_long, context))
+}
+
+pub(crate) fn parse_context_hint(hint: Option<String>, context: &str) -> Result<Option<ContextHint>, ConfigError> {
+    hint.filter(|hint| !hint.trim().is_empty())
+        .map(ContextHint::new)
+        .transpose()
+        .map_err(|too_long| hint_too_long(too_long, context))
+}
+
+fn hint_too_long(HintTooLong { len, max }: HintTooLong, context: &str) -> ConfigError {
+    ConfigError::Registry(LoadError::HintTooLong {
+        context: context.to_string(),
+        len,
+        max,
     })
 }
 

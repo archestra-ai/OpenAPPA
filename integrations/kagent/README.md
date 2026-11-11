@@ -68,7 +68,7 @@ helm upgrade --install kagent-crds oci://ghcr.io/kagent-dev/kagent/helm/kagent-c
   --version 0.9.12 -n kagent --create-namespace --force-conflicts
 
 # 2. Install kagent with the appa plugin image
-APPA_VERSION=0.37.0 # x-release-please-version
+APPA_VERSION=0.42.0 # x-release-please-version
 OPENAI_API_KEY_B64="$(printf %s "$OPENAI_API_KEY" | base64 | tr -d '\n')"
 kubectl apply -f - <<EOF
 apiVersion: v1
@@ -87,8 +87,8 @@ helm upgrade --install kagent oci://ghcr.io/kagent-dev/kagent/helm/kagent \
   --set registry=ghcr.io \
   --set kmcp.podSecurityContext.runAsUser=65532 \
   --set kmcp.podSecurityContext.runAsGroup=65532 \
-  --set controller.agentImage.registry=europe-west1-docker.pkg.dev \
-  --set controller.agentImage.repository=friendly-path-465518-r6/appa-public/appa-kagent-adk \
+  --set controller.agentImage.registry=ghcr.io \
+  --set controller.agentImage.repository=archestra-ai/appa-kagent-adk \
   --set providers.default=openAI \
   --set-string providers.openAI.apiKeySecretRef=kagent-openai \
   --set-string providers.openAI.apiKeySecretKey=OPENAI_API_KEY \
@@ -120,9 +120,9 @@ The explicit KMCP user and group preserve `runAsNonRoot` while avoiding
 bash <<'BASH'
 set -euo pipefail
 
-APPA_VERSION=0.37.0 # x-release-please-version
+APPA_VERSION=0.42.0 # x-release-please-version
 
-helm upgrade --install appa-runtime oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-runtime \
+helm upgrade --install appa-runtime oci://ghcr.io/archestra-ai/charts/appa-runtime \
   --version "$APPA_VERSION" -n appa --create-namespace \
   --set persistence.enabled=true \
   --set appaGuide.enabled=true \
@@ -140,10 +140,10 @@ BASH
 bash <<'BASH'
 set -euo pipefail
 
-APPA_VERSION=0.37.0 # x-release-please-version
+APPA_VERSION=0.42.0 # x-release-please-version
 
 helm upgrade --install appa-kagent-demo \
-  oci://europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public/charts/appa-kagent-demo \
+  oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
   --set-string runtime.url=http://appa-runtime.appa.svc.cluster.local:18787 \
   --set-string modelConfig.name=default-model-config \

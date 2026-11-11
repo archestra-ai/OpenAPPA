@@ -2,10 +2,10 @@
 //! event model this crate declares.
 
 mod embedded;
-pub(crate) mod files;
 mod host;
 mod launch;
 pub(crate) mod peer;
+mod recorders;
 mod session;
 mod spawn_hold;
 
@@ -22,7 +22,7 @@ pub use crate::engine::{
 };
 pub use crate::events::{ExternalOutcome, ExternalRole, NoAnswerClass};
 pub use crate::external::Diagnostics;
-pub use crate::recorder::{ConsultBackend, ConsultContext, ConsultRecord, ConsultRecorder};
+pub use crate::transcriber::{ConsultBackend, ConsultContext, ConsultRecord, ConsultTranscriber};
 pub use appa_runtime_api::{
     Actor, OfferedRemedy, OutcomeBody, PromptKey, ProposedCall, Review, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome,
     TrajectoryId,
@@ -52,9 +52,9 @@ use crate::external::{ConsultGates, ExternalServices};
 #[cfg(feature = "daemon")]
 use crate::yell;
 use appa_engine::label::ReaderId;
-use appa_eventlog::{Backend, DeploymentName, HostObservation, Log, LogStore};
-use appa_runtime_api::{Adapter, AdapterName};
-use host::{HostState, host_actor, inventory_at};
+use appa_eventlog::{AheadAttempt, Backend, DeploymentName, EndKind, HostObservation, Log, LogStore, StoredLabel};
+use appa_runtime_api::Adapter;
+use host::{AheadState, Declared, HostState, host_actor, inventory_at};
 
 /// One remedy offer as it is quoted and carried.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -183,7 +183,7 @@ pub(crate) fn call_key(call: &ProposedCall) -> Option<PermitKey> {
     if bare == "yell" {
         return crate::yell::YellArgs::parse(&call.arguments).map(|args| args.ticket());
     }
-    if !MANAGEMENT_TOOLS.contains(&bare) && !files::owns(call) && bare != peer::READ_PEER_MESSAGE {
+    if !MANAGEMENT_TOOLS.contains(&bare) && bare != peer::READ_PEER_MESSAGE {
         return None;
     }
     let mut arguments = serde_json::from_str::<serde_json::Value>(call.arguments.get()).ok()?;
@@ -327,34 +327,80 @@ pub enum RemedyRefusal {
     InvalidOfferId(OfferIdRefusal),
     /// No preceding control hook vouched for this offer.
     Unvouched,
+    /// No preceding control hook vouched for this declaration ahead of the spawn, under the
+    /// call the request names.
+    UnvouchedDeclaration,
+    /// The attempt already declared, with other arguments.
+    AttemptReused,
+    /// A declaration ahead of the spawn names no host attempt, so a retry could not be told
+    /// from a second declaration.
+    UnidentifiedDeclaration,
+    /// More than one actor declared under this attempt, and the request does not say which.
+    AmbiguousReplay,
     /// The offer belongs to a different session or actor.
     ActorMismatch,
-    /// The offer no longer stands (expired, already terminal, or recorded under an earlier
-    /// policy revision), or is from another trajectory.
+    /// The offer no longer stands (expired, or already terminal, or a stale offer on a result,
+    /// return, or approval), or is from another trajectory.
     UnknownOffer,
+    /// The session or its policy changed after this offer on a call was made, so the call is
+    /// checked anew when proposed again.
+    Superseded,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,
+    /// An annotator the plan consults gave no answer. This attempt committed no engine facts,
+    /// did not authorize the call, and did not consume the offer; a retry needs a fresh vouch,
+    /// which a control hook writes.
+    Unanswered { annotator: String, class: NoAnswerClass },
     /// Runtime storage or execution failure.
     Runtime { detail: String },
 }
 
 impl RemedyRefusal {
-    pub fn detail(&self) -> &str {
-        match self {
+    pub fn detail(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(match self {
             Self::InvalidOfferId(_) => "the offer id must be exactly 16 lowercase hexadecimal characters",
             Self::Unvouched | Self::UnknownOffer => "no live offer with this id exists",
+            Self::Superseded => {
+                "[appa] This session or its policy changed after this offer was made, so the offer no longer \
+                 applies. Call the blocked tool again with the same arguments; it will be checked again."
+            }
+            Self::UnvouchedDeclaration => {
+                "[appa] This declaration was not tied to your session, so nothing was declared. Call the subagent \
+                 tool now, and apply the declaration plan its block offers."
+            }
+            Self::AttemptReused => "this attempt already declared a different return",
+            Self::UnidentifiedDeclaration => "a declaration ahead of the spawn needs the host attempt it is made under",
+            Self::AmbiguousReplay => "more than one session declared under this attempt",
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
+            Self::Unanswered { annotator, class } => {
+                return std::borrow::Cow::Owned(format!(
+                    "annotator {annotator} gave no answer ({class}), so the plan was not applied. Nothing changed \
+                     and the offer still stands: call execute_remedy_plan again with the same offer id."
+                ));
+            }
             Self::Runtime { detail } => detail,
-        }
+        })
+    }
+}
+
+/// The host operation an embedding host executes a declaration ahead of the spawn under. A
+/// retry of the operation replays the declaration it made, and one operation declares once.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemedyAttempt(pub String);
+
+impl RemedyAttempt {
+    /// An attempt no other operation shares, for a host that does not retry its own calls.
+    pub fn fresh() -> RemedyAttempt {
+        RemedyAttempt(format!("{:032x}", rand::random::<u128>()))
     }
 }
 
 /// What one whole `execute_remedy_plan` act produced: the engine's
 /// answer, or the control channel's own refusal. `Refused` covers a
 /// quote this trajectory pursues no offer for, an offer already
-/// executing, and a storage failure — never an engine decision, and it
-/// never says which.
+/// executing, an annotator that gave no answer, and a storage failure —
+/// never an engine decision.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
     Authorized { call: ProposedCall },
@@ -366,11 +412,17 @@ pub enum RemedyOutcome {
 
 impl From<EventError> for RemedyOutcome {
     fn from(error: EventError) -> RemedyOutcome {
-        RemedyOutcome::Refused {
-            reason: RemedyRefusal::Runtime {
+        let reason = match error {
+            EventError::AnnotationRefused {
+                annotator,
+                no_answer: Some(class),
+                ..
+            } => RemedyRefusal::Unanswered { annotator, class },
+            error => RemedyRefusal::Runtime {
                 detail: error.to_string(),
             },
-        }
+        };
+        RemedyOutcome::Refused { reason }
     }
 }
 
@@ -394,6 +446,15 @@ pub enum OfferKind {
     Withhold,
     Authority { names: Vec<String> },
     Sanitizer { name: String },
+}
+
+/// Where a quoted offer stands: executable, outrun by a change to the session it was made in,
+/// or ended (or never this family's).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum OfferStanding {
+    Live(OfferKind),
+    Stale,
+    Ended,
 }
 
 /// One offer that still stands, with what reading it needs: the engine and view of the
@@ -465,11 +526,11 @@ pub enum OpenError {
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
     UndeclaredExternal { kind: &'static str, name: String },
     #[error(
-        "annotator {0} names a builtin on its declaration and takes no [externals.annotators] binding — remove the binding"
+        "{kind} {name} names a builtin on its declaration and takes no [externals.{kind}s] binding — remove the binding"
     )]
-    BoundBuiltinAnnotator(String),
-    #[error("annotator {0} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
-    LlmNotConfigured(String),
+    BoundBuiltin { kind: &'static str, name: String },
+    #[error("{kind} {name} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
+    LlmNotConfigured { kind: &'static str, name: String },
     #[error(
         "{kind} {name} names the builtin \"{builtin}\", but [externals.{builtin}] cannot serve it: {missing}; set the key and reload"
     )]
@@ -481,9 +542,9 @@ pub enum OpenError {
     },
     #[error("annotator {0} names the builtin \"jev\", but the deployment declares no [externals.jev]")]
     JevNotConfigured(String),
-    #[error("annotator {0} names the builtin \"archestra\", but the host supplies no archestra endpoint")]
+    #[error("{kind} {name} names the builtin \"archestra\", but the host supplies no archestra endpoint")]
     #[cfg(feature = "archestra")]
-    ArchestraNotConfigured(String),
+    ArchestraNotConfigured { kind: &'static str, name: String },
     #[error("annotator {0} names the builtin \"jev\", which judges the complete call and takes no inputs")]
     JevInputs(String),
     #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
@@ -571,6 +632,10 @@ pub(crate) enum EventError {
     OutcomeMismatch,
     #[error("no live offer with this id exists")]
     UnknownOffer,
+    /// The declaration ahead an application was for was settled, or no longer applies through
+    /// this offer, where the application would commit. Nothing is appended.
+    #[error("the return declared ahead was settled or changed while it was applied")]
+    AheadMoved,
     #[error("only a child trajectory submits a return")]
     NotAChild,
     #[error("the spawn did not take: no prepared fork to open this child")]
@@ -586,6 +651,14 @@ pub(crate) enum EventError {
         "the subagent stopped before it returned a result. This subagent call is closed. You can start the subagent again. If it stops again, tell the user that the subagent could not finish."
     )]
     SpawnStopped,
+    /// The harness reported the spawn call as failed, named no child, and no child ever bound
+    /// to its fork: the subagent failed before it started, such as on a provider error at its
+    /// first request. The spawn closes, so the parent can spawn again. The text is the model's
+    /// next step.
+    #[error(
+        "the subagent did not start, so it returned no result. This subagent call is closed. You can start the subagent again. If it does not start again, tell the user that the subagent could not start."
+    )]
+    SpawnNeverStarted,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
     #[error("external resolution did not settle after {rounds} rounds")]
@@ -609,6 +682,9 @@ pub(crate) enum EventError {
         annotator: String,
         reason: String,
         next_action: &'static str,
+        /// Why the external Annotator gave no answer; `None` when the runtime refused an
+        /// answer it had.
+        no_answer: Option<NoAnswerClass>,
     },
     #[error("tool {tool} is not declared in this policy and no wildcard covers it; the call is refused before it runs")]
     UndeclaredTool { tool: String },
@@ -627,7 +703,17 @@ pub(crate) enum EventError {
 }
 
 impl EventError {
+    /// The engine refused an annotation it had.
     fn annotation_refused(annotator: String, reason: String) -> Self {
+        Self::annotation(annotator, reason, None)
+    }
+
+    /// The external Annotator gave no answer.
+    fn annotation_unanswered(annotator: String, reason: &crate::external::NoAnswerReason) -> Self {
+        Self::annotation(annotator, reason.diagnostic(), Some(reason.into()))
+    }
+
+    fn annotation(annotator: String, reason: String, no_answer: Option<NoAnswerClass>) -> Self {
         let next_action = if annotator == "claude-code.undeclared-tool" {
             "; this tool has no exact policy contract; run /appa-guide to write rules for this tool"
         } else {
@@ -637,6 +723,7 @@ impl EventError {
             annotator,
             reason,
             next_action,
+            no_answer,
         }
     }
 
@@ -668,13 +755,16 @@ impl EventError {
                 RefusalClass::Trajectory
             }
             EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
-            EventError::UnknownOffer | EventError::RemedyArguments { .. } => RefusalClass::Remedy,
+            EventError::UnknownOffer | EventError::AheadMoved | EventError::RemedyArguments { .. } => {
+                RefusalClass::Remedy
+            }
             EventError::SpawnNotTaken => RefusalClass::SpawnNotTaken,
             EventError::NotAChild
             | EventError::FanOutUnkeyed
             | EventError::SpawnAmbiguous
             | EventError::BindingMismatch
-            | EventError::SpawnStopped => RefusalClass::Spawn,
+            | EventError::SpawnStopped
+            | EventError::SpawnNeverStarted => RefusalClass::Spawn,
         }
     }
 
@@ -714,13 +804,15 @@ impl EventError {
             | EventError::UnknownDispatch
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
+            | EventError::AheadMoved
             | EventError::NotAChild
             | EventError::SpawnNotTaken
             | EventError::SpawnAmbiguous
             | EventError::UndeclaredSpawn { .. }
             | EventError::PeerMessageTooLarge { .. }
             | EventError::BindingMismatch
-            | EventError::SpawnStopped => false,
+            | EventError::SpawnStopped
+            | EventError::SpawnNeverStarted => false,
         }
     }
 }
@@ -850,7 +942,21 @@ impl Deployment {
         naming: ToolNaming,
     ) -> Result<Deployment, OpenError> {
         let policy = compile_policy(&config, naming)?;
-        validate_deployment(&policy, &config.externals)?;
+        // A sanitizer binding no declaration names is idle: a root binds the sanitizers of a
+        // battery it may install later. It stays in the composed config, but nothing here
+        // validates or builds it, so it cannot stop this deployment from opening.
+        // A binding of the reserved `attest-schema` is never idle: validation refuses it.
+        let declared: std::collections::BTreeSet<String> = policy
+            .registry_config()
+            .sanitizers
+            .iter()
+            .map(|sanitizer| sanitizer.name.as_str().to_string())
+            .collect();
+        let mut in_use = config.externals.clone();
+        in_use
+            .sanitizers
+            .retain(|name, _| declared.contains(name) || name == appa_engine::names::SanitizerName::ATTEST_SCHEMA);
+        validate_deployment(&policy, &in_use)?;
         let policy = match config.do_something {
             DoSomething::Refused => policy,
             DoSomething::Served => {
@@ -864,7 +970,18 @@ impl Deployment {
             .annotators()
             .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
             .collect();
-        let mut externals = ExternalServices::new(config.externals.clone(), modules, annotator_builtins, gates)
+        // A Sanitizer naming a model builtin on its declaration is served by the same backend
+        // a binding naming that builtin resolves to.
+        let mut bindings = in_use;
+        bindings
+            .sanitizers
+            .extend(policy.sanitizer_builtins().map(|(name, builtin)| {
+                (
+                    name.as_str().to_string(),
+                    crate::config::Implementation::Builtin(builtin.wire_name().to_string()),
+                )
+            }));
+        let mut externals = ExternalServices::new(bindings, modules, annotator_builtins, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         externals.credential_store = config.credential_store.clone();
         Ok(Deployment {
@@ -1143,11 +1260,6 @@ impl Prepared {
     }
 
     fn assemble(self, backend: Backend) -> Result<Runtime, OpenError> {
-        let state_path = if let Backend::Sqlite { path } = &backend {
-            Some(path.clone())
-        } else {
-            None
-        };
         let opened = match backend {
             Backend::Sqlite { path } => LogStore::open_archiving(&path),
             backend => LogStore::open(backend).map(|store| (store, None)),
@@ -1165,19 +1277,15 @@ impl Prepared {
                 "the database was too old to upgrade; it was moved aside and its sessions cannot resume"
             );
         }
-        self.with_store(Arc::new(store), state_path, DeploymentName::new(SERVING_LINE))
+        self.with_store(Arc::new(store), DeploymentName::new(SERVING_LINE))
     }
 
-    fn with_store(
-        self,
-        store: Arc<LogStore>,
-        state_path: Option<PathBuf>,
-        line: DeploymentName,
-    ) -> Result<Runtime, OpenError> {
+    fn with_store(self, store: Arc<LogStore>, line: DeploymentName) -> Result<Runtime, OpenError> {
         let (deployment, _) = serve(&store, &line, &self.deployment)?;
         Ok(Runtime {
             inner: Arc::new(Inner {
                 shared: Arc::new(Shared {
+                    recorder_cursors: recorders::Cursors::default(),
                     deployment: std::sync::RwLock::new(Arc::new(deployment)),
                     line,
                     revisions: std::sync::Mutex::new(std::collections::BTreeMap::new()),
@@ -1185,13 +1293,11 @@ impl Prepared {
                     events: std::sync::Mutex::new(crate::events::EventLog::default()),
                     gates: self.gates,
                     naming: self.naming,
-                    files: None,
-                    state_path,
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
                     spawn_holds: spawn_hold::SpawnHolds::default(),
                 }),
                 store,
-                recorder: None,
+                transcriber: None,
                 #[cfg(feature = "archestra")]
                 archestra_context: None,
                 pinned: None,
@@ -1247,7 +1353,7 @@ struct Inner {
     shared: Arc<Shared>,
     store: Arc<LogStore>,
     /// Where this view's sessions hand a record of every consult they make.
-    recorder: Option<Arc<dyn ConsultRecorder>>,
+    transcriber: Option<Arc<dyn ConsultTranscriber>>,
     #[cfg(feature = "archestra")]
     archestra_context: Option<String>,
     /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
@@ -1280,8 +1386,8 @@ struct RevisionKey {
 /// view [`Runtime::on`] makes of it, so a reload through any of them serves every view
 /// that pins no deployment.
 struct Shared {
-    files: Option<files::FileTracking>,
-    state_path: Option<PathBuf>,
+    /// How far each recorder has read each family.
+    recorder_cursors: recorders::Cursors,
     deployment: std::sync::RwLock<Arc<Deployment>>,
     /// The deployment line the shared deployment serves the head of.
     line: DeploymentName,
@@ -1332,11 +1438,7 @@ impl Runtime {
         store: Arc<LogStore>,
         modules: Option<PathBuf>,
     ) -> Result<Runtime, OpenError> {
-        Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(
-            store,
-            None,
-            DeploymentName::new(SERVING_LINE),
-        )
+        Prepared::new(config, modules, ToolNaming::AsAuthored)?.with_store(store, DeploymentName::new(SERVING_LINE))
     }
 
     /// [`Runtime::open_with_store`] serving `line` in place of the default one, for tests that
@@ -1348,7 +1450,7 @@ impl Runtime {
         store: Arc<LogStore>,
         line: DeploymentName,
     ) -> Result<Runtime, OpenError> {
-        Prepared::new(config, None, ToolNaming::AsAuthored)?.with_store(store, None, line)
+        Prepared::new(config, None, ToolNaming::AsAuthored)?.with_store(store, line)
     }
 
     /// [`Runtime::open_with_store`] for a host that names tools through an adapter of its
@@ -1365,11 +1467,8 @@ impl Runtime {
         if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
             return Err(OpenError::UnspelledControlTool);
         }
-        Prepared::new(config, modules, ToolNaming::Canonical { adapter })?.with_store(
-            store,
-            None,
-            DeploymentName::new(SERVING_LINE),
-        )
+        Prepared::new(config, modules, ToolNaming::Canonical { adapter })?
+            .with_store(store, DeploymentName::new(SERVING_LINE))
     }
 
     /// This runtime over another store: the same deployment, consult gates and diagnostics,
@@ -1379,15 +1478,15 @@ impl Runtime {
     pub fn on(&self, store: Arc<LogStore>) -> Runtime {
         self.view(|view| {
             view.store = store;
-            view.recorder = None;
+            view.transcriber = None;
         })
     }
 
-    /// This view with every consult its sessions make handed to `recorder`, once the
+    /// This view with every consult its sessions make handed to `transcriber`, once the
     /// consult's outcome is known. Deployment probes and [`Runtime::on`] views of it
-    /// record nothing.
-    pub fn recording(&self, recorder: Arc<dyn ConsultRecorder>) -> Runtime {
-        self.view(|view| view.recorder = Some(recorder))
+    /// transcribe nothing.
+    pub fn transcribing(&self, transcriber: Arc<dyn ConsultTranscriber>) -> Runtime {
+        self.view(|view| view.transcriber = Some(transcriber))
     }
 
     /// A request-scoped opaque context returned only to the host's archestra
@@ -1403,7 +1502,7 @@ impl Runtime {
     /// policies from one runtime publishes each to its own line and dispatches each through a
     /// view pinned to that line's head. Once the line moves past the revision the deployment
     /// was published as, the view refuses with a retryable error until the host pins the new
-    /// head. A family of another line is refused. [`Runtime::on`] and [`Runtime::recording`]
+    /// head. A family of another line is refused. [`Runtime::on`] and [`Runtime::transcribing`]
     /// views of this one keep the pin.
     ///
     /// A pin selects the policy and its externals, not whose trajectories a view reaches.
@@ -1561,13 +1660,13 @@ impl Runtime {
         }
     }
 
-    /// Another view of this runtime's shared state: this view's store, recorder and pin,
+    /// Another view of this runtime's shared state: this view's store, transcriber and pin,
     /// with what `vary` changes.
     fn view(&self, vary: impl FnOnce(&mut Inner)) -> Runtime {
         let mut inner = Inner {
             shared: Arc::clone(&self.inner.shared),
             store: Arc::clone(&self.inner.store),
-            recorder: self.inner.recorder.clone(),
+            transcriber: self.inner.transcriber.clone(),
             #[cfg(feature = "archestra")]
             archestra_context: self.inner.archestra_context.clone(),
             pinned: self.inner.pinned.clone(),
@@ -1882,6 +1981,18 @@ impl Inner {
         self.append_host_with(root, |_| Ok((Some(observation.clone()), ())))
     }
 
+    /// [`Inner::write_host`] for a record no policy revision judged, which no publish fences.
+    fn append_host_with<Refusal: From<EventError>, Answer>(
+        &self,
+        root: &TrajectoryId,
+        derive: impl Fn(&Log) -> Result<(Option<HostObservation>, Answer), Refusal>,
+    ) -> Result<Answer, Refusal> {
+        self.write_host(root, |log| {
+            let (observation, answer) = derive(log)?;
+            Ok((observation.map(HostWrite::unfenced), answer))
+        })
+    }
+
     /// Record one host observation derived from the very position it will be written at, so
     /// a writer that loses the compare-and-swap decides again against what won rather than
     /// replaying a decision the log has moved past. `None` means there is nothing left to
@@ -1898,21 +2009,36 @@ impl Inner {
     /// Read, derive, append; on a lost compare-and-swap, read again and derive again. The
     /// answer handed back is the one the derivation that landed produced, so a caller learns
     /// what was true where its record went and not what an earlier read showed it.
-    fn append_host_with<Refusal: From<EventError>, Answer>(
+    ///
+    /// A write judged under a policy revision commits only while that revision is the head: a
+    /// publish between the judgment and the append writes nothing and answers
+    /// [`EventError::PolicyMoved`].
+    pub(super) fn write_host<Refusal: From<EventError>, Answer>(
         &self,
         root: &TrajectoryId,
-        derive: impl Fn(&Log) -> Result<(Option<HostObservation>, Answer), Refusal>,
+        derive: impl Fn(&Log) -> Result<(Option<HostWrite>, Answer), Refusal>,
     ) -> Result<Answer, Refusal> {
         for _ in 0..HOST_ATTEMPTS {
             let step = self.step(root)?;
             let log = self.step_log(&step, root)?;
-            let (observation, answer) = derive(&log)?;
-            let Some(observation) = observation else {
+            let (write, answer) = derive(&log)?;
+            let Some(HostWrite { observation, fence }) = write else {
                 return Ok(answer);
             };
-            match step.append_host(&log, &observation) {
+            let appended = match fence {
+                None => step.append_host(&log, &observation),
+                Some(revision) => step.append_host_fenced(&log, &observation, revision),
+            };
+            match appended {
                 Ok(()) => return Ok(answer),
                 Err(appa_eventlog::AppendError::Conflict { .. }) => continue,
+                Err(appa_eventlog::AppendError::PolicyMoved { head }) => {
+                    return Err(EventError::PolicyMoved {
+                        deployment: self.line().to_string(),
+                        head: head.map_or_else(|| "none".to_string(), |head| head.to_string()),
+                    }
+                    .into());
+                }
                 Err(error) => {
                     self.note_store_error(Some(root), crate::events::StoreOperation::Append, &error);
                     return Err(EventError::Storage(error.to_string()).into());
@@ -1926,6 +2052,29 @@ impl Inner {
     }
 }
 
+/// One host record on its way to the log, and the policy revision it was judged under where
+/// a revision judged it.
+pub(super) struct HostWrite {
+    observation: HostObservation,
+    fence: Option<appa_engine::profile::PolicyRevision>,
+}
+
+impl HostWrite {
+    fn unfenced(observation: HostObservation) -> HostWrite {
+        HostWrite {
+            observation,
+            fence: None,
+        }
+    }
+
+    pub(super) fn judged(observation: HostObservation, revision: appa_engine::profile::PolicyRevision) -> HostWrite {
+        HostWrite {
+            observation,
+            fence: Some(revision),
+        }
+    }
+}
+
 /// How many times a host write re-derives against a position another writer took before it
 /// gives up. Every contender records one observation, so a family loses this many races only
 /// when it is being written by far more than it has actors.
@@ -1936,6 +2085,20 @@ const HOST_ATTEMPTS: u32 = 8;
 /// moment it was taken at.
 fn reduced(log: &Log) -> HostState {
     HostState::fold(log.host_records(), std::time::SystemTime::now())
+}
+
+/// The one live vouch this family holds behind `key`.
+#[cfg(any(test, feature = "daemon"))]
+fn standing_in(log: &Log, key: &PermitKey) -> Result<host::LiveVouch, Unvouched> {
+    reduced(log).standing(key)
+}
+
+/// Which family stands behind a key, as a read that may not fail quietly answers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Holder {
+    One(TrajectoryId),
+    Nobody,
+    Ambiguous,
 }
 
 /// Why [`Runtime::open_root_fork`] opened no independent conversation-root fork.
@@ -1964,136 +2127,6 @@ fn read_refused(error: appa_eventlog::ReadError) -> EventError {
 }
 
 impl Runtime {
-    #[cfg(feature = "daemon")]
-    pub(crate) fn file_initial_label(
-        &self,
-        trust: &str,
-        audience: appa_engine::label::DeclaredAudience,
-    ) -> Result<appa_engine::label::Label, OpenError> {
-        let deployment = self.inner.deployment();
-        let rank = deployment
-            .resident
-            .registry()
-            .trust_chain()
-            .rank_of(trust)
-            .ok_or_else(|| OpenError::UnsupportedPolicy(format!("unknown initial file trust rank: {trust}")))?;
-        Ok(appa_engine::label::Label::new(
-            rank,
-            appa_engine::label::Audience::of_declared(&audience),
-        ))
-    }
-
-    /// Enable experimental Read/Write/Edit tracking, not a supported security boundary.
-    /// Runtime-owned tools require native alternatives and implicit reads disabled.
-    /// Inference and final responses remain unmediated. Use disposable fixtures only.
-    /// Configure this before sharing the runtime. Each root session binds its first file call's
-    /// harness working directory and checks it for links. Each file gets the operator's source
-    /// Label when a call first touches it. Child trajectories inherit their root's workspace
-    /// event stream. All roots bound to the same canonical workspace share that stream.
-    /// Only exclusively owned Unix workspaces are supported. The host must also keep its
-    /// configuration, plugins, credentials and other execution-control files outside the root.
-    pub fn with_file_tracking(
-        mut self,
-        initial: appa_engine::label::Label,
-        config_path: PathBuf,
-    ) -> Result<Self, OpenError> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .and_then(|inner| Arc::get_mut(&mut inner.shared))
-            .ok_or_else(|| OpenError::Storage("enable file tracking before sharing the runtime".into()))?;
-        if !matches!(inner.naming, ToolNaming::Canonical { adapter } if adapter.name == AdapterName::ClaudeCode) {
-            return Err(OpenError::Storage(
-                "file tracking requires the Claude Code adapter".into(),
-            ));
-        }
-        let mut protected_paths =
-            vec![std::fs::canonicalize(config_path).map_err(|error| OpenError::Storage(error.to_string()))?];
-        if let Some(path) = &inner.state_path {
-            protected_paths.push(std::fs::canonicalize(path).map_err(|error| OpenError::Storage(error.to_string()))?);
-        }
-        let deployment = Arc::clone(
-            inner
-                .deployment
-                .get_mut()
-                .expect("the deployment lock is never poisoned: no panic runs while it is held"),
-        );
-        if deployment
-            .resident
-            .registry()
-            .sanitizers()
-            .any(|sanitizer| sanitizer.on.input)
-        {
-            return Err(OpenError::Storage(
-                "file tracking does not support tool-input sanitizer or rewrite routes".into(),
-            ));
-        }
-        if files::FileTool::ALL.into_iter().any(|tool| {
-            deployment
-                .resident
-                .registry()
-                .profile()
-                .confines_result(&appa_engine::value::ToolName::new(format!("mcp/appa/{}", tool.name())))
-        }) {
-            return Err(OpenError::Storage(
-                "file tracking cannot confine the result of a runtime-owned file tool".into(),
-            ));
-        }
-        if deployment
-            .resident
-            .registry()
-            .trust_chain()
-            .name_of(initial.trust)
-            .is_none()
-        {
-            return Err(OpenError::Storage(
-                "initial file trust must be a configured policy rank".into(),
-            ));
-        }
-        inner.files = Some(files::FileTracking {
-            policy_key: deployment.key(),
-            initial,
-            deployment: inner.line.to_string(),
-            protected_paths,
-            process_backend: None,
-        });
-        tracing::warn!(
-            "experimental file tools require Claude Code launched with native tools and implicit filesystem reads disabled"
-        );
-        Ok(self)
-    }
-
-    /// Enable the host-installed, pinned agentsh runner for declared-input processing.
-    /// The backend and system toolchain are trusted host code, outside the managed workspace.
-    pub fn with_file_process_backend(mut self, backend: PathBuf) -> Result<Self, OpenError> {
-        let inner = Arc::get_mut(&mut self.inner)
-            .and_then(|inner| Arc::get_mut(&mut inner.shared))
-            .ok_or_else(|| OpenError::Storage("enable processing before sharing the runtime".into()))?;
-        let files = inner
-            .files
-            .as_mut()
-            .ok_or_else(|| OpenError::Storage("processing requires file tracking".into()))?;
-        let backend = std::fs::canonicalize(backend).map_err(|error| OpenError::Storage(error.to_string()))?;
-        if ["agentsh", "agentsh-unixwrap", "run.py"]
-            .iter()
-            .any(|name| std::fs::canonicalize(backend.join(name)).map_or(true, |path| !path.is_file()))
-        {
-            return Err(OpenError::Storage("processing requires a complete backend".into()));
-        }
-        files.process_backend = Some(backend);
-        Ok(self)
-    }
-
-    #[cfg(feature = "daemon")]
-    pub(crate) fn bind_file_workspace(&self, root: &TrajectoryId, workspace: &str) -> Result<(), EventError> {
-        self.inner
-            .shared
-            .files
-            .as_ref()
-            .ok_or_else(|| files::refused("file tools are not enabled"))?
-            .bind(&self.inner.store, root, workspace)
-            .map(|_| ())
-            .map_err(files::refused)
-    }
-
     /// Opens the modules, the engine, and the store. The `[policy]`
     /// table compiles through the documented dialect into the engine's
     /// registry — every surface and algebraic load lint runs here, and
@@ -2179,6 +2212,7 @@ impl Runtime {
         let consults = deployment.externals.context_consults(&context);
         let context =
             session::gather_context(&consults, |consult| deployment.externals.consult(consult, None, None)).await;
+        let declaration = declaration.with_context_hints(&context, &deployment.config.externals.context_hints);
         let consult = crate::consult::Consult {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {
@@ -2186,7 +2220,7 @@ impl Runtime {
                 artifact: crate::consult::AnnotationArtifact { args, context },
             },
         };
-        let outcome = deployment.externals.consult(&consult, None, None).await;
+        let outcome = deployment.externals.consult_afresh(&consult).await;
         let admitted = matches!(
             &outcome,
             crate::external::ConsultOutcome::Answer(answer)
@@ -2987,60 +3021,85 @@ impl Runtime {
         .await
     }
 
-    /// Executes an embedded remedy plan for an authenticated actor.
+    /// Declare, for an authenticated actor, what its next single subagent call's return may
+    /// carry: the call that quotes no offer. The spawn applies it through its block's own
+    /// declaration offer. A retry under the same `attempt` answers from the declaration it
+    /// made.
+    pub async fn declare_return_ahead(
+        &self,
+        acting: &Actor,
+        arguments: RemedyArguments,
+        attempt: RemedyAttempt,
+    ) -> RemedyOutcome {
+        self.declare_ahead(
+            &acting.root,
+            Authority::Embedded {
+                actor: acting,
+                attempt: AheadAttempt::Host(attempt.0),
+            },
+            &arguments,
+            EmbeddedPresentationOptions::default(),
+        )
+    }
+
+    /// Executes an embedded remedy plan for an authenticated actor. It names no attempt, so
+    /// a plan that declares ahead of the spawn is refused.
     /// Returns a structured `RemedyOutcome`.
     pub async fn execute_embedded_remedy(&self, actor: &Actor, args: ExecuteRemedyPlanArgs) -> RemedyOutcome {
-        self.execute_embedded_remedy_with_options(actor, args, EmbeddedPresentationOptions::default())
+        self.execute_embedded_remedy_with_options(actor, args, EmbeddedPresentationOptions::default(), None)
             .await
     }
 
-    /// Executes one admitted embedded remedy with request-scoped display capabilities.
+    /// Executes one admitted embedded remedy with request-scoped display capabilities. A
+    /// declaration ahead of the spawn needs the host `attempt` it is made under.
     pub async fn execute_embedded_remedy_with_options(
         &self,
         actor: &Actor,
         args: ExecuteRemedyPlanArgs,
         presentation: EmbeddedPresentationOptions,
+        attempt: Option<RemedyAttempt>,
     ) -> RemedyOutcome {
-        self.execute_remedy_outcome(args, RemedyCaller::Embedded { actor, presentation })
-            .await
+        self.execute_remedy_outcome(
+            args,
+            RemedyCaller::Embedded {
+                actor,
+                presentation,
+                attempt,
+            },
+        )
+        .await
     }
 
-    /// Executes a remedy plan for the MCP daemon, returning an MCP tool reply.
+    /// Executes a remedy plan for the MCP daemon, returning an MCP tool reply. `call` is the
+    /// tool call the request names, where the host's MCP client names one.
     #[cfg(feature = "daemon")]
     pub(crate) async fn execute_remedy_plan(
         &self,
         args: ExecuteRemedyPlanArgs,
+        call: Option<&str>,
         elicitation: Option<&Elicitation>,
-        expected_actor: Option<&Actor>,
     ) -> RemedyReply {
         self.render_remedy(
-            self.execute_remedy_outcome(
-                args,
-                RemedyCaller::Daemon {
-                    elicitation,
-                    expected_actor,
-                },
-            )
-            .await,
+            self.execute_remedy_outcome(args, RemedyCaller::Daemon { call, elicitation })
+                .await,
         )
     }
 
     #[tracing::instrument(target = "appa_telemetry", name = "appa.remedy", skip_all)]
     async fn execute_remedy_outcome(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
-        let (elicitation, expected_actor, presentation, strict_freshness) = match caller {
-            RemedyCaller::Embedded { actor, presentation } => (None, Some(actor), presentation, true),
-            #[cfg(feature = "daemon")]
-            RemedyCaller::Daemon {
-                elicitation,
-                expected_actor,
-            } => (
-                elicitation,
-                expected_actor,
-                EmbeddedPresentationOptions::default(),
-                false,
-            ),
+        let Some(offer_id) = args.offer_id.clone() else {
+            return self.declare(args, caller);
         };
-        let quoted = match OfferId::parse(&args.offer_id) {
+        let (elicitation, expected_actor, presentation, strict_freshness) = match caller {
+            RemedyCaller::Embedded {
+                actor, presentation, ..
+            } => (None, Some(actor), presentation, true),
+            #[cfg(feature = "daemon")]
+            RemedyCaller::Daemon { elicitation, .. } => {
+                (elicitation, None, EmbeddedPresentationOptions::default(), false)
+            }
+        };
+        let quoted = match OfferId::parse(&offer_id) {
             Ok(quoted) => quoted,
             Err(reason) => {
                 return RemedyOutcome::Refused {
@@ -3130,11 +3189,12 @@ enum RemedyCaller<'a> {
     Embedded {
         actor: &'a Actor,
         presentation: EmbeddedPresentationOptions,
+        attempt: Option<RemedyAttempt>,
     },
     #[cfg(feature = "daemon")]
     Daemon {
+        call: Option<&'a str>,
         elicitation: Option<&'a Elicitation>,
-        expected_actor: Option<&'a Actor>,
     },
 }
 
@@ -3150,19 +3210,48 @@ enum Admission {
 
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
 /// declaring a subagent's return `label` and `return_schema` — for a harness that routes the
-/// control tool itself.
-pub fn parse_control_arguments(arguments: &str) -> Result<(OfferId, RemedyArguments), String> {
+/// control tool itself. No `offer_id` is a declaration ahead of the spawn, which
+/// [`Runtime::declare_return_ahead`] takes.
+pub fn parse_control_arguments(arguments: &str) -> Result<(Option<OfferId>, RemedyArguments), String> {
     let args: ExecuteRemedyPlanArgs =
         serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;
-    let offer = OfferId::parse(&args.offer_id).map_err(|error| format!("execute_remedy_plan offer_id: {error}"))?;
+    let offer = args
+        .offer_id
+        .as_deref()
+        .map(|offer| OfferId::parse(offer).map_err(|error| format!("execute_remedy_plan offer_id: {error}")))
+        .transpose()?;
     Ok((offer, RemedyArguments::from(args)))
+}
+
+/// What a declaration ahead of the spawn tells the model.
+const DECLARED_AHEAD: &str = "[appa] Declared. Call the subagent tool now, before any other tool: your next \
+     subagent call returns under this floor. A call that changes this session's label first lapses the declaration.";
+
+/// The key the control hook vouches a declaration ahead of the spawn under, and the tool spends
+/// it by, since such a call quotes no offer: the declaration as both read it, and the tool call
+/// both name where the host's MCP client names it. Two sessions declaring alike share a key
+/// only where no call is named.
+pub(crate) fn declaration_key(args: &ExecuteRemedyPlanArgs, call: Option<&str>) -> PermitKey {
+    let label = args.label.as_ref().map(|label| {
+        serde_json::json!({
+            "trust": label.trust,
+            "audience": label.audience,
+        })
+    });
+    PermitKey::call(
+        "execute_remedy_plan",
+        &serde_json::json!({ "call": call, "label": label, "return_schema": args.return_schema }),
+    )
 }
 
 /// The arguments the control tool takes. The schema derive is what the MCP tool
 /// declaration is built from, and one reading of them serves every caller.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteRemedyPlanArgs {
-    pub offer_id: String,
+    /// The offer to execute. Omit it to declare, right before a subagent call, what that
+    /// call's return may carry: `label`, and `return_schema` to attest.
+    #[serde(default)]
+    pub offer_id: Option<String>,
     /// For a plan that declares a subagent's return: the lowest label this session accepts
     /// from the return, in the policy's `delta` spelling. An omitted dimension keeps this
     /// session's current value. A plan that takes no return takes no `label`.
@@ -3202,7 +3291,255 @@ pub struct RemedyReply {
     pub is_error: bool,
 }
 
+/// What authorizes a declaration ahead of the spawn: an embedding host's authenticated actor
+/// and the attempt it names, or the vouch the daemon's control hook recorded under the
+/// declaration's key, with the call the host's MCP client named where it named one.
+enum Authority<'a> {
+    Embedded {
+        actor: &'a Actor,
+        attempt: AheadAttempt,
+    },
+    #[cfg(feature = "daemon")]
+    Vouch {
+        key: &'a PermitKey,
+        call: Option<&'a str>,
+    },
+}
+
+impl Authority<'_> {
+    /// The attempt the caller names before anything is read, which a replay matches.
+    fn named(&self) -> Option<AheadAttempt> {
+        match self {
+            Authority::Embedded { attempt, .. } => Some(attempt.clone()),
+            #[cfg(feature = "daemon")]
+            Authority::Vouch { call, .. } => call.map(|call| AheadAttempt::McpCall(call.to_string())),
+        }
+    }
+
+    /// The actor the caller authenticated, which a replay must belong to.
+    fn expected(&self) -> Option<&Actor> {
+        match self {
+            Authority::Embedded { actor, .. } => Some(actor),
+            #[cfg(feature = "daemon")]
+            Authority::Vouch { .. } => None,
+        }
+    }
+}
+
+/// Where a daemon declaration's holder discovery left it: no family holds the vouch, so only
+/// a declaration another delivery of the named call made answers it; or one family holds it.
+#[cfg(feature = "daemon")]
+pub(crate) enum Scan {
+    NoHolder { call: String },
+    Holder { root: TrajectoryId, call: Option<String> },
+}
+
+/// What a declaration already made under the attempt answers, if any was made: the
+/// declaration itself to a retry with its arguments, and a refusal to anything else. Matches
+/// for another actor only are another actor's declaration.
+fn replayed<'a>(
+    matches: impl IntoIterator<Item = &'a Declared>,
+    expected: Option<&Actor>,
+    arguments: &RemedyArguments,
+) -> Option<RemedyOutcome> {
+    let matches: Vec<&Declared> = matches.into_iter().collect();
+    if matches.is_empty() {
+        return None;
+    }
+    let kept: Vec<&Declared> = matches
+        .into_iter()
+        .filter(|declared| expected.is_none_or(|actor| declared.actor == *actor))
+        .collect();
+    let refused = |reason| RemedyOutcome::Refused { reason };
+    Some(match kept.as_slice() {
+        [] => refused(RemedyRefusal::ActorMismatch),
+        [only] if only.arguments == *arguments => declared_ahead(),
+        [_] => refused(RemedyRefusal::AttemptReused),
+        _ => refused(RemedyRefusal::AmbiguousReplay),
+    })
+}
+
+fn declared_ahead() -> RemedyOutcome {
+    RemedyOutcome::Returned {
+        value: DECLARED_AHEAD.to_string(),
+    }
+}
+
 impl Runtime {
+    /// A control call that quotes no offer declares ahead of the spawn: under the attempt an
+    /// embedding host names, or under the vouch the daemon's control hook recorded.
+    fn declare(&self, args: ExecuteRemedyPlanArgs, caller: RemedyCaller<'_>) -> RemedyOutcome {
+        match caller {
+            RemedyCaller::Embedded { attempt: None, .. } => RemedyOutcome::Refused {
+                reason: RemedyRefusal::UnidentifiedDeclaration,
+            },
+            RemedyCaller::Embedded {
+                actor,
+                presentation,
+                attempt: Some(attempt),
+            } => self.declare_ahead(
+                &actor.root,
+                Authority::Embedded {
+                    actor,
+                    attempt: AheadAttempt::Host(attempt.0),
+                },
+                &RemedyArguments::from(args),
+                presentation,
+            ),
+            #[cfg(feature = "daemon")]
+            RemedyCaller::Daemon { call, .. } => self.declare_vouched(args, call),
+        }
+    }
+
+    /// A daemon declaration: replayed where another delivery of its call already declared,
+    /// else declared on the one family that holds its vouch. A read that fails answers
+    /// operationally and spends nothing; only a discovery that read every family answers
+    /// that nothing vouched.
+    #[cfg(feature = "daemon")]
+    fn declare_vouched(&self, args: ExecuteRemedyPlanArgs, call: Option<&str>) -> RemedyOutcome {
+        let key = declaration_key(&args, call);
+        let arguments = RemedyArguments::from(args);
+        if let Some(call) = call {
+            match self.replay_named(call, &arguments) {
+                Ok(Some(replayed)) => return replayed,
+                Ok(None) => {}
+                Err(error) => return error.into(),
+            }
+        }
+        let scan = match (self.discover_holder(&key), call) {
+            (Err(error), _) => return error.into(),
+            (Ok(Holder::One(root)), call) => Scan::Holder {
+                root,
+                call: call.map(str::to_string),
+            },
+            (Ok(Holder::Nobody), Some(call)) => Scan::NoHolder { call: call.to_string() },
+            (Ok(Holder::Nobody | Holder::Ambiguous), _) => {
+                return RemedyOutcome::Refused {
+                    reason: RemedyRefusal::UnvouchedDeclaration,
+                };
+            }
+        };
+        self.admit(scan, &key, &arguments)
+    }
+
+    /// What a declaration another delivery of `call` made answers, across every family that
+    /// recorded one: a retry whose vouch that declaration spent still finds its result.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn replay_named(
+        &self,
+        call: &str,
+        arguments: &RemedyArguments,
+    ) -> Result<Option<RemedyOutcome>, EventError> {
+        let attempt = AheadAttempt::McpCall(call.to_string());
+        let roots = self.inner.store.roots_mentioning(&attempt.key()).map_err(|error| {
+            self.inner
+                .note_store_error(None, crate::events::StoreOperation::Read, &error);
+            read_refused(error)
+        })?;
+        let mut matches = Vec::new();
+        for root in roots {
+            let log = self.inner.log(&root)?;
+            let ahead = AheadState::fold(log.host_records());
+            matches.extend(ahead.declared_by_attempt(&attempt).into_iter().cloned());
+        }
+        Ok(replayed(&matches, None, arguments))
+    }
+
+    /// The family that holds the vouch behind a declaration's key, read strictly.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn discover_holder(&self, key: &PermitKey) -> Result<Holder, EventError> {
+        self.holders_strict(key, None)
+    }
+
+    /// A daemon declaration from where its discovery left it.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn admit(&self, scan: Scan, key: &PermitKey, arguments: &RemedyArguments) -> RemedyOutcome {
+        match scan {
+            Scan::NoHolder { call } => match self.replay_named(&call, arguments) {
+                Ok(Some(replayed)) => replayed,
+                Ok(None) => RemedyOutcome::Refused {
+                    reason: RemedyRefusal::UnvouchedDeclaration,
+                },
+                Err(error) => error.into(),
+            },
+            Scan::Holder { root, call } => self.declare_ahead(
+                &root,
+                Authority::Vouch {
+                    key,
+                    call: call.as_deref(),
+                },
+                arguments,
+                EmbeddedPresentationOptions::default(),
+            ),
+        }
+    }
+
+    /// A return declaration ahead of the spawn, judged and written in one fenced step on the
+    /// family's log: a replay of its attempt answers from the record; otherwise it is
+    /// authorized, checked at the acting trajectory's label under the revision it commits at,
+    /// and recorded, spending the daemon's vouch in the same record. A refusal or a failure
+    /// writes nothing and spends nothing.
+    fn declare_ahead(
+        &self,
+        root: &TrajectoryId,
+        authority: Authority<'_>,
+        arguments: &RemedyArguments,
+        presentation: EmbeddedPresentationOptions,
+    ) -> RemedyOutcome {
+        let session = match self.session_with_presentation(root, root, presentation) {
+            Ok(session) => session,
+            Err(error) => return error.into(),
+        };
+        let named = authority.named();
+        let written = session.append_host_judged(|context| {
+            let ahead = AheadState::fold(context.log.host_records());
+            if let Some(replayed) = named
+                .as_ref()
+                .and_then(|attempt| replayed(ahead.declared_by_attempt(attempt), authority.expected(), arguments))
+            {
+                return Ok((None, replayed));
+            }
+            let (actor, attempt, spends) = match &authority {
+                Authority::Embedded { actor, attempt } => ((*actor).clone(), attempt.clone(), None),
+                #[cfg(feature = "daemon")]
+                Authority::Vouch { key, call } => {
+                    let unvouched = || RemedyOutcome::Refused {
+                        reason: RemedyRefusal::UnvouchedDeclaration,
+                    };
+                    let Ok(standing) = standing_in(context.log, key) else {
+                        return Err(unvouched());
+                    };
+                    // The sibling re-check `take_vouched` makes: the compare-and-swap is this
+                    // root's alone, so a sibling that vouched since is read, not swapped on.
+                    if self.holders_strict(key, Some(root))? != Holder::Nobody {
+                        return Err(unvouched());
+                    }
+                    let attempt = match call {
+                        Some(call) => AheadAttempt::McpCall(call.to_string()),
+                        None => AheadAttempt::Vouch(standing.seq),
+                    };
+                    let spent = appa_eventlog::SpentVouch { key: key.wire() };
+                    (standing.actor, attempt, Some(spent))
+                }
+            };
+            let label = context
+                .engine()
+                .declare_ahead(context.view, acting_trajectory(&actor), arguments)
+                .map_err(|detail| RemedyOutcome::from(EventError::RemedyArguments { detail }))?;
+            let declaration = HostObservation::AheadDeclared {
+                actor: host_actor(&actor),
+                attempt,
+                arguments: arguments.clone(),
+                label: StoredLabel::named(&label, context.engine().registry().trust_chain()),
+                spends,
+            };
+            Ok((Some(declaration), declared_ahead()))
+        });
+        match written {
+            Ok(outcome) | Err(outcome) => outcome,
+        }
+    }
+
     /// The whole act: resolve the quoted id inside the acting trajectory's
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
@@ -3252,8 +3589,12 @@ impl Runtime {
                     if !matches!(self.live_holder(&claimed, Some(&root)), Ok(None)) {
                         return Err(refused(RemedyRefusal::Unvouched));
                     }
-                    if fresh && self.offer_kind_in(log, &quoted).is_none() {
-                        return Err(unknown());
+                    if fresh {
+                        match self.offer_standing_in(log, &quoted) {
+                            OfferStanding::Live(_) => {}
+                            OfferStanding::Stale => return Err(refused(RemedyRefusal::Superseded)),
+                            OfferStanding::Ended => return Err(unknown()),
+                        }
                     }
                     ruling
                 }
@@ -3325,11 +3666,7 @@ impl Runtime {
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
             Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
             Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
-            Err(error) => RemedyOutcome::Refused {
-                reason: RemedyRefusal::Runtime {
-                    detail: error.to_string(),
-                },
-            },
+            Err(error) => error.into(),
         }
     }
 
@@ -3344,15 +3681,21 @@ impl Runtime {
     /// offer that no longer stands.
     #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn offer_kind(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<OfferKind> {
-        self.offer_kind_in(&self.inner.log(root).ok()?, quoted)
+        match self.offer_standing_in(&self.inner.log(root).ok()?, quoted) {
+            OfferStanding::Live(kind) => Some(kind),
+            OfferStanding::Stale | OfferStanding::Ended => None,
+        }
     }
 
-    fn offer_kind_in(&self, log: &Log, quoted: &OfferId) -> Option<OfferKind> {
+    fn offer_standing_in(&self, log: &Log, quoted: &OfferId) -> OfferStanding {
         self.read_offer_in(log, quoted, |standing| {
-            standing
-                .engine
-                .offer_kind(standing.view, &standing.pursuer, &standing.offer)
+            Some(
+                standing
+                    .engine
+                    .offer_standing(standing.view, &standing.pursuer, &standing.offer),
+            )
         })
+        .unwrap_or(OfferStanding::Ended)
     }
 
     /// Read a quoted offer in this root's family under the policy the log resolves to, or
@@ -3440,16 +3783,27 @@ impl Runtime {
     /// A standing that does not land is no standing: the tool then finds nothing vouched
     /// and says so, which is the same answer a hook that never ran would leave.
     pub(crate) fn vouch(&self, key: &PermitKey, acting: &Actor, ruling: Option<appa_runtime_api::Ruling>) {
-        if let Err(error) = self.inner.append_host(
+        if let Err(error) = self.record_vouch(key, acting, ruling) {
+            tracing::warn!(root = %acting.root.0, %error, "this trajectory's standing was not recorded");
+        }
+    }
+
+    /// [`Runtime::vouch`] for a standing whose loss the caller must report: a declaration's
+    /// vouch that did not land would make its execution answer as one no hook vouched.
+    pub(crate) fn record_vouch(
+        &self,
+        key: &PermitKey,
+        acting: &Actor,
+        ruling: Option<appa_runtime_api::Ruling>,
+    ) -> Result<(), EventError> {
+        self.inner.append_host(
             &acting.root,
             &HostObservation::Vouched {
                 actor: host_actor(acting),
                 key: key.wire(),
                 ruling,
             },
-        ) {
-            tracing::warn!(root = %acting.root.0, %error, "this trajectory's standing was not recorded");
-        }
+        )
     }
 
     /// The trajectory vouched for this key, taken once, with the ruling its harness
@@ -3510,7 +3864,7 @@ impl Runtime {
             // The loop already read this root at the position it writes at, so the re-read
             // is the siblings only — and where the key names no sibling, which is every
             // offer and every ticket only one session quoted, there is nothing to read.
-            let (actor, ruling) = reduced(log).vouched(key)?;
+            let host::LiveVouch { actor, ruling, .. } = standing_in(log, key)?;
             if self.live_holder(key, Some(&root))?.is_some() {
                 return Err(Unvouched::Ambiguous);
             }
@@ -3541,33 +3895,39 @@ impl Runtime {
     /// partial view cannot tell a lone holder from one of two and would answer the ambiguous
     /// case with one session's standing.
     fn live_holder(&self, key: &PermitKey, folded: Option<&TrajectoryId>) -> Result<Option<TrajectoryId>, Unvouched> {
-        let candidates = match self.inner.store.roots_mentioning(&key.wire()) {
-            Ok(candidates) => candidates,
+        match self.holders_strict(key, folded) {
+            Ok(Holder::One(root)) => Ok(Some(root)),
+            Ok(Holder::Nobody) => Ok(None),
+            Ok(Holder::Ambiguous) => Err(Unvouched::Ambiguous),
             Err(error) => {
                 tracing::warn!(%error, "the families standing behind this key did not read, so nothing stands");
-                self.inner
-                    .note_store_error(None, crate::events::StoreOperation::Read, &error);
-                return Err(Unvouched::Nobody);
+                Err(Unvouched::Nobody)
             }
-        };
-        let mut held: Option<TrajectoryId> = None;
+        }
+    }
+
+    /// [`Runtime::live_holder`] with its failures kept: a read that fails is the store's
+    /// failure, never a family that holds nothing. A declaration answers it operationally,
+    /// so its retry is not refused as one nothing vouched for.
+    fn holders_strict(&self, key: &PermitKey, folded: Option<&TrajectoryId>) -> Result<Holder, EventError> {
+        let candidates = self.inner.store.roots_mentioning(&key.wire()).map_err(|error| {
+            self.inner
+                .note_store_error(None, crate::events::StoreOperation::Read, &error);
+            read_refused(error)
+        })?;
+        let mut held = Holder::Nobody;
         for root in candidates {
             if folded == Some(&root) {
                 continue;
             }
             // Every host record, not the rows that name the key: a turn's end releases
             // every standing its actor held and says so without naming one.
-            let log = match self.inner.log(&root) {
-                Ok(log) => log,
-                Err(error) => {
-                    tracing::warn!(root = %root.0, %error, "this family's records did not read, so nothing stands");
-                    return Err(Unvouched::Nobody);
-                }
-            };
-            match reduced(&log).vouched(key) {
-                Ok(_) if held.is_none() => held = Some(root),
-                Ok(_) | Err(Unvouched::Ambiguous) => return Err(Unvouched::Ambiguous),
-                Err(Unvouched::Nobody) => {}
+            let log = self.inner.log(&root)?;
+            let first = held == Holder::Nobody;
+            match (reduced(&log).vouched(key), first) {
+                (Ok(_), true) => held = Holder::One(root),
+                (Ok(_), false) | (Err(Unvouched::Ambiguous), _) => return Ok(Holder::Ambiguous),
+                (Err(Unvouched::Nobody), _) => {}
             }
         }
         Ok(held)
@@ -3615,16 +3975,18 @@ impl Runtime {
         )
     }
 
-    /// This actor's turn is over: its prompt mark and every vouch it still held end here.
+    /// This actor's turn is over: its prompt mark and every vouch it still held end here, and
+    /// at a boundary so does the return it declared ahead.
     /// A vouch is recorded when the actor quotes an offer at the control tool's hook and
     /// taken when the tool itself runs, both inside one turn. One still standing at the
     /// turn's end was never spent — the harness declined the call, or the tool never ran —
     /// and nothing later can spend it.
-    pub(crate) fn record_turn_end(&self, acting: &Actor) -> Result<(), EventError> {
+    pub(crate) fn record_turn_end(&self, acting: &Actor, end_kind: EndKind) -> Result<(), EventError> {
         self.inner.append_host(
             &acting.root,
             &HostObservation::TurnEnded {
                 actor: host_actor(acting),
+                end_kind,
             },
         )
     }
@@ -3910,12 +4272,59 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
                 .to_string(),
         ));
     }
-    bound_exactly(
+    // A Sanitizer that names a model builtin on its declaration is served by the runtime,
+    // as such an Annotator is below: refused when it is also bound, or when the deployment
+    // declares no profile for it. Every other Sanitizer is bound exactly once.
+    let declared_builtins: std::collections::BTreeMap<&str, appa_policy::AnnotatorBuiltin> = policy
+        .sanitizer_builtins()
+        .map(|(name, builtin)| (name.as_str(), builtin))
+        .collect();
+    for (name, builtin) in &declared_builtins {
+        if externals.sanitizers.contains_key(*name) {
+            return Err(OpenError::BoundBuiltin {
+                kind: "sanitizer",
+                name: name.to_string(),
+            });
+        }
+        if *builtin == appa_policy::AnnotatorBuiltin::Llm && externals.llm.is_none() {
+            return Err(OpenError::LlmNotConfigured {
+                kind: "sanitizer",
+                name: name.to_string(),
+            });
+        }
+    }
+    // The host-supplied transport, named on a declaration or in a binding, opens only where
+    // the host supplies its endpoint.
+    #[cfg(feature = "archestra")]
+    if externals.archestra.is_none() {
+        let declared = declared_builtins
+            .iter()
+            .filter(|(_, builtin)| **builtin == appa_policy::AnnotatorBuiltin::Archestra)
+            .map(|(name, _)| name.to_string());
+        let bound = externals
+            .sanitizers
+            .iter()
+            .filter(|(_, bound)| {
+                matches!(bound, crate::config::Implementation::Builtin(named) if named == crate::config::ARCHESTRA_BUILTIN)
+            })
+            .map(|(name, _)| name.clone());
+        if let Some(name) = declared.chain(bound).next() {
+            return Err(OpenError::ArchestraNotConfigured {
+                kind: "sanitizer",
+                name,
+            });
+        }
+    }
+    // A binding with no declaration stays idle rather than refused, as an unreferenced
+    // audience source does: a root binds the sanitizers of the batteries it may include,
+    // and composition leaves out a battery's sanitizer the root does not bind.
+    no_unbound(
         "sanitizer",
         rc.sanitizers
             .iter()
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
-            .map(|sanitizer| sanitizer.name.as_str()),
+            .map(|sanitizer| sanitizer.name.as_str())
+            .filter(|name| !declared_builtins.contains_key(name)),
         &externals.sanitizers,
     )?;
     // A declared builtin is served by the runtime itself, so it is refused when it is also
@@ -3930,18 +4339,27 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             continue;
         };
         if externals.annotators.contains_key(name) {
-            return Err(OpenError::BoundBuiltinAnnotator(name.to_string()));
+            return Err(OpenError::BoundBuiltin {
+                kind: "annotator",
+                name: name.to_string(),
+            });
         }
         match builtin {
             appa_policy::AnnotatorBuiltin::Llm if externals.llm.is_none() => {
-                return Err(OpenError::LlmNotConfigured(name.to_string()));
+                return Err(OpenError::LlmNotConfigured {
+                    kind: "annotator",
+                    name: name.to_string(),
+                });
             }
             appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
                 return Err(OpenError::JevNotConfigured(name.to_string()));
             }
             #[cfg(feature = "archestra")]
             appa_policy::AnnotatorBuiltin::Archestra if externals.archestra.is_none() => {
-                return Err(OpenError::ArchestraNotConfigured(name.to_string()));
+                return Err(OpenError::ArchestraNotConfigured {
+                    kind: "annotator",
+                    name: name.to_string(),
+                });
             }
             // Jev judges the complete call and answers the lowest or the highest rank.
             appa_policy::AnnotatorBuiltin::Jev if !binding.inputs.is_empty() => {
@@ -3964,6 +4382,18 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
     bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
+    // A recorder a declaration names that nothing binds would keep no label, and a read of
+    // what its calls wrote would launder it; a binding nothing names is never delivered to.
+    bound_exactly(
+        "recorder",
+        policy
+            .engine()
+            .registry()
+            .recorders()
+            .into_iter()
+            .map(|name| name.as_str()),
+        &externals.recorders,
+    )?;
     // A model profile loads without its key, so a battery installs before the key is
     // exported; a deployment that consults the profile needs the key to open.
     use crate::config::Implementation;
@@ -3983,6 +4413,10 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             .annotators()
             .filter(|(_, binding)| binding.builtin == Some(builtin))
             .map(|(name, _)| ("annotator", name.as_str()));
+        let sanitizers = policy
+            .sanitizer_builtins()
+            .filter(|(_, declared)| *declared == builtin)
+            .map(|(name, _)| ("sanitizer", name.as_str()));
         let bindings = [
             ("authority", &externals.authorities),
             ("sanitizer", &externals.sanitizers),
@@ -3991,7 +4425,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         .flat_map(|(kind, table)| table.iter().map(move |(name, bound)| (kind, name.as_str(), bound)))
         .filter(|(_, _, bound)| matches!(bound, Implementation::Builtin(named) if named == builtin.wire_name()))
         .map(|(kind, name, _)| (kind, name));
-        if let Some((kind, name)) = annotators.chain(bindings).next() {
+        if let Some((kind, name)) = annotators.chain(sanitizers).chain(bindings).next() {
             return Err(OpenError::ModelKeyMissing {
                 kind,
                 name: name.to_string(),
@@ -4316,19 +4750,6 @@ mod deployment_tests {
         );
     }
 
-    #[test]
-    fn the_undeclared_tool_fallback_refusal_names_the_recovery_action() {
-        let fallback = EventError::annotation_refused(
-            "claude-code.undeclared-tool".to_string(),
-            "non_success status=1".to_string(),
-        )
-        .to_string();
-        assert!(fallback.contains("run /appa-guide"), "{fallback}");
-
-        let exact = EventError::annotation_refused("bash-classifier".to_string(), "timeout".to_string()).to_string();
-        assert!(!exact.contains("/appa-guide"), "{exact}");
-    }
-
     /// The served adapter's inverse is what the runtime says where it addresses that
     /// host's model. A contract's `(selector)` is the policy's own discriminator and no
     /// part of the name the model calls; a canonical id the served host cannot name — and
@@ -4585,7 +5006,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         bound.externals.annotators.insert("classifier".to_string(), endpoint());
         assert!(matches!(
             load(bound),
-            Err(OpenError::BoundBuiltinAnnotator(name)) if name == "classifier"
+            Err(OpenError::BoundBuiltin { kind: "annotator", name }) if name == "classifier"
         ));
     }
 
@@ -4611,7 +5032,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         assert!(matches!(
             load(claude_config(policy)),
-            Err(OpenError::LlmNotConfigured(name)) if name == "classifier"
+            Err(OpenError::LlmNotConfigured { kind: "annotator", name }) if name == "classifier"
         ));
         assert!(load(with_profile()).is_ok());
 
@@ -4619,7 +5040,77 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let runtime = Runtime::open(with_profile(), dir.path().join("appa.db"), None).expect("the deployment opens");
         assert!(matches!(
             runtime.reload(claude_config(policy)),
-            Err(OpenError::LlmNotConfigured(name)) if name == "classifier"
+            Err(OpenError::LlmNotConfigured { kind: "annotator", name }) if name == "classifier"
+        ));
+    }
+
+    /// A Sanitizer naming a model builtin on its declaration opens with no binding, is
+    /// refused beside one, and names `llm` only over a deployment declaring the profile.
+    #[test]
+    fn a_declared_sanitizer_builtin_opens_unbound_and_llm_needs_its_profile() {
+        let policy = |builtin: &str| {
+            format!(
+                r#"
+            [policy]
+            version = 2
+            [[policy.tool]]
+            name = "lookup"
+            delta = {{ trust = "suspicious" }}
+            tags = ["records"]
+            [[policy.sanitizer]]
+            name = "clean"
+            on = ["tool_output"]
+            builtin = "{builtin}"
+            tags = ["records"]
+            [policy.sanitizer.permits]
+            trust = {{ from = "suspicious", to = "trusted" }}
+            [policy.deployment]
+            confined_results = ["lookup"]
+        "#
+            )
+        };
+        assert!(load(claude_config(&policy("claude-code"))).is_ok());
+
+        let mut bound = claude_config(&policy("claude-code"));
+        bound.externals.sanitizers.insert(
+            "clean".to_string(),
+            crate::config::Implementation::Builtin("claude-code".to_string()),
+        );
+        assert!(matches!(
+            load(bound),
+            Err(OpenError::BoundBuiltin { kind: "sanitizer", name }) if name == "clean"
+        ));
+
+        assert!(matches!(
+            load(claude_config(&policy("llm"))),
+            Err(OpenError::LlmNotConfigured { kind: "sanitizer", name }) if name == "clean"
+        ));
+        assert!(
+            load(claude_config(&format!(
+                "{}\n[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n",
+                policy("llm")
+            )))
+            .is_ok()
+        );
+    }
+
+    /// A sanitizer binding no declaration names is idle, so a model key it cannot reach does
+    /// not stop the deployment from opening; once a declaration names it, the key is checked.
+    #[test]
+    fn an_idle_sanitizer_binding_does_not_block_opening() {
+        let externals = "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n\
+                         [externals.sanitizers.\"future.mask\"]\nbuiltin = \"llm\"\n";
+        let tool = "[[policy.tool]]\nname = \"post\"\ndelta = {}\ntags = [\"outbound\"]\n";
+        let declared = "[[policy.sanitizer]]\nname = \"future.mask\"\non = [\"tool_input\"]\ntags = [\"outbound\"]\n\
+                        [policy.sanitizer.permits]\naudience = { from = [\"internal\"], to = [\"public\"] }\n";
+        let document = |sanitizer: &str| format!("[policy]\nversion = 2\n{tool}{sanitizer}\n{externals}");
+        assert!(
+            load(claude_config(&document(""))).is_ok(),
+            "the idle binding is not validated"
+        );
+        assert!(matches!(
+            load(claude_config(&document(declared))),
+            Err(OpenError::ModelKeyMissing { kind: "sanitizer", name, .. }) if name == "future.mask"
         ));
     }
 
@@ -5878,6 +6369,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         .await;
         assert_eq!(passed["decision"], "pass_control");
         let (offer, args) = parse_control_arguments(&args.to_string()).unwrap();
+        let offer = offer.expect("the control call quotes an offer");
         let actor = Actor {
             root: root.clone(),
             child: None,
@@ -6201,6 +6693,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             &root,
             &HostObservation::TurnEnded {
                 actor: host_actor(&actor),
+                end_kind: appa_eventlog::EndKind::Boundary,
             },
         );
         assert_eq!(
@@ -6324,7 +6817,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             runtime.vouch(&PermitKey::Call("deadbeef".to_string()), &parent, None);
         }
         runtime.record_prompt(&child).expect("the child's mark records");
-        runtime.record_turn_end(&child).expect("the child's turn ends");
+        runtime
+            .record_turn_end(&child, EndKind::Boundary)
+            .expect("the child's turn ends");
         assert!(
             runtime.prompted(&parent),
             "another actor's prompt and turn end say nothing about this one"
@@ -6334,7 +6829,9 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         runtime.record_prompt_settled(&parent).expect("the mark settles");
         assert!(!runtime.prompted(&parent));
         runtime.record_prompt(&parent).expect("a second prompt arrives");
-        runtime.record_turn_end(&parent).expect("and its turn ends");
+        runtime
+            .record_turn_end(&parent, EndKind::Boundary)
+            .expect("and its turn ends");
         assert!(!runtime.prompted(&parent), "the turn's end is the last word");
     }
 

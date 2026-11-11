@@ -16,7 +16,7 @@ curl -fsSL https://openappa.com/install.sh | sh &&
   ~/.local/bin/appa plugin install claude-code
 ```
 
-The installer places `appa` in `~/.local/bin`.
+The installer places `appa` in `~/.local/bin`. It verifies the download against the release's `SHA256SUMS`. When the GitHub CLI (`gh`) is installed and signed in, it also verifies the build provenance: OpenAPPA's release workflow on `main` attested exactly those bytes. `APPA_VERIFY_PROVENANCE=require` refuses to install without that check. `APPA_VERIFY_PROVENANCE=skip` installs on the checksum alone.
 
 `appa plugin install claude-code` configures Claude Code's user environment:
 1. Deploys the runtime binary under APPA's data directory.
@@ -66,6 +66,8 @@ Create a public GitHub issue from the action items in my private meeting recordi
 Claude can read the meeting, but that read narrows who may receive the resulting data. When Claude attempts the public GitHub write, OpenAPPA checks the accumulated label against the destination boundary and blocks the flow before the tool executes.
 
 The refusal names the policy conflict and provides available remedies (such as routing through a configured sanitizer or requesting authorized human review).
+
+In a `clappa` session, the sanitizers of every installed battery are active by default. The default config binds each one to the local `claude` CLI. A read that would lower the session's trust, or narrow its audience, then also offers the sanitizer's rewrite of the result, so the session can keep its label. To turn off a sanitizer, delete its `[externals.sanitizers."<name>"]` binding from the config that `appa plugin install claude-code` wrote.
 
 ![A protected Claude Code session refuses to post content from a private meeting recording to a public GitHub repo, and explains why](/images/claude-code-blocked-flow.png)
 
@@ -132,7 +134,7 @@ Protected sessions can coordinate with `SendMessage`. A peer message carries the
 | --- | --- |
 | The address of exactly one other live protected session under the same policy and principal | Allowed at any label |
 | Any other socket address | Denied |
-| A session name | Requires audience `public`: a name can belong to any session, including an unprotected one |
+| A session name | Requires audience `internal`: a name belongs to a session of the same organization or user, which may be unprotected |
 
 When a send by name is denied and one protected peer has that name, the denial gives the peer's address. The model can then send again to that address. `recipient`, when set, MUST equal `to`.
 

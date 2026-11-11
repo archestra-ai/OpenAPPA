@@ -262,7 +262,7 @@ pub(super) fn prepare(
     };
     let values = serde_json::json!({
         "fullnameOverride":"appa-runtime",
-        "image":{"repository":Image::Runtime.repository(),"digest":published.images()[&Image::Runtime].digest()},
+        "image":{"repository":published.image_repository(Image::Runtime),"digest":published.images()[&Image::Runtime].digest()},
         "appaGuide":{"enabled":false}, "config":config_values
     });
     write_synced(&root.join("runtime-values.json"), &json(&values)?)?;

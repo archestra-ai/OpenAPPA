@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use appa_runtime::api::{LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, RemedyOutcome, Runtime};
+use appa_runtime::api::{
+    LabelSpelling, OfferId, OfferedRemedy, RemedyArguments, RemedyAttempt, RemedyOutcome, Runtime,
+};
 use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
@@ -416,10 +418,18 @@ impl SessionInner {
                 "{ADVERTISED_CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it."
             );
         };
-        match self
-            .tokio
-            .block_on(self.runtime.execute_remedy_with(&self.actor(child), offer, arguments))
-        {
+        // A call that quotes no offer declares the next subagent call's return.
+        let actor = self.actor(child);
+        let outcome = match offer {
+            Some(offer) => self
+                .tokio
+                .block_on(self.runtime.execute_remedy_with(&actor, offer, arguments)),
+            None => self.tokio.block_on(
+                self.runtime
+                    .declare_return_ahead(&actor, arguments, RemedyAttempt::fresh()),
+            ),
+        };
+        match outcome {
             RemedyOutcome::Authorized { call } => format!(
                 "Authorized. Call the {} tool with exactly these arguments to run it: {}",
                 call.tool,

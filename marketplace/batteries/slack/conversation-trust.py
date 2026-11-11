@@ -1,4 +1,6 @@
-"""The slack conversation annotator: one consult in, one answer out.
+"""The slack conversation annotator. The runtime runs this script once for
+each tool call it annotates, passes the consult request as JSON on
+standard input, and reads one JSON answer from standard output.
 
 A read of one conversation is read by that conversation's readers,
 `@slack:channel/<id>`. Trust follows who can write the text: a

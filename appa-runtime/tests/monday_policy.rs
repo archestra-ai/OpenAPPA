@@ -6,7 +6,7 @@ use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime_api::{HookDecision, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, loaded_session_runtime, offer_of, propose, ran, raw, repo_root, root, serve};
+use common::{actor, loaded_session_runtime, propose, ran, raw, repo_root, root, serve, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -120,7 +120,8 @@ timeout_ms = 30000
 review_timeout_ms = 600000
 max_body_bytes = 1048576
 [externals.authorities.monday-operator]
-builtin = "approve"
+# Approves when asked. The stock "approve" is applied at the block, which this test reads.
+command = ["/bin/sh", "-c", 'cat > /dev/null; printf "%s" "{{\"version\":1,\"answer\":{{\"ruling\":\"approve\"}}}}"']
 [externals.audience.people]
 url = "{source}/audience"
 selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members", feeds = "internal" }}]
@@ -136,7 +137,7 @@ async fn accept_read(runtime: &Arc<Runtime>, read: ProposedCall) {
     let decision = propose(runtime, read.clone()).await;
     if !matches!(decision, HookDecision::AllowCall { .. }) {
         assert!(matches!(
-            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }
         ));
         assert_eq!(
@@ -154,7 +155,7 @@ async fn review_write(runtime: &Arc<Runtime>, write: ProposedCall) {
         "{decision:?}"
     );
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(

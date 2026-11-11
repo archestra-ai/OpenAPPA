@@ -1305,6 +1305,7 @@ func (p *AppaPluginKagent) beforeTool(ctx agent.Context, t tool.Tool, args map[s
 		if ids.childID != "" {
 			actor = ids.rootID + ":" + ids.childID
 		}
+		args = orEmpty(args)
 		args["_appa_actor"] = actor
 	}
 	ruling := ""

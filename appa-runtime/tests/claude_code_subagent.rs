@@ -505,8 +505,8 @@ async fn delegation_guidance_leads_to_a_floor_that_admits_the_private_read_befor
         panic!("the spawn asks for its return declaration");
     };
     assert!(
-        feedback.contains("label: {audience: ["),
-        "the attestation route asks for its bound audience dimension: {feedback}"
+        feedback.contains("label: {}, return_schema: {type: \"object\", ...}"),
+        "the attestation route keeps this session's audience unless lowered: {feedback}"
     );
 
     declare_spawn(&incompatible, &spawn, sanitized("attest-schema"), attested_at(None)).await;

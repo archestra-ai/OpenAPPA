@@ -27,7 +27,7 @@ use crate::model::archestra::ArchestraBackend;
 use crate::model::claude_code::ClaudeCodeBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
-use crate::recorder::ConsultBackend;
+use crate::transcriber::ConsultBackend;
 use appa_engine::label::ReaderId;
 use appa_policy::AnnotatorBuiltin;
 use appa_runtime_api::Ruling;
@@ -42,9 +42,9 @@ pub enum NoAnswerReason {
     Unreachable,
     #[cfg(feature = "daemon")]
     Dismissed,
-    /// A non-success exit or HTTP status. `detail` is the last line a command wrote to
-    /// stderr, or what the host said about an `archestra` consult it refused — its own
-    /// error, never its answer — where one was read.
+    /// A non-success exit or HTTP status. `detail` is what the external said about its
+    /// refusal, as [`error_line`] bounds and redacts it: the last line a command wrote to
+    /// stderr, or a `url` external's diagnostics header, else the error its body carries.
     NonSuccess {
         status: u16,
         detail: Option<String>,
@@ -65,22 +65,11 @@ impl NoAnswerReason {
     pub fn diagnostic(&self) -> String {
         match self {
             NoAnswerReason::MalformedAnswer(detail) => format!("malformed {detail}"),
-            NoAnswerReason::Unregistered => "unregistered".to_string(),
-            NoAnswerReason::Unreachable => "unreachable".to_string(),
-            #[cfg(feature = "daemon")]
-            NoAnswerReason::Dismissed => "dismissed".to_string(),
-            NoAnswerReason::NonSuccess { status, detail: None } => format!("non_success status={status}"),
             NoAnswerReason::NonSuccess {
                 status,
                 detail: Some(detail),
             } => format!("non_success status={status} detail={detail:?}"),
-            NoAnswerReason::Timeout => "timeout".to_string(),
-            NoAnswerReason::Transport => "transport".to_string(),
-            NoAnswerReason::Malformed => "malformed".to_string(),
-            NoAnswerReason::Oversized => "oversized".to_string(),
-            NoAnswerReason::UnsupportedVersion => "unsupported_version".to_string(),
-            NoAnswerReason::ModuleError => "module_error".to_string(),
-            NoAnswerReason::ModulePanicked => "module_panicked".to_string(),
+            other => crate::events::NoAnswerClass::from(other).to_string(),
         }
     }
 }
@@ -93,15 +82,16 @@ pub enum ConsultOutcome {
     NoAnswer(NoAnswerReason),
 }
 
-/// The response header a `url` external may describe itself in, for a consult recorder only.
+/// The response header a `url` external may describe itself in: kept for a consult
+/// recorder, and read as the reason for a refusal.
 const DIAGNOSTICS_HEADER: &str = "x-appa-diagnostics";
 
 /// The most bytes of an external's self-description a consult record keeps.
 pub(crate) const MAX_DIAGNOSTIC_BYTES: usize = 8192;
 
 /// What an external wrote about itself beside its answer: a `url` external's
-/// diagnostics header, or the tail of a command's stderr. Kept for a consult recorder;
-/// the runtime never reads it.
+/// diagnostics header, or the tail of a command's stderr. Kept for a consult transcriber;
+/// the runtime reads its last line only as the `detail` of a refusal.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Diagnostics {
     pub bytes: Vec<u8>,
@@ -117,11 +107,22 @@ impl Diagnostics {
         }
     }
 
-    /// The last line of a command's stderr, as [`error_line`] bounds it; none where the
-    /// command said nothing.
+    /// The last line, as [`error_line`] bounds it; none where the external said nothing,
+    /// or said more than was kept: the cut can drop the key that marks a later line secret.
     pub(crate) fn error_line(&self) -> Option<String> {
-        Some(error_line(&String::from_utf8_lossy(&self.bytes))).filter(|line| !line.is_empty())
+        match self.truncated {
+            true => None,
+            false => Some(error_line(&String::from_utf8_lossy(&self.bytes))).filter(|line| !line.is_empty()),
+        }
     }
+}
+
+/// Whether a `claude-code` annotation consult may be answered from an identical earlier prompt.
+#[derive(Debug, Clone, Copy)]
+enum Recall {
+    Recalled,
+    #[cfg(any(test, feature = "daemon"))]
+    Afresh,
 }
 
 /// What a recorded transport saw of one consult beside its outcome.
@@ -185,9 +186,9 @@ enum Backend {
 }
 
 impl Backend {
-    /// The transport a consult record names, for a backend that leaves the process or asks
-    /// a person. The in-process answers — stock, an inline roster, the stand-in — are not
-    /// recorded.
+    /// The transport a consult record names, for a backend that leaves the process, asks a
+    /// person, or is a stock approving authority. The other in-process answers — a stock
+    /// sanitizer, an inline roster, the stand-in — are not recorded.
     fn recorded(&self) -> Option<ConsultBackend> {
         match self {
             Backend::Url(_) => Some(ConsultBackend::Url),
@@ -199,7 +200,8 @@ impl Backend {
             #[cfg(feature = "archestra")]
             Backend::Model(PromptModel::Archestra(_)) => Some(ConsultBackend::Archestra),
             Backend::Jev(_) => Some(ConsultBackend::Jev),
-            Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
+            Backend::Stock(Stock::Approve) => Some(ConsultBackend::Stock),
+            Backend::Stock(Stock::RedactEmail | Stock::RedactSecrets) | Backend::Readers(_) | Backend::StandIn => None,
         }
     }
 }
@@ -235,12 +237,18 @@ pub struct ExternalServices {
     timeout: Duration,
     max_body_bytes: usize,
     backends: BTreeMap<ConsultKind, BTreeMap<String, Backend>>,
+    /// The bound recorders: delivered to, never consulted.
+    recorders: BTreeMap<String, Transport>,
     gates: ConsultGates,
 }
 
 /// How many `command` consults may run at once across a runtime: every trajectory's
 /// pending consults fan out together, and each is a process.
 const COMMAND_CONSULT_PERMITS: usize = 8;
+
+/// How many `command` recorder deliveries may run at once across a runtime. Their own gate:
+/// a recorder that hangs never holds a permit a consult waits on.
+const COMMAND_RECORDER_PERMITS: usize = 2;
 
 /// Settle a batch of consults, every sibling included, as many at a time as the
 /// command gate admits. A consult's deadline covers its wait for a permit, so a wider
@@ -262,6 +270,7 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     command: Arc<tokio::sync::Semaphore>,
+    recorder: Arc<tokio::sync::Semaphore>,
     /// Each model builtin's gate with the `max_concurrent` it was sized by. Only the serving
     /// deployment sizes them; a consult takes its permits from the gate current when it
     /// starts, so a resize reaches every deployment's later consults.
@@ -298,6 +307,7 @@ impl ConsultGates {
         };
         ConsultGates {
             command: Arc::new(tokio::sync::Semaphore::new(command)),
+            recorder: Arc::new(tokio::sync::Semaphore::new(COMMAND_RECORDER_PERMITS)),
             models: Arc::new(Mutex::new(AnnotatorBuiltin::ALL.map(gate))),
             jev: Arc::default(),
         }
@@ -403,6 +413,20 @@ impl ExternalServices {
             for (name, implementation) in table {
                 let backend = match implementation {
                     Implementation::Transport(transport) => Backend::from(transport),
+                    #[cfg(feature = "archestra")]
+                    Implementation::Builtin(builtin)
+                        if section == Section::Sanitizers && builtin == crate::config::ARCHESTRA_BUILTIN =>
+                    {
+                        // A host-supplied transport: served only where the host supplies it.
+                        archestra
+                            .clone()
+                            .map(|archestra| Backend::Model(PromptModel::Archestra(archestra)))
+                            .ok_or_else(|| ModulesError::UnknownBuiltin {
+                                section: section.name(),
+                                name: name.clone(),
+                                builtin,
+                            })?
+                    }
                     Implementation::Builtin(builtin) => {
                         builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref())?
                     }
@@ -418,6 +442,7 @@ impl ExternalServices {
                 .collect()
         };
         backends.insert(ConsultKind::Context, bound(config.context));
+        let recorders = config.recorders;
         let mut annotators = bound(config.annotators);
         for (name, builtin) in annotator_builtins {
             let backend = match builtin {
@@ -457,6 +482,7 @@ impl ExternalServices {
             timeout: config.timeout,
             max_body_bytes: config.max_body_bytes,
             backends,
+            recorders,
             gates,
         })
     }
@@ -482,6 +508,26 @@ impl ExternalServices {
         )
     }
 
+    /// Whether this authority is the stock `approve` builtin — the one whose rulings the
+    /// runtime obtains at the block, without the agent executing the plan.
+    pub(crate) fn is_stock_approve(&self, authority: &str) -> bool {
+        matches!(
+            self.backends
+                .get(&ConsultKind::Authority)
+                .and_then(|table| table.get(authority)),
+            Some(Backend::Stock(Stock::Approve))
+        )
+    }
+
+    /// Whether any authority is the stock `approve` builtin.
+    pub(crate) fn has_stock_approve(&self) -> bool {
+        self.backends.get(&ConsultKind::Authority).is_some_and(|table| {
+            table
+                .values()
+                .any(|backend| matches!(backend, Backend::Stock(Stock::Approve)))
+        })
+    }
+
     /// One consult of a registered component, dispatched on its configured
     /// implementation. `elicitation` is the open request that asked for a ruling; it is
     /// present only for an authority consult raised inside the remedy tool, and only
@@ -494,10 +540,18 @@ impl ExternalServices {
         elicitation: Option<&Elicitation>,
         ruling: Option<Ruling>,
     ) -> ConsultOutcome {
-        self.dispatch(consult, elicitation, ruling, None).await
+        self.dispatch(consult, elicitation, ruling, None, Recall::Recalled)
+            .await
     }
 
-    /// [`ExternalServices::consult`] for a consult recorder: the outcome, and what the
+    /// [`ExternalServices::consult`] that never answers from an identical earlier prompt, so
+    /// `appa runtime annotate --repeat` measures the model rather than the cache.
+    #[cfg(any(test, feature = "daemon"))]
+    pub(crate) async fn consult_afresh(&self, consult: &Consult) -> ConsultOutcome {
+        self.dispatch(consult, None, None, None, Recall::Afresh).await
+    }
+
+    /// [`ExternalServices::consult`] for a consult transcriber: the outcome, and what the
     /// transport saw of it where the backend is one a record names. Only here does a
     /// `url` consult read a non-success body or a `command` consult wait for its stderr.
     pub(crate) async fn consult_transcribed(
@@ -507,7 +561,9 @@ impl ExternalServices {
         ruling: Option<Ruling>,
     ) -> (ConsultOutcome, Option<Transcript>) {
         let mut transcript = self.backend(consult).and_then(Backend::recorded).map(Transcript::of);
-        let outcome = self.dispatch(consult, elicitation, ruling, transcript.as_mut()).await;
+        let outcome = self
+            .dispatch(consult, elicitation, ruling, transcript.as_mut(), Recall::Recalled)
+            .await;
         (outcome, transcript)
     }
 
@@ -523,6 +579,7 @@ impl ExternalServices {
         elicitation: Option<&Elicitation>,
         ruling: Option<Ruling>,
         seen: Option<&mut Transcript>,
+        recall: Recall,
     ) -> ConsultOutcome {
         let kind = consult.kind();
         let name = consult.name.as_str();
@@ -560,7 +617,7 @@ impl ExternalServices {
                     Err(NoAnswerReason::Unreachable)
                 }
             },
-            Backend::Model(model) => self.consult_model(model, consult, seen).await,
+            Backend::Model(model) => self.consult_model(model, consult, seen, recall).await,
             Backend::Jev(jev) => {
                 let (answered, record) = Box::pin(jev.consult(consult)).await;
                 if let Some(seen) = seen {
@@ -624,14 +681,7 @@ impl ExternalServices {
         let deadline = tokio::time::Instant::now() + self.timeout;
         let permit = acquire_within(&self.gates.command, deadline, "command", &consult.name).await?;
         let transcript = seen.as_deref().map(|seen| Transcript::of(seen.backend));
-        let mut credentials = Vec::new();
-        for var in &command.token_env {
-            if let Some(value) = crate::credentials::resolve(self.credential_store.as_ref(), var)
-                .map_err(|_| NoAnswerReason::Unreachable)?
-            {
-                credentials.push((std::ffi::OsString::from(var), value));
-            }
-        }
+        let credentials = self.command_credentials(command)?;
         let CommandRun { output, transcript } =
             run_command(command, input, deadline, self.max_body_bytes, transcript, credentials).await;
         drop(permit);
@@ -641,18 +691,40 @@ impl ExternalServices {
         read_answer(&output?)
     }
 
+    /// The credentials a `command` binding's `token_env` names, resolved for its process.
+    fn command_credentials(
+        &self,
+        command: &ResolverCommand,
+    ) -> Result<Vec<(std::ffi::OsString, std::ffi::OsString)>, NoAnswerReason> {
+        let mut credentials = Vec::new();
+        for var in &command.token_env {
+            if let Some(value) = crate::credentials::resolve(self.credential_store.as_ref(), var)
+                .map_err(|_| NoAnswerReason::Unreachable)?
+            {
+                credentials.push((std::ffi::OsString::from(var), value));
+            }
+        }
+        Ok(credentials)
+    }
+
     async fn consult_model(
         &self,
         model: &PromptModel,
         consult: &Consult,
         seen: Option<&mut Transcript>,
+        recall: Recall,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let prompt = ModelPrompt::new(consult).ok_or(NoAnswerReason::Unregistered)?;
-        match model {
-            PromptModel::Llm(llm) => llm.consult(&prompt, &consult.name, seen).await,
-            PromptModel::ClaudeCode(claude) => claude.consult(&prompt, &consult.name, seen).await,
+        match (model, recall, &consult.body) {
+            (PromptModel::ClaudeCode(claude), Recall::Recalled, ConsultBody::Annotation { declaration, .. }) => {
+                claude.annotate(&prompt, declaration, &consult.name, seen).await
+            }
+            (PromptModel::ClaudeCode(claude), ..) => claude.consult(&prompt, &consult.name, seen).await,
+            (PromptModel::Llm(llm), ..) => llm.consult(&prompt, &consult.name, seen).await,
             #[cfg(feature = "archestra")]
-            PromptModel::Archestra(archestra) => archestra.consult(&prompt, &consult.name, seen).await,
+            (PromptModel::Archestra(archestra), ..) => {
+                archestra.consult(consult.kind(), &prompt, &consult.name, seen).await
+            }
         }
     }
 
@@ -701,10 +773,35 @@ impl ExternalServices {
         }
     }
 
+    /// Deliver one batch of dispatch records to a bound recorder over its transport, in the
+    /// consult envelope's carriage: a `url` recorder is posted the delivery, a `command`
+    /// recorder reads it on stdin, and either answers `{"version": 1, "answer": {}}` once it
+    /// has kept the records. Any other reply is a failed delivery, retried with the next.
+    pub(crate) async fn deliver(&self, recorder: &str, delivery: &serde_json::Value) -> Result<(), NoAnswerReason> {
+        let answer = match self.recorders.get(recorder) {
+            None => return Err(NoAnswerReason::Unregistered),
+            Some(Transport::Url(endpoint)) => read_answer(&self.post(endpoint, delivery, None).await?),
+            Some(Transport::Command(command)) => {
+                let input = serde_json::to_vec(delivery).map_err(|_| NoAnswerReason::Malformed)?;
+                let deadline = tokio::time::Instant::now() + self.timeout;
+                let credentials = self.command_credentials(command)?;
+                let permit = acquire_within(&self.gates.recorder, deadline, "recorder", recorder).await?;
+                let CommandRun { output, .. } =
+                    run_command(command, input, deadline, self.max_body_bytes, None, credentials).await;
+                drop(permit);
+                read_answer(&output?)
+            }
+        }?;
+        match answer.as_object() {
+            Some(_) => Ok(()),
+            None => Err(NoAnswerReason::MalformedAnswer("recorder answer".into())),
+        }
+    }
+
     async fn post(
         &self,
         endpoint: &Endpoint,
-        consult: &Consult,
+        consult: &(impl serde::Serialize + ?Sized),
         mut seen: Option<&mut Transcript>,
     ) -> Result<Vec<u8>, NoAnswerReason> {
         let http = match endpoint.host() {
@@ -721,24 +818,36 @@ impl ExternalServices {
         let mut response = builder.send().await.map_err(classify_transport)?;
         let status = response.status();
         let cap = self.max_body_bytes as u64;
+        let diagnostics = response
+            .headers()
+            .get(DIAGNOSTICS_HEADER)
+            .map(|value| Diagnostics::head(value.as_bytes()));
         if let Some(seen) = seen.as_deref_mut() {
             seen.http_status = Some(status.as_u16());
-            seen.diagnostics = response
-                .headers()
-                .get(DIAGNOSTICS_HEADER)
-                .map(|value| Diagnostics::head(value.as_bytes()));
+            seen.diagnostics = diagnostics.clone();
         }
         if !status.is_success() {
-            // Read for the record alone: whatever the body holds, the outcome is the status.
+            // Whatever the body holds, the outcome is the status; the body only says why.
+            let settled = std::time::Instant::now();
+            let mut body = Vec::new();
+            let read = tokio::time::timeout(RECORD_READ_GRACE, read_body(&mut response, cap, &mut body)).await;
+            // A body cut short is kept for the record only, as is a truncated header. The
+            // header may describe the external rather than the refusal, so the body leads.
+            let said = [
+                matches!(read, Ok(Ok(()))).then(|| refusal_detail(&body)).flatten(),
+                diagnostics.as_ref().and_then(Diagnostics::error_line),
+            ];
+            let detail = match said {
+                [Some(body), Some(header)] if body != header => Some(format!("{body}; {header}")),
+                [body, header] => body.or(header),
+            };
             if let Some(seen) = seen {
-                seen.settled = Some(std::time::Instant::now());
-                let mut body = Vec::new();
-                let _ = tokio::time::timeout(RECORD_READ_GRACE, read_body(&mut response, cap, &mut body)).await;
+                seen.settled = Some(settled);
                 seen.raw_response = Some(body);
             }
             return Err(NoAnswerReason::NonSuccess {
                 status: status.as_u16(),
-                detail: None,
+                detail,
             });
         }
         if response.content_length().is_some_and(|len| len > cap) {
@@ -800,7 +909,7 @@ fn builtin_backend(
     let module = match section {
         Section::Authorities => registry.authority(&builtin),
         Section::Sanitizers => registry.sanitizer(&builtin),
-        Section::Annotators | Section::Audience | Section::Context => None,
+        Section::Annotators | Section::Audience | Section::Context | Section::Recorders => None,
     };
     let backend = match (section, builtin.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
@@ -821,21 +930,28 @@ fn builtin_backend(
 /// a failed `url` consult's body, or the stderr a command that answered keeps open.
 pub(crate) const RECORD_READ_GRACE: Duration = Duration::from_millis(100);
 
-/// The last non-empty line of what a child said about its own failure, stripped of
-/// control characters and bounded, fit for a log field and a diagnostic.
+/// The last non-empty line of what an external said about its own failure, its secrets
+/// redacted, stripped of control characters and bounded, fit for a log field and a
+/// diagnostic.
 pub(crate) fn error_line(text: &str) -> String {
     const MAX_LINE: usize = 200;
-    let line: String = text
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or_default()
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect();
+    // Redacted whole first: a secret's key may stand on an earlier line than its value.
+    let text = crate::secrets::redact_secrets(text);
+    let last = text.lines().rev().map(str::trim).find(|line| !line.is_empty());
+    let line: String = last.unwrap_or_default().chars().filter(|c| !c.is_control()).collect();
     let cut = line.char_indices().nth(MAX_LINE).map_or(line.len(), |(index, _)| index);
     line[..cut].to_string()
+}
+
+/// What a host said about a consult it refused: the `message` of its error envelope
+/// (`{"error":{"message":…}}`), else the last line of whatever it wrote; none when it
+/// wrote nothing.
+pub(crate) fn refusal_detail(body: &[u8]) -> Option<String> {
+    let envelope: Option<String> = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|value| value.get("error")?.get("message")?.as_str().map(str::to_string));
+    let line = error_line(envelope.as_deref().unwrap_or(&String::from_utf8_lossy(body)));
+    (!line.is_empty()).then_some(line)
 }
 
 fn classify_transport(error: reqwest::Error) -> NoAnswerReason {
@@ -941,6 +1057,8 @@ mod tests {
             annotators,
             audience,
             context: BTreeMap::new(),
+            context_hints: BTreeMap::new(),
+            recorders: BTreeMap::new(),
             claude_code: Default::default(),
             llm: None,
             jev: None,
@@ -1011,6 +1129,7 @@ mod tests {
                     tool: "send_message".to_string(),
                     arguments,
                     requirements: vec![],
+                    narrows: None,
                 },
             },
         }
@@ -1043,6 +1162,8 @@ mod tests {
             body: ConsultBody::Annotation {
                 declaration: AnnotationDeclaration {
                     hint: Some("Classify customer records for the declared audiences.".to_string()),
+                    deployment_hint: None,
+                    context_hints: std::collections::BTreeMap::new(),
                     inputs: vec![],
                     trust_ranks: vec!["suspicious".to_string(), "trusted".to_string()],
                     audiences: appa_engine::registry::AudienceVocabulary::parse_entries(&[
@@ -1322,6 +1443,23 @@ mod tests {
         assert!(matches!(resolve_command(&services).await, ConsultOutcome::Answer(_)));
     }
 
+    /// A command is told how long it has, the time already spent on the consult deducted.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_command_reads_the_budget_it_has_left() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let script = r#"cat >/dev/null; printf '{"version":1,"answer":{"budget":%s}}' "$APPA_CONSULT_TIMEOUT_MS""#;
+        let ConsultOutcome::Answer(answer) =
+            resolve_command(&command_services(dir.path(), script, budget_ms(), 1024)).await
+        else {
+            panic!("the command answers");
+        };
+        let budget = answer["budget"]
+            .as_u64()
+            .expect("the budget is a number of milliseconds");
+        assert!(0 < budget && budget <= budget_ms(), "{budget} ms of {}", budget_ms());
+    }
+
     #[cfg(unix)]
     async fn resolve_command(services: &ExternalServices) -> ConsultOutcome {
         services
@@ -1347,7 +1485,7 @@ mod tests {
             r#"cat > request.json
 printf '%s' "$1" > argument.txt
 pwd > cwd.txt
-env | grep '^APPA_' > appa-env.txt
+env | grep '^APPA_' | grep -v '^APPA_CONSULT_TIMEOUT_MS=' > appa-env.txt
 printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             2000,
             65_536,
@@ -1385,7 +1523,8 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             std::fs::read_to_string(dir.path().join("appa-env.txt")).unwrap(),
             "APPA_PROVIDER_TEST_TOKEN=provider-credential\n",
             "a command inherits the one credential its binding names — not the runtime's own \
-             variables, and not another binding's credential in the same namespace"
+             variables, and not another binding's credential in the same namespace; its budget \
+             has its own test"
         );
 
         // The same command serves an authority: the transport is kind-agnostic.
@@ -1778,6 +1917,49 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         ));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_identical_claude_annotation_is_answered_once_and_only_an_admitted_answer_is_kept() {
+        let dir = tempfile::tempdir().expect("a fixture directory is created");
+        let spawns = |answer: &str| {
+            let fixture = tempfile::tempdir_in(dir.path()).expect("a fixture directory is created");
+            let counter = fixture.path().join("spawns");
+            let script = format!(
+                "printf x >> {counter}\nprintf '%s' '{{\"type\":\"result\",\"structured_output\":{answer}}}'",
+                counter = counter.display()
+            );
+            let mut config = externals(None, 5000, 65_536);
+            config.claude_code.command = fake_claude(fixture.path(), &script);
+            let services = services_declaring(config, declared("judge", AnnotatorBuiltin::ClaudeCode));
+            let count = move || std::fs::read(&counter).map_or(0, |bytes| bytes.len());
+            (services, count, fixture)
+        };
+        let consult = annotation_consult("judge", serde_json::json!({"id": 7}));
+
+        let admitted =
+            r#"{"delta":{"trust":"suspicious"},"forwards":{},"requires":{"history":[],"attention":[]},"emits":[]}"#;
+        let (services, count, _fixture) = spawns(admitted);
+        let first = services.consult(&consult, None, None).await;
+        assert!(matches!(first, ConsultOutcome::Answer(_)), "{first:?}");
+        assert_eq!(services.consult(&consult, None, None).await, first);
+        assert_eq!(count(), 1, "the identical consult does not start the model again");
+        assert_eq!(services.consult_afresh(&consult).await, first);
+        assert_eq!(count(), 2, "an afresh consult always starts the model");
+        services
+            .consult(&annotation_consult("judge", serde_json::json!({"id": 8})), None, None)
+            .await;
+        assert_eq!(count(), 3, "other arguments are another prompt");
+
+        let (services, count, _fixture) = spawns(r#"{"ruling":"approve"}"#);
+        for _ in 0..2 {
+            assert!(matches!(
+                services.consult(&consult, None, None).await,
+                ConsultOutcome::Answer(_)
+            ));
+        }
+        assert_eq!(count(), 2, "an answer outside the mandate is never kept");
+    }
+
     #[tokio::test]
     async fn the_llm_builtin_serves_every_consult_kind_it_may_bind() {
         let url = stub(Router::new().route(
@@ -1966,6 +2148,82 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
     }
 
+    /// A refusal carries what the external said about it, redacted: a `url` external's
+    /// body's error envelope followed by its diagnostics header, and the last line a
+    /// command wrote to stderr.
+    #[tokio::test]
+    async fn a_refusal_carries_the_externals_redacted_reason() {
+        let said = "github context: GH_TOKEN=ghp_a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8 may change the login";
+        let redacted = "github context: GH_TOKEN=[redacted-secret] may change the login";
+        let url = stub(Router::new().route(
+            "/",
+            post(move || async move {
+                (
+                    axum::http::StatusCode::BAD_GATEWAY,
+                    [(DIAGNOSTICS_HEADER, said)],
+                    r#"{"error":{"message":"Battery helper failed: the helper exited with status 1"}}"#,
+                )
+            }),
+        ))
+        .await;
+        assert_eq!(
+            resolve(&services(Some(url), 2000, 65536)).await,
+            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                status: 502,
+                detail: Some(format!(
+                    "Battery helper failed: the helper exited with status 1; {redacted}"
+                ))
+            }),
+        );
+
+        let url = stub(Router::new().route(
+            "/",
+            post(|| async {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    r#"{"error":{"message":"Too many battery helper consults in flight"}}"#,
+                )
+            }),
+        ))
+        .await;
+        assert_eq!(
+            resolve(&services(Some(url), 2000, 65536)).await,
+            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: Some("Too many battery helper consults in flight".to_string())
+            }),
+        );
+
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().expect("a fixture directory is created");
+            let script = format!("echo 'a first line' >&2; echo '{said}' >&2; exit 1");
+            assert_eq!(
+                resolve_command(&command_services(dir.path(), &script, budget_ms(), 1024)).await,
+                ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                    status: 1,
+                    detail: Some(redacted.to_string())
+                }),
+            );
+        }
+    }
+
+    /// A secret is redacted with its key on an earlier line, and a line the record cut,
+    /// whose key may be gone, is not read at all.
+    #[test]
+    fn a_refusal_detail_never_carries_a_split_or_cut_secret() {
+        assert_eq!(error_line("password=\"\nhunter2\""), "password=\"[redacted-secret]\"");
+        let cut = |bytes: &[u8]| {
+            Diagnostics {
+                bytes: bytes.to_vec(),
+                truncated: true,
+            }
+            .error_line()
+        };
+        assert_eq!(cut(b"hunter2"), None);
+        assert_eq!(cut(b"=\"\nhunter2\""), None);
+    }
+
     #[tokio::test]
     async fn every_failure_shape_resolves_nothing() {
         let url = stub(Router::new().route(
@@ -1977,7 +2235,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             resolve(&services(Some(url), 2000, 65536)).await,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                 status: 500,
-                detail: None
+                detail: Some("boom".to_string())
             }),
         );
 
@@ -2045,7 +2303,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             resolve(&services(Some(url), 2000, 65536)).await,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                 status: 301,
-                detail: None
+                detail: Some("moved".to_string())
             }),
         );
 
@@ -2141,7 +2399,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 .await,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                 status: 403,
-                detail: None
+                detail: Some("nope".to_string())
             }),
         );
 
@@ -2401,7 +2659,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             transcribed,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                 status: 503,
-                detail: None
+                detail: Some("upstream overloaded; trace=7f3a".to_string())
             })
         );
         assert_eq!(transcribed, plain, "transcribing changes no outcome");
@@ -2463,7 +2721,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             transcribed,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                 status: 3,
-                detail: None
+                detail: Some("model refused".to_string())
             })
         );
         assert_eq!(
@@ -2590,9 +2848,9 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     /// A failed `url` consult whose body stalls part-way: the record keeps the part read, and
-    /// the consult waits out only the grace, not the client's timeout.
+    /// the consult, recorded or not, waits out only the grace, not the client's timeout.
     #[tokio::test]
-    async fn a_stalled_non_success_body_costs_a_recorded_consult_only_the_grace() {
+    async fn a_stalled_non_success_body_costs_a_consult_only_the_grace() {
         const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
         let consult = authority_consult("security", serde_json::json!({}));
         let services_at = |url: String| {
@@ -2606,21 +2864,28 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             .consult_transcribed(&consult, None, None)
             .await;
         let elapsed = started.elapsed();
+        let started = std::time::Instant::now();
         let plain = services_at(raw_stub(STALLED, true).await)
             .consult(&consult, None, None)
             .await;
+        let plain_elapsed = started.elapsed();
 
         assert_eq!(
             recorded,
             ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
                 status: 503,
                 detail: None
-            })
+            }),
+            "a body cut short says nothing about the refusal"
         );
-        assert_eq!(recorded, plain, "recording changes no outcome");
+        assert_eq!(recorded, plain, "transcribing changes no outcome");
         assert!(
             elapsed < RECORD_READ_GRACE + Duration::from_millis(900),
             "the stalled body stretched the consult to {elapsed:?}"
+        );
+        assert!(
+            plain_elapsed < RECORD_READ_GRACE + Duration::from_millis(900),
+            "the stalled body stretched the plain consult to {plain_elapsed:?}"
         );
         let transcript = transcript.expect("a url consult is transcribed");
         assert_eq!(transcript.raw_response.as_deref(), Some(&b"partial"[..]));

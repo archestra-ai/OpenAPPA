@@ -1,4 +1,6 @@
-"""The google-workspace audience source: one consult in, one answer out.
+"""The google-workspace audience source. The runtime runs this script once
+for each membership read or member lookup, passes the consult request as
+JSON on standard input, and reads one JSON answer from standard output.
 
 Serves these selector templates over Google's OpenID userinfo and
 Admin SDK Directory APIs:
@@ -49,6 +51,10 @@ class NotFound(Exception):
     """Google answered 404: the path names nothing the token can see."""
 
 
+class Forbidden(RuntimeError):
+    """Google answered 403: the token may not read what the path names."""
+
+
 def rest_api(token):
     def call(url, **params):
         query = f"?{urllib.parse.urlencode(params)}" if params else ""
@@ -62,6 +68,8 @@ def rest_api(token):
         except urllib.error.HTTPError as error:
             if error.code == 404:
                 raise NotFound(url) from error
+            if error.code == 403:
+                raise Forbidden(f"GET {url} failed: 403") from error
             raise RuntimeError(f"GET {url} failed: {error.code}") from error
 
     return call

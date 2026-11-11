@@ -245,7 +245,7 @@ fn a_decision_cannot_record_a_release_the_check_refuses() {
             receiving: Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
             proposed_effects: crate::fact::EffectSet::default(),
             annotation: None,
-            file_basis: None,
+            held: None,
             subject: crate::basis::fixture_subject(&traj()),
             evidence: crate::audience::AudienceEvidence::default(),
             terms: crate::fact::ReleaseTerms::none(),

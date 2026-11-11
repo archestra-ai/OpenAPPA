@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 
 use appa_engine::fact::{Fact, TrajectoryOpening};
 use appa_engine::label::{Audience, Label, Trust};
-use appa_engine::value::{DispatchId, FileBasis, FileSource};
+use appa_engine::value::{DispatchId, HeldMessage};
 use appa_eventlog::{HeldNotice, HeldPeerId, HostObservation, Log, LogStore, StoredLabel};
 use appa_runtime_api::{Actor, PeerAddress, PeerDigest, PeerFrame, ProposedCall, SessionTitle, TrajectoryId};
 
@@ -118,25 +118,25 @@ pub(crate) fn held_read(call: &ProposedCall) -> Option<HeldPeerId> {
     HeldPeerId::parse(&args.id).ok()
 }
 
-/// The basis a `read_peer_message` call reads under: the held message's digest, and its label
-/// under `chain`, the trust chain the holding family is judged under.
-pub(super) fn held_basis(
+/// The held message a `read_peer_message` call reads: its id and digest, and its label under
+/// `chain`, the trust chain the holding family is judged under.
+pub(super) fn held_message(
     store: &LogStore,
     root: &TrajectoryId,
     id: &HeldPeerId,
     chain: &appa_engine::registry::TrustChain,
-) -> Result<FileBasis, EventError> {
+) -> Result<HeldMessage, EventError> {
     let notice = store
         .peek_peer_message(root, id, SystemTime::now())
         .map_err(|error| EventError::Storage(error.to_string()))?
         .ok_or_else(|| EventError::RemedyArguments {
             detail: format!("no peer message {} is held for this session", id.as_str()),
         })?;
-    Ok(FileBasis::Read(FileSource {
-        version: notice.id.as_str().to_string(),
+    Ok(HeldMessage {
+        id: notice.id.as_str().to_string(),
         digest: notice.digest.to_string(),
         label: notice.label.under(chain),
-    }))
+    })
 }
 
 impl Runtime {
