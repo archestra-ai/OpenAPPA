@@ -1,6 +1,6 @@
 //! Grain battery: meeting content is suspicious, and what is read back as meeting content
 //! can still be written from it.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

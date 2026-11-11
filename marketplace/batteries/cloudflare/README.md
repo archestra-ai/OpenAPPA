@@ -126,7 +126,7 @@ The tool lists follow `docs-ai-search@0.4.13` and
 tool the policy does not name is blocked.
 
 ```sh
-cargo test --locked -p appa --test cloudflare_policy --test marketplace
+cargo test --locked -p appa --test integration -- cloudflare_policy:: marketplace::
 ```
 
 ## Sanitizers

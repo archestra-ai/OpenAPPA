@@ -67,7 +67,7 @@ does not name is blocked. Clients that see `fetch`, `search`, and
 names.
 
 ```sh
-cargo test --locked -p appa --test notion_policy --test marketplace
+cargo test --locked -p appa --test integration -- notion_policy:: marketplace::
 ```
 
 ## Sanitizers

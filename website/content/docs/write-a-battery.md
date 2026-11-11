@@ -87,7 +87,7 @@ the token under that variable. Thus a step does not tell the person to set
 the credential variable. A blank or multi-line `benefit` or step makes
 the manifest invalid.
 
-Run `cargo test -p appa --locked --test marketplace` to validate the
+Run `cargo test -p appa --locked --test integration -- marketplace::` to validate the
 package with the rest of the marketplace. A version derives its catalog
 entry and content digest from the committed package, so there is no
 catalog file to edit or commit.
@@ -204,7 +204,7 @@ python3 -m unittest discover -s marketplace/batteries/your-server -p 'test_*.py'
 Then check that the battery composes with the shipped ones:
 
 ```sh
-cargo test -p appa --test marketplace
+cargo test -p appa --test integration -- marketplace::
 ```
 
 This test detects invalid battery config and conflicts with other batteries. CI also runs Python tests under `marketplace/batteries/*/test_*.py`.

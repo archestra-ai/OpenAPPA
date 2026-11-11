@@ -4,6 +4,8 @@
 //! them.
 #![allow(dead_code)]
 
+pub mod init_fixture;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;

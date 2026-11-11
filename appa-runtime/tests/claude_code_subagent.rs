@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use common::{claude_event, claude_hook, including_session_tool_rules, offers, repo_root};
 
 use std::path::Path;

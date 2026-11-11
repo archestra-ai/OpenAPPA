@@ -105,7 +105,7 @@ The tool list follows the 2026-09-15 capture of "PagerDuty MCP Server"
 does not name is blocked.
 
 ```sh
-cargo test --locked -p appa --test pagerduty_policy --test marketplace
+cargo test --locked -p appa --test integration -- pagerduty_policy:: marketplace::
 ```
 
 ## Sanitizers

@@ -73,7 +73,7 @@ Narrow it in a root rule by argument if you want a smaller set of pages
 root rules run first.
 
 ```sh
-cargo test --locked -p appa --test microsoft_learn_policy --test marketplace
+cargo test --locked -p appa --test integration -- microsoft_learn_policy:: marketplace::
 ```
 
 ## Sanitizers

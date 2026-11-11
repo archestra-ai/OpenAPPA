@@ -110,7 +110,7 @@ package, so the commit is the pin. Edit the TOML rules when the registry
 changes; a tool the policy does not name is blocked.
 
 ```sh
-cargo test --locked -p appa --test posthog_policy --test marketplace
+cargo test --locked -p appa --test integration -- posthog_policy:: marketplace::
 ```
 
 ## Sanitizers

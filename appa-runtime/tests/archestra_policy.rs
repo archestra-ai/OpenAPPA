@@ -1,6 +1,6 @@
 //! Archestra battery: what each tool adds to the session and what it requires, and which of
 //! a sharing tool's first-match rules a call selects.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use common::{actor, audit_len, last_offer, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};

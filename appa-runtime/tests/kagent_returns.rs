@@ -7,7 +7,7 @@
 //! declaration itself, so the menu and the return routes are part of the wire
 //! contract, not prose for a model.
 
-mod common;
+use crate::common;
 
 use common::offers;
 

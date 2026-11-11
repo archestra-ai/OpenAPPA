@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use common::{offers, raw};
 
 use std::sync::Arc;

@@ -9,7 +9,7 @@
 //!
 //! Ignored by default: they need a real `claude` on PATH and, for the hook
 //! entries, its credentials and one model turn. Run with
-//! `cargo test --test real_claude -- --ignored`.
+//! `cargo test -p appa --test integration -- --ignored real_claude::`.
 
 use std::fs;
 use std::path::Path;

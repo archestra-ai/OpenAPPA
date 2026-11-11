@@ -1,5 +1,5 @@
 //! Notion battery: coarse internal reads, trusted writes, reviewed structural changes.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

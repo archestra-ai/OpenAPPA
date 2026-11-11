@@ -2,7 +2,7 @@
 //! remedy that names the authority leaves its offer standing. Once a later policy revision is
 //! published, the offer no longer stands and nothing consults the authority for it.
 
-mod common;
+use crate::common;
 use common::{actor, offer_of, propose, raw, root};
 
 use std::sync::Arc;
