@@ -22,6 +22,13 @@ Two batteries cover Claude Code's built-in `Read`, `Grep`, `Write`, `Edit` and `
 
 The default config `appa plugin install claude-code` writes handles tools that the batteries do not name.
 
+The model for the `coding` battery's sanitizers is configured in the deployment, not in the battery. The default config binds both to the Claude Code model (`builtin = "claude-code"` under `[externals.sanitizers]`), because a Claude Code session has the `claude` CLI. A root can bind them to `builtin = "llm"` instead.
+
+- `coding.strip-secrets` runs on a Bash or PowerShell command that names a credential path. The `claude-code` battery confines those results, so the output reaches the agent only after the sanitizer runs. The model replaces every secret value, and the output returns at `internal` instead of narrowing the session to `self`.
+- `coding.strip-instructions` runs on a fetch that lowers the session's trust, where the root confines WebFetch's result, as the default config does with `confined_results = ["host/claude-code/WebFetch"]`. The model removes every instruction from the page, and the result keeps the session's trust.
+
+APPA does not verify what a sanitizer's model removed: binding a sanitizer registers it as trusted.
+
 ## Files
 
 ```text

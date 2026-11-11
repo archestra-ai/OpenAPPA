@@ -470,7 +470,7 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
         .authorities
         .iter()
         .map(|authority| {
-            serde_json::json!({
+            let mut document = serde_json::json!({
                 "name": authority.name,
                 "mandate": {
                     "trust_ceiling": authority.mandate.trust_ceiling,
@@ -482,7 +482,13 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
                     },
                 },
                 "scope": sorted_set(&authority.scope.tags),
-            })
+            });
+            // Written only where the authority excepts a tag, so a policy that excepts none
+            // keeps the identity it had.
+            if !authority.except.is_empty() {
+                document["except"] = serde_json::Value::Array(sorted_set(&authority.except));
+            }
+            document
         })
         .collect();
 
@@ -1213,6 +1219,7 @@ mod tests {
     fn hints_never_move_the_identity() {
         let mut cfg = config(vec![tool("fetch")]);
         cfg.authorities = vec![Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 trust_ceiling: Some(Trust::new(1)),
@@ -1252,6 +1259,7 @@ mod tests {
     fn declaration_order_moves_the_identity_only_where_order_is_semantic() {
         let mut cfg = config(vec![tool("a"), tool("b")]);
         let officer = |name: &str| Authority {
+            except: Vec::new(),
             name: AuthorityName::new(name),
             mandate: Mandate {
                 trust_ceiling: Some(Trust::new(1)),

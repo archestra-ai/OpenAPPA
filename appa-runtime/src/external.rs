@@ -65,22 +65,11 @@ impl NoAnswerReason {
     pub fn diagnostic(&self) -> String {
         match self {
             NoAnswerReason::MalformedAnswer(detail) => format!("malformed {detail}"),
-            NoAnswerReason::Unregistered => "unregistered".to_string(),
-            NoAnswerReason::Unreachable => "unreachable".to_string(),
-            #[cfg(feature = "daemon")]
-            NoAnswerReason::Dismissed => "dismissed".to_string(),
-            NoAnswerReason::NonSuccess { status, detail: None } => format!("non_success status={status}"),
             NoAnswerReason::NonSuccess {
                 status,
                 detail: Some(detail),
             } => format!("non_success status={status} detail={detail:?}"),
-            NoAnswerReason::Timeout => "timeout".to_string(),
-            NoAnswerReason::Transport => "transport".to_string(),
-            NoAnswerReason::Malformed => "malformed".to_string(),
-            NoAnswerReason::Oversized => "oversized".to_string(),
-            NoAnswerReason::UnsupportedVersion => "unsupported_version".to_string(),
-            NoAnswerReason::ModuleError => "module_error".to_string(),
-            NoAnswerReason::ModulePanicked => "module_panicked".to_string(),
+            other => crate::events::NoAnswerClass::from(other).to_string(),
         }
     }
 }
@@ -197,9 +186,9 @@ enum Backend {
 }
 
 impl Backend {
-    /// The transport a consult record names, for a backend that leaves the process or asks
-    /// a person. The in-process answers — stock, an inline roster, the stand-in — are not
-    /// recorded.
+    /// The transport a consult record names, for a backend that leaves the process, asks a
+    /// person, or is a stock approving authority. The other in-process answers — a stock
+    /// sanitizer, an inline roster, the stand-in — are not recorded.
     fn recorded(&self) -> Option<ConsultBackend> {
         match self {
             Backend::Url(_) => Some(ConsultBackend::Url),
@@ -211,7 +200,8 @@ impl Backend {
             #[cfg(feature = "archestra")]
             Backend::Model(PromptModel::Archestra(_)) => Some(ConsultBackend::Archestra),
             Backend::Jev(_) => Some(ConsultBackend::Jev),
-            Backend::Stock(_) | Backend::Readers(_) | Backend::StandIn => None,
+            Backend::Stock(Stock::Approve) => Some(ConsultBackend::Stock),
+            Backend::Stock(Stock::RedactEmail | Stock::RedactSecrets) | Backend::Readers(_) | Backend::StandIn => None,
         }
     }
 }
@@ -423,6 +413,20 @@ impl ExternalServices {
             for (name, implementation) in table {
                 let backend = match implementation {
                     Implementation::Transport(transport) => Backend::from(transport),
+                    #[cfg(feature = "archestra")]
+                    Implementation::Builtin(builtin)
+                        if section == Section::Sanitizers && builtin == crate::config::ARCHESTRA_BUILTIN =>
+                    {
+                        // A host-supplied transport: served only where the host supplies it.
+                        archestra
+                            .clone()
+                            .map(|archestra| Backend::Model(PromptModel::Archestra(archestra)))
+                            .ok_or_else(|| ModulesError::UnknownBuiltin {
+                                section: section.name(),
+                                name: name.clone(),
+                                builtin,
+                            })?
+                    }
                     Implementation::Builtin(builtin) => {
                         builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref())?
                     }
@@ -502,6 +506,26 @@ impl ExternalServices {
                 .and_then(|table| table.get(authority)),
             Some(Backend::Hitl)
         )
+    }
+
+    /// Whether this authority is the stock `approve` builtin — the one whose rulings the
+    /// runtime obtains at the block, without the agent executing the plan.
+    pub(crate) fn is_stock_approve(&self, authority: &str) -> bool {
+        matches!(
+            self.backends
+                .get(&ConsultKind::Authority)
+                .and_then(|table| table.get(authority)),
+            Some(Backend::Stock(Stock::Approve))
+        )
+    }
+
+    /// Whether any authority is the stock `approve` builtin.
+    pub(crate) fn has_stock_approve(&self) -> bool {
+        self.backends.get(&ConsultKind::Authority).is_some_and(|table| {
+            table
+                .values()
+                .any(|backend| matches!(backend, Backend::Stock(Stock::Approve)))
+        })
     }
 
     /// One consult of a registered component, dispatched on its configured
@@ -698,7 +722,9 @@ impl ExternalServices {
             (PromptModel::ClaudeCode(claude), ..) => claude.consult(&prompt, &consult.name, seen).await,
             (PromptModel::Llm(llm), ..) => llm.consult(&prompt, &consult.name, seen).await,
             #[cfg(feature = "archestra")]
-            (PromptModel::Archestra(archestra), ..) => archestra.consult(&prompt, &consult.name, seen).await,
+            (PromptModel::Archestra(archestra), ..) => {
+                archestra.consult(consult.kind(), &prompt, &consult.name, seen).await
+            }
         }
     }
 

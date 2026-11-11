@@ -339,24 +339,7 @@ impl Sqlite {
         policy_file: &[u8],
     ) -> Result<(), PublishError> {
         immediate(&mut self.connection(), |transaction| {
-            let current = head_of(transaction, deployment)?;
-            if current != expected {
-                return Err(PublishError::Moved { head: current });
-            }
-            transaction.execute(
-                "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
-                params![head.key.as_str(), policy_file],
-            )?;
-            transaction.execute(
-                "INSERT INTO policy_revisions (deployment, revision, key) VALUES (?1, ?2, ?3)",
-                params![deployment.as_str(), head.revision.value() as i64, head.key.as_str()],
-            )?;
-            transaction.execute(
-                "INSERT INTO deployments (name, head) VALUES (?1, ?2)
-                 ON CONFLICT (name) DO UPDATE SET head = excluded.head",
-                params![deployment.as_str(), head.revision.value() as i64],
-            )?;
-            Ok(())
+            publish_in(transaction, deployment, expected, head, policy_file)
         })
     }
 
@@ -1316,6 +1299,60 @@ impl Appender<'_> {
             Ok(())
         })
     }
+}
+
+impl Appender<'_> {
+    /// Publish `policy_file` as the next revision of `deployment` in one transaction of its
+    /// own, as another process's publish racing this append would.
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn foreign_publish(
+        &mut self,
+        deployment: &DeploymentName,
+        policy_file: &[u8],
+    ) -> Result<(), AppendError> {
+        let published = immediate(&mut self.0, |transaction| {
+            let current = head_of(transaction, deployment)?;
+            let head = PolicyHead {
+                revision: current.map_or(PolicyRevision::FIRST, PolicyRevision::next),
+                key: PolicyFileKey::of(policy_file),
+            };
+            publish_in(transaction, deployment, current, &head, policy_file)
+        });
+        match published {
+            Ok(()) => Ok(()),
+            Err(PublishError::Storage(error)) => Err(AppendError::Storage(error)),
+            Err(error) => unreachable!("a foreign publish moves the head it read in its own transaction: {error}"),
+        }
+    }
+}
+
+/// Store `policy_file` and move `deployment`'s head from `expected` to `head` inside
+/// `transaction`.
+fn publish_in(
+    transaction: &Transaction<'_>,
+    deployment: &DeploymentName,
+    expected: Option<PolicyRevision>,
+    head: &PolicyHead,
+    policy_file: &[u8],
+) -> Result<(), PublishError> {
+    let current = head_of(transaction, deployment)?;
+    if current != expected {
+        return Err(PublishError::Moved { head: current });
+    }
+    transaction.execute(
+        "INSERT INTO policy_files (key, bytes) VALUES (?1, ?2) ON CONFLICT (key) DO NOTHING",
+        params![head.key.as_str(), policy_file],
+    )?;
+    transaction.execute(
+        "INSERT INTO policy_revisions (deployment, revision, key) VALUES (?1, ?2, ?3)",
+        params![deployment.as_str(), head.revision.value() as i64, head.key.as_str()],
+    )?;
+    transaction.execute(
+        "INSERT INTO deployments (name, head) VALUES (?1, ?2)
+         ON CONFLICT (name) DO UPDATE SET head = excluded.head",
+        params![deployment.as_str(), head.revision.value() as i64],
+    )?;
+    Ok(())
 }
 
 /// Damage stated in the log's own vocabulary, for callers that pin how a read refuses it.

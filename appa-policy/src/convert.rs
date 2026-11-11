@@ -15,6 +15,7 @@ use appa_engine::profile::{BindingMode, ExecutorClass, ProfileDeclaration, neutr
 use appa_engine::registry::{AudienceVocabulary, LoadError, TrustChain, url_host_wildcards};
 use appa_engine::value::ToolName;
 
+use crate::annotator::AnnotatorBuiltin;
 use crate::error::ConfigError;
 use crate::raw::{
     RawAuthority, RawBoundary, RawDelta, RawDeployment, RawPermits, RawRequires, RawSanitizer, RawSanitizerPermits,
@@ -276,6 +277,7 @@ impl RawAuthority {
             scope: Scope {
                 tags: self.tags.into_iter().map(TagName::new).collect(),
             },
+            except: self.except_tags.into_iter().map(TagName::new).collect(),
             hint,
         })
     }
@@ -309,12 +311,27 @@ fn parse_attends(attention: Vec<String>, context: &str) -> Result<Attends, Confi
 }
 
 impl RawSanitizer {
-    pub(crate) fn convert(self, chain: &TrustChain) -> Result<Sanitizer, ConfigError> {
+    /// The registered sanitizer, and the model builtin its declaration names, if any.
+    pub(crate) fn convert(self, chain: &TrustChain) -> Result<(Sanitizer, Option<AnnotatorBuiltin>), ConfigError> {
         refuse_inline_binding("sanitizer", &self.name, self.implementation.as_ref())?;
+        if self.name == SanitizerName::ATTEST_SCHEMA
+            && let Some(builtin) = self.builtin
+        {
+            return Err(ConfigError::ReservedSanitizerBuiltin { builtin });
+        }
+        let builtin = self
+            .builtin
+            .map(|builtin| {
+                AnnotatorBuiltin::parse_sanitizer(&builtin).ok_or_else(|| ConfigError::UnknownSanitizerBuiltin {
+                    name: self.name.clone(),
+                    builtin,
+                })
+            })
+            .transpose()?;
         let on = parse_points(&self.on, &self.name)?;
         let transition = self.permits.convert(chain, &self.name)?;
         let hint = parse_hint(self.hint, &format!("sanitizer {}", self.name))?;
-        Ok(Sanitizer {
+        let sanitizer = Sanitizer {
             name: SanitizerName::new(self.name),
             on,
             transition,
@@ -322,7 +339,8 @@ impl RawSanitizer {
                 tags: self.tags.into_iter().map(TagName::new).collect(),
             },
             hint,
-        })
+        };
+        Ok((sanitizer, builtin))
     }
 }
 

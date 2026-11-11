@@ -173,7 +173,8 @@ impl Mandate {
 }
 
 /// A component's jurisdiction: the tags it covers. Empty = everything (small configs stay
-/// small). Authorities and sanitizers route by this one shape.
+/// small). Authorities and sanitizers route by this one shape; an authority may also except
+/// tags ([`Authority::in_scope`]).
 /// Attention gaps ignore scope — they route by their own currency (the attended mark).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scope {
@@ -204,7 +205,22 @@ pub struct Authority {
     pub name: AuthorityName,
     pub mandate: Mandate,
     pub scope: Scope,
+    /// Tags that put a tool outside this authority's jurisdiction, whatever its scope covers.
+    /// A deployment that keeps some requirements unremediable while one authority covers the
+    /// rest tags the tools carrying them and excepts the tag here.
+    #[serde(default)]
+    pub except: Vec<TagName>,
     pub hint: Option<Hint>,
+}
+
+impl Authority {
+    /// Is a tool carrying `tags` within this authority's jurisdiction: covered by its scope and
+    /// carrying no excepted tag? The one home of the predicate, read by planning, execution and
+    /// the load-time planner count alike. Attention gaps never read it — they route by the
+    /// attended mark.
+    pub(crate) fn in_scope(&self, tags: &[TagName]) -> bool {
+        self.scope.covers(tags) && !self.except.iter().any(|tag| tags.contains(tag))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

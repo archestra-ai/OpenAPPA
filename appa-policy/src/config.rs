@@ -5,11 +5,11 @@ use appa_engine::authority::ContextHint;
 use appa_engine::contract::ToolDeclaration;
 use appa_engine::engine::Engine;
 use appa_engine::label::Label;
-use appa_engine::names::{AnnotatorName, RecorderName};
+use appa_engine::names::{AnnotatorName, RecorderName, SanitizerName};
 use appa_engine::profile::{DeploymentPolicy, ProfileDeclaration};
 use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
 
-use crate::annotator::{AnnotatorBinding, compile_annotators, validate_annotator_inputs};
+use crate::annotator::{AnnotatorBinding, AnnotatorBuiltin, compile_annotators, validate_annotator_inputs};
 use crate::audience::convert_audience;
 use crate::convert::{default_boundary_label, parse_context_hint, split_selector};
 use crate::error::ConfigError;
@@ -29,6 +29,8 @@ pub struct Config {
     boundary_label: Label,
     /// Every registered `[[annotator]]`, with its runtime-owned hint, builtin, and input mapping.
     annotators: BTreeMap<AnnotatorName, AnnotatorBinding>,
+    /// Every `[[sanitizer]]` that names a model builtin on its declaration.
+    sanitizer_builtins: BTreeMap<SanitizerName, AnnotatorBuiltin>,
     /// Every tool a `[deployment]` field names, as authored, with the field it was named in.
     deployment_tools: Vec<(&'static str, String)>,
     /// The deployer's `[deployment] hint`, runtime-owned like an Annotator hint.
@@ -98,8 +100,13 @@ impl Config {
         }
 
         let mut sanitizers = Vec::new();
+        let mut sanitizer_builtins = BTreeMap::new();
         for s in raw.sanitizer {
-            sanitizers.push(s.convert(&trust_chain)?);
+            let (sanitizer, builtin) = s.convert(&trust_chain)?;
+            if let Some(builtin) = builtin {
+                sanitizer_builtins.insert(sanitizer.name.clone(), builtin);
+            }
+            sanitizers.push(sanitizer);
         }
 
         let planner_cap = match raw.limits.as_ref().and_then(|l| l.planner_cap) {
@@ -148,6 +155,7 @@ impl Config {
             policy,
             boundary_label,
             annotators,
+            sanitizer_builtins,
             deployment_tools,
             deployment_hint,
         })
@@ -201,6 +209,13 @@ impl Config {
     /// `[externals.annotators]`.
     pub fn annotators(&self) -> impl Iterator<Item = (&AnnotatorName, &AnnotatorBinding)> {
         self.annotators.iter()
+    }
+
+    /// Every `[[sanitizer]]` that names a model builtin on its declaration, with that builtin.
+    /// Such a Sanitizer takes no deployment binding, exactly as an Annotator naming one; every
+    /// other Sanitizer is bound by name under `[externals.sanitizers]`.
+    pub fn sanitizer_builtins(&self) -> impl Iterator<Item = (&SanitizerName, AnnotatorBuiltin)> {
+        self.sanitizer_builtins.iter().map(|(name, builtin)| (name, *builtin))
     }
 
     /// The deployer's statement about this deployment's environment and trust boundaries, which

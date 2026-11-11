@@ -222,9 +222,9 @@ fn declaring(builtin: &str, externals: &str) -> String {
 #[tokio::test]
 async fn a_declared_builtin_the_deployment_cannot_serve_refuses_open_and_reload() {
     let bound: fn(&OpenError) -> bool =
-        |error| matches!(error, OpenError::BoundBuiltinAnnotator(name) if name == "classify");
+        |error| matches!(error, OpenError::BoundBuiltin { kind: "annotator", name } if name == "classify");
     let no_profile: fn(&OpenError) -> bool =
-        |error| matches!(error, OpenError::LlmNotConfigured(name) if name == "classify");
+        |error| matches!(error, OpenError::LlmNotConfigured { kind: "annotator", name } if name == "classify");
     let cases = vec![
         (
             "a builtin annotator that is also bound",

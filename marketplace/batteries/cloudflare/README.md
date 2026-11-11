@@ -129,3 +129,18 @@ tool the policy does not name is blocked.
 cargo test --locked -p appa --test cloudflare_policy --test marketplace
 bash scripts/appa-marketplace.sh --check
 ```
+
+## Sanitizers
+
+When the deployment binds a sanitizer below, the battery confines the results of its eight Workers Observability and documentation tools. A read that narrows the session then offers, beside the plain narrowing, each sanitizer below that the deployment binds, and the agent chooses. A chosen sanitizer runs a model on the confined result with the sanitizer's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+
+| Sanitizer | `permits` | Effect |
+|---|---|---|
+| `cloudflare.strip-instructions` | `trust`: `suspicious` → `trusted` | Removes every instruction from the result and keeps the data. The read does not lower the session's trust, so it adds no trust gap to a later call that requires `trusted` data. |
+| `cloudflare.redact-for-public` | `audience`: `internal` → `public` | Runs only on `query_worker_observability`, `observability_keys` and `observability_values` (tag `cloudflare-records`). Removes account, zone and Worker identifiers, hostnames, request paths, IP addresses, headers, bodies, user identifiers, credentials and code from Workers logs and telemetry, and keeps errors, status codes and timings. The read does not narrow the session's audience, so it adds no audience gap to a later call bound for `public` readers. |
+
+A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts or settles with the other sanitizer. A sanitizer never clears a requirement, such as a review mark.
+
+The model for each sanitizer is configured in the deployment, not in the battery. A sanitizer runs only when the root config binds it under `[externals.sanitizers]`: for example `builtin = "llm"` with an `[externals.llm]` profile, `builtin = "claude-code"` where the `claude` CLI is installed, or a `url`. The default config of the Claude Code plugin binds every battery sanitizer to `claude-code`, so in `clappa` sessions it is active once the battery is installed. A sanitizer that the root does not bind is not offered, and the results that only it covers are not confined. The battery then decides as it would without sanitizers.
+
+APPA does not verify what the model removed: binding a sanitizer registers it as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tags offers no sanitizer. To change a sanitizer's hint, declare a `[[policy.sanitizer]]` with the same name in the root config. The root declaration replaces the battery's whole, so copy its `on`, `tags`, and `permits`.

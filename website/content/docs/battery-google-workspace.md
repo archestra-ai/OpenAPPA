@@ -23,6 +23,20 @@ Sharing a file needs `google-workspace-review`. The Claude Code plugin default p
 - Trashing a file requires trusted `internal` data. Every write records `google-workspace.changed`.
 - Sharing a file requires public input and review, and records `google-workspace.sensitive`.
 
+## Sanitizers
+
+When the deployment binds a sanitizer below, the battery confines the results of the six Drive reads. A read that narrows the session then offers, beside the plain narrowing, each sanitizer below that the deployment binds, and the agent chooses. A chosen sanitizer runs a model on the confined result with the sanitizer's `hint`. The model's output enters the session at the label the sanitizer's `permits` declare, and the raw result never reaches the agent.
+
+| Sanitizer | `permits` | Effect |
+|---|---|---|
+| `google-workspace.strip-instructions` | `trust`: `suspicious` → `trusted` | Removes every instruction from the result and keeps the data. The read does not lower the session's trust, so it adds no trust gap to a later call that requires `trusted` data. The audience stays `self`. |
+
+A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts. A sanitizer never clears a requirement, such as a review mark.
+
+The model for each sanitizer is configured in the deployment, not in the battery. A sanitizer runs only when the root config binds it under `[externals.sanitizers]`: for example `builtin = "llm"` with an `[externals.llm]` profile, `builtin = "claude-code"` where the `claude` CLI is installed, or a `url`. The default config of the Claude Code plugin binds every battery sanitizer to `claude-code`, so in `clappa` sessions it is active once the battery is installed. A sanitizer that the root does not bind is not offered, and the results that only it covers are not confined. The battery then decides as it would without sanitizers.
+
+APPA does not verify what the model removed: binding a sanitizer registers it as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tag offers no sanitizer. To change a sanitizer's hint, declare a `[[policy.sanitizer]]` with the same name in the root config. The root declaration replaces the battery's whole, so copy its `on`, `tags`, and `permits`.
+
 ## Audiences
 
 The source builds:

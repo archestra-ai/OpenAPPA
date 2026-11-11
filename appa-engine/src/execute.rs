@@ -130,6 +130,7 @@ mod tests {
 
     fn registry() -> Registry {
         let officer = Authority {
+            except: Vec::new(),
             name: AuthorityName::new("officer"),
             mandate: Mandate {
                 trust_ceiling: Some(TRUSTED),
@@ -139,6 +140,7 @@ mod tests {
             hint: None,
         };
         let attester = Authority {
+            except: Vec::new(),
             name: AuthorityName::new("attester"),
             mandate: Mandate {
                 attends: Attends::Named(vec![MarkName::new("signoff")]),
