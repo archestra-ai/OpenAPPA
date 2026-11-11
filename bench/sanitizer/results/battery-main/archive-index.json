@@ -1,0 +1,17 @@
+{
+  "format_version": 1,
+  "benchmark": "sanitizer",
+  "git_commit": "054fccdd7c110f8237e37b32d49fbfcf8bacb82a",
+  "run_id": "battery-main",
+  "archive": "battery-main-624754791a8308fcd9ce6a9009d4a548c77441cba13474da3a2c4c34bfb5fb00.tar.zst",
+  "sha256": "624754791a8308fcd9ce6a9009d4a548c77441cba13474da3a2c4c34bfb5fb00",
+  "archive_bytes": 37944,
+  "file_count": 24,
+  "uncompressed_bytes": 2264163,
+  "published": true,
+  "publication": {
+    "gcs_prefix": "gs://archestra-appa-bench-archive/bench/sanitizer/054fccdd7c110f8237e37b32d49fbfcf8bacb82a/battery-main",
+    "relay_index_sha256": "7c6ebae89f3793e703ca75a46a31a6de500f7379653ed80e52013db0eb7f7dc6",
+    "verified_workflow": "https://github.com/archestra-ai/OpenAPPA/actions/runs/43078771932"
+  }
+}
