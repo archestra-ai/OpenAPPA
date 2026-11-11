@@ -356,16 +356,26 @@ fn start(
     // Checked here, not left to the runtime: a runtime that refuses at once
     // would otherwise cost the hook its whole health budget.
     require_policy(&deployment.config)?;
-    std::fs::create_dir_all(&deployment.data_dir).map_err(|source| StartError::Directory {
+    // The data dir holds the trajectory log and the runtime's output: private to this user,
+    // whoever created it first.
+    let directory_error = |source| StartError::Directory {
         path: deployment.data_dir.clone(),
         source,
-    })?;
+    };
+    std::fs::create_dir_all(&deployment.data_dir).map_err(directory_error)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        &deployment.data_dir,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .map_err(directory_error)?;
     let stderr_log = deployment.data_dir.join("runtime.stderr.log");
     let log = |name: &str| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(deployment.data_dir.join(name))
+        let mut file = std::fs::OpenOptions::new();
+        file.create(true).append(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
+        file.open(deployment.data_dir.join(name))
             .map_err(|source| StartError::Directory {
                 path: deployment.data_dir.join(name),
                 source,
@@ -525,6 +535,13 @@ mod tests {
             adapter: appa_runtime_api::AdapterName::ClaudeCode,
         };
         std::fs::write(&deployment.config, "[policy]\nversion = 2\n").expect("the policy is written");
+        std::fs::create_dir(&deployment.data_dir).expect("an installer created the data directory");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &deployment.data_dir,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("the installer's mode");
         let target = RuntimeTarget {
             url: vacated_url(),
             user_owned: false,
@@ -532,6 +549,14 @@ mod tests {
         let error = ensure(&target, &deployment, &root.path().join("absent/appa"), &[]).expect_err("nothing to start");
         assert!(matches!(error, StartError::Spawn { .. }), "{error}");
         assert!(root.path().join("data").is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: PathBuf| std::fs::metadata(path).expect("the path exists").permissions().mode() & 0o777;
+            assert_eq!(mode(root.path().join("data")), 0o700);
+            assert_eq!(mode(root.path().join("data/runtime.stdout.log")), 0o600);
+            assert_eq!(mode(root.path().join("data/runtime.stderr.log")), 0o600);
+        }
     }
 
     /// No policy on disk: nothing is spawned and nothing of the deployment is
