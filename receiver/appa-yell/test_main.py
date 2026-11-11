@@ -265,8 +265,9 @@ def test_sanitize_message_for_slack_breaks_mentions_and_truncates():
     # Mentions are broken with zero-width space
     assert (
         main.sanitize_message_for_slack("@channel test @here <@U123>")
-        == "@\u200bchannel test @\u200bhere <@\u200bU123>"
+        == "@\u200bchannel test @\u200bhere &lt;@\u200bU123&gt;"
     )
+    assert main.sanitize_message_for_slack("<!channel> a&b") == "&lt;!channel&gt; a&amp;b"
     assert main.sanitize_message_for_slack("   ") == "(empty message)"
 
     # Oversized messages are truncated to avoid Block Kit limit

@@ -48,7 +48,6 @@ class EpisodeStats:
     checks: int = 0
     allowed: int = 0
     policy_blocks: int = 0
-    sequential_blocks: int = 0
     hidden_completions: int = 0
     hidden_cost: float = 0.0
     admitted_results: int = 0
