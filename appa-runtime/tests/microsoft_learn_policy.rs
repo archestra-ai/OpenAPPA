@@ -3,7 +3,7 @@ mod common;
 
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw};
+use common::{actor, battery_runtime, members_source, propose, ran, raw, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -75,7 +75,7 @@ async fn accept_and_run(runtime: &Arc<Runtime>, call: ProposedCall) {
         call.tool
     );
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(

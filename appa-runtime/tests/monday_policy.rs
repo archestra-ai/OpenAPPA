@@ -6,7 +6,7 @@ use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime_api::{HookDecision, ProposedCall};
 use axum::{Router, routing::post};
-use common::{actor, loaded_session_runtime, offer_of, propose, ran, raw, repo_root, root, serve};
+use common::{actor, loaded_session_runtime, propose, ran, raw, repo_root, root, serve, unsanitized_offer_of};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -137,7 +137,7 @@ async fn accept_read(runtime: &Arc<Runtime>, read: ProposedCall) {
     let decision = propose(runtime, read.clone()).await;
     if !matches!(decision, HookDecision::AllowCall { .. }) {
         assert!(matches!(
-            runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+            runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }
         ));
         assert_eq!(
@@ -155,7 +155,7 @@ async fn review_write(runtime: &Arc<Runtime>, write: ProposedCall) {
         "{decision:?}"
     );
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(

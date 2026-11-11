@@ -505,8 +505,8 @@ impl Walk<'_> {
                 // The bounds, which the author also chose. Same reasoning as `const`: a length
                 // or a pattern is a channel as much as a string is, and a regex is authored
                 // text with nothing bounding what it can spell.
-                "minimum" | "maximum" | "multipleOf" | "minItems" | "maxItems" | "minLength" | "maxLength"
-                | "pattern" => {
+                "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" | "multipleOf" | "minItems"
+                | "maxItems" | "minLength" | "maxLength" | "pattern" => {
                     let token = self.literal(entry);
                     out.insert(key.clone(), token);
                 }
@@ -931,6 +931,20 @@ mod tests {
                 .expect("one property is a const");
             assert_eq!(*konst, bounded["maximum"], "the same number is the same literal");
         }
+    }
+
+    /// Exclusive bounds are bounds the engine admits: tokenized like `minimum`, not drift.
+    #[test]
+    fn an_exclusive_bound_is_a_literal() {
+        let stripped = run(serde_json::json!({
+            "shape": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 }
+        }));
+        assert!(stripped.unclassified.is_empty(), "{:?}", drift(&stripped));
+        let shape = &stripped.value["shape"];
+        for bound in ["exclusiveMinimum", "exclusiveMaximum"] {
+            assert!(shape[bound].is_string() && shape[bound] != UNCLASSIFIED, "{shape}");
+        }
+        assert_ne!(shape["exclusiveMinimum"], shape["exclusiveMaximum"]);
     }
 
     /// Ten or more members is where a naive `-N` spelling stops sorting the way the engine's

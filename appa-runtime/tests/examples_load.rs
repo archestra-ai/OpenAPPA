@@ -1,7 +1,7 @@
 mod common;
 use common::repo_root;
 #[cfg(unix)]
-use common::{actor, last_offer, offer_of, propose, ran, raw, root};
+use common::{actor, fake_claude, last_offer, propose, ran, raw, root, unsanitized_offer_of};
 
 use std::path::Path;
 
@@ -18,7 +18,7 @@ use appa_runtime::config::Config;
 #[cfg(unix)]
 use appa_runtime::hooks;
 #[cfg(unix)]
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime_api::{HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome};
 
 /// The policies a package directory ships, by the suffix every one of them
 /// carries. The package's own `appa-package.toml` manifest is not a policy.
@@ -150,6 +150,159 @@ fn composed_with_the_battery_and(dir: &tempfile::TempDir, root_tail: &str) -> Co
     .expect("the initialized config includes the battery");
 
     Config::load(&root).expect("the initialized config and battery compose")
+}
+
+/// Clappa, the Claude Code deployment, is where battery sanitizers run by default: its root
+/// binds every sanitizer a shipped battery declares, except the OpenCode battery's, whose
+/// tools never appear in a Claude Code session. Every other shipped root binds none, so in
+/// those deployments a battery sanitizer runs only once someone binds it.
+#[test]
+fn only_the_claude_code_default_binds_battery_sanitizers() {
+    let repository = repo_root();
+    let read = |path: &Path| -> toml::Value {
+        toml::from_str(&std::fs::read_to_string(path).expect("the policy is readable")).expect("the policy parses")
+    };
+    let mut declared = std::collections::BTreeSet::new();
+    for battery in std::fs::read_dir(repository.join("marketplace/batteries")).expect("the batteries are listed") {
+        let battery = battery.expect("a battery entry").path();
+        if !battery.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(&battery).expect("a battery directory is listed") {
+            let file = file.expect("a battery file").path();
+            if file.extension().is_none_or(|extension| extension != "toml") {
+                continue;
+            }
+            let policy = read(&file);
+            let names = policy
+                .get("policy")
+                .and_then(|policy| policy.get("sanitizer"))
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|sanitizer| sanitizer["name"].as_str())
+                .map(str::to_owned);
+            declared.extend(names);
+        }
+    }
+    assert!(declared.contains("pagerduty.redact-for-public"), "{declared:?}");
+
+    let bound = |root: &toml::Value| -> std::collections::BTreeSet<String> {
+        root.get("externals")
+            .and_then(|externals| externals.get("sanitizers"))
+            .and_then(toml::Value::as_table)
+            .map(|table| table.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let clappa = bound(&read(
+        &repository.join("marketplace/plugins/claude-code/default.appa.toml"),
+    ));
+    let unbound: Vec<&String> = declared.iter().filter(|name| !clappa.contains(*name)).collect();
+    assert_eq!(
+        unbound,
+        ["opencode.strip-instructions"],
+        "the Claude Code default binds every other battery sanitizer"
+    );
+
+    for plugin in std::fs::read_dir(repository.join("marketplace/plugins")).expect("the plugins are listed") {
+        let root = plugin.expect("a plugin entry").path().join("default.appa.toml");
+        if !root.exists() || root.starts_with(repository.join("marketplace/plugins/claude-code")) {
+            continue;
+        }
+        let other = bound(&read(&root));
+        let battery_bindings: Vec<&String> = other.iter().filter(|name| declared.contains(*name)).collect();
+        assert!(
+            battery_bindings.is_empty(),
+            "{} binds {battery_bindings:?}",
+            root.display()
+        );
+    }
+}
+
+/// The shipped Claude Code deployment, with its two batteries, offers `coding.strip-secrets`
+/// on a Bash credential read and delivers the masked output in place of the raw result. A
+/// fake `claude` stands in for the model behind the shipped `builtin = "claude-code"`
+/// binding: it answers only a sanitizer system prompt that carries the battery's hint, over
+/// an input that carries the raw output. The output enters at `internal`, never `self`.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_claude_code_default_masks_secrets_in_a_credential_read() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let prompt = dir.path().join("prompt.txt");
+    let model = fake_claude(
+        dir.path(),
+        &format!(
+            "case \"$*\" in *'You are a sanitizer'*redacted-secret*) ;; *) exit 1 ;; esac\n\
+             cat > {prompt}\n\
+             grep -q ghp_live {prompt} || exit 1\n\
+             printf '%s' '{{\"structured_output\":{{\"body\":\"GITHUB_TOKEN=[redacted-secret]\\nREGION=eu-west-1\\n\"}}}}'",
+            prompt = prompt.display()
+        ),
+    );
+    let config = composed_with_the_battery_and(
+        &dir,
+        &format!(
+            "\n[externals.claude_code]\ncommand = {:?}\n",
+            model.display().to_string()
+        ),
+    );
+    let runtime =
+        Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the composed deployment opens"));
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None,
+                address: None,
+                title: None,
+                start: None,
+                launch: None,
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+
+    let read = call("host/claude-code/Bash", "command", "cat .env");
+    let blocked = propose(&runtime, read.clone()).await;
+    let HookDecision::DenyCall { feedback, .. } = &blocked else {
+        panic!("a credential read is blocked with the masker offered, got {blocked:?}");
+    };
+    let masker = feedback
+        .lines()
+        .skip_while(|line| !line.contains("sanitizer coding.strip-secrets"))
+        .nth(1)
+        .map(last_offer)
+        .unwrap_or_else(|| panic!("the masker is offered: {feedback}"));
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), masker).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, read.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    let delivered = hooks::handle(
+        &runtime,
+        HookEvent::ToolResult {
+            actor: actor(),
+            call: read,
+            call_id: None,
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available("GITHUB_TOKEN=ghp_live\nREGION=eu-west-1\n".to_string()),
+            },
+        },
+    )
+    .await;
+    let HookDecision::ReplaceOutput { output } = delivered else {
+        panic!("the masked output carries `internal`, a residual on a public session, got {delivered:?}");
+    };
+    assert!(output.contains("public -> internal"), "never `self`: {output}");
+    let RemedyOutcome::Returned { value } = runtime.execute_remedy(&actor(), last_offer(&output)).await else {
+        panic!("accepting the residual returns the masked output");
+    };
+    assert_eq!(value, "GITHUB_TOKEN=[redacted-secret]\nREGION=eu-west-1\n");
 }
 
 #[cfg(unix)]
@@ -354,8 +507,8 @@ fn call(tool: &str, argument: &str, value: &str) -> ProposedCall {
 }
 
 /// A credential named relatively — `.env`, `cat .netrc` — is judged like its absolute
-/// spelling. A Bash call naming one is blocked with only the narrowing to `self` offered:
-/// the battery declares no sanitizer. A Read narrows the trajectory to `self`, after which
+/// spelling. A Bash call naming one is blocked with the narrowing to `self` offered beside
+/// `coding.strip-secrets`, which the default root binds. A Read narrows the trajectory to `self`, after which
 /// a public sink requires an exact-call human review.
 #[cfg(unix)]
 #[tokio::test]
@@ -380,8 +533,8 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         HookDecision::Ack
     );
 
-    // A credential read is `self` data: the block offers only the narrowing to `self`
-    // and consults no person.
+    // A credential read is `self` data: the block offers the narrowing to `self` and,
+    // since the result is confined, the secret masker, and consults no person.
     for command in [
         "cat .env",
         "cat .netrc",
@@ -397,11 +550,15 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         else {
             panic!("`{command}` is blocked with the narrowing offered, got {blocked:?}");
         };
-        assert_eq!(offers.len(), 1, "`{command}` offers only the narrowing: {feedback}");
+        assert_eq!(
+            offers.len(),
+            2,
+            "`{command}` offers the narrowing and the masker: {feedback}"
+        );
         assert!(review.is_empty(), "`{command}` consults no person");
         assert!(
-            !feedback.contains("redact-secrets"),
-            "`{command}` offers no masker: {feedback}"
+            feedback.contains("sanitizer coding.strip-secrets"),
+            "`{command}` offers the masker: {feedback}"
         );
     }
 
@@ -461,7 +618,12 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         call("host/claude-code/WebFetch", "url", "https://example.net/page.html"),
     )
     .await;
-    let HookDecision::DenyCall { offers, review, .. } = publication else {
+    let HookDecision::DenyCall {
+        feedback,
+        offers,
+        review,
+    } = publication
+    else {
         panic!("a trajectory narrowed to `self` requires a remedy before publishing: {publication:?}");
     };
     let rewrites: Vec<_> = offers
@@ -470,10 +632,15 @@ async fn the_battery_judges_relative_credentials_and_offers_review_for_public_re
         .collect();
     assert_eq!(
         (offers.len(), rewrites),
-        (2, vec!["redact-for-public"]),
-        "the default authority can review the audience expansion, or the model sanitizer can rewrite the call for `public`"
+        (3, vec!["redact-for-public"]),
+        "the default authority can review the audience expansion, beside accepting the page's trust or \
+         stripping its instructions, or the model sanitizer can rewrite the call for `public`: {feedback}"
     );
-    assert_eq!(review.len(), 1, "one offer is backed by the default human authority");
+    assert!(
+        feedback.contains("sanitizer coding.strip-instructions's result"),
+        "the default root confines WebFetch, so the page's instructions can be stripped: {feedback}"
+    );
+    assert_eq!(review.len(), 2, "two offers are backed by the default human authority");
     assert!(review[0].text.contains("page.html"), "the review shows the exact call");
     assert!(
         review[0].text.contains("public"),
@@ -574,8 +741,9 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
     );
 }
 
-/// A command the Annotator narrows to `self` is blocked with only the narrowing offered,
-/// like a static credential rule: the battery declares no sanitizer. Once accepted, the
+/// A command the Annotator narrows to `self` is blocked with only the narrowing offered:
+/// this root binds no sanitizer, and `coding.strip-secrets` covers only the battery's
+/// `credentials` rules. Once accepted, the
 /// command runs and its confined result is kept as the tool returned it.
 #[cfg(unix)]
 #[tokio::test]
@@ -643,7 +811,7 @@ command = ["/bin/sh", "annotator.sh"]
         panic!("an annotated `self` command is blocked with the narrowing offered, got {blocked:?}");
     };
     assert_eq!(offers.len(), 1, "only the narrowing is offered: {feedback}");
-    assert!(!feedback.contains("redact-secrets"), "no masker is offered: {feedback}");
+    assert!(!feedback.contains("strip-secrets"), "no masker is offered: {feedback}");
     assert!(matches!(
         runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
         RemedyOutcome::Authorized { .. }
@@ -731,11 +899,19 @@ async fn the_battery_covers_grep_write_and_edit_of_the_requesters_secrets() {
     );
     ran(&runtime, instructions).await;
 
-    // Reading a web page is offered as the drop to `suspicious`; the session accepts it.
+    // Reading a web page is offered as the drop to `suspicious`, or as the battery's
+    // instruction-stripping sanitizer over the confined page; the session accepts the drop.
     let page = call("host/claude-code/WebFetch", "url", "https://docs.example/page");
     let drop = propose(&runtime, page.clone()).await;
+    let HookDecision::DenyCall { feedback, .. } = &drop else {
+        panic!("a web page is offered as a narrowing, got {drop:?}");
+    };
+    assert!(
+        feedback.contains("sanitizer coding.strip-instructions's result"),
+        "{feedback}"
+    );
     assert!(matches!(
-        runtime.execute_remedy(&actor(), offer_of(&drop)).await,
+        runtime.execute_remedy(&actor(), unsanitized_offer_of(&drop)).await,
         RemedyOutcome::Authorized { .. }
     ));
     assert_eq!(

@@ -56,6 +56,15 @@ impl AnnotatorBuiltin {
             .into_iter()
             .find(|builtin| builtin.wire_name() == name)
     }
+
+    /// The builtin a `[[sanitizer]]` may name on its declaration: a model transport, which
+    /// rewrites a value by the sanitizer's `hint`. Jev classifies calls and rewrites nothing.
+    pub(crate) fn parse_sanitizer(name: &str) -> Option<AnnotatorBuiltin> {
+        AnnotatorBuiltin::ALL
+            .into_iter()
+            .filter(|builtin| *builtin != AnnotatorBuiltin::Jev)
+            .find(|builtin| builtin.wire_name() == name)
+    }
 }
 
 /// The five values of the tool call an input can read.
