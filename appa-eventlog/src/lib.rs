@@ -1737,7 +1737,7 @@ mod tests {
         }
     }
 
-    const POLICY: &str = r#"
+    pub(crate) const POLICY: &str = r#"
         version = 2
     "#;
 
@@ -2643,6 +2643,7 @@ mod tests {
                 params![b"version = 2\n# other".to_vec()],
             )
             .expect("the damage lands");
+        assert!(matches!(store.log(&root()), Err(ReadError::PolicyFileMismatch { .. })));
         assert!(matches!(
             store.policy_file(&deployment(), PolicyRevision::FIRST),
             Err(ReadError::PolicyFileMismatch { .. })
