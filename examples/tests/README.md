@@ -12,6 +12,7 @@ Add `-v` to see every step. `cargo test -p appa --test replay` runs all of them.
 | Example | What it pins |
 |---|---|
 | [secret-stays-inside](secret-stays-inside/) | Reading HR data limits an email to HR recipients. |
+| [install-from-pypi](install-from-pypi/) | One rule with `\|` alternatives lets an install reach PyPI's two hosts after an HR read. |
 | [untrusted-web-content](untrusted-web-content/) | Fetched web content lowers trust; a shell command may then not run. |
 | [backup-before-deploy](backup-before-deploy/) | A deploy needs a recorded backup; a migration runs once. |
 | [push-only-to-the-org](push-only-to-the-org/) | Three `mcp/shell/bash` contracts chosen by the command text; a non-org push needs a person. |
