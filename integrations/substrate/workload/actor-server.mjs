@@ -2,17 +2,17 @@
 // wakes the actor first when it is suspended.
 //
 //   GET  /          the console page (ui/index.html)
-//   GET  /healthz   the wakeup probe: answers once the OpenAPPA runtime does
+//   GET  /healthz   the wakeup probe
 //   GET  /actor     what this actor is and what it can reach
-//   POST /run       {"prompt": "..."} runs one protected Claude Code turn and
+//   POST /run       {"prompt": "..."} runs one stock Claude Code turn and
 //                   streams its events as NDJSON
+//   POST /curl      {"tool": "...", "arguments": {...}} makes one MCP tool
+//                   call with curl and returns what came back
 //
-// Each run is `clappa -p`: Claude Code with OpenAPPA's hooks, gated by the
-// runtime that `appa plugin install claude-code` deployed in this image. The
-// runtime binds loopback inside the sandbox, so a suspend snapshots its
-// trajectory store with the agent and a resume restores both.
+// Nothing here knows about OpenAPPA. Claude Code calls GitHub's MCP server
+// directly; the egress gateway checks each call on its way out.
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
@@ -20,152 +20,112 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 8080);
-const RUNTIME_URL = process.env.APPA_RUNTIME_URL ?? "http://127.0.0.1:8787";
-const MCP_CONFIG = process.env.APPA_DEMO_MCP_CONFIG ?? "/home/agent/mcp.json";
-const MODEL = process.env.APPA_DEMO_MODEL ?? "sonnet";
-const RUN_TIMEOUT_MS = Number(process.env.APPA_DEMO_RUN_TIMEOUT_MS ?? 240_000);
-
-// Tools the session may call without a prompt. The GitHub write is absent on
-// purpose: in a headless session Claude Code refuses an unlisted tool at its
-// permission step, so a comment that OpenAPPA admitted by mistake still could
-// not post. OpenAPPA's PreToolUse decision comes first, so when the policy
-// holds, its refusal is the one the model sees.
+const MCP_CONFIG = process.env.AGENT_MCP_CONFIG ?? "/home/agent/mcp.json";
+const MODEL = process.env.AGENT_MODEL ?? "sonnet";
+const RUN_TIMEOUT_MS = Number(process.env.AGENT_RUN_TIMEOUT_MS ?? 240_000);
+// The GitHub tools the session may call without a prompt. A headless session
+// refuses any other tool before it is sent.
 const ALLOWED_TOOLS = (
-  process.env.APPA_DEMO_ALLOWED_TOOLS ??
-  "mcp__archestra__grain__list_meetings,mcp__archestra__grain__fetch_meeting,mcp__appa"
+  process.env.AGENT_ALLOWED_TOOLS ?? "mcp__github__get_file_contents,mcp__github__add_issue_comment"
 ).split(",");
-
-// Tool results whose content stays out of the console. A meeting record
-// names its participants, so the page shows only that the read happened.
-const WITHHELD_RESULT_PREFIXES = ["mcp__archestra__grain__"];
 
 const server = createServer((request, response) => {
   route(request, response).catch((error) => {
     console.error("[actor] request failed:", error);
-    if (!response.headersSent) {
-      response.writeHead(500, { "content-type": "text/plain" });
-    }
+    if (!response.headersSent) response.writeHead(500, { "content-type": "text/plain" });
     response.end(String(error));
   });
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`[actor] listening on :${PORT}`);
-});
+server.listen(PORT, "0.0.0.0", () => console.log(`[actor] listening on :${PORT}`));
 
 let running = false;
 
 async function route(request, response) {
   const url = new URL(request.url ?? "/", "http://actor");
   if (request.method === "GET" && url.pathname === "/") {
-    const page = readFileSync(join(HERE, "ui", "index.html"));
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    response.end(page);
+    response.end(readFileSync(join(HERE, "ui", "index.html")));
     return;
   }
   if (request.method === "GET" && url.pathname === "/healthz") {
-    const healthy = await runtimeHealthy();
-    response.writeHead(healthy ? 200 : 503, { "content-type": "text/plain" });
-    response.end(healthy ? "ok" : "appa runtime not answering");
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.end("ok");
     return;
   }
   if (request.method === "GET" && url.pathname === "/actor") {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify(await describeActor()));
+    json(response, 200, {
+      actor: process.env.ACTOR_NAME ?? null,
+      atespace: process.env.ACTOR_ATESPACE ?? null,
+      egress: (process.env.AGENT_EGRESS_HOSTS ?? "").split(",").filter(Boolean),
+      // What the sandbox holds in place of each credential.
+      credentials: {
+        CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
+        GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? null,
+      },
+      mcpServer: process.env.GITHUB_MCP_URL ?? "https://api.githubcopilot.com/mcp/",
+    });
     return;
   }
-  if (request.method === "POST" && url.pathname === "/run") {
-    if (running) {
-      response.writeHead(409, { "content-type": "text/plain" });
-      response.end("a run is already in progress");
-      return;
-    }
-    const { prompt } = JSON.parse((await readBody(request)) || "{}");
-    if (typeof prompt !== "string" || prompt.trim() === "") {
-      response.writeHead(400, { "content-type": "text/plain" });
-      response.end("prompt is required");
-      return;
-    }
+  if (request.method === "POST" && (url.pathname === "/run" || url.pathname === "/curl")) {
+    if (running) return json(response, 409, { error: "a run is already in progress" });
+    const input = JSON.parse((await readBody(request)) || "{}");
     running = true;
     try {
-      await streamRun(prompt, response);
+      if (url.pathname === "/run") {
+        if (typeof input.prompt !== "string" || !input.prompt.trim()) {
+          return json(response, 400, { error: "prompt is required" });
+        }
+        await streamRun(input.prompt, response);
+      } else {
+        json(response, 200, await curlCall(input.tool, input.arguments ?? {}));
+      }
     } finally {
       running = false;
     }
     return;
   }
-  response.writeHead(404, { "content-type": "text/plain" });
-  response.end("not found");
+  json(response, 404, { error: "not found" });
 }
 
 async function streamRun(prompt, response) {
-  response.writeHead(200, {
-    "content-type": "application/x-ndjson",
-    "cache-control": "no-store",
-  });
+  response.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store" });
   const emit = (event) => response.write(`${JSON.stringify(event)}\n`);
   const toolNames = new Map();
-  let sessionId = null;
-
   const child = spawn(
-    "clappa",
+    "claude",
     [
-      "-p",
-      prompt,
-      "--output-format",
-      "stream-json",
+      "-p", prompt,
+      "--output-format", "stream-json",
       "--verbose",
-      "--model",
-      MODEL,
-      "--mcp-config",
-      MCP_CONFIG,
+      "--model", MODEL,
+      "--mcp-config", MCP_CONFIG,
       "--strict-mcp-config",
-      // No built-in tools: this actor exists to call MCP tools.
-      "--tools",
-      "",
-      "--allowedTools",
-      ALLOWED_TOOLS.join(","),
-      "--permission-mode",
-      "default",
+      // No built-in tools: this actor reaches the outside through MCP only.
+      "--tools", "",
+      "--allowedTools", ALLOWED_TOOLS.join(","),
+      "--permission-mode", "default",
       "--no-session-persistence",
     ],
     { cwd: "/home/agent/work", env: process.env, stdio: ["ignore", "pipe", "pipe"] },
   );
   const timer = setTimeout(() => child.kill("SIGTERM"), RUN_TIMEOUT_MS);
-
   let buffered = "";
   child.stdout.on("data", (chunk) => {
     buffered += chunk;
-    let newline = buffered.indexOf("\n");
-    while (newline !== -1) {
+    let newline;
+    while ((newline = buffered.indexOf("\n")) !== -1) {
       const line = buffered.slice(0, newline).trim();
       buffered = buffered.slice(newline + 1);
-      newline = buffered.indexOf("\n");
-      if (line === "") continue;
-      let message;
+      if (!line) continue;
       try {
-        message = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      for (const event of translate(message, toolNames)) {
-        if (event.type === "session") sessionId = event.sessionId;
-        emit(event);
-      }
-      if (message.type === "user" && sessionId) {
-        // Tool results change the trajectory label; report the new one.
-        trajectoryLabel(sessionId).then((label) => label && emit({ type: "label", label }));
-      }
+        for (const event of translate(JSON.parse(line), toolNames)) emit(event);
+      } catch {}
     }
   });
   child.stderr.on("data", (chunk) => process.stderr.write(chunk));
-
   const code = await new Promise((resolve) => child.on("close", resolve));
   clearTimeout(timer);
-  if (sessionId) {
-    const label = await trajectoryLabel(sessionId);
-    if (label) emit({ type: "label", label });
-  }
   emit({ type: "exit", code });
   response.end();
 }
@@ -174,97 +134,59 @@ async function streamRun(prompt, response) {
 function translate(message, toolNames) {
   const events = [];
   if (message.type === "system" && message.subtype === "init") {
-    events.push({
-      type: "session",
-      sessionId: message.session_id,
-      tools: (message.tools ?? []).filter((name) => name.startsWith("mcp__")),
-    });
+    events.push({ type: "session", tools: (message.tools ?? []).filter((name) => name.startsWith("mcp__")) });
   }
   if (message.type === "assistant") {
     for (const block of message.message?.content ?? []) {
-      if (block.type === "text" && block.text.trim()) {
-        events.push({ type: "text", text: block.text });
-      }
+      if (block.type === "text" && block.text.trim()) events.push({ type: "text", text: block.text });
       if (block.type === "tool_use") {
         toolNames.set(block.id, block.name);
-        events.push({ type: "tool_call", id: block.id, tool: block.name, input: block.input });
+        events.push({ type: "tool_call", tool: block.name, input: block.input });
       }
     }
   }
   if (message.type === "user") {
     for (const block of message.message?.content ?? []) {
       if (block.type !== "tool_result") continue;
-      const tool = toolNames.get(block.tool_use_id) ?? "";
-      const text = resultText(block.content);
-      const withheld = WITHHELD_RESULT_PREFIXES.some((prefix) => tool.startsWith(prefix));
       events.push({
         type: "tool_result",
-        id: block.tool_use_id,
-        tool,
+        tool: toolNames.get(block.tool_use_id) ?? "",
         error: Boolean(block.is_error),
-        text: withheld && !block.is_error ? null : text,
-        bytes: text.length,
+        text: resultText(block.content),
       });
     }
   }
-  if (message.type === "result") {
-    events.push({
-      type: "result",
-      text: message.result ?? "",
-      permissionDenials: (message.permission_denials ?? []).map((denial) => denial.tool_name),
-      costUsd: message.total_cost_usd ?? null,
-      durationMs: message.duration_ms ?? null,
-    });
-  }
+  if (message.type === "result") events.push({ type: "result", text: message.result ?? "" });
   return events;
+}
+
+function curlCall(tool, args) {
+  return new Promise((resolve) => {
+    execFile(join(HERE, "mcp-call.sh"), [String(tool), JSON.stringify(args)], { timeout: 60_000 },
+      (error, stdout, stderr) => {
+        const data = stdout.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim());
+        let result = null;
+        for (const item of data.length ? data : [stdout]) {
+          try {
+            const parsed = JSON.parse(item);
+            if (parsed.id === 2) result = parsed;
+          } catch {}
+        }
+        const content = result?.result?.content?.map((part) => part.text).join("\n") ?? stdout;
+        resolve({ ok: !error, isError: Boolean(result?.result?.isError || result?.error), text: content || stderr });
+      });
+  });
 }
 
 function resultText(content) {
   if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .filter((part) => part.type === "text")
-      .map((part) => part.text)
-      .join("\n");
-  }
+  if (Array.isArray(content)) return content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
   return "";
 }
 
-async function trajectoryLabel(sessionId) {
-  try {
-    const query = new URLSearchParams({ trajectory: `cc:${sessionId}` });
-    const answer = await fetch(`${RUNTIME_URL}/status?${query}`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    return answer.ok ? await answer.json() : null;
-  } catch {
-    return null;
-  }
-}
-
-async function runtimeHealthy() {
-  try {
-    const answer = await fetch(`${RUNTIME_URL}/health`, { signal: AbortSignal.timeout(2000) });
-    return answer.ok && (await answer.text()).trim() === "ok";
-  } catch {
-    return false;
-  }
-}
-
-async function describeActor() {
-  return {
-    actor: process.env.ACTOR_NAME ?? null,
-    atespace: process.env.ACTOR_ATESPACE ?? null,
-    egress: (process.env.APPA_DEMO_EGRESS_HOSTS ?? "").split(",").filter(Boolean),
-    // What the sandbox holds in place of each credential. The egress gateway
-    // swaps the real value in after the request leaves the sandbox.
-    credentials: {
-      CLAUDE_CODE_OAUTH_TOKEN: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null,
-      ARCHESTRA_TOKEN: process.env.ARCHESTRA_TOKEN ?? null,
-    },
-    mcpServer: process.env.ARCHESTRA_MCP_URL ?? null,
-    appaRuntime: (await runtimeHealthy()) ? "ok" : "down",
-  };
+function json(response, status, value) {
+  response.writeHead(status, { "content-type": "application/json" });
+  response.end(JSON.stringify(value));
 }
 
 function readBody(request) {

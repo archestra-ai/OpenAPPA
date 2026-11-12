@@ -12,12 +12,12 @@ metadata:
   name: appa-workers
   namespace: appa-substrate-demo
   labels:
-    workload: appa-claude-code
+    workload: appa-substrate-agent
 spec:
   replicas: 1
   workerImage: ${WORKER_IMAGE}
   template:
-    # One worker holds one actor. Claude Code, the OpenAPPA runtime and the
+    # One worker holds one actor. Claude Code and the
     # actor server fit in the actor's 2Gi; the worker keeps the rest.
     resources:
       limits:

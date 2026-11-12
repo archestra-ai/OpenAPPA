@@ -1,13 +1,9 @@
-# The demo actor: Claude Code protected by OpenAPPA, served over HTTP for
-# Substrate's router. The image installs OpenAPPA the way a workstation does
-# (`install.sh`, then `appa plugin install claude-code`), so the hooks, the
-# runtime binary, and `clappa` are the released ones; only the policy is the
-# demo's own.
+# An ordinary agent image: stock Claude Code behind a small HTTP front door
+# for Substrate's router. Nothing in it knows about OpenAPPA; the egress
+# gateway enforces the policy on the requests the actor makes.
 FROM node:22-slim
 
 ARG CLAUDE_CODE_VERSION=2.1.322
-# Empty installs the latest release.
-ARG APPA_VERSION=
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates curl \
@@ -18,18 +14,9 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 RUN useradd --create-home --uid 10001 agent
 USER agent
 WORKDIR /home/agent
-ENV PATH=/home/agent/.local/bin:$PATH \
-    SHELL=/bin/sh
+RUN mkdir -p /home/agent/work
 
-RUN curl -fsSL https://openappa.com/install.sh \
-      | APPA_VERSION="${APPA_VERSION}" APPA_VERIFY_PROVENANCE=skip sh \
-  && appa plugin install claude-code \
-  && mkdir -p /home/agent/work
-
-# The install keeps an existing policy, so the demo's replaces the one it
-# wrote afterwards.
-COPY --chown=agent:agent demo.appa.toml /home/agent/.config/appa/appa.toml
-COPY --chown=agent:agent actor-server.mjs entrypoint.sh /home/agent/actor/
+COPY --chown=agent:agent actor-server.mjs entrypoint.sh mcp-call.sh /home/agent/actor/
 COPY --chown=agent:agent ui /home/agent/actor/ui
 
 # Headless and quiet: no updater, no telemetry, no extra hosts for the

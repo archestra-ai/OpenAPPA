@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenAPPA on Substrate</title>
+<title>Substrate Actor Console</title>
 <style>
   :root {
     --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
@@ -12,98 +12,93 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { padding: 18px 28px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 14px; }
-  header h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 14px; }
+  header h1 { margin: 0; font-size: 19px; font-weight: 650; }
   header span { color: var(--muted); }
-  main { display: grid; grid-template-columns: 340px 1fr; gap: 20px; padding: 20px 28px; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
-  .panel h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-  dl { margin: 0; display: grid; grid-template-columns: 110px 1fr; row-gap: 6px; }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; padding: 18px 24px; }
+  main.solo { grid-template-columns: minmax(0, 1fr); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .panel h2 { margin: 0 0 10px; font-size: 12.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  dl { margin: 0; display: grid; grid-template-columns: 120px 1fr; row-gap: 4px; font-size: 14px; }
   dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
   code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
   .chip { display: inline-block; background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
-          padding: 1px 9px; margin: 2px 4px 2px 0; font-size: 12.5px; }
-  .label { font-size: 26px; font-weight: 700; margin-top: 4px; }
-  .label.public { color: var(--ok); } .label.internal { color: var(--warn); } .label.self { color: var(--bad); }
-  .stack { display: flex; flex-direction: column; gap: 16px; }
-  textarea { width: 100%; min-height: 84px; resize: vertical; background: var(--bg); color: var(--text);
-             border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: inherit; }
-  button { margin-top: 10px; background: #238636; color: white; border: 0; border-radius: 8px;
-           padding: 9px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+          padding: 0 8px; margin: 1px 4px 1px 0; font-size: 12.5px; }
+  .stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  textarea { width: 100%; min-height: 76px; resize: vertical; background: var(--bg); color: var(--text);
+             border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font: inherit; }
+  .buttons { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
+  button { background: #238636; color: white; border: 0; border-radius: 8px;
+           padding: 8px 16px; font: inherit; font-weight: 600; cursor: pointer; }
+  button.secondary { background: var(--chip); border: 1px solid var(--line); }
   button:disabled { opacity: .55; cursor: default; }
-  #timeline { display: flex; flex-direction: column; gap: 10px; }
-  .event { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; background: var(--bg); }
-  .event .head { display: flex; gap: 10px; align-items: center; font-weight: 600; }
-  .event .body { margin-top: 6px; color: var(--muted); white-space: pre-wrap; }
+  #timeline { display: flex; flex-direction: column; gap: 8px; }
+  .event { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--bg); }
+  .event .head { display: flex; gap: 8px; align-items: center; font-weight: 600; }
+  .event .body { margin-top: 4px; color: var(--muted); white-space: pre-wrap; font-size: 13.5px; max-height: 220px; overflow: auto; }
   .event.call .head::before { content: "→"; color: var(--accent); }
   .event.result .head::before { content: "←"; color: var(--ok); }
   .event.blocked { border-color: var(--bad); background: rgba(248, 81, 73, .08); }
   .event.blocked .head { color: var(--bad); }
   .event.blocked .head::before { content: "⛔"; }
-  .event.labelchange { border-style: dashed; }
+  .event.note { border-style: dashed; }
   .event.answer { border-color: var(--accent); }
   .event.answer .body { color: var(--text); }
+  iframe { width: 100%; height: calc(100vh - 110px); border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
   .muted { color: var(--muted); }
 </style>
 </head>
 <body>
 <header>
-  <h1>OpenAPPA on Agent Substrate</h1>
-  <span>Claude Code in a gVisor actor · policy enforced inside the sandbox</span>
+  <h1>Agent Substrate actor</h1>
+  <span>Stock Claude Code · no guardrails in the image</span>
 </header>
-<main>
+<main id="main">
   <div class="stack">
     <section class="panel">
-      <h2>Substrate actor</h2>
+      <h2>Actor</h2>
       <dl>
         <dt>Actor</dt><dd id="actor">…</dd>
-        <dt>Atespace</dt><dd id="atespace">…</dd>
         <dt>Sandbox</dt><dd>gVisor</dd>
-        <dt>Egress</dt><dd id="egress">…</dd>
+        <dt>Egress allows</dt><dd id="egress">…</dd>
         <dt>MCP server</dt><dd id="mcp" class="mono">…</dd>
-        <dt>OpenAPPA</dt><dd id="runtime">…</dd>
+        <dt>Credentials</dt><dd id="creds" class="mono">…</dd>
       </dl>
     </section>
     <section class="panel">
-      <h2>Credentials inside the sandbox</h2>
-      <div id="creds" class="mono">…</div>
-      <div class="muted" style="margin-top:8px;font-size:13px">The egress gateway injects the real tokens after a request leaves the sandbox.</div>
-    </section>
-    <section class="panel">
-      <h2>Session label</h2>
-      <div class="muted">Who may read what this session holds</div>
-      <div id="label" class="label public">public</div>
-    </section>
-  </div>
-  <div class="stack">
-    <section class="panel">
       <h2>Task</h2>
       <textarea id="prompt"></textarea>
-      <button id="run">Run agent</button>
+      <div class="buttons">
+        <button id="run">Run Claude Code</button>
+        <button id="curl" class="secondary">Same comment with curl</button>
+      </div>
     </section>
     <section class="panel">
-      <h2>Trajectory</h2>
+      <h2>What the agent sees</h2>
       <div id="timeline"><div class="muted">No run yet.</div></div>
     </section>
   </div>
+  <iframe id="gateway" title="Egress gateway decisions"></iframe>
 </main>
 <script>
-const DEFAULT_PROMPT = new URLSearchParams(location.search).get("prompt") ??
-  "Find my most recent Grain meeting titled \"Core Team Daily Sync\" and post its title and date as a comment on https://github.com/archestra-ai/archestra/issues/4145. If OpenAPPA offers a remedy plan, accept it. If a call stays blocked, stop and tell me in one sentence why.";
+const params = new URLSearchParams(location.search);
+const ISSUE = params.get("issue") ?? "https://github.com/archestra-ai/archestra/issues/4145";
+const SOURCE = params.get("source") ?? "https://github.com/archestra-ai/infra/blob/main/gcp/staging-private-access/README.md";
+const DEFAULT_PROMPT = params.get("prompt") ??
+  `Read ${SOURCE} and post a three-bullet summary of it as a comment on ${ISSUE}. If a call is refused, stop and tell me in one sentence why.`;
 const $ = (id) => document.getElementById(id);
 $("prompt").value = DEFAULT_PROMPT;
+const gateway = params.get("gateway");
+if (gateway) $("gateway").src = gateway; else { $("gateway").remove(); $("main").classList.add("solo"); }
 
-const short = (tool) => tool.replace(/^mcp__archestra__/, "").replace(/^mcp__appa__/, "appa/");
+const short = (tool) => tool.replace(/^mcp__github__/, "github/");
 
 async function loadActor() {
   const actor = await (await fetch("actor")).json();
-  $("actor").textContent = actor.actor ?? "—";
-  $("atespace").textContent = actor.atespace ?? "—";
-  $("egress").innerHTML = actor.egress.map((h) => `<span class="chip">${h}</span>`).join("") || "—";
-  $("mcp").textContent = actor.mcpServer ?? "—";
-  $("runtime").textContent = actor.appaRuntime === "ok" ? "runtime healthy (loopback)" : "runtime down";
-  $("creds").innerHTML = Object.entries(actor.credentials)
-    .map(([name, value]) => `${name}=<b>${value ?? "unset"}</b>`).join("<br>");
+  $("actor").textContent = `${actor.atespace}/${actor.actor}`;
+  $("egress").innerHTML = actor.egress.map((h) => `<span class="chip">${h}</span>`).join("");
+  $("mcp").textContent = actor.mcpServer;
+  $("creds").innerHTML = Object.entries(actor.credentials).map(([k, v]) => `${k}=<b>${v ?? "unset"}</b>`).join("<br>");
 }
 
 function add(kind, head, body) {
@@ -116,28 +111,21 @@ function add(kind, head, body) {
   item.scrollIntoView({ behavior: "smooth", block: "end" });
 }
 
-let lastAudience = "public";
-function showLabel(status) {
-  const audience = status.audience ?? status.label?.audience;
-  if (!audience || typeof audience !== "string") return;
-  $("label").textContent = audience;
-  $("label").className = `label ${audience}`;
-  if (audience !== lastAudience) {
-    add("labelchange", `Session label: ${lastAudience} → ${audience}`,
-      "The session now holds data only these readers may see.");
-    lastAudience = audience;
-  }
+// The "Why:" lines of an OpenAPPA refusal.
+function reasons(text) {
+  const why = text.split(/\n\s*Why:\s*\n/)[1];
+  if (!why) return text;
+  return why.split(/\n\s*\n/)[0].split("\n").map((l) => l.trim().replace(/^- /, "")).filter(Boolean).join("\n");
 }
 
+function busy(on) { $("run").disabled = on; $("curl").disabled = on; }
+
 $("run").addEventListener("click", async () => {
-  $("run").disabled = true;
+  busy(true);
   $("timeline").innerHTML = "";
-  lastAudience = "public";
-  showLabel({ audience: "public" });
-  add("labelchange", "Resuming the actor and starting Claude Code…");
+  add("note", "Resuming the actor and starting Claude Code…");
   const response = await fetch("run", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
+    method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ prompt: $("prompt").value }),
   });
   const reader = response.body.getReader();
@@ -154,34 +142,38 @@ $("run").addEventListener("click", async () => {
       if (line.trim()) render(JSON.parse(line));
     }
   }
-  $("run").disabled = false;
+  busy(false);
+});
+
+$("curl").addEventListener("click", async () => {
+  busy(true);
+  const [, owner, repo, number] = ISSUE.match(/github\.com\/([^/]+)\/([^/]+)\/issues\/(\d+)/);
+  const args = { owner, repo, issue_number: Number(number), body: "Posted with curl from the same actor." };
+  add("call", "curl → github/add_issue_comment", JSON.stringify(args, null, 2));
+  const answer = await (await fetch("curl", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tool: "add_issue_comment", arguments: args }),
+  })).json();
+  if (answer.isError && /\[appa\]/.test(answer.text)) add("blocked", "Refused at the egress gateway", reasons(answer.text));
+  else add(answer.isError ? "blocked" : "result", "curl got", answer.text.slice(0, 600));
+  busy(false);
 });
 
 function render(event) {
   switch (event.type) {
     case "session":
-      add("labelchange", "Claude Code session started under OpenAPPA",
-        `Tools: ${event.tools.map(short).join(", ")}`);
+      add("note", "Claude Code started", `MCP tools: ${event.tools.length} from GitHub`);
       break;
-    case "tool_call": {
-      const input = { ...event.input };
-      add("call", short(event.tool), JSON.stringify(input, null, 2));
+    case "tool_call":
+      add("call", short(event.tool), JSON.stringify(event.input, null, 2));
       break;
-    }
     case "tool_result":
-      if (event.error) {
-        add("blocked", `${short(event.tool)} blocked`, event.text);
-      } else if (event.text === null) {
-        add("result", `${short(event.tool)} returned`, `${event.bytes} bytes of meeting data (hidden from this view)`);
-      } else {
-        add("result", `${short(event.tool)} returned`, event.text.slice(0, 600));
-      }
-      break;
-    case "label":
-      showLabel(event.label);
+      if (event.error && /\[appa\]/.test(event.text)) add("blocked", `Refused at the egress gateway: ${short(event.tool)}`, reasons(event.text));
+      else if (event.error) add("blocked", `${short(event.tool)} failed`, event.text);
+      else add("result", `${short(event.tool)} returned`, event.text.slice(0, 500));
       break;
     case "result":
-      add("answer", "Agent's answer", event.text);
+      add("answer", "Claude Code's answer", event.text);
       break;
     case "exit":
       if (event.code !== 0) add("blocked", `Claude Code exited with code ${event.code}`);

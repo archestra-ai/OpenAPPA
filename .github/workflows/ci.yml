@@ -109,6 +109,7 @@ jobs:
               - '.github/workflows/ci.yml'
             go:
               - 'integrations/kagent/appa-kagent-adk-go/**'
+              - 'integrations/substrate/appa-extproc/**'
               - 'marketplace/plugins/kagent/fixtures/**'
               - 'appa-runtime-api/refusal-classes.txt'
               - '.github/workflows/ci.yml'
@@ -294,7 +295,8 @@ jobs:
           shellcheck -x -s sh scripts/appa-eval.sh \
             scripts/appa-install.sh \
             scripts/appa-install-test.sh \
-            integrations/substrate/workload/entrypoint.sh
+            integrations/substrate/workload/entrypoint.sh \
+            integrations/substrate/workload/mcp-call.sh
           shellcheck -x -s bash integrations/substrate/deploy.sh
 
       - name: Test release battery refresh
@@ -395,9 +397,22 @@ jobs:
           for dir in examples/tests/*/; do
             ./target/debug/appa replay --config "${dir}appa.toml" "$dir"
           done
-          ./target/debug/appa replay \
-            --config integrations/substrate/workload/demo.appa.toml \
-            integrations/substrate/tests
+
+      # The Substrate egress processor's flow test, against this tree's runtime.
+      - name: Setup Go for the Substrate processor
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: integrations/substrate/appa-extproc/go.mod
+          cache-dependency-path: integrations/substrate/appa-extproc/go.sum
+
+      - name: Test the Substrate processor against a served runtime
+        working-directory: integrations/substrate/appa-extproc
+        run: |
+          state="$(mktemp -d)"
+          ../../../target/debug/appa runtime --adapter kagent --listen 127.0.0.1:18788 \
+            --config testdata/flow.appa.toml --db "$state/appa.db" &
+          for _ in $(seq 50); do curl -fsS http://127.0.0.1:18788/health && break; sleep 0.2; done
+          APPA_TEST_RUNTIME_URL=http://127.0.0.1:18788 go test -run TestFlowAgainstRuntime -count=1 ./...
 
       # The version and its hashes are locked in .github/tools/claude-code.
       - name: Install Claude Code harness
@@ -913,6 +928,37 @@ jobs:
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
           cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
+
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+  substrate-go-checks:
+    name: Substrate Go Checks
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: integrations/substrate/appa-extproc
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: integrations/substrate/appa-extproc/go.mod
+          cache-dependency-path: integrations/substrate/appa-extproc/go.sum
 
       - name: gofmt
         run: test -z "$(gofmt -l .)"

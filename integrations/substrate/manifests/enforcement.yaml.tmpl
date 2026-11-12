@@ -1,0 +1,111 @@
+# The OpenAPPA enforcement point for Substrate's egress gateway: the ext_proc
+# processor and the OpenAPPA runtime it asks, in one pod. The runtime binds
+# loopback, so nothing else in the cluster reaches its unauthenticated /hook.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: appa-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: appa-extproc
+  namespace: appa-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: appa-extproc
+  namespace: appa-system
+spec:
+  # One replica: the trajectory store is the runtime's local database.
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: appa-extproc }
+  template:
+    metadata:
+      labels: { app: appa-extproc }
+    spec:
+      serviceAccountName: appa-extproc
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+      - name: extproc
+        image: ${EXTPROC_IMAGE}
+        args:
+        - --listen=:9443
+        - --admin-listen=127.0.0.1:8081
+        - --runtime-url=http://127.0.0.1:8787
+        - --tls-credential-bundle=/run/servicedns/credential-bundle.pem
+        - --tls-client-ca=/run/podidentity-ca/trust-bundle.pem
+        - --tls-client-id=spiffe://cluster.local/ns/ate-system/sa/atenet-egress
+        - --mcp-server=api.githubcopilot.com=github
+        ports:
+        - { name: grpc, containerPort: 9443 }
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: { drop: ["ALL"] }
+        volumeMounts:
+        - { name: servicedns-certs, mountPath: /run/servicedns, readOnly: true }
+        - { name: podidentity-ca, mountPath: /run/podidentity-ca, readOnly: true }
+      - name: runtime
+        image: ${RUNTIME_IMAGE}
+        command: ["appa"]
+        args:
+        - runtime
+        - --adapter=kagent
+        - --listen=127.0.0.1:8787
+        - --config=/etc/appa/appa.toml
+        - --db=/var/lib/appa/appa.db
+        env:
+        # One person's GitHub token answers the battery's visibility lookups.
+        - { name: APPA_BATTERY_TARGET, value: single-user }
+        - name: APPA_PROVIDER_GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef: { name: appa-github-token, key: token }
+        readinessProbe:
+          exec: { command: ["curl", "-fsS", "http://127.0.0.1:8787/health"] }
+          periodSeconds: 5
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: { drop: ["ALL"] }
+        volumeMounts:
+        - { name: policy, mountPath: /etc/appa, readOnly: true }
+        - { name: state, mountPath: /var/lib/appa }
+      volumes:
+      - name: policy
+        configMap: { name: appa-policy }
+      - name: state
+        emptyDir: {}
+      # The serving certificate the egress gateway verifies, for the names of
+      # the Service below.
+      - name: servicedns-certs
+        projected:
+          sources:
+          - podCertificate:
+              signerName: servicedns.podcert.ate.dev/identity
+              keyType: ECDSAP256
+              credentialBundlePath: credential-bundle.pem
+      # The CA of the egress gateway's client certificate.
+      - name: podidentity-ca
+        projected:
+          sources:
+          - clusterTrustBundle:
+              signerName: podidentity.podcert.ate.dev/identity
+              labelSelector:
+                matchLabels:
+                  podcert.ate.dev/canarying: live
+              path: trust-bundle.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: appa-extproc
+  namespace: appa-system
+spec:
+  selector: { app: appa-extproc }
+  ports:
+  - { name: grpc, port: 9443, targetPort: grpc }

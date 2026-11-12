@@ -3,43 +3,55 @@ title: Agent Substrate
 nav_title: Agent Substrate
 category: Works with
 order: 7.7
-description: Run OpenAPPA-protected Claude Code agents as Agent Substrate actors.
+description: Enforce OpenAPPA at Agent Substrate's egress gateway, for every actor and any agent harness.
 ---
 
-[Agent Substrate](https://github.com/agent-substrate/substrate) runs agents as sandboxed, suspendable actors on Kubernetes. Each actor runs in a gVisor or microVM sandbox. Its egress gateway decides which hosts the actor can reach, and can inject credentials into the actor's requests after they leave the sandbox.
+[Agent Substrate](https://github.com/agent-substrate/substrate) runs agents as sandboxed, suspendable actors on Kubernetes. Every request an actor makes leaves through Substrate's egress gateway. The gateway decides which hosts the actor may reach and injects credentials outside the sandbox.
 
-OpenAPPA adds the decision that a network policy cannot make: which data may flow to which tool. One hostname often serves both a private source and a public destination. An MCP gateway is one example: a meeting read and a public GitHub comment go to the same host. The egress gateway must allow that host for both calls or for neither. OpenAPPA checks each tool call against the data the session already holds and refuses the comment after the read.
+A host allowlist can't tell two calls to the same host apart. A read of a private repository and a comment on a public issue both go to `api.githubcopilot.com`. OpenAPPA runs at the same gateway and checks each MCP tool call against the data the actor already holds. After the private read, it refuses the public comment before the request leaves the cluster.
+
+Nothing runs inside the sandbox, so the agent image needs no plugin, hook, or SDK. Claude Code, another harness, or `curl` gets the same checks.
 
 ## How it works
 
-The integration packages Claude Code and the OpenAPPA runtime into one actor image:
-
-- **Installed like a workstation.** The image runs `install.sh` and `appa plugin install claude-code`. The hooks, the runtime binary, and `clappa` are the released ones. Only the policy belongs to the deployment.
-- **The runtime runs inside the sandbox.** Claude Code's hooks post only to a loopback runtime. The actor starts the runtime on `127.0.0.1:8787` before it serves any request, and its wakeup probe requires the runtime to answer.
-- **Labels survive suspension.** The actor template takes a memory snapshot. When Substrate suspends the actor, the snapshot keeps the runtime process and its trajectory store. A resumed actor continues every session with the label it held.
-- **No credentials in the sandbox.** The actor holds placeholder tokens. Its `EgressPolicy` names the real tokens, and the egress gateway puts them into the `Authorization` header outside the sandbox.
-- **Two independent boundaries.** Substrate limits the hosts, the protocols, and the credentials. OpenAPPA limits the data that flows to each tool. Neither boundary depends on the other.
+- **The gateway calls OpenAPPA.** Substrate's egress gateway calls an additional `ext_proc` service, `appa-extproc`, for each request. For a host configured as an MCP server, the processor asks for the request body and the response. Other traffic passes on its headers.
+- **One label per actor.** The gateway passes the actor's SPIFFE ID, taken from the verified certificate of the actor's tunnel. The processor keys the trajectory on it. Every process and MCP session in one actor shares the label, and nothing inside the sandbox can name another actor.
+- **Each `tools/call` is checked.** The processor asks the OpenAPPA runtime whether the call may run. A refused call gets a tool error that carries the runtime's reason, and the request never reaches the server. After an allowed call, the processor reports the result, and the runtime updates the label.
+- **Narrowing is taken for the agent.** The agent doesn't know about OpenAPPA, so the processor takes a remedy that only narrows the label and needs no review, then runs the call. A remedy that asks a person is refused.
+- **Fail closed.** A body the processor can't read, or a runtime that doesn't answer, blocks the call. The gateway refuses requests while the processor is down.
 
 | Boundary | Enforced by | Decides |
 |---|---|---|
 | Sandbox | gVisor or microVM | Which syscalls, files, and devices the agent can use |
 | Network | Substrate egress gateway | Which hosts the actor can reach, and which credential each request carries |
-| Information flow | OpenAPPA runtime | Which data may flow into each tool call |
+| Information flow | OpenAPPA at the egress gateway | Which data may flow into each tool call |
+
+The processor and the runtime run in one pod in `appa-system`. The runtime binds loopback, so nothing else in the cluster reaches it.
+
+## Requirements
+
+The processor needs Substrate's egress gateway to pass request and response bodies. That support is proposed in [agent-substrate/substrate#3817](https://github.com/agent-substrate/substrate/pull/3817). Until it merges, run `ate-setup` from that branch.
+
+Install Substrate with the processor configured:
+
+```sh
+ATE_INSTALL_KIND=true go run ./cmd/ate-setup deploy ate-system --context kind-substrate \
+  --credential-provider='{"name":"k8s.io"}' \
+  --ingress-allowed-spiffe-ids=spiffe://cluster.local/ns/ate-system/sa/atenet-client \
+  --experimental-additional-egress-extproc-service=appa-system/appa-extproc:9443 \
+  --experimental-additional-egress-extproc-allow-mode-override \
+  --experimental-additional-egress-extproc-timeout=60s
+```
+
+You also need [`kubectl-ate`](https://github.com/agent-substrate/substrate/blob/main/docs/reference/kubectl-ate.md), Docker, and `envsubst`.
 
 ## Quickstart
 
-The quickstart deploys one protected actor onto a local Substrate cluster. The actor reaches an [Archestra MCP gateway](/archestra) that serves Grain and GitHub tools. The demo policy marks a Grain read as `internal` and requires `public` data for a GitHub comment.
-
-#### Prerequisites
-
-- A local Substrate install: follow Substrate's [quickstart](https://github.com/agent-substrate/substrate#quickstart-development) with `KIND_CLUSTER_NAME=substrate`, and install the credential provider with `--credential-provider='{"name":"k8s.io"}'`.
-- [`kubectl-ate`](https://github.com/agent-substrate/substrate/blob/main/docs/reference/kubectl-ate.md), Docker, and `envsubst`.
-- An Archestra MCP gateway with the Grain `list_meetings` and `fetch_meeting` tools and the GitHub `add_issue_comment` tool assigned, and an Archestra token that the gateway accepts.
-- A Claude subscription token from `claude setup-token`.
+The quickstart deploys the enforcement point and one actor running stock Claude Code against GitHub's MCP server.
 
 #### 1. Build the worker image
 
-From the Substrate checkout, build the worker image of the installed version:
+From the Substrate checkout:
 
 ```sh
 ATE_INSTALL_KIND=true go run ./cmd/ate-setup publish worker-images --kind --context kind-substrate
@@ -47,74 +59,59 @@ ATE_INSTALL_KIND=true go run ./cmd/ate-setup publish worker-images --kind --cont
 
 The command prints an `ateworker-gvisor` image reference.
 
-#### 2. Deploy the actor
+#### 2. Deploy
 
-From the OpenAPPA checkout, save each token to a file, then deploy:
+Save a Claude subscription token from `claude setup-token` and a GitHub token to files. Then run the deploy script from the OpenAPPA checkout:
 
 ```sh
 WORKER_IMAGE=<the ateworker-gvisor reference> \
-ARCHESTRA_MCP_URL=https://<archestra-host>/v1/mcp/<gateway-id> \
-CLAUDE_TOKEN_FILE=~/.config/appa-substrate-demo/claude-oauth-token \
-ARCHESTRA_TOKEN_FILE=~/.config/appa-substrate-demo/archestra-token \
+CLAUDE_TOKEN_FILE=<claude token file> \
+GITHUB_TOKEN_FILE=<github token file> \
   integrations/substrate/deploy.sh
 ```
 
-The script builds and pushes the actor image, creates the worker pool, stores the tokens in one Kubernetes Secret, and grants the demo atespace access to that Secret. It then creates the actor template, the actor, and the actor's `EgressPolicy`. The actor starts suspended.
+The script does the following:
+
+- Builds `appa-extproc` and the agent image.
+- Deploys the processor and the runtime to `appa-system`, with the policy in `integrations/substrate/policy/appa.toml`.
+- Creates the actor and its `EgressPolicy`.
+
+The GitHub token has two uses. The egress gateway injects it into the actor's MCP requests, and the policy uses it to look up who may read a repository.
 
 #### 3. Open the console
 
-Proxy the actor through Substrate's router:
+```sh
+kubectl ate --context kind-substrate proxy actor agent 8000:8080 -a appa-substrate-demo
+kubectl --context kind-substrate -n appa-system port-forward deploy/appa-extproc 8001:8081
+```
+
+Open `http://localhost:8000/?gateway=http://localhost:8001/`. The left side runs the agent. The right side is the processor's decision log.
+
+## Scenario
+
+Ask the agent to read a file in a private repository and post a summary on a public issue:
+
+1. The agent calls `get_file_contents`. The read would narrow the actor's label to the repository's collaborators. The processor takes the narrowing, and the read runs.
+2. The agent calls `add_issue_comment` on the public issue. A public issue's readers are everyone, and the actor holds data only the collaborators may read. The processor answers the call with OpenAPPA's refusal, and the agent reports it.
+3. **Same comment with curl** sends that comment with `curl` from the same actor. The request is refused the same way, because the label belongs to the actor, not to the client.
+
+## Policy
+
+The policy includes the GitHub [battery](/docs/battery-github). A tool crosses the wire as `mcp:<server>/<tool>`, and a rule names it `mcp/<server>/<tool>`. The processor's `--mcp-server` flag maps each MCP host to a server name; the manifest maps `api.githubcopilot.com` to `github`. Add rules for other MCP servers below the include, and add their hosts with `--mcp-server`.
+
+Start a fresh label for an actor:
 
 ```sh
-kubectl ate --context kind-substrate proxy actor claude-appa 8000:8080 -a appa-substrate-demo
-```
-
-Open [http://localhost:8000](http://localhost:8000). The first request resumes the actor.
-
-## Demonstration scenario
-
-The console's default task asks the agent to read a meeting and post it publicly:
-
-```text
-Find my most recent Grain meeting titled "Core Team Daily Sync" and post its title and date as a comment on <public issue URL>.
-```
-
-1. The agent calls `grain__fetch_meeting`. OpenAPPA offers to narrow the session to `internal`, and the agent accepts the remedy plan. The read then runs.
-2. The agent calls `github_copilot__add_issue_comment`. The comment requires data that `public` may read, and the session holds `internal` data. OpenAPPA refuses the call before it reaches the gateway.
-3. The policy offers no sanitizer and no authority for this flow, so the refusal is final. The agent reports the block.
-
-The egress gateway allowed both calls, because both go to the gateway's host.
-
-As a second barrier, the actor server does not allow `add_issue_comment` at Claude Code's permission step. A headless session refuses an unallowed tool. If the policy admitted the comment by mistake, Claude Code would still refuse it. OpenAPPA's `PreToolUse` decision runs first, so when the policy holds, the agent sees OpenAPPA's refusal.
-
-## Write a policy for your actors
-
-The demo policy is `integrations/substrate/workload/demo.appa.toml`. Claude Code names an MCP gateway's tool `mcp__<server>__<gateway-tool>`. The adapter splits that name at the first `__`, so a rule names `mcp/<server>/<gateway-tool>`:
-
-```toml
-[[policy.tool]]
-name = "mcp/archestra/grain__fetch_meeting"
-delta = { audience = ["internal"] }
-
-[[policy.tool]]
-name = "mcp/archestra/github_copilot__add_issue_comment"
-requires = { audience = { contains = ["public"] } }
-delta = {}
-```
-
-A tool without a rule is refused, so the gateway's other tools stay closed. Check a policy change with a trace replay before you rebuild the image:
-
-```sh
-appa replay --config integrations/substrate/workload/demo.appa.toml \
-  integrations/substrate/tests/demo-policy.appa
+curl -X POST 'localhost:8001/reset?actor=spiffe://cluster.local/worker-for-actor/<atespace>/<actor>'
 ```
 
 ## Limits
 
-- **One runtime per actor.** Each actor holds its own runtime and trajectory store. Two actors do not share a session label.
-- **Claude Code only.** The actor image packages the Claude Code adapter. Another harness needs its own adapter in the image.
-- **The policy is in the image.** A policy change requires a new image and a new actor template.
-- **The network boundary sees no arguments.** Substrate's egress `ext_proc` callout receives request headers, not bodies, so a check at the gateway cannot read tool arguments. OpenAPPA checks them inside the sandbox.
+- **MCP over streamable HTTP only.** The processor reads JSON-RPC `tools/call` requests sent as HTTP POST. Other traffic to an allowed host, such as GitHub's REST API, isn't checked, so allow only the MCP hosts in the actor's `EgressPolicy`.
+- **HTTPS rules only.** The gateway terminates TLS only for hosts under an `https` rule. A `tls_passthrough` host never reaches the processor.
+- **Buffered bodies.** The gateway buffers each gated request and its response. A response larger than the gateway's buffer limit fails.
+- **One replica.** The trajectory store is the runtime's local database on an `emptyDir`, so a pod restart resets every label.
+- **No reviewed remedies.** A remedy that asks a person is refused, because the agent has no channel to the reviewer.
 
 ## Uninstall
 
@@ -122,4 +119,4 @@ appa replay --config integrations/substrate/workload/demo.appa.toml \
 integrations/substrate/deploy.sh delete
 ```
 
-The command deletes the actor, its template, and the demo namespace. The atespace and its Secret grant remain.
+Reinstall Substrate without the `--experimental-additional-egress-extproc-*` flags. While they stay set, the gateway refuses requests that the processor doesn't answer.
