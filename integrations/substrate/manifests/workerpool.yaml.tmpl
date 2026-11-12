@@ -1,0 +1,30 @@
+# The demo's namespace and worker pool. Applied with kubectl after
+# substituting ${WORKER_IMAGE}: the ateworker-gvisor image of the installed
+# Substrate.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: appa-substrate-demo
+---
+apiVersion: ate.dev/v1
+kind: WorkerPool
+metadata:
+  name: appa-workers
+  namespace: appa-substrate-demo
+  labels:
+    workload: appa-claude-code
+spec:
+  replicas: 1
+  workerImage: ${WORKER_IMAGE}
+  template:
+    # One worker holds one actor. Claude Code, the OpenAPPA runtime and the
+    # actor server fit in the actor's 2Gi; the worker keeps the rest.
+    resources:
+      limits:
+        cpu: "1"
+        memory: 2560Mi
+      requests:
+        cpu: 250m
+        memory: 2560Mi
+  sandboxClasses:
+  - name: gvisor

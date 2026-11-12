@@ -364,6 +364,18 @@ else
   report FAIL unknown-shell-hint
 fi
 
+# A container build or a cron job runs with no SHELL at all. The installer
+# still finishes and prints the PATH step.
+noshell_dir=$(case_dir no-shell-hint)
+if env -u SHELL APPA_REPOSITORY_URL="$origin/good" APPA_INSTALL_DIR="$noshell_dir" \
+  sh "$installer" >"$work/noshell.out" 2>"$work/noshell.err" &&
+  grep -q "export PATH=\"$noshell_dir:\$PATH\"" "$work/noshell.out"; then
+  report PASS no-shell-hint
+else
+  cat "$work/noshell.out" "$work/noshell.err" >&2
+  report FAIL no-shell-hint
+fi
+
 # A PATH holding everything the installer needs except a digest tool.
 mkdir "$work/nodigest"
 for tool in sh curl tar gzip mktemp install uname grep cut mkdir rm cat env; do

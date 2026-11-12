@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenAPPA on Substrate</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --ok: #3fb950; --warn: #d29922; --bad: #f85149; --accent: #58a6ff; --chip: #21262d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 18px 28px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 14px; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 650; }
+  header span { color: var(--muted); }
+  main { display: grid; grid-template-columns: 340px 1fr; gap: 20px; padding: 20px 28px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .panel h2 { margin: 0 0 10px; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  dl { margin: 0; display: grid; grid-template-columns: 110px 1fr; row-gap: 6px; }
+  dt { color: var(--muted); } dd { margin: 0; word-break: break-all; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+  .chip { display: inline-block; background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
+          padding: 1px 9px; margin: 2px 4px 2px 0; font-size: 12.5px; }
+  .label { font-size: 26px; font-weight: 700; margin-top: 4px; }
+  .label.public { color: var(--ok); } .label.internal { color: var(--warn); } .label.self { color: var(--bad); }
+  .stack { display: flex; flex-direction: column; gap: 16px; }
+  textarea { width: 100%; min-height: 84px; resize: vertical; background: var(--bg); color: var(--text);
+             border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; font: inherit; }
+  button { margin-top: 10px; background: #238636; color: white; border: 0; border-radius: 8px;
+           padding: 9px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: default; }
+  #timeline { display: flex; flex-direction: column; gap: 10px; }
+  .event { border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; background: var(--bg); }
+  .event .head { display: flex; gap: 10px; align-items: center; font-weight: 600; }
+  .event .body { margin-top: 6px; color: var(--muted); white-space: pre-wrap; }
+  .event.call .head::before { content: "→"; color: var(--accent); }
+  .event.result .head::before { content: "←"; color: var(--ok); }
+  .event.blocked { border-color: var(--bad); background: rgba(248, 81, 73, .08); }
+  .event.blocked .head { color: var(--bad); }
+  .event.blocked .head::before { content: "⛔"; }
+  .event.labelchange { border-style: dashed; }
+  .event.answer { border-color: var(--accent); }
+  .event.answer .body { color: var(--text); }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenAPPA on Agent Substrate</h1>
+  <span>Claude Code in a gVisor actor · policy enforced inside the sandbox</span>
+</header>
+<main>
+  <div class="stack">
+    <section class="panel">
+      <h2>Substrate actor</h2>
+      <dl>
+        <dt>Actor</dt><dd id="actor">…</dd>
+        <dt>Atespace</dt><dd id="atespace">…</dd>
+        <dt>Sandbox</dt><dd>gVisor</dd>
+        <dt>Egress</dt><dd id="egress">…</dd>
+        <dt>MCP server</dt><dd id="mcp" class="mono">…</dd>
+        <dt>OpenAPPA</dt><dd id="runtime">…</dd>
+      </dl>
+    </section>
+    <section class="panel">
+      <h2>Credentials inside the sandbox</h2>
+      <div id="creds" class="mono">…</div>
+      <div class="muted" style="margin-top:8px;font-size:13px">The egress gateway injects the real tokens after a request leaves the sandbox.</div>
+    </section>
+    <section class="panel">
+      <h2>Session label</h2>
+      <div class="muted">Who may read what this session holds</div>
+      <div id="label" class="label public">public</div>
+    </section>
+  </div>
+  <div class="stack">
+    <section class="panel">
+      <h2>Task</h2>
+      <textarea id="prompt"></textarea>
+      <button id="run">Run agent</button>
+    </section>
+    <section class="panel">
+      <h2>Trajectory</h2>
+      <div id="timeline"><div class="muted">No run yet.</div></div>
+    </section>
+  </div>
+</main>
+<script>
+const DEFAULT_PROMPT = new URLSearchParams(location.search).get("prompt") ??
+  "Find my most recent Grain meeting titled \"Core Team Daily Sync\" and post its title and date as a comment on https://github.com/archestra-ai/archestra/issues/4145. If OpenAPPA offers a remedy plan, accept it. If a call stays blocked, stop and tell me in one sentence why.";
+const $ = (id) => document.getElementById(id);
+$("prompt").value = DEFAULT_PROMPT;
+
+const short = (tool) => tool.replace(/^mcp__archestra__/, "").replace(/^mcp__appa__/, "appa/");
+
+async function loadActor() {
+  const actor = await (await fetch("actor")).json();
+  $("actor").textContent = actor.actor ?? "—";
+  $("atespace").textContent = actor.atespace ?? "—";
+  $("egress").innerHTML = actor.egress.map((h) => `<span class="chip">${h}</span>`).join("") || "—";
+  $("mcp").textContent = actor.mcpServer ?? "—";
+  $("runtime").textContent = actor.appaRuntime === "ok" ? "runtime healthy (loopback)" : "runtime down";
+  $("creds").innerHTML = Object.entries(actor.credentials)
+    .map(([name, value]) => `${name}=<b>${value ?? "unset"}</b>`).join("<br>");
+}
+
+function add(kind, head, body) {
+  const item = document.createElement("div");
+  item.className = `event ${kind}`;
+  item.innerHTML = `<div class="head"></div>` + (body ? `<div class="body"></div>` : "");
+  item.querySelector(".head").textContent = head;
+  if (body) item.querySelector(".body").textContent = body;
+  $("timeline").append(item);
+  item.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+let lastAudience = "public";
+function showLabel(status) {
+  const audience = status.audience ?? status.label?.audience;
+  if (!audience || typeof audience !== "string") return;
+  $("label").textContent = audience;
+  $("label").className = `label ${audience}`;
+  if (audience !== lastAudience) {
+    add("labelchange", `Session label: ${lastAudience} → ${audience}`,
+      "The session now holds data only these readers may see.");
+    lastAudience = audience;
+  }
+}
+
+$("run").addEventListener("click", async () => {
+  $("run").disabled = true;
+  $("timeline").innerHTML = "";
+  lastAudience = "public";
+  showLabel({ audience: "public" });
+  add("labelchange", "Resuming the actor and starting Claude Code…");
+  const response = await fetch("run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: $("prompt").value }),
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newline;
+    while ((newline = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (line.trim()) render(JSON.parse(line));
+    }
+  }
+  $("run").disabled = false;
+});
+
+function render(event) {
+  switch (event.type) {
+    case "session":
+      add("labelchange", "Claude Code session started under OpenAPPA",
+        `Tools: ${event.tools.map(short).join(", ")}`);
+      break;
+    case "tool_call": {
+      const input = { ...event.input };
+      add("call", short(event.tool), JSON.stringify(input, null, 2));
+      break;
+    }
+    case "tool_result":
+      if (event.error) {
+        add("blocked", `${short(event.tool)} blocked`, event.text);
+      } else if (event.text === null) {
+        add("result", `${short(event.tool)} returned`, `${event.bytes} bytes of meeting data (hidden from this view)`);
+      } else {
+        add("result", `${short(event.tool)} returned`, event.text.slice(0, 600));
+      }
+      break;
+    case "label":
+      showLabel(event.label);
+      break;
+    case "result":
+      add("answer", "Agent's answer", event.text);
+      break;
+    case "exit":
+      if (event.code !== 0) add("blocked", `Claude Code exited with code ${event.code}`);
+      break;
+  }
+}
+
+loadActor();
+</script>
+</body>
+</html>

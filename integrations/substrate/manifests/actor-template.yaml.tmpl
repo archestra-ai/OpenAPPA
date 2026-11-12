@@ -1,0 +1,59 @@
+# ActorTemplate (protojson-shaped ateapi.ActorTemplate) for the protected
+# Claude Code actor. Applied with `kubectl ate create actor-template -f -`
+# after substituting ${ACTOR_IMAGE} and ${ARCHESTRA_MCP_URL}.
+#
+# The two credentials are placeholders. The actor's EgressPolicy replaces
+# each Authorization header outside the sandbox, so neither token is in the
+# actor's environment, its filesystem, or its snapshots.
+metadata:
+  atespace: appa-substrate-demo
+  name: claude-appa
+workerSelector:
+  matchLabels:
+    workload: appa-claude-code
+containers:
+- name: claude
+  image: ${ACTOR_IMAGE}
+  env:
+  - name: ACTOR_NAME
+    value: claude-appa
+  - name: ACTOR_ATESPACE
+    value: appa-substrate-demo
+  - name: ARCHESTRA_MCP_URL
+    value: "${ARCHESTRA_MCP_URL}"
+  - name: ARCHESTRA_TOKEN
+    value: injected-by-substrate-egress
+  - name: CLAUDE_CODE_OAUTH_TOKEN
+    value: injected-by-substrate-egress
+  - name: APPA_DEMO_EGRESS_HOSTS
+    value: "api.anthropic.com,${ARCHESTRA_HOST}"
+  # The egress gateway terminates TLS for the hosts it injects into, so
+  # Node must trust the gateway's CA as well as the public roots.
+  - name: NODE_EXTRA_CA_CERTS
+    value: /run/ate/egress-trust-bundle/trust-bundle.pem
+  volumeMounts:
+  - name: system-info
+    mountPath: /run/ate
+  # The router wakes the actor on a request; it is ready once the OpenAPPA
+  # runtime answers.
+  wakeupProbe:
+    httpGet:
+      path: /healthz
+      port: 8080
+volumes:
+- name: system-info
+  systemInfo:
+    dataSources:
+    - trustBundle:
+        names:
+        - egress-mitm.ate.dev
+        - system-roots.ate.dev
+        path: egress-trust-bundle/trust-bundle.pem
+resources:
+  limits:
+    cpuMillicores: 1000
+    memoryBytes: 2147483648 # 2Gi
+# A memory snapshot keeps the OpenAPPA runtime process, and the trajectory
+# labels it holds, across suspend and resume.
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

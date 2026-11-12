@@ -1,0 +1,20 @@
+# The actor's EgressPolicy: two hosts, each with its credential injected.
+# Applied with `kubectl ate create egress-policy claude-appa -f -`.
+#
+# Both the Grain read and the GitHub comment go to ${ARCHESTRA_HOST}, so
+# this policy cannot separate them. OpenAPPA, inside the sandbox, does.
+rules:
+- https:
+    hostnames: ["api.anthropic.com"]
+    effects:
+      replaceHeaders:
+      - header: Authorization
+        prefix: "Bearer "
+        credentialUri: ate-secret://k8s.io/default/appa-substrate-demo/appa-substrate-demo-credentials/claude-code-oauth-token
+- https:
+    hostnames: ["${ARCHESTRA_HOST}"]
+    effects:
+      replaceHeaders:
+      - header: Authorization
+        prefix: "Bearer "
+        credentialUri: ate-secret://k8s.io/default/appa-substrate-demo/appa-substrate-demo-credentials/archestra-token

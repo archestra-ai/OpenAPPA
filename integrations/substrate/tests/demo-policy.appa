@@ -1,0 +1,26 @@
+# The flows the demo actor's policy (workload/demo.appa.toml) decides.
+# Run: appa replay --config ../workload/demo.appa.toml demo-policy.appa
+
+# A fresh session holds nothing private, so a public comment may post.
+mcp/archestra/github_copilot__add_issue_comment {
+  owner: "example-org"
+  repo: "example-repo"
+  issue_number: 1
+  body: "hello"
+}
+expect allow
+
+# Reading a meeting is allowed, and narrows the session to internal.
+mcp/archestra/grain__fetch_meeting {
+  meeting_id: "00000000-0000-0000-0000-000000000000"
+}
+expect allow
+
+# After the read, nothing in the session may reach a public issue.
+mcp/archestra/github_copilot__add_issue_comment {
+  owner: "example-org"
+  repo: "example-repo"
+  issue_number: 1
+  body: "Core Team Daily Sync, 2026-08-17"
+}
+expect deny

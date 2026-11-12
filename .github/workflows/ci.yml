@@ -152,6 +152,7 @@ jobs:
             plugin:
               - 'integrations/amp/**'
               - 'integrations/opencode/**'
+              - 'integrations/substrate/**'
               - 'appa-runtime-api/refusal-classes.txt'
               - 'marketplace/plugins/opencode/**'
               - 'integrations/appa-guide/**'
@@ -292,7 +293,9 @@ jobs:
         run: |
           shellcheck -x -s sh scripts/appa-eval.sh \
             scripts/appa-install.sh \
-            scripts/appa-install-test.sh
+            scripts/appa-install-test.sh \
+            integrations/substrate/workload/entrypoint.sh
+          shellcheck -x -s bash integrations/substrate/deploy.sh
 
       - name: Test release battery refresh
         run: |
@@ -392,6 +395,9 @@ jobs:
           for dir in examples/tests/*/; do
             ./target/debug/appa replay --config "${dir}appa.toml" "$dir"
           done
+          ./target/debug/appa replay \
+            --config integrations/substrate/workload/demo.appa.toml \
+            integrations/substrate/tests
 
       # The version and its hashes are locked in .github/tools/claude-code.
       - name: Install Claude Code harness
