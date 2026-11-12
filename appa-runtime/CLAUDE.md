@@ -28,7 +28,7 @@ one at the repository root:
   `api/session/` also name `appa-engine`), and `appa replay`
   (`src/replay.rs`: trace files parsed into typed hook events and run
   through the dispatcher over an in-memory log; the shipped traces live
-  in `examples/tests/` at the repository root), and the hidden
+  in `examples/tests/` at the repository root), and
   `appa runtime annotate` (`src/annotate.rs`: calls on standard input
   asked of the policy's Annotators through the production consult path,
   with no trajectory, for measuring an Annotator). It keeps no durable

@@ -209,6 +209,10 @@ cargo test -p appa --test integration -- marketplace::
 
 This test detects invalid battery config and conflicts with other batteries. CI also runs Python tests under `marketplace/batteries/*/test_*.py`.
 
+### Annotator answers
+
+Use [`appa runtime annotate`](/contracts#test-an-annotator) to check each annotator's answers against the real runtime. Write the calls to check as JSON lines. Run them against a root config that includes only your battery. The command asks the annotator through the same consult path as a session, prints one answer per call, and runs no tool. Point the program at a test copy of the provider's API to check answers that depend on provider state.
+
 ### Integration test
 
 Use [`appa replay` validation](/validation) to test the battery end to end. Replay proposes tool calls and checks the decisions from OpenAPPA. It does not run the tools.

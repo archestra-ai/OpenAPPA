@@ -1,0 +1,58 @@
+# Control: in a public session the catch-all lets any host through.
+mcp/shell/install {
+  hosts: ["evil.example"]
+}
+expect allow
+
+mcp/files/read {
+  path: "/hr/salaries.csv"
+}
+expect allow
+
+# The session now holds HR data. An install reaches both PyPI hosts in one call.
+mcp/shell/install {
+  hosts: ["pypi.org", "files.pythonhosted.org"]
+}
+expect allow
+
+# Order does not matter.
+mcp/shell/install {
+  hosts: ["files.pythonhosted.org", "pypi.org"]
+}
+expect allow
+
+# One alternative alone matches.
+mcp/shell/install {
+  hosts: ["pypi.org"]
+}
+expect allow
+
+# One foreign entry takes the whole list out.
+mcp/shell/install {
+  hosts: ["pypi.org", "evil.example"]
+}
+expect deny
+
+# PyPI's upload host is not an alternative.
+mcp/shell/install {
+  hosts: ["upload.pypi.org"]
+}
+expect deny
+
+# Each alternative matches the full value.
+mcp/shell/install {
+  hosts: ["pypi.org.evil.example"]
+}
+expect deny
+
+# The bar is syntax, not text.
+mcp/shell/install {
+  hosts: ["pypi.org|files.pythonhosted.org"]
+}
+expect deny
+
+# An empty list names no host the rule covers.
+mcp/shell/install {
+  hosts: []
+}
+expect deny
