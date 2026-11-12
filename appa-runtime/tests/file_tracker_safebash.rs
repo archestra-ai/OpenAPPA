@@ -486,3 +486,105 @@ fn a_command_reaches_its_declared_socket_and_writes_under_its_declared_directory
         "the call's temporary directory is gone"
     );
 }
+
+/// An output the call creates is an empty file while the command runs. When the command
+/// fails, each it left empty is removed again, even one it opened, as uv opens `uv.lock`, and
+/// the command is told why it found it empty; when it succeeds, only each it left untouched is
+/// removed, so a file it made empty on purpose stays.
+#[test]
+fn an_output_the_command_does_not_write_stays_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let config = root.join("file-tracker.toml");
+    // A stand-in sandbox that runs the command unconfined: `sh -c 'exec sh -c "$4"' sandbox
+    // --settings <file> -c <command>`.
+    std::fs::write(
+        &config,
+        format!(
+            "store = {:?}\n[sandbox]\ncommand = [\"sh\", \"-c\", \"exec sh -c \\\"$4\\\"\", \"sandbox\"]\ntimeout_secs = 5\n",
+            root.join("store.json").display().to_string(),
+        ),
+    )
+    .unwrap();
+    let (lock, report, marker) = (root.join("uv.lock"), root.join("report.md"), root.join("__init__.py"));
+    let (text, _) = safebash(
+        &config,
+        serde_json::json!({
+            "command": format!("echo done > {report:?}; sleep 0.01; touch {lock:?}; test -s {lock:?}"),
+            "input_files": [], "output_files": [lock, report], "network_hosts": [],
+        }),
+    );
+    assert!(text.starts_with("exit: 1"), "{text}");
+    assert!(!lock.exists(), "an empty output of a failed command is removed");
+    assert!(
+        text.contains(&format!("[appa] {} did not exist", lock.display())),
+        "{text}"
+    );
+    assert!(!text.contains("report.md did not exist"), "{text}");
+    assert_eq!(std::fs::read_to_string(&report).unwrap(), "done\n");
+
+    let (text, _) = safebash(
+        &config,
+        serde_json::json!({
+            "command": format!("sleep 0.01; touch {marker:?}"),
+            "input_files": [], "output_files": [lock, marker], "network_hosts": [],
+        }),
+    );
+    assert!(text.starts_with("exit: 0") && !text.contains("[appa]"), "{text}");
+    assert!(
+        !lock.exists(),
+        "a command that succeeds without writing leaves no placeholder"
+    );
+    assert_eq!(
+        std::fs::read(&marker).unwrap(),
+        b"",
+        "a file the command made empty stays"
+    );
+}
+
+/// A command the person types in a subdirectory of a repository reads and writes the
+/// repository, so git there finds it; one typed outside a repository keeps to its directory.
+#[test]
+fn a_command_typed_below_a_repository_root_works_on_the_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let config = root.join("file-tracker.toml");
+    std::fs::write(
+        &config,
+        format!("store = {:?}\n", root.join("store.json").display().to_string()),
+    )
+    .unwrap();
+    let (repository, plain) = (root.join("repo"), root.join("plain"));
+    std::fs::create_dir_all(repository.join(".git")).unwrap();
+    std::fs::create_dir_all(repository.join("svc/cmd")).unwrap();
+    std::fs::create_dir_all(plain.join("sub")).unwrap();
+    let writable = |cwd: &std::path::Path| -> Vec<String> {
+        let mut tracker = Command::new(env!("CARGO_BIN_EXE_appa"))
+            .args(["file-tracker", "sandbox", "--config"])
+            .arg(&config)
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writeln!(
+            tracker.stdin.take().unwrap(),
+            r#"{{"command": "git status", "typed": true}}"#
+        )
+        .unwrap();
+        let output = tracker.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let written = answer["filesystem"]["allowWrite"].as_array().unwrap().iter();
+        written.map(|path| path.as_str().unwrap().to_string()).collect()
+    };
+    let holds = |paths: &[String], dir: &std::path::Path| paths.iter().any(|path| path == dir.to_str().unwrap());
+    let below = writable(&repository.join("svc/cmd"));
+    assert!(holds(&below, &repository), "{below:?}");
+    assert!(holds(&writable(&repository), &repository));
+    let outside = writable(&plain.join("sub"));
+    assert!(
+        holds(&outside, &plain.join("sub")) && !holds(&outside, &plain),
+        "{outside:?}"
+    );
+}

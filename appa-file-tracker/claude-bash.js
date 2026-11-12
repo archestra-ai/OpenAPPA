@@ -195,11 +195,45 @@ const HINTS = [
     text: `[appa] A declared output file can be rewritten but not replaced, renamed or removed, so a tool that writes a temporary file and renames it over the output fails. Write through the file instead: sed 's/a/b/' f > "$TMPDIR/f" && cat "$TMPDIR/f" > f in place of sed -i, and git show HEAD:./f > f in place of git checkout -- f. For a tool that always replaces the file, such as cargo add, declare the file's directory with a trailing / in output_files.`,
   },
   {
+    // A call that declares a directory below the repository's root leaves the root, and .git
+    // in it, out of the command's view.
+    output: /not a git repository/,
+    text: "[appa] Git found no repository because the repository's root, the directory that holds .git, is not in input_files. Declare the root in input_files, and its .git/ in output_files if git writes.",
+  },
+  {
+    // Git writes a branch, its index and new objects under .git, which a call that names only
+    // the work tree, or nothing, leaves read-only; the failure names a lock, not the file system.
+    output: /cannot lock ref|unable to create directory for .*\.git\/|Unable to create '[^']*\.lock'|unable to (create temporary|write new index)/,
+    text: "[appa] Git writes branches, its index and new objects under .git. When the repository's .git/ is not in output_files, it is read-only to this command, so git commit, git checkout -b and git switch fail. Declare it with a trailing /, such as <repository>/.git/, beside the files the command changes.",
+  },
+  {
     // What `ls -l` shows of /dev/null mounted where a protected file is absent (`PROTECTED`).
     output: /^c\S{9}\s.*\s1,\s+3\s/m,
     text: "[appa] An entry listed as character device 1, 3, such as .bashrc or .vscode, is /dev/null, which the sandbox mounts where a protected file does not exist so that the command cannot create it. There is no such file.",
   },
 ];
+
+/**
+ * Remove each output the call's command was to create and did not write, so it is absent again
+ * as before the call rather than an empty file a tool refuses to read, and say so when the
+ * command `failed`: every one still empty when it failed, which a tool such as uv may have
+ * opened and refused, and otherwise each left empty and untouched, so a file the command made
+ * empty on purpose stays.
+ */
+function unwritten(confined, failed) {
+  const removed = (confined.placeholders ?? []).filter(({ path: placeholder, modified }) => {
+    try {
+      const stat = fs.lstatSync(placeholder, { bigint: true });
+      if (!stat.isFile() || stat.size !== 0n || (!failed && String(stat.mtimeNs) !== modified)) return false;
+      fs.unlinkSync(placeholder);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (!failed || removed.length === 0) return "";
+  return `[appa] ${removed.map(({ path: placeholder }) => placeholder).join(", ")} did not exist, so the command found an empty file in its place; it is removed again. A tool that refuses an empty file, such as uv with uv.lock, needs the file's directory declared with a trailing / in output_files instead.`;
+}
 
 /** `shown` with the hints that `input` and everything it printed, `printed`, call for. */
 function hinted(input, shown, printed) {
@@ -208,7 +242,9 @@ function hinted(input, shown, printed) {
     const relative = typeof declared === "string" ? path.relative(declared, process.cwd()) : "..";
     return !relative.startsWith("..") && !path.isAbsolute(relative);
   });
-  const hints = HINTS.filter((hint) => (hint.partial && whole ? false : hint.command ? hint.command.test(command ?? "") : hint.output.test(printed)));
+  // A command the person typed declares nothing: it sees the repository or the working directory.
+  const typed = ![input?.input_files, input?.output_files, input?.network_hosts].every(Array.isArray);
+  const hints = HINTS.filter((hint) => (hint.partial && (whole || typed) ? false : hint.command ? hint.command.test(command ?? "") : hint.output.test(printed)));
   const ran = JSON.stringify([input?.input_files, input?.output_files, input?.network_hosts]);
   const fallback = defaults();
   if (DEFAULTED.delete(command) && ran === JSON.stringify([fallback.input_files, fallback.output_files, fallback.network_hosts])) {
@@ -285,15 +321,19 @@ bash.call = async function (input, context, ...rest) {
   try {
     const result = await calls.run({ confined, nonce }, () => call.call(this, input, required, ...rest));
     backgrounded = result?.data?.backgroundTaskId !== undefined;
+    if (!backgrounded) unwritten(confined, false);
     if (!backgrounded && typeof result?.data?.stdout === "string") {
       result.data.stdout = hinted(input, result.data.stdout, `${result.data.stdout}\n${result.data.stderr ?? ""}`);
     }
     return result;
   } catch (error) {
     if (error?.name !== "ShellError") throw error;
+    const note = unwritten(confined, true);
     return {
       data: {
-        stdout: hinted(input, [error.stderr, `Exit code ${error.code}`].filter(Boolean).join("\n"), String(error.stderr ?? "")),
+        stdout: [hinted(input, [error.stderr, `Exit code ${error.code}`].filter(Boolean).join("\n"), String(error.stderr ?? "")), note]
+          .filter(Boolean)
+          .join("\n"),
         stderr: "",
         interrupted: Boolean(error.interrupted),
         isImage: false,

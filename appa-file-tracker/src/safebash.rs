@@ -62,7 +62,7 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
         path: None,
     };
     let named = named(&role, arguments)?;
-    prepare(&named)?;
+    let placeholders = prepare(&named)?;
     // The call's own scratch directory holds nothing of the user's. Under `srt` the sandbox
     // runtime opens its proxy's sockets, which the command must reach; under `tmp` the
     // command keeps its temporary files, gone when the call ends.
@@ -102,7 +102,23 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
         return Err(missing);
     }
     let finished = supervise(sandbox, config.sandbox.timeout_secs)?;
-    Ok(finished.report(config.sandbox.timeout_secs, ""))
+    let failed = !finished.status.is_some_and(|status| status.success());
+    let removed = unwritten(&placeholders, failed);
+    let note = match removed.is_empty() || !failed {
+        true => String::new(),
+        false => format!("\n{}", unwritten_note(&removed)),
+    };
+    Ok(finished.report(config.sandbox.timeout_secs, &note))
+}
+
+/// What the model reads when a command failed and left outputs it was to create untouched:
+/// each was an empty file while the command ran, which a tool may refuse, and is gone again.
+fn unwritten_note(removed: &[PathBuf]) -> String {
+    let names: Vec<String> = removed.iter().map(|path| path.display().to_string()).collect();
+    format!(
+        "[appa] {} did not exist, so the command found an empty file in its place; it is removed again. A tool that refuses an empty file, such as uv with uv.lock, needs the file's directory declared with a trailing / in output_files instead.",
+        names.join(", ")
+    )
 }
 
 /// Why the sandbox `config` names cannot start here, when it cannot: its program is not on
@@ -159,8 +175,12 @@ impl Drop for Removed {
 /// or names an input that is not a file, a directory or a socket, is refused.
 ///
 /// A command the person types at the prompt (`typed`) reaches no hook, so nothing labels
-/// its result: it reads and writes the working directory, reaches no host, and sees no file
-/// whose label restricts its audience, so its result needs none.
+/// its result: it reads and writes the working directory, or the git repository that holds
+/// it, reaches no host, and sees no file whose label restricts its audience, so its result
+/// needs none.
+///
+/// In `placeholders` are the absent outputs created for the sandbox to open, each with its
+/// modification time; the preload removes each the command did not write.
 pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let role = ToolRole {
         name: "Bash".to_string(),
@@ -170,13 +190,13 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let (named, concealing) = match arguments["typed"].as_bool() == Some(true) {
         true => {
             let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
-            let cwd = cwd.display().to_string();
+            let cwd = repository_root(&cwd).unwrap_or(cwd).display().to_string();
             let typed = json!({ "input_files": [cwd], "output_files": [format!("{cwd}/")], "network_hosts": [] });
             (named(&role, &typed)?, Concealing::Labeled)
         }
         false => (named(&role, arguments)?, Concealing::Restricted),
     };
-    prepare(&named)?;
+    let placeholders = prepare(&named)?;
     let temporary = unique("appa-bash");
     std::fs::create_dir_all(&temporary).map_err(|error| format!("{}: {error}", temporary.display()))?;
     let mut settings = settings(config, &named, concealing)?;
@@ -191,13 +211,54 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
         .collect();
     settings["prelude"] = json!(format!("export TMPDIR={}\n{identity}", quoted(&temporary)));
     settings["hiddenEnvironment"] = json!(hidden_environment(&named));
+    settings["placeholders"] = placeholders
+        .iter()
+        .map(|(path, created)| {
+            let nanos = created
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos());
+            json!({ "path": path, "modified": nanos.to_string() })
+        })
+        .collect();
     Ok(settings)
+}
+
+/// The root of the git work tree that holds `cwd`, the nearest directory at or above it with
+/// a `.git`, when that lies above `cwd` and does not hold the home: a command typed in a
+/// subdirectory of a repository works on the repository, as git there does.
+fn repository_root(cwd: &Path) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    cwd.ancestors()
+        .take_while(|dir| !home.as_ref().is_some_and(|home| covers(dir, home)))
+        .find(|dir| dir.join(".git").exists())
+        .filter(|root| *root != cwd)
+        .map(Path::to_path_buf)
+}
+
+/// The placeholders a command did not write, each removed, so the output stays absent as it
+/// was before the call: every one still empty when the command `failed`, which a tool such as
+/// uv may have opened and refused, and otherwise each left empty and untouched, so a file the
+/// command made empty on purpose stays.
+fn unwritten(placeholders: &[(PathBuf, std::time::SystemTime)], failed: bool) -> Vec<PathBuf> {
+    placeholders
+        .iter()
+        .filter(|(path, created)| {
+            std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+                metadata.is_file()
+                    && metadata.len() == 0
+                    && (failed || metadata.modified().ok().as_ref() == Some(created))
+            })
+        })
+        .filter(|(path, _)| std::fs::remove_file(path).is_ok())
+        .map(|(path, _)| path.clone())
+        .collect()
 }
 
 /// Check what a call names and create its absent outputs, so the sandbox can open each for
 /// writing: every input an existing file, directory or socket, every output a regular file,
-/// a directory, or absent.
-fn prepare(named: &Named) -> Result<(), String> {
+/// a directory, or absent. Each output it creates is returned with its modification time.
+fn prepare(named: &Named) -> Result<Vec<(PathBuf, std::time::SystemTime)>, String> {
+    let mut placeholders = Vec::new();
     for directory in &named.directories {
         std::fs::create_dir_all(directory).map_err(|error| format!("{}: {error}", directory.display()))?;
     }
@@ -229,11 +290,15 @@ fn prepare(named: &Named) -> Result<(), String> {
         // ordinary one. A program a command builds is declared by its directory.
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o644);
-        options
+        let absent = std::fs::symlink_metadata(output).is_err();
+        let file = options
             .open(output)
             .map_err(|error| format!("{}: {error}", output.display()))?;
+        if absent && let Ok(created) = file.metadata().and_then(|metadata| metadata.modified()) {
+            placeholders.push((output.clone(), created));
+        }
     }
-    Ok(())
+    Ok(placeholders)
 }
 
 /// The variables that give git the person's name and email, which it reads from `~/.gitconfig`:
