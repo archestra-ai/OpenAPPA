@@ -37,6 +37,19 @@ pub struct Store {
     /// settles on what the call saw when it was annotated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub returned: Vec<Reservation>,
+    /// What the history of each git directory a call read holds, by its directory: walking
+    /// a long history on every call would stall the agent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub histories: BTreeMap<PathBuf, History>,
+}
+
+/// The label of every path a repository's history reached, as the path rules give it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct History {
+    /// The digest of the refs and reflogs walked, the path rules and the trust ranks: a
+    /// history walked at another key is walked again.
+    pub key: String,
+    pub label: Label,
 }
 
 /// How long a given-back reservation is kept for a release that comes after a remedy.

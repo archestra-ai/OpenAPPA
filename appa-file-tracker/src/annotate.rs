@@ -2,9 +2,10 @@
 //! edit forwards its predecessor's label, so the label the edit publishes keeps it; a write
 //! forwards nothing, so the label it publishes replaces the one it destroys; SafeBash forwards
 //! the meet of the labels of the inputs it sees — a file in a declared directory that a path
-//! rule gives a restricted audience is hidden unless the call names it or git tracks it. The
-//! hosts SafeBash reaches add nothing to its label: the policy judges them by the call's
-//! selector. Every file a call may change is reserved until its records settle it.
+//! rule gives a restricted audience is hidden unless the call names it or git tracks it, and a
+//! git directory carries the labels of what its history holds. The hosts SafeBash reaches add
+//! nothing to its label: the policy judges them by the call's selector. Every file a call may
+//! change is reserved until its records settle it.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -14,7 +15,7 @@ use serde_json::{Value, json};
 use crate::config::{Config, PathRule, Role};
 use crate::label::{Label, Ranks};
 use crate::paths::{Named, covers, named, tree};
-use crate::store::{Locked, Reservation, Store, digest_lines, now, stamp, version};
+use crate::store::{History, Locked, Reservation, Store, digest_lines, now, stamp, version};
 
 /// What the consult declares the answer may use.
 struct Mandate {
@@ -84,7 +85,6 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
     for cache in &caches {
         std::fs::create_dir_all(cache).map_err(|error| format!("{}: {error}", cache.display()))?;
     }
-    let store = &locked.store;
     let toolchains = crate::safebash::toolchains(config);
     let covered = |path: &PathBuf| toolchains.iter().any(|toolchain| covers(toolchain, path));
     let mut inputs = Label::default();
@@ -92,17 +92,21 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
         // A toolchain is readable to every command and assumed to hold no credentials: what
         // a call reads there carries only what recorded writes left on it, above it or under it.
         let label = match covered(path) {
-            true => store
-                .files
-                .iter()
-                .filter(|(recorded, _)| covers(recorded, path) || covers(path, recorded))
-                .fold(Label::default(), |met, (_, recorded)| {
-                    met.meet(&recorded.label, &store.ranks)
-                }),
-            false => file_label(config, store, path, &named.reads)?,
+            true => {
+                let store = &locked.store;
+                store
+                    .files
+                    .iter()
+                    .filter(|(recorded, _)| covers(recorded, path) || covers(path, recorded))
+                    .fold(Label::default(), |met, (_, recorded)| {
+                        met.meet(&recorded.label, &store.ranks)
+                    })
+            }
+            false => file_label(config, &mut locked.store, path, &named.reads)?,
         };
-        inputs = inputs.meet(&label, &store.ranks);
+        inputs = inputs.meet(&label, &locked.store.ranks);
     }
+    let store = &locked.store;
     // A download cache the call writes without declaring it shows the command what it holds
     // but the files recorded there with a label: it carries what was recorded on it or above.
     for cache in &caches {
@@ -192,24 +196,141 @@ pub fn annotate(config: &Config, request: &Value) -> Result<Value, String> {
 
 /// A file's label: what recorded writes left on it or on a directory above it, met with every
 /// path rule that matches it — and, for a directory, the own label of everything under it the
-/// call sees. An entry [`concealed`] from a call that names `reads` adds nothing.
-pub fn file_label(config: &Config, store: &Store, path: &Path, reads: &[PathBuf]) -> Result<Label, String> {
+/// call sees. An entry [`concealed`] from a call that names `reads` adds nothing. A git
+/// directory the path lies in, or one among the entries the call sees, adds what its history
+/// holds ([`history_label`]).
+pub fn file_label(config: &Config, store: &mut Store, path: &Path, reads: &[PathBuf]) -> Result<Label, String> {
     let mut label = config
         .paths
         .iter()
         .filter(|rule| rule.matches(path))
         .map(PathRule::label)
         .fold(recorded_label(store, path), |met, label| met.meet(&label, &store.ranks));
+    let mut repositories: Vec<PathBuf> = path
+        .ancestors()
+        .find(|dir| is_git_directory(dir))
+        .map(Path::to_path_buf)
+        .into_iter()
+        .collect();
     if path.is_dir() {
         let entries = tree(path)?;
         let hidden = concealed(config, store, path, &entries, reads, Concealing::Restricted);
         for (entry, _) in &entries {
             if !hidden.iter().any(|hidden| covers(hidden, entry)) {
                 label = label.meet(&own_label(config, store, entry), &store.ranks);
+                repositories.extend(
+                    entry
+                        .parent()
+                        .filter(|dir| entry.ends_with("HEAD") && is_git_directory(dir))
+                        .map(Path::to_path_buf),
+                );
             }
         }
     }
+    repositories.sort();
+    repositories.dedup();
+    for git in &repositories {
+        let held = history_label(config, store, git);
+        label = label.meet(&held, &store.ranks);
+    }
     Ok(label)
+}
+
+/// Whether `dir` is a git directory, such as a repository's `.git` or a bare repository.
+fn is_git_directory(dir: &Path) -> bool {
+    dir.join("HEAD").is_file() && dir.join("objects").is_dir()
+}
+
+/// What a git directory holds: the label the path rules give each path its index holds, or
+/// any commit its refs, reflogs and stash reach adds, and each directory above one. A
+/// credential the working tree hides, or no longer has, is still in the repository, and a
+/// command that reads the git directory can read it. A git directory git cannot read holds
+/// what every rule labels.
+fn history_label(config: &Config, store: &mut Store, git: &Path) -> Label {
+    let ranks = store.ranks.clone();
+    let rules: Vec<&PathRule> = config
+        .paths
+        .iter()
+        .filter(|rule| rule.label() != Label::default())
+        .collect();
+    // The paths are the working tree's, which a `.git` directory sits at the top of.
+    let base = match git.file_name() == Some(".git".as_ref()) {
+        true => git.parent().unwrap_or(git),
+        false => git,
+    };
+    let labeled = |names: &[u8]| {
+        let mut paths = std::collections::BTreeSet::new();
+        for name in names.split(|byte| *byte == 0).filter(|name| !name.is_empty()) {
+            let path = base.join(String::from_utf8_lossy(name).as_ref());
+            paths.extend(path.ancestors().take_while(|dir| *dir != base).map(Path::to_path_buf));
+        }
+        let matching = paths
+            .iter()
+            .flat_map(|path| rules.iter().filter(move |rule| rule.matches(path)));
+        matching.fold(Label::default(), |met, rule| met.meet(&rule.label(), &ranks))
+    };
+    let read = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(git)
+            // The repository's own configuration cannot make this read run a program.
+            .args(["-c", "core.fsmonitor=false"])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| output.stdout)
+    };
+    let everything = || {
+        rules
+            .iter()
+            .fold(Label::default(), |met, rule| met.meet(&rule.label(), &ranks))
+    };
+    let (Some(index), Some(tips)) = (
+        read(&["ls-files", "-z"]),
+        read(&["rev-list", "--no-walk", "--all", "--reflog"]),
+    ) else {
+        return everything();
+    };
+    let mut lines: Vec<String> = String::from_utf8_lossy(&tips).lines().map(str::to_string).collect();
+    lines.sort();
+    lines.extend(
+        rules
+            .iter()
+            .map(|rule| format!("{}\0{:?}\0{:?}", rule.pattern, rule.except, rule.label())),
+    );
+    lines.extend(ranks.0.iter().map(|rank| format!("rank\0{rank}")));
+    let key = digest_lines(&lines);
+    let walked = match store.histories.get(git).filter(|history| history.key == key) {
+        Some(history) => history.label.clone(),
+        None => {
+            let log = [
+                "log",
+                "--all",
+                "--reflog",
+                "--format=",
+                "--name-only",
+                "--no-renames",
+                "--diff-filter=A",
+                "-z",
+            ];
+            let Some(names) = read(&log) else {
+                return everything();
+            };
+            let label = labeled(&names);
+            store.histories.insert(
+                git.to_path_buf(),
+                History {
+                    key,
+                    label: label.clone(),
+                },
+            );
+            label
+        }
+    };
+    walked.meet(&labeled(&index), &ranks)
 }
 
 /// Which files under a directory a command reads stay out of its sight unless it names them.
@@ -478,14 +599,17 @@ mod tests {
             )
         };
         let read = |path: &Path| {
-            let store = Store::default();
+            let mut store = Store::default();
             let entries = tree(path).unwrap();
             let reads = [path.to_path_buf()];
             let mut hidden = concealed(&config, &store, path, &entries, &reads, Concealing::Restricted);
             hidden.sort();
             (
                 hidden,
-                file_label(&config, &store, path, &reads).unwrap().audience.is_empty(),
+                file_label(&config, &mut store, path, &reads)
+                    .unwrap()
+                    .audience
+                    .is_empty(),
             )
         };
         git(&["init", "-q"]);
@@ -550,5 +674,59 @@ mod tests {
             assert_eq!(run, json!(["self"]), "Bash {file}");
         }
         assert_eq!(unlabeled, (Value::Null, Value::Null), "a skill holds no credential");
+    }
+
+    /// A credential committed and then removed is still in the repository's history: a read
+    /// that holds the git directory, or reads it alone, carries its `self` audience, and a read
+    /// of the working tree beside it does not. A history that gains one after it was walked
+    /// is walked again.
+    #[test]
+    fn a_read_of_git_carries_the_credentials_its_history_holds() {
+        let dir = std::env::temp_dir().join(format!("appa-ft-history-{}-{}", std::process::id(), now()));
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/main.rs"), "").unwrap();
+        let config_path = dir.join("file-tracker.toml");
+        std::fs::write(
+            &config_path,
+            format!("store = {:?}\n", dir.join("store.json").display().to_string()),
+        )
+        .unwrap();
+        let config = Config::load(Some(&config_path)).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        let mut store = Store::default();
+        let mut restricted = |path: &Path| {
+            !file_label(&config, &mut store, path, &[path.to_path_buf()])
+                .unwrap()
+                .audience
+                .is_empty()
+        };
+        git(&["init", "-q"]);
+        git(&["add", "src/main.rs"]);
+        git(&["commit", "-qm", "code"]);
+        let clean = (restricted(&repo), restricted(&repo.join(".git")));
+        std::fs::write(repo.join(".env"), "TOKEN=x\n").unwrap();
+        git(&["add", ".env"]);
+        git(&["commit", "-qm", "credential"]);
+        git(&["rm", "-q", ".env"]);
+        git(&["commit", "-qm", "removed"]);
+        let removed = (
+            restricted(&repo),
+            restricted(&repo.join(".git")),
+            restricted(&repo.join(".git/objects")),
+            restricted(&repo.join("src")),
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(clean, (false, false));
+        assert_eq!(removed, (true, true, true, false));
     }
 }
