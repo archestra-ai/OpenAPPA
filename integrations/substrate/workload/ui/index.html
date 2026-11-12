@@ -25,7 +25,7 @@
   .chip { display: inline-block; background: var(--chip); border: 1px solid var(--line); border-radius: 999px;
           padding: 0 8px; margin: 1px 4px 1px 0; font-size: 12.5px; }
   .stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-  textarea { width: 100%; min-height: 76px; resize: vertical; background: var(--bg); color: var(--text);
+  textarea { width: 100%; min-height: 100px; resize: vertical; background: var(--bg); color: var(--text);
              border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px; font: inherit; }
   .buttons { display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
   button { background: #238636; color: white; border: 0; border-radius: 8px;
@@ -44,7 +44,7 @@
   .event.note { border-style: dashed; }
   .event.answer { border-color: var(--accent); }
   .event.answer .body { color: var(--text); }
-  iframe { width: 100%; height: calc(100vh - 110px); border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
+  iframe { position: sticky; top: 18px; width: 100%; height: calc(100vh - 110px); border: 1px solid var(--line); border-radius: 10px; background: var(--bg); }
   .muted { color: var(--muted); }
 </style>
 </head>
