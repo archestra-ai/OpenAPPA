@@ -62,7 +62,9 @@ updates:
           - patch
 
   - package-ecosystem: gomod
-    directory: /integrations/kagent/appa-kagent-adk-go
+    directories:
+      - /integrations/kagent/appa-kagent-adk-go
+      - /integrations/substrate/appa-extproc
     schedule:
       interval: weekly
     cooldown:

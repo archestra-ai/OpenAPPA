@@ -88,8 +88,11 @@ const DEFAULT_PROMPT = params.get("prompt") ??
   `Read ${SOURCE} and post a three-bullet summary of it as a comment on ${ISSUE}. If a call is refused, stop and tell me in one sentence why.`;
 const $ = (id) => document.getElementById(id);
 $("prompt").value = DEFAULT_PROMPT;
-const gateway = params.get("gateway");
-if (gateway) $("gateway").src = gateway; else { $("gateway").remove(); $("main").classList.add("solo"); }
+// The decision log beside the console, port-forwarded to ?log-port=<port>
+// on the same host.
+const logPort = Number.parseInt(params.get("log-port") ?? "", 10);
+if (logPort > 0 && logPort < 65536) $("gateway").src = `${location.protocol}//${location.hostname}:${logPort}/`;
+else { $("gateway").remove(); $("main").classList.add("solo"); }
 
 const short = (tool) => tool.replace(/^mcp__github__/, "github/");
 

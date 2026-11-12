@@ -50,10 +50,12 @@ fi
 export WORKER_IMAGE
 export RUNTIME_IMAGE="${RUNTIME_IMAGE:-ghcr.io/archestra-ai/appa-runtime:v0.42.0}"
 
+# Each run tags its own build, and the manifests pin the pushed digest.
+tag="dev-$(date +%Y%m%d%H%M%S)"
 build() {
-  docker build -t "$repo/$1:latest" "$2" >&2
-  docker push "$repo/$1:latest" >/dev/null
-  docker inspect --format '{{index .RepoDigests 0}}' "$repo/$1:latest"
+  docker build -t "$repo/$1:$tag" "$2" >&2
+  docker push "$repo/$1:$tag" >/dev/null
+  docker inspect --format '{{index .RepoDigests 0}}' "$repo/$1:$tag"
 }
 
 echo "==> Building the ext_proc processor and the agent image"
@@ -118,5 +120,5 @@ decisions beside it:
 
   kubectl ate --context $context proxy actor $actor 8000:8080 -a $atespace
   kubectl --context $context -n appa-system port-forward deploy/appa-extproc 8001:8081
-  open 'http://localhost:8000/?gateway=http://localhost:8001/'
+  open 'http://localhost:8000/?log-port=8001'
 EOF

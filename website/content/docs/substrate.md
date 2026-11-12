@@ -85,7 +85,7 @@ kubectl ate --context kind-substrate proxy actor agent 8000:8080 -a appa-substra
 kubectl --context kind-substrate -n appa-system port-forward deploy/appa-extproc 8001:8081
 ```
 
-Open `http://localhost:8000/?gateway=http://localhost:8001/`. The left side runs the agent. The right side is the processor's decision log.
+Open `http://localhost:8000/?log-port=8001`. The left side runs the agent. The right side is the processor's decision log.
 
 ## Scenario
 
