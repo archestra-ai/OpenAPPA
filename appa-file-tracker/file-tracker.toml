@@ -11,12 +11,15 @@
 # absolute, resolved path; one without, such as `*secrets*`, against the file's
 # name, so a repository named `k8s-secrets` is not labeled whole. The label holds
 # before any recorded write and under every later one: a read returns the
-# meet of the recorded label and every matching rule. `write_trust` and
+# meet of the recorded label and every matching rule. `except` lists patterns,
+# matched the same way, that leave a path out of the rule. `write_trust` and
 # `write_attention` are what a call that writes such a file requires.
 
 # --- the requester's credentials are `self` data, and only a trusted session writes them ---
 [[path]]
 pattern = "*/.env*"
+# A template beside the credential, committed to show its keys.
+except = ["*.example", "*.sample", "*.template"]
 audience = ["self"]
 write_trust = "trusted"
 
@@ -153,11 +156,24 @@ write_trust = "trusted"
 
 [[path]]
 pattern = "*credentials*"
+# Source code and schemas name credentials without holding them.
+except = [
+    "*.rs", "*.go", "*.py", "*.rb", "*.php", "*.java", "*.kt", "*.scala", "*.swift", "*.cs",
+    "*.c", "*.h", "*.cc", "*.cpp", "*.hpp", "*.js", "*.mjs", "*.cjs", "*.jsx", "*.ts", "*.tsx",
+    "*.schema.json",
+]
 audience = ["self"]
 write_trust = "trusted"
 
 [[path]]
 pattern = "*secrets*"
+# Source code and schemas name credentials without holding them, and so do the
+# sanitizer benchmark's policies, such as coding.strip-secrets.toml.
+except = [
+    "*.rs", "*.go", "*.py", "*.rb", "*.php", "*.java", "*.kt", "*.scala", "*.swift", "*.cs",
+    "*.c", "*.h", "*.cc", "*.cpp", "*.hpp", "*.js", "*.mjs", "*.cjs", "*.jsx", "*.ts", "*.tsx",
+    "*.schema.json", "*/bench/sanitizer/corpus/*",
+]
 audience = ["self"]
 write_trust = "trusted"
 

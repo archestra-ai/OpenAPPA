@@ -31,6 +31,10 @@ pub struct Config {
 #[serde(deny_unknown_fields)]
 pub struct PathRule {
     pub pattern: String,
+    /// Patterns, each matched as `pattern` is, that leave a path out of the rule, such as
+    /// `*.example` for a template beside a credential.
+    #[serde(default)]
+    pub except: Vec<String>,
     /// The label such a file has before any recorded write, and keeps under every later one.
     #[serde(default)]
     pub trust: Option<String>,
@@ -46,11 +50,14 @@ pub struct PathRule {
 
 impl PathRule {
     pub fn matches(&self, path: &Path) -> bool {
-        let text = match self.pattern.contains('/') {
-            true => path.to_str(),
-            false => path.file_name().and_then(|name| name.to_str()),
+        let matches = |pattern: &str| {
+            let text = match pattern.contains('/') {
+                true => path.to_str(),
+                false => path.file_name().and_then(|name| name.to_str()),
+            };
+            text.is_some_and(|text| wildcard(pattern, text))
         };
-        text.is_some_and(|text| wildcard(&self.pattern, text))
+        matches(&self.pattern) && !self.except.iter().any(|except| matches(except))
     }
 
     pub fn label(&self) -> Label {
@@ -319,6 +326,7 @@ mod tests {
     fn a_pattern_without_a_slash_names_the_file_and_one_with_a_slash_its_path() {
         let rule = |pattern: &str| PathRule {
             pattern: pattern.to_string(),
+            except: Vec::new(),
             trust: None,
             audience: None,
             write_trust: None,
@@ -337,13 +345,28 @@ mod tests {
             "/file-tracker.toml"
         ))))
         .unwrap();
-        let env = Path::new("/w/app/.env");
-        assert!(
-            config
-                .paths
-                .iter()
-                .any(|rule| rule.matches(env) && rule.audience.as_deref() == Some(&["self".to_string()][..]))
-        );
+        let restricted = |path: &str| {
+            config.paths.iter().any(|rule| {
+                rule.matches(Path::new(path)) && rule.audience.as_deref() == Some(&["self".to_string()][..])
+            })
+        };
+        // A credential and its template, and data and code that name credentials.
+        for (path, credential) in [
+            ("/w/app/.env", true),
+            ("/w/app/.env.production.local", true),
+            ("/w/app/.env.example", false),
+            ("/w/app/.env.template", false),
+            ("/w/app/db-secrets.yaml", true),
+            ("/w/app/credentials", true),
+            ("/w/app/src/credentials/mod.rs", false),
+            ("/w/app/src/secrets.ts", false),
+            ("/w/appa/bench/sanitizer/corpus/coding.strip-secrets.toml", false),
+            ("/w/app/config/prod-secrets.toml", true),
+            ("/w/app/credentials.schema.json", false),
+            ("/w/app/credentials.json", true),
+        ] {
+            assert_eq!(restricted(path), credential, "{path}");
+        }
         for tool in [
             "host/claude-code/Read",
             "host/claude-code/Write",
