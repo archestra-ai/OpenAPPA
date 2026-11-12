@@ -970,7 +970,7 @@ Without the token, the `org` line is a `no_answer` with the program's error:
 {"id":"org","repeat":0,"latency_ms":67,"outcome":"no_answer","annotator":"google-workspace.drive-readers","reason":"non_success status=1 detail=\"google-workspace.drive-readers: APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN is not set\""}
 ```
 
-The command exits with status 0 after it asks every call, whatever the outcomes. It exits with a nonzero status, and asks no annotator, when the configuration does not load or an input line is not a call.
+The command exits with status 0 after it asks every call and writes every answer, whatever the outcomes. It exits with a nonzero status, and asks no annotator, when the configuration does not load or an input line is not a call. It also exits with a nonzero status when it cannot write an answer, for example because the reader closed standard output. It then stops the consults in flight and asks no more calls.
 
 ## Recorders
 
