@@ -318,13 +318,22 @@ const PROTECTED = [
   ...[".ripgreprc", ".mcp.json", ".vscode", ".idea", ".claude/commands", ".claude/agents"],
 ];
 
-/** The prelude line that keeps git in a command from listing the protected paths absent here. */
-function unlisted(tmpdir) {
+/**
+ * The prelude line that keeps git in a command from listing what the sandbox mounts /dev/null
+ * on: the protected paths absent here, and the files the call does not see, such as an
+ * untracked .env, which `git add -A` would refuse to add and so add nothing.
+ */
+function unlisted({ tmpdir, filesystem }) {
   const cwd = process.cwd();
-  const absent = PROTECTED.filter((name) => {
+  // The repository the working directory is in, or the one `git init` would make there. A
+  // worktree's .git is a file naming its git directory.
+  let top = cwd;
+  while (!fs.existsSync(path.join(top, ".git")) && path.dirname(top) !== top) top = path.dirname(top);
+  if (!fs.existsSync(path.join(top, ".git"))) top = cwd;
+  const absent = PROTECTED.map((name) => path.join(cwd, name)).filter((entry) => {
     let found;
     try {
-      found = fs.lstatSync(path.join(cwd, name));
+      found = fs.lstatSync(entry);
     } catch {
       return true;
     }
@@ -332,12 +341,11 @@ function unlisted(tmpdir) {
     // background, is an empty read-only file on the disk until that command ends.
     return found.isFile() && found.size === 0 && (found.mode & 0o777) === 0o444;
   });
-  if (absent.length === 0) return "";
-  // The repository the working directory is in, or the one `git init` would make there. A
-  // worktree's .git is a file naming its git directory.
-  let top = cwd;
-  while (!fs.existsSync(path.join(top, ".git")) && path.dirname(top) !== top) top = path.dirname(top);
-  if (!fs.existsSync(path.join(top, ".git"))) top = cwd;
+  const hidden = (filesystem?.denyRead ?? []).filter((entry) => {
+    const relative = path.relative(top, entry);
+    return !relative.startsWith("..") && !path.isAbsolute(relative) && fs.lstatSync(entry, { throwIfNoEntry: false })?.isFile();
+  });
+  if (absent.length === 0 && hidden.length === 0) return "";
   let gitdir = path.join(top, ".git");
   try {
     const named = /^gitdir: (.+)$/m.exec(fs.readFileSync(gitdir, "utf8"))?.[1];
@@ -346,7 +354,7 @@ function unlisted(tmpdir) {
   const glob = (text) => text.replace(/[\\*?[ ]/g, "\\$&");
   const excludes = path.join(tmpdir, "appa-git-excludes");
   const config = path.join(tmpdir, "appa-git-config");
-  fs.writeFileSync(excludes, absent.map((name) => `/${glob(path.relative(top, path.join(cwd, name)))}\n`).join(""));
+  fs.writeFileSync(excludes, [...absent, ...hidden].map((entry) => `/${glob(path.relative(top, entry))}\n`).join(""));
   fs.writeFileSync(config, `[core]\n\texcludesFile = "${excludes.replace(/[\\"]/g, "\\$&")}"\n`);
   // Only in that repository: the same name at the top of another one is a file of its own.
   const quoted = (text) => `'${text.replace(/'/g, `'\\''`)}'`;
@@ -393,7 +401,7 @@ sandbox.wrapWithSandbox = async function (command, shell, custom, signal, option
   }
   const perCall = { ...(custom ?? {}), filesystem, network: { ...(custom?.network ?? {}), ...current.confined.network } };
   // The prelude points TMPDIR at the call's own directory and gives git the person's identity.
-  const confinedCommand = (current.confined.prelude ?? "") + unlisted(current.confined.tmpdir) + command;
+  const confinedCommand = (current.confined.prelude ?? "") + unlisted(current.confined) + command;
   const wrapped = await wrapping.run(current, () =>
     wrap.call(this, confinedCommand, shell, perCall, signal, { ...(options ?? {}), commandId: current.nonce }),
   );
@@ -597,7 +605,8 @@ async function selfTest() {
       );
 
       // A working directory below the repository's root, as in a monorepo: a call that
-      // declares the repository finds it from there, and a credential there stays hidden.
+      // declares the repository finds it from there, and a credential there stays hidden:
+      // `git add -A` adds the rest and leaves it out.
       const sub = path.join(repo, "sub");
       fs.mkdirSync(sub);
       fs.writeFileSync(path.join(sub, ".env"), "TOKEN=CANARY-SUBDIRECTORY\n");
@@ -605,11 +614,15 @@ async function selfTest() {
       try {
         const below = await confinedRun(
           { command: "true", input_files: [repo], output_files: [`${repo}/`], network_hosts: [] },
-          "git rev-parse --show-toplevel; cat .env",
+          "git rev-parse --show-toplevel; cat .env; git add -A && git diff --cached --name-only",
           sub,
         );
         check(below.stdout.startsWith(`${repo}\n`), `git finds no repository from a subdirectory: ${below.stdout}${below.stderr}`);
         check(!below.stdout.includes("CANARY-SUBDIRECTORY"), "a credential in the working directory is readable");
+        check(
+          below.stdout.includes("\nreal.txt\n") && !below.stdout.includes("sub/.env"),
+          `git add -A fails on a hidden credential: ${below.stdout}${below.stderr}`,
+        );
       } finally {
         process.chdir(home);
       }
