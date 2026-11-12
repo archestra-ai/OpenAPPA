@@ -33,7 +33,8 @@ pub const DESCRIPTION: &str = "Runs one shell command in a sandbox. The command 
     under it, as a build directory, node_modules/ or a cache needs (for example ~/.cache/go-build/). A command that \
     reaches a Go, cargo or npm registry keeps what it downloads in that package manager's cache, which every later \
     command reads without declaring it. A credential \
-    file such as .env inside a declared directory stays hidden unless the call names it. Declare every file the \
+    file such as .env inside a declared directory stays hidden unless the call names it or git tracks it. Declare every \
+    file the \
     command reads or writes: any other file in your workspace, home or /tmp is hidden from it, so ls and find there \
     show only what the call declares. $TMPDIR is a private directory for this call alone, removed when it ends. To \
     list a directory, declare it in input_files. Declare a socket such as \
@@ -587,7 +588,7 @@ fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Va
     let covered = |path: &PathBuf| toolchains.iter().any(|toolchain| covers(toolchain, path));
     let mut secret = Vec::new();
     for read in named.reads.iter().filter(|read| read.is_dir() && !covered(read)) {
-        secret.extend(concealed(config, store, &tree(read)?, &named.reads, concealing));
+        secret.extend(concealed(config, store, read, &tree(read)?, &named.reads, concealing));
     }
     let mut kept = Vec::new();
     for directory in named.directories.iter().filter(|directory| !covered(directory)) {
