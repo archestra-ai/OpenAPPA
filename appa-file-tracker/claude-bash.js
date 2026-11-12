@@ -176,7 +176,8 @@ const HINTS = [
     text: "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing or git status here is incomplete. To see a directory, declare it in input_files.",
   },
   {
-    output: /^(?!.*config file).*(Read-only file system|EROFS)/m,
+    // Go and others print it in lower case.
+    output: /^(?!.*config file).*(read-only file system|EROFS)/im,
     text: "[appa] A write to a path not in output_files fails as a read-only file system. Declare the path in output_files, or its directory with a trailing /, such as node_modules/.vite/ or .git/.",
   },
   {
@@ -557,6 +558,9 @@ async function selfTest() {
   check(bare?.input_files?.[0] === process.cwd() && bare.network_hosts.length === 0, "a call without lists does not read the working directory alone");
   DEFAULTED.delete("ls");
   check(!bash.coerceInput({ command: "ls", input_files: [] })?.input?.output_files, "a call naming some lists is completed");
+  const declared = { command: "go mod tidy", input_files: ["/p"], output_files: [], network_hosts: [] };
+  check(hinted(declared, "", "open /p/go.mod: read-only file system").includes("output_files"), "a lower-case read-only failure gets no hint");
+  check(!hinted({ command: "git status" }, "", "").includes("saw only"), "a typed command gets the note for a partial listing");
 
   // Outside a session the settings are not loaded yet; the sandbox reads them.
   const loader = (await modulesWith("enableConfigs")).find((module) => typeof module.enableConfigs === "function");
