@@ -168,11 +168,15 @@ impl Config {
                 .ok_or("no store is configured and neither XDG_STATE_HOME nor HOME is set")?
                 .join("appa/file-tracker.json"),
         };
-        let mut paths = raw.path;
-        paths.extend(defaults.path);
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let paths = raw
+            .path
+            .into_iter()
+            .chain(defaults.path)
+            .filter_map(|rule| anchored(rule, home.as_deref()))
+            .collect();
         let mut tools = raw.tool;
         tools.extend(defaults.tool);
-        let home = std::env::var_os("HOME").map(PathBuf::from);
         let readable = raw
             .sandbox
             .readable
@@ -226,6 +230,24 @@ impl Config {
     pub fn role(&self, tool: &str) -> Option<&ToolRole> {
         self.tools.iter().find(|role| role.name == tool)
     }
+}
+
+/// `rule` with each pattern that starts with `~/` anchored at the resolved home directory,
+/// as the paths a pattern matches are resolved. Without a home directory a rule whose own
+/// pattern starts with `~/` matches nothing and is dropped, and so is such an `except`.
+fn anchored(mut rule: PathRule, home: Option<&Path>) -> Option<PathRule> {
+    let home = home.map(|home| std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()));
+    let home = home
+        .as_deref()
+        .and_then(Path::to_str)
+        .map(|home| home.trim_end_matches('/'));
+    let anchor = |pattern: &str| match pattern.strip_prefix("~/") {
+        Some(rest) => home.map(|home| format!("{home}/{rest}")),
+        None => Some(pattern.to_owned()),
+    };
+    rule.pattern = anchor(&rule.pattern)?;
+    rule.except = rule.except.iter().filter_map(|pattern| anchor(pattern)).collect();
+    Some(rule)
 }
 
 fn defaults_shell() -> RawConfig {
@@ -338,6 +360,34 @@ mod tests {
         assert!(!rule("*/.ssh/*").matches(Path::new("/home/me/ssh/id_ed25519")));
     }
 
+    /// `~/` anchors a pattern at the home directory alone: the home's settings match, a
+    /// project's and a path that only contains the home's path do not. Without a home the
+    /// rule is dropped, and a rule written another way is kept as it is.
+    #[test]
+    fn a_pattern_starting_with_a_tilde_names_the_home_directory_only() {
+        let rule = |pattern: &str, except: &[&str]| PathRule {
+            pattern: pattern.to_string(),
+            except: except.iter().map(|except| except.to_string()).collect(),
+            trust: None,
+            audience: None,
+            write_trust: None,
+            write_attention: Vec::new(),
+        };
+        let home = Path::new("/no-such-home/me");
+        let settings = anchored(
+            rule("~/.claude/settings*", &["~/.claude/settings.example*"]),
+            Some(home),
+        )
+        .unwrap();
+        assert!(settings.matches(Path::new("/no-such-home/me/.claude/settings.json")));
+        assert!(!settings.matches(Path::new("/no-such-home/me/.claude/settings.example.json")));
+        assert!(!settings.matches(Path::new("/w/app/.claude/settings.json")));
+        assert!(!settings.matches(Path::new("/w/no-such-home/me/.claude/settings.json")));
+        assert!(anchored(rule("~/.claude/settings*", &[]), None).is_none());
+        let kept = anchored(rule("*/.env*", &["~/.env.example"]), None).unwrap();
+        assert_eq!((kept.pattern.as_str(), kept.except.len()), ("*/.env*", 0));
+    }
+
     #[test]
     fn the_built_in_configuration_classifies_credentials_and_serves_both_harnesses() {
         let config = Config::load(Some(Path::new(concat!(
@@ -364,8 +414,14 @@ mod tests {
             ("/w/app/config/prod-secrets.toml", true),
             ("/w/app/credentials.schema.json", false),
             ("/w/app/credentials.json", true),
+            ("/w/app/.claude/settings.json", false),
+            ("/w/app/.claude/settings.local.json", true),
         ] {
             assert_eq!(restricted(path), credential, "{path}");
+        }
+        if let Some(home) = std::env::var_os("HOME").and_then(|home| std::fs::canonicalize(home).ok()) {
+            let settings = home.join(".claude/settings.json");
+            assert!(restricted(settings.to_str().unwrap()), "{}", settings.display());
         }
         for tool in [
             "host/claude-code/Read",

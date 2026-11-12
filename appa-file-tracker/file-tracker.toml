@@ -9,7 +9,8 @@
 # A path rule labels every file its pattern matches (`*` matches any run of
 # characters, `/` included). A pattern with a `/` is matched against the
 # absolute, resolved path; one without, such as `*secrets*`, against the file's
-# name, so a repository named `k8s-secrets` is not labeled whole. The label holds
+# name, so a repository named `k8s-secrets` is not labeled whole. A pattern that
+# starts with `~/` is anchored at the home directory. The label holds
 # before any recorded write and under every later one: a read returns the
 # meet of the recorded label and every matching rule. `except` lists patterns,
 # matched the same way, that leave a path out of the rule. `write_trust` and
@@ -319,13 +320,20 @@ pattern = "*/Library/LaunchAgents/*"
 write_trust = "trusted"
 
 # --- the files that can turn the protection off ask the person running the session ---
-# Claude Code's settings can also hold credentials in their `env` block, so they are `self`
-# data. A pattern cannot tell the home directory's settings from a project's, so a
-# project's committed `.claude/settings.json` is `self` too, and a command that declares
-# the project directory does not see it unless it names the file.
+# The person's own Claude Code settings can hold credentials in their `env` block, so they
+# are `self` data: the home directory's, and a project's `settings.local.json`, which
+# Claude Code keeps out of git. A project's committed `settings.json` is shared with
+# everyone who clones it and is not labeled.
+[[path]]
+pattern = "~/.claude/settings*"
+audience = ["self"]
+
+[[path]]
+pattern = "*/.claude/settings.local.json"
+audience = ["self"]
+
 [[path]]
 pattern = "*/.claude/settings*"
-audience = ["self"]
 write_attention = ["human-approval"]
 
 [[path]]

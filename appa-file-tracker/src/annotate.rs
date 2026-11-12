@@ -626,9 +626,10 @@ mod tests {
         assert_eq!(below, (vec![], false));
     }
 
-    /// The built-in rules make the Databricks CLI's token cache and Claude Code's settings
-    /// `self` data, whether Read or a shell command that declares the file reads them. A
-    /// file beside them that holds no credential, a skill, stays unlabeled.
+    /// The built-in rules make the Databricks CLI's token cache and a project's
+    /// `settings.local.json` `self` data, whether Read or a shell command that declares the
+    /// file reads them. A project's committed `settings.json`, which everyone who clones it
+    /// reads, and a skill beside it stay unlabeled.
     #[test]
     fn credential_files_beside_a_config_directory_read_as_self() {
         let dir = std::env::temp_dir().join(format!("appa-ft-self-{}-{}", std::process::id(), now()));
@@ -641,10 +642,12 @@ mod tests {
         };
         let files = [
             path("home/.databricks/token-cache.json"),
-            path("home/.claude/settings.json"),
             path("project/.claude/settings.local.json"),
         ];
-        let skill = path("project/.claude/skills/review/SKILL.md");
+        let shared = [
+            path("project/.claude/settings.json"),
+            path("project/.claude/skills/review/SKILL.md"),
+        ];
         std::fs::write(
             &config_path,
             format!("store = {:?}\n", dir.join("store.json").display().to_string()),
@@ -667,13 +670,15 @@ mod tests {
             )
         };
         let labels: Vec<_> = files.iter().map(|file| (read(file), run(file))).collect();
-        let unlabeled = (read(&skill), run(&skill));
+        let unlabeled: Vec<_> = shared.iter().map(|file| (read(file), run(file))).collect();
         let _ = std::fs::remove_dir_all(&dir);
         for (file, (read, run)) in files.iter().zip(labels) {
             assert_eq!(read, json!(["self"]), "Read {file}");
             assert_eq!(run, json!(["self"]), "Bash {file}");
         }
-        assert_eq!(unlabeled, (Value::Null, Value::Null), "a skill holds no credential");
+        for (file, labels) in shared.iter().zip(unlabeled) {
+            assert_eq!(labels, (Value::Null, Value::Null), "{file} holds no credential");
+        }
     }
 
     /// A credential committed and then removed is still in the repository's history: a read
