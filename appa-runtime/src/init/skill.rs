@@ -14,9 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use super::{Compensation, InitError, Undo, file_before, write_state};
-use crate::guide::{self, CONTRACTS};
+use crate::guide::{self, CONTRACTS, ROUTER};
 
-const ROUTER: &str = include_str!("../../../integrations/appa-guide/SKILL.md");
 const CLAUDE_CODE: &str = include_str!("../../../integrations/appa-guide/references/claude-code.md");
 
 pub(super) static TEXT: LazyLock<String> = LazyLock::new(|| [ROUTER, guide::CORE, CLAUDE_CODE].join("\n\n"));

@@ -20,7 +20,10 @@ The `appa` binary exposes the core rules as `appa_runtime::guide::CORE` and
 compiles `SKILL.md` with the core rules and the Claude reference appended, in
 that order. `appa plugin install claude-code` writes that text to the user's
 Claude Code skills directory beside the policy-review guide. Claude
-therefore needs no gated `Read` call to bootstrap the guide. The runtime
+therefore needs no gated `Read` call to bootstrap the guide. `appa opencode
+setup` compiles `SKILL.md` with the core rules and `references/opencode.md`
+appended, and hands that text to the operator session as one read-only file.
+No package carries a copy. The runtime
 chart mounts a ConfigMap copy of `SKILL.md`, `references/core.md` and
 `references/kagent.md` from `charts/appa-runtime/files/skill/` over the git
 checkout;
