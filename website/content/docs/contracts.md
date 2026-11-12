@@ -38,8 +38,8 @@ Each `[[policy.tool]]` entry defines a contract governing a tool's execution lif
 
 | Lifecycle stage | Contract field | Description |
 |---|---|---|
-| Pre-dispatch evaluation | `requires` | Preconditions evaluated against the outbound label (`current_label ⊔ forwards`). Call is blocked if unsatisfied. |
-| Pre-dispatch evaluation | `forwards` | Label of data transmitted out-of-band by the tool. Joined to the outbound label during pre-dispatch checks. |
+| Pre-dispatch evaluation | `requires` | Preconditions evaluated against the outbound label (`current_label ⊓ forwards`). Call is blocked if unsatisfied. |
+| Pre-dispatch evaluation | `forwards` | Label of content the tool sends beyond its arguments. Combined into the outbound label during pre-dispatch checks. |
 | Post-dispatch update | `delta` | Label transition applied to the trajectory after result delivery. Can narrow audience or lower trust; cannot expand permissions. |
 | Post-dispatch update | `effects` | Side-effect identifiers appended to trajectory history upon successful execution. |
 
@@ -66,19 +66,19 @@ effects = ["egress"]
 | `parameters` | JSON Schema for tool arguments. Required when extracting specific arguments for annotators. |
 | `tags` | Category tags used to route blocked calls to matching authorities and sanitizers. See [Tags](#tags). |
 | `delta` | Label transition for tool results. Can narrow audience or lower trust; cannot expand permissions. |
-| `forwards` | Label transition for out-of-band data. Accepts only literal entries (no `$<argument>` placeholders). |
-| `requires` | Preconditions for executing the call: audience, trust, history, or attention requirements. |
+| `forwards` | Label of content the tool sends beyond its arguments. Accepts only literal entries (no `$<argument>` placeholders). |
+| `requires` | Preconditions for executing the call: audience, trust, effects, or attention requirements. |
 | `effects` | Side-effect identifiers recorded in trajectory history after successful execution. |
 | `annotator` | Name of a registered [annotator](#annotators) that dynamically computes the contract for each call. |
 | `recorder` | Name of a registered [recorder](#recorders) that receives audit records for released calls. |
 
 If omitted, `delta` and `forwards` add no restrictions, and `requires` imposes no preconditions.
 
-A tool contract must use either static fields (`delta`, `forwards`, `requires`, `effects`) or an `annotator`. Combining static contract fields with an annotator causes a configuration load error.
+A tool contract uses either static fields (`delta`, `forwards`, `requires`, `effects`) or an `annotator`. Beside an annotator, a tool can declare only a [label floor](#annotators); any other static field causes a configuration load error.
 
 OpenAPPA evaluates `requires` before dispatching a tool call. The engine checks the outbound flow label: the trajectory's current label combined with the tool's `forwards`. The tool's `delta` applies only to the returned result, so it does not affect pre-call evaluation.
 
-Use `forwards` when a tool accesses and transmits content out-of-band (data not passed through its arguments). In the example below, `mail_report` reads a server-side report and emails it. Because the report is marked `internal`, mailing it to an external recipient fails the `contains` check regardless of what data the trajectory previously read:
+Use `forwards` when a tool itself sends content that its arguments do not carry. In the example below, `mail_report` reads a server-side report and emails it. Because the report is marked `internal`, mailing it to an external recipient fails the `contains` check regardless of what data the trajectory previously read:
 
 ```toml
 [[policy.tool]]
@@ -283,7 +283,7 @@ Explicit tool contracts always take precedence over the wildcard, regardless of 
 
 ## Restrictions and requirements
 
-OpenAPPA tracks information flow using security labels composed of an audience set and a trust rank (`audience × trust`). Policies can also require event history preconditions (`effects`) and per-call approvals (`attention`).
+OpenAPPA tracks information flow using security labels composed of an audience set and a trust rank (`audience × trust`). Policies can also require recorded effects (`effects`) and per-call approvals (`attention`).
 
 ### Audiences
 
@@ -294,7 +294,7 @@ Use `delta.audience` to restrict the audience permitted to read a tool's output.
 | Field | Description | Runtime behavior |
 |---|---|---|
 | `delta.audience` | Allowed readers for the tool result. | Narrows the trajectory audience to the specified readers. |
-| `forwards.audience` | Allowed readers for out-of-band data sent by the tool. | Narrows the outbound label evaluated against `requires`. |
+| `forwards.audience` | Allowed readers for content the tool sends beyond its arguments. | Narrows the outbound label evaluated against `requires`. |
 | `requires.audience.contains` | Required recipients for outbound data. | Verifies that the trajectory audience is authorized to reach every specified reader. |
 
 In the example below, reading a CRM ticket restricts the trajectory to `internal`. The subsequent `publish_update` call requires unrestricted outbound reach (`public`):
@@ -391,7 +391,7 @@ Multi-user hosts can specify the identity each session acts for by passing an em
 
 Hosts supply the principal in-process via the embedded runtime API, or over HTTP via the `principal` field in `session_start`. Wire-supplied principals are supported under kagent when `APPA_SESSION_PRINCIPAL=wire` is set (the default, `none`, rejects requests containing a principal). Because `/hook` does not authenticate incoming callers, enable `wire` only when kagent authenticates requests and `/hook` is network-isolated. OpenAPPA relies on the host for authentication and does not verify session credentials directly; hosts must provide the verified address reported by membership providers. Multi-user configurations typically omit `[policy.audience] self`, causing any unauthenticated session lacking a principal to fail `self` checks. Policies referencing `self` in boundary declarations or starting labels still require a declared `self` source at load time.
 
-Policies may omit `self` or `internal`. If a policy check requires members of an omitted audience level (for example, checking `contains = ["internal"]` after output restricted the audience to `self`), the check cannot resolve. OpenAPPA denies the call and logs the missing configuration.
+Policies may omit `self` or `internal`. If a policy check requires members of an omitted audience level (for example, checking `contains = ["internal"]` after output restricted the audience to `self`), the check cannot resolve. OpenAPPA denies the call and names the missing key.
 
 Each selector entry uses the format `provider:selector`. The provider name corresponds to a binding under `[externals.audience.<provider>]`. The selector identifies the specific group or resource to query, matching one of the provider's declared `selectors` templates.
 
@@ -550,14 +550,14 @@ Before serving traffic from a new or reloaded policy, OpenAPPA executes a startu
 
 ### Trust
 
-Trust ranks quantify data provenance and integrity within a trajectory. A trust rank is a discrete level (such as `suspicious` or `trusted`). Trajectory trust follows a monotonic low-water-mark model: ingesting data at a lower rank degrades the trajectory's trust, and subsequent outputs cannot elevate it. Sinks enforce minimum required trajectory trust ranks before execution.
+Trust ranks quantify data provenance and integrity within a trajectory. A trust rank is a discrete level (such as `suspicious` or `trusted`). Reading data at a lower rank lowers the trajectory's trust, and later results cannot raise it again. Tools can require a minimum rank before they run.
 
 Configure trust bounds using the following fields:
 
 | Field | Description | Example |
 |---|---|---|
 | `delta.trust` | Output trust rank. Computes the meet with trajectory trust; can lower or maintain trust, but cannot elevate it. | `delta = { trust = "suspicious" }` |
-| `forwards.trust` | Trust rank of out-of-band data sent by the tool. Joined to the outbound label evaluated against `requires.trust`. | `forwards = { trust = "suspicious" }` |
+| `forwards.trust` | Trust rank of content the tool sends beyond its arguments. Combined into the outbound label evaluated against `requires.trust`. | `forwards = { trust = "suspicious" }` |
 | `requires.trust` | Minimum trajectory trust rank required to execute this tool call. | `requires = { trust = "trusted" }` |
 
 Trust rank names must appear in the policy's configured trust chain.
@@ -576,11 +576,11 @@ Content authored strictly by organization members or verified collaborators main
 
 Because static contracts cannot inspect per-call authors, they must assume worst-case write access: reading a public repository issue statically assigns `suspicious`. Dynamic annotators can evaluate specific authors using context reported by a [context provider](#context-providers). Deployment hints (`[policy.deployment] hint`) instruct annotators on whether specific endpoints are trusted or suspicious.
 
-Guest accounts and installed integrations act under organizational identity. If an integration relays unvetted external text into an internal channel, static policies treat that text as internal; use dynamic annotators where untrusted relays must be checked.
+Guest accounts and installed integrations write as the organization, so text they post keeps the trajectory's trust.
 
 #### Declare tool restrictions and requirements
 
-In the example below, `trust_chain` defines the default trust lattice. The `read_web_page` contract marks its output as `suspicious`. Once the trajectory ingests web content, OpenAPPA blocks `apply_db_migration` because it requires `trusted` inputs:
+In the example below, `trust_chain` sets the default ranks explicitly. The `read_web_page` contract marks its output as `suspicious`. Once the trajectory ingests web content, OpenAPPA blocks `apply_db_migration` because it requires `trusted` inputs:
 
 ```toml
 [policy]
@@ -596,11 +596,11 @@ name = "apply_db_migration"
 requires = { trust = "trusted" }
 ```
 
-Subsequent tool results marked `trusted` do not restore a trajectory's trust after a downgrade to `suspicious`. An [authority](#authorities) with appropriate permissions can approve a blocked call without altering the underlying trajectory label, or a [sanitizer](#sanitizers) can declassify or endorse sanitized outputs.
+Subsequent tool results marked `trusted` do not restore a trajectory's trust after a downgrade to `suspicious`. An [authority](#authorities) with appropriate permissions can approve a blocked call without altering the underlying trajectory label, or a [sanitizer](#sanitizers) can assign a cleaned result the audience or trust rank its `permits` allow.
 
 ### Effects
 
-Effects track completed actions in trajectory history, allowing policies to enforce action ordering and idempotency preconditions.
+Effects track completed actions in trajectory history, so later calls can require that an action has, or has not, already occurred.
 
 | Field | Description | Example |
 |---|---|---|
@@ -662,7 +662,7 @@ Authorities with `permits = { attention = ["*"] }` can approve any declared atte
 
 ## Annotators
 
-An annotator dynamically computes contract rules for tool calls. It can return output restrictions (`delta`), out-of-band flow restrictions (`forwards`), execution preconditions (`requires`), and side effects (`effects`). (The built-in `jev` annotator determines audience and trust labels only.)
+An annotator dynamically computes contract rules for tool calls. It can return output restrictions (`delta`), restrictions on content the call sends beyond its arguments (`forwards`), execution preconditions (`requires`), and side effects (`effects`). (The built-in `jev` annotator determines audience and trust labels only.)
 
 Use annotators when call rules depend on runtime arguments or external context (such as classifying file access by filesystem directory or database queries by target table).
 
@@ -794,11 +794,11 @@ Annotator permits enforce strict bounds on what an annotator may return:
 
 `public` is always permitted and must not be listed in `audiences`. Setting `audiences = []` allows only `public` classifications.
 
-An empty list explicitly denies all values for that field (for example, `marks = []` forbids the annotator from attaching attention marks, and `audiences = []` permits only `public`). An omitted field permits any value valid within the policy.
+An empty list explicitly denies all values for that field (for example, `marks = []` forbids the annotator from attaching attention marks, and `audiences = []` permits only `public`). An omitted field permits any value valid within the policy: omitting `marks` lets the annotator require any mark the policy declares, including `blocked` if the policy uses it.
 
 An annotator may return selector placeholders only if explicitly declared in its `audiences` permit (such as `@github:repo/$owner/$repo/collaborators`). Declaring a placeholder requires all tools bound to the annotator to provide those arguments; consequently, the wildcard tool `*` cannot use an annotator with selector placeholders. In consult requests, OpenAPPA instantiates placeholders into concrete values (e.g. `@github:repo/acme/api/collaborators`), and the annotator must reference only those instantiated values. See [Read a source collection from a tool argument](#read-a-source-collection-from-a-tool-argument).
 
-An optional `hint` (maximum 512 characters) provides task-specific classification rules (e.g. mapping specific directory paths or commands to labels). Built-in annotators (`claude-code`, `llm`, `jev`) automatically include OpenAPPA's label guide; hints override guide defaults on conflict without needing to restate standard rules. Hints cannot expand configured permits.
+An optional `hint` (maximum 512 characters) provides task-specific classification rules (e.g. mapping specific directory paths or commands to labels). Built-in annotators (`claude-code`, `llm`, `jev`) automatically include OpenAPPA's label guide, so a hint does not restate it. Hints cannot expand configured permits.
 
 An optional deployment-wide hint (`[policy.deployment] hint`, maximum 2,048 characters, root configuration only) defines global environment boundaries, such as internal hostnames or forge domains. OpenAPPA forwards this to all annotators as `declaration.deployment_hint`.
 
@@ -818,7 +818,7 @@ Built-in annotator engines are configured directly via `builtin` on `[[policy.an
 
 An annotator declaring `builtin` must not define an `[externals.annotators.<name>]` section. Unlike sanitizers and authorities, annotator builtins belong in `[[policy.annotator]]`.
 
-`claude-code` requires the `claude` CLI on `PATH`. On Windows, `claude` must resolve to `claude.exe` (OpenAPPA cannot execute the `claude.cmd` npm shim). `llm` requires `[externals.llm]` configuration. `jev` requires `[externals.jev]` credentials, classifies the entire call object (cannot use `inputs`), and requires a trust chain with at least two ranks. Configurations with missing, unrecognized, or unconfigured builtins are rejected at policy load.
+`claude-code` requires the `claude` CLI on `PATH`. On Windows, `claude` must resolve to `claude.exe` (OpenAPPA cannot execute the `claude.cmd` npm shim). `llm` requires `[externals.llm]` configuration. `jev` requires `[externals.jev]` credentials, classifies the entire call object (cannot use `inputs`), and requires a mandate whose `ranks` admit at least two trust ranks. Configurations with missing, unrecognized, or unconfigured builtins are rejected at policy load.
 
 ### Annotator protocol
 
@@ -871,7 +871,7 @@ Annotators respond with an `answer` object specifying `delta`, `requires`, and `
 
 Protocol constraints:
 - `answer` must define `delta`, `requires`, and `emits`, and may include `forwards` and `evidence`. Unrecognized keys are rejected.
-- `evidence` is an optional opaque string (up to 1,024 bytes) recording provenance (such as a policy version or file hash). It forms part of the call's cryptographic digest and is forwarded to configured [recorders](#recorders).
+- `evidence` is an optional opaque string (up to 1,024 bytes) recording provenance (such as a policy version or file hash). It is part of the recorded annotation and is forwarded to configured [recorders](#recorders).
 - `forwards` uses the same structure and validation as `delta`.
 - `requires` must include `history` and `attention` arrays (even when empty).
 - `requires.audience` must contain exactly `contains`.
@@ -883,7 +883,7 @@ OpenAPPA rejects responses containing unknown keys, null values, empty audience 
 
 Annotations are bound strictly to the specific call evaluated. Any change to call arguments requires a fresh annotation. Replaying a recorded session reuses cached annotations and membership data without re-querying annotators.
 
-If an annotator fails, times out, or returns values outside its permits, the call is denied.
+If an annotator fails, times out, or returns values outside its permits, the call is denied. OpenAPPA checks that the answer uses permitted values; the annotator is responsible for classifying the call correctly.
 
 ### Test an annotator
 
@@ -1081,7 +1081,7 @@ When a tool result would restrict the trajectory label, OpenAPPA offers matching
 
 If the sanitized output still carries restrictions, the agent may accept the narrowed label or apply another compatible sanitizer. Sanitizing a newly ingested result does not retroactively remove restrictions incurred from earlier steps.
 
-Transforming tool arguments can satisfy audience `contains` requirements (for example, replacing an external recipient with an internal address). Argument sanitization cannot satisfy trust requirements because modifying arguments does not decontaminate the trajectory history that generated them. Argument sanitization replaces argument values only; any `forwards` label defined on the tool contract continues to apply.
+Transforming tool arguments can satisfy audience `contains` requirements (for example, replacing an external recipient with an internal address). Argument sanitization cannot satisfy trust requirements because modifying arguments does not remove the `taint` the trajectory already carries. Argument sanitization replaces argument values only; any `forwards` label defined on the tool contract continues to apply.
 
 Following argument sanitization, OpenAPPA evaluates the call against contracts matching the modified arguments, re-checking preconditions, effects, and schemas. If the new contract uses an annotator, a fresh annotation is requested. Cached audience membership data is reused.
 
@@ -1314,7 +1314,7 @@ A `void return` suppresses all return communication from the child to the parent
 { "offer_id": "<the void offer ID>" }
 ```
 
-Because no output crosses the boundary into the parent context, the child cannot contaminate or restrict the parent's label. The child may accept any label narrowing required for its task. The child must terminate with an empty final message; OpenAPPA blocks non-empty final text or `StructuredOutput` calls and instructs the child to terminate with an empty response.
+Because no output crosses the boundary into the parent context, the child's `taint` cannot reach the parent's label. The child may accept any label narrowing required for its task. The child must terminate with an empty final message; OpenAPPA blocks non-empty final text or `StructuredOutput` calls and instructs the child to terminate with an empty response.
 
 Use void returns for child agents that perform autonomous mutations through their own tools without returning data. Void contracts govern return communication only; all tool calls issued by the child remain subject to their own policy contracts.
 
@@ -1326,14 +1326,14 @@ A `fan-out spawn` launches multiple concurrent or sequential subagents under a s
 - Available remedy plans include direct validation, untagged `tool_output` sanitizers, and void returns (`attest-schema` is excluded because later agents may start after trust has degraded).
 - In Claude Code, child agents are associated with the prompt context of the enclosing `Workflow`. Concurrent `Workflow` calls within the same prompt are rejected until the active workflow completes.
 
-Workflow completion payloads do not require separate checks if the orchestration script performs no direct I/O; data crossing to the parent consists strictly of validated child agent returns.
+The workflow's own result needs no separate check: the script performs no I/O, so the only data it passes to the parent is the validated child answers.
 
-Child agent transcripts are protected session files; direct tool reads targeting them are denied.
+Child agent transcripts are protected session files; direct tool reads targeting them are denied. The return check covers the child's answer. Files the child writes carry no label unless a [recorder](#recorders) tracks them.
 
 ### Structured child returns
 
 Use the built-in sanitizer `attest-schema` when a child agent must extract structured data (such as integers or enum values) from untrusted inputs without inheriting `suspicious` trust. `attest-schema` validates the payload against a declared JSON Schema without mutating it. It can elevate trust from `suspicious` to `trusted` only when all of the following conditions are met:
-1. Every schema property enforces strict bounds: numbers, booleans, enum values, or constrained regex patterns. Unconstrained strings and free text are rejected.
+1. Every schema leaf bounds what the child can return: a boolean, an integer or decimal with declared bounds, a fixed list of choices (`enum` or `const`), or a `format` from OpenAPPA's closed list. Free strings, including strings constrained only by `pattern`, are rejected.
 2. The parent declares the schema before the child reads untrusted data.
 3. The parent holds `trusted` status when spawning the child.
 
@@ -1528,7 +1528,7 @@ Deployment settings:
 - `max_body_bytes`: Maximum accepted response payload size (default: 65,536 bytes).
 - `review_timeout_ms`: Maximum duration human review requests remain pending (default: 600,000 ms).
 
-These settings apply globally across the deployment unless overridden in specific component sections. [Model implementations](#model-implementations) and [Jev](#jev) configure their own `timeout_ms` and `max_concurrent` limits. `max_concurrent` bounds concurrent requests to a backend across all active sessions.
+These settings apply to the whole deployment; a binding cannot override them. [Model implementations](#model-implementations) and [Jev](#jev) configure their own `timeout_ms` and `max_concurrent` limits in their own sections. `max_concurrent` bounds concurrent requests to a backend across all active sessions.
 
 Implementation requirements by component type:
 
@@ -1608,13 +1608,15 @@ Consult requests never expose the agent's full trajectory label, history, or con
 
 Components must respond with `{"version":1,"answer":{...}}` containing fields corresponding to their component type. Additional top-level fields are rejected.
 
-OpenAPPA denies execution if a service returns an HTTP error, exits with a non-zero status code, times out, exceeds `max_body_bytes`, or returns malformed JSON.
+OpenAPPA rejects a response if the service returns an HTTP error, exits with a non-zero status code, times out, exceeds `max_body_bytes`, or returns malformed JSON.
 
 ### Model implementations
 
-The `claude-code` and `llm` backends dispatch consult requests to language models. OpenAPPA injects fixed instructions and `declaration` constraints into the system prompt, including the formal label guide for annotators. Call data in `artifact` is sent as user content.
+The `claude-code` and `llm` backends dispatch consult requests to language models. OpenAPPA injects fixed instructions and `declaration` constraints into the system prompt, including the label guide for annotators. Call data in `artifact` is sent as user content.
 
-Before dispatching annotator requests to external model providers (`claude-code`, `llm`, or `jev`), OpenAPPA automatically redacts detected credentials in `artifact.args` using the built-in secret detector. Fields matching credential keywords (`password`, `token`, `secret`, `api_key`, `credential`, etc.) or high-entropy tokens are replaced with `[redacted-secret]`. Authority and sanitizer payloads are not redacted, as sanitizers require raw text for processing.
+Before dispatching annotator requests to external model providers (`claude-code`, `llm`, or `jev`), OpenAPPA automatically redacts detected credentials in `artifact.args` using the built-in secret detector. Fields matching credential keywords (`password`, `token`, `secret`, `api_key`, `credential`, etc.) or high-entropy tokens are replaced with `[redacted-secret]`. Redaction is best effort. Authority and sanitizer payloads are not redacted, as sanitizers require raw text for processing.
+
+OpenAPPA checks authority and annotator answers against their permits and assigns sanitized data the declared audience or trust rank. The model is responsible for making the correct judgment or removing the required content.
 
 OpenAPPA derives expected response schemas from the component's declaration. Model backends return the inner `answer` object directly.
 
@@ -1627,7 +1629,7 @@ OpenAPPA derives expected response schemas from the component's declaration. Mod
 | `timeout_ms` | Per-request timeout including queue wait. | `60000` |
 | `max_concurrent` | Maximum concurrent processes. | `4` |
 
-Each consult spawns an isolated `claude -p` process in a temporary working directory with project settings and tools disabled.
+Each consult spawns a fresh `claude -p` process in a temporary working directory with project settings and tools disabled.
 
 `[externals.llm]` configures direct API integrations for `builtin = "llm"` components:
 
@@ -1646,7 +1648,7 @@ Supported providers are `anthropic`, `openai`, `gemini`, and `ollama`. `token_en
 
 Deployments referencing `builtin = "llm"` initialize only if the required API token is set in the environment (or if using `ollama` without authentication). An unused `[externals.llm]` section does not require an API key to load.
 
-Transient failures (connection errors, HTTP 429, or HTTP 5xx) are retried up to three times with a 500 ms backoff if `timeout_ms` permits.
+Transient failures (connection errors, HTTP 429, or HTTP 5xx) are retried with a 500 ms backoff, up to three attempts in total, if `timeout_ms` permits.
 
 Requests use provider default temperature and sampling parameters. `openai` uses the Chat Completions API. `ollama` defaults to `http://localhost:11434` without authentication.
 

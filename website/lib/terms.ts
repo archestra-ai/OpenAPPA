@@ -16,6 +16,8 @@ const TERMS = {
   /* Core Engine Concepts */
   label:
     "The security state attached to a trajectory, tracking allowed readers (audience) and trust rank.",
+  taint:
+    "The restrictions a trajectory carries from the values it admitted: a narrowed audience, a lowered trust rank, or both. Within a trajectory, taint only grows; a later result cannot remove it. A subagent fork absorbs taint locally, and only its checked answer can carry taint back to the parent.",
   log:
     "The append-only execution history recording tool dispatches, narrowing acceptances, authority approvals, and denials.",
   authority:

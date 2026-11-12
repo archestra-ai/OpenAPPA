@@ -5,9 +5,9 @@ order: 4
 description: Tool-flow enforcement, file labels, SafeBash, shell rules, and checked delegation for coding agents.
 ---
 
-OpenAPPA monitors and restricts coding agent tool calls and subagent execution via harness hooks and an in-process MCP server. For [Claude Code](/claude-code), it enforces three core boundaries: protected sessions, validated subagent returns, and policy contracts for native filesystem and shell tools.
+OpenAPPA monitors and restricts coding agent tool calls and subagent execution through harness hooks and the runtime's `appa` MCP server. For [Claude Code](/claude-code), it enforces three core boundaries: protected sessions, validated subagent returns, and policy contracts for native filesystem and shell tools.
 
-> **Scope Note:** OpenAPPA tracks information flow and validates tool invocations; it does not isolate processes. Pair it with operating-system sandboxing (such as containers or namespaces) for execution confinement.
+> **Scope Note:** OpenAPPA tracks information flow and validates tool invocations. It builds no sandbox of its own: in Claude Code it confines each shell command in the harness's sandbox ([SafeBash](#safebash)). For other harnesses, pair it with operating-system sandboxing (such as containers or namespaces).
 
 ## Protected sessions
 
@@ -21,17 +21,17 @@ Enforcement hooks evaluate calls only when `APPA_GATE=1` is set in the process e
 - **Protected (`clappa`):** The supported launcher automatically sets `APPA_GATE=1`.
 - **Custom Launchers:** When invoking Claude Code directly, export `APPA_GATE=1` and set `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` (backgrounded sessions are unsupported).
 
-`clappa` also manages state tokens required for session integrity:
-- **Launch token:** Binds session state. Without it, each new session ID initializes with an unlinked, fresh security label.
-- **Parent lineage:** Binds forked sessions to the parent trajectory's taint context. Without `clappa`, a forked session inherits parent conversation history but resets to a clean label (avoid forking unprotected sessions).
-- **Messaging address:** Required for inter-session peer communication.
+`clappa` also supplies the following values. A session started another way does not have them unless its launcher sets the same values:
+- **Launch token:** Without it, each new session ID opens a fresh label.
+- **Fork parent:** Without it, a forked session carries the parent's conversation but starts at a clean label, without the parent's `taint`. Do not fork such a session.
+- **Messaging address:** Without it, a session cannot receive peer messages.
 - **Confined shell:** Without it, Claude Code's own `Bash` declares no file lists, and the file-tracker refuses every `Bash` call. Register SafeBash instead: an MCP server named `file-tracker` that runs `appa file-tracker mcp`. Also list `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit` in `permissions.deny`.
 
 ### Boundary limitations and failure modes
 
-- **Client-Side Enforcement:** Because hooks execute in userspace inside the Claude Code client process, local configuration files can disable protection via `APPA_GATE` or `disableAllHooks`.
+- **Client-Side Enforcement:** Protection runs on the client, so Claude Code settings can turn it off with `APPA_GATE` or `disableAllHooks`.
 - **Fail-Closed Behavior:** If the OpenAPPA runtime disconnects or becomes unavailable, all hooked actions block by default.
-- **Telemetry:** The terminal status line displays the active trajectory's trust level and audience scope. See the [Claude Code guide](/claude-code) for setup and policy enforcement walk-throughs.
+- **Status line:** The terminal status line displays the active trajectory's trust level and audience scope. See the [Claude Code guide](/claude-code) for setup and policy enforcement walk-throughs.
 
 ## Subagent return checks
 
@@ -43,9 +43,9 @@ When a parent agent delegates through Claude Code's native `Agent` tool, OpenAPP
    - Constrain the response to a specified security label.
    - Route the output through a designated sanitizer.
 
-Human review is required only if the spawn request itself violates policy or requires explicit authority approval.
+OpenAPPA asks a person only when the spawn has another gap that an authority must approve.
 
-During execution, OpenAPPA monitors child tool calls under standard policy. Once the child finishes, OpenAPPA intercepts and validates the final response payload before releasing it to the parent context. If validation fails, the child remains active until it produces an admissible response. This mechanism allows subagents to inspect sensitive files (e.g. credential logs or private tickets) without leaking prohibited data back into the parent trajectory. See [Subagent reads](/how-it-works#subagent-reads) and [Subagent Returns](/contracts#subagent-returns).
+During execution, OpenAPPA monitors child tool calls under standard policy. Once the child finishes, OpenAPPA intercepts and validates the final response payload before releasing it to the parent context. If validation fails, the child remains active until it produces an admissible response. This mechanism allows subagents to inspect sensitive files (e.g. credential-adjacent logs or private tickets) without leaking prohibited data back into the parent trajectory. See [Subagent reads](/how-it-works#subagent-reads) and [Subagent Returns](/contracts#subagent-returns).
 
 ## Shell and native file tools
 
