@@ -101,7 +101,6 @@ but never renames them.
 
 ```sh
 cargo test --locked -p appa --test launchdarkly_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 ```
 
 ## Sanitizers

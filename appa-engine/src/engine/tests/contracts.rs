@@ -245,6 +245,13 @@ fn selector_order_and_matchers_move_policy_identity_but_normalized_wildcards_do_
     assert_ne!(conjunction, base, "a second clause is a different predicate");
     assert_ne!(identity(&["read(path:secret*,mode:ro)", "read"]), conjunction);
     assert_ne!(identity(&["read(path:secret*,scope:rw)", "read"]), conjunction);
+
+    // Alternation is commutative and idempotent too: a repeated alternative is the pattern
+    // written once.
+    let either = identity(&["read(path:secret*|private*)", "read"]);
+    assert_eq!(identity(&["read(path:private*|secret*)", "read"]), either);
+    assert_ne!(either, base, "a second alternative is a different predicate");
+    assert_eq!(identity(&["read(path:secret*|secret*)", "read"]), base);
 }
 
 #[test]

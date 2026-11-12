@@ -233,7 +233,6 @@ statement to a person.
 ```sh
 python3 -m unittest discover -s marketplace/batteries/databricks -p 'test_*.py'
 cargo test --locked -p appa --test databricks_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 ```
 
 ## Sanitizers

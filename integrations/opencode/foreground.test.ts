@@ -8,6 +8,7 @@ import { configuration, guide, install } from './setup'
 // Only inference is scripted. The published CLI, plugin, native tools, APPA
 // daemon, policy store and MCP remedy execution are real.
 const payload = resolve(import.meta.dir, '../../marketplace/plugins/opencode')
+const contracts = resolve(import.meta.dir, '../../website/content/docs/contracts.md')
 let directory: string
 let runtime: ReturnType<typeof Bun.spawn>
 let server: ReturnType<typeof Bun.spawn>
@@ -59,6 +60,7 @@ async function startServer(setupConfig?: string) {
     APPA_OPENCODE_RUNTIME_URL: proxy.url.toString(),
     APPA_OPENCODE_SETUP_CONFIG: setupConfig,
     APPA_OPENCODE_SETUP_GUIDE: setupConfig ? setupGuide : undefined,
+    APPA_OPENCODE_SETUP_CONTRACTS: setupConfig ? contracts : undefined,
     APPA_OPENCODE_SETUP_BINARY: setupConfig ? resolve(process.env.APPA_TEST_BINARY || '../../target/debug/appa') : undefined,
     OPENCODE_PASSWORD: password, OPENCODE_DISABLE_MODELS_FETCH: '1' },
   stdout: Bun.file(`${directory}/opencode.log`), stderr: Bun.file(`${directory}/opencode-error.log`) })
@@ -566,7 +568,7 @@ test('operator setup proposes without writing, rejects invalid and stale policie
   const batteryRequest = requests.at(-1)
   const batteryMessage = [...batteryRequest.messages].reverse().find((message: any) => message.role === 'tool')
   const battery = JSON.parse(batteryMessage.content)
-  expect(battery.contracts).toBe(await readFile(`${payload}/contracts.md`, 'utf8'))
+  expect(battery.contracts).toBe(await readFile(contracts, 'utf8'))
   expect(battery.files['appa.toml']).toBe(await readFile(resolve(import.meta.dir, '../../marketplace/batteries/opencode/appa.toml'), 'utf8'))
   expect(Buffer.byteLength(batteryMessage.content)).toBeGreaterThan(50 * 1024)
   expect(batteryMessage.content).not.toContain('Full output saved')

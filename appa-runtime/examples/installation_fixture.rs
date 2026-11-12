@@ -35,6 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let marketplace = repository.join("marketplace");
+    // The repository carries packages; the catalog a version ships is derived.
+    let catalog = appa_package::Marketplace::render(&marketplace)?;
     let binary_archive = tempfile::NamedTempFile::new()?;
     let platform = Platform::current().ok_or("unsupported fixture platform")?;
     if matches!(platform, Platform::WindowsAmd64 | Platform::WindowsArm64) {
@@ -56,12 +58,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         flate2::Compression::fast(),
     ));
     tar.append_dir_all(".", &marketplace)?;
+    append(&mut tar, appa_package::CATALOG_FILE, catalog.as_bytes())?;
     tar.into_inner()?.finish()?;
     let binary_digest = digest(binary_archive.path())?;
     let marketplace_digest = digest(marketplace_archive.path())?;
     let placeholder = ArtifactDigest::of_bytes(b"unused fixture artifact");
     let descriptor = serde_json::json!({"schema":1,"repository":REPOSITORY,"commit":identity["commit"],"release":release,"protocol":appa_package::PROTOCOL,
-        "catalog":digest(&marketplace.join("marketplace.toml"))?,"marketplace":marketplace_digest,"batteries":batteries_digest,"runtime_chart":placeholder,
+        "catalog":ArtifactDigest::of_bytes(catalog.as_bytes()),"marketplace":marketplace_digest,"batteries":batteries_digest,"runtime_chart":placeholder,
         "binaries":Platform::ALL.into_iter().map(|p|(p,if p == platform { binary_digest.clone() } else { placeholder.clone() })).collect::<BTreeMap<_,_>>(),
         "images":Image::ALL.into_iter().map(|image|(image,serde_json::json!({"digest":placeholder,"platforms":{"linux/amd64":placeholder}}))).collect::<BTreeMap<_,_>>()});
     let generation = Generation::parse(&serde_json::to_vec(&descriptor)?)?;
@@ -77,6 +80,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &std::fs::read(marketplace.join("plugins/claude-code/default.appa.toml"))?,
     )?;
     tar.append_dir_all("marketplace", &marketplace)?;
+    append(
+        &mut tar,
+        &format!("marketplace/{}", appa_package::CATALOG_FILE),
+        catalog.as_bytes(),
+    )?;
     tar.append_path_with_name(binary_archive.path(), format!("artifacts/{}", platform.archive()))?;
     tar.append_path_with_name(batteries, format!("artifacts/appa-batteries-{}.tar.gz", &release[1..]))?;
     tar.append_path_with_name(

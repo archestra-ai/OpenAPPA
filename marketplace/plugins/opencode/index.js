@@ -1336,11 +1336,14 @@ ${stdout}`);
         let battery = catalog.find((item) => item.name === input.battery);
         if (!battery)
           throw Error("Choose a battery from the inspected catalog.");
+        let contracts = process.env.APPA_OPENCODE_SETUP_CONTRACTS;
+        if (!contracts || !isAbsolute(contracts))
+          throw Error("Setup requires the contract reference path from the operator launcher.");
         return JSON.stringify({
           ...battery,
           deployment_target: target,
           files: Object.fromEntries(await Promise.all(["appa-package.toml", "appa.toml", "README.md", ...battery.target_policy ? [battery.target_policy] : []].map(async (name) => [name, await readFile(join(store, battery.name, name), "utf8")]))),
-          contracts: await readFile(assets ? join(assets, "contracts.md") : join(checkout, "website/content/docs/contracts.md"), "utf8")
+          contracts: await readFile(contracts, "utf8")
         });
       }
       case "publish": {

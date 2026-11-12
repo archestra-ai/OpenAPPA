@@ -111,7 +111,6 @@ changes; a tool the policy does not name is blocked.
 
 ```sh
 cargo test --locked -p appa --test posthog_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 ```
 
 ## Sanitizers

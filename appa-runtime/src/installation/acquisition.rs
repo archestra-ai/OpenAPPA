@@ -10,6 +10,7 @@ use std::process::Command;
 use appa_package::generation::{
     ArtifactDigest, BUILD_BATTERIES_ARCHIVE, Commit, DESCRIPTOR_FILE, Generation, Platform, REPOSITORY,
 };
+use appa_package::{CATALOG_FILE, Marketplace};
 use serde::Deserialize;
 
 use super::{InstallError, Selection, invalid, io, verify_packages};
@@ -198,7 +199,7 @@ impl Acquired {
     /// (uncommitted changes) or no longer at HEAD. Answers the commit only for
     /// an export. A listing needs no artifacts; an install builds the whole
     /// generation.
-    pub fn build_catalog(stage: &Path) -> Result<(Option<Commit>, PathBuf), InstallError> {
+    pub fn build_catalog(stage: &Path) -> Result<(Option<Commit>, PathBuf, Marketplace), InstallError> {
         let root = option_env!("APPA_BUILD_REPOSITORY")
             .map(Path::new)
             .ok_or_else(|| InstallError::Invalid("this build names no checkout to list from".into()))?;
@@ -210,9 +211,17 @@ impl Acquired {
             Some(commit) if git_head(root).as_deref() == Some(commit.as_str()) => {
                 let repository = stage.join("repository");
                 export_commit(root, &repository)?;
-                Ok((Some(commit), repository.join("marketplace")))
+                let marketplace = repository.join("marketplace");
+                let catalog = parse_catalog(&write_catalog(&marketplace)?, &marketplace)?;
+                Ok((Some(commit), marketplace, catalog))
             }
-            _ => Ok((None, root.join("marketplace"))),
+            _ => {
+                // The working tree is read in place, so its catalog stays in memory.
+                let marketplace = root.join("marketplace");
+                let catalog = Marketplace::render(&marketplace).map_err(invalid)?;
+                let catalog = parse_catalog(catalog.as_bytes(), &marketplace)?;
+                Ok((None, marketplace, catalog))
+            }
         }
     }
 
@@ -223,7 +232,7 @@ impl Acquired {
     pub fn build(requirements: Requirements) -> Result<Self, InstallError> {
         let commit = option_env!("APPA_BUILD_COMMIT").ok_or_else(|| {
             InstallError::Invalid(
-                "this development build has uncommitted plugin changes; commit them and rebuild, or install a published version with --revision"
+                "this development build has uncommitted battery changes; commit them and rebuild, or install a published version with --revision"
                     .into(),
             )
         })?;
@@ -250,7 +259,7 @@ impl Acquired {
             )));
         }
         let marketplace = repository.join("marketplace");
-        let catalog = ArtifactDigest::of_bytes(&super::required_bytes(&marketplace.join("marketplace.toml"))?);
+        let catalog = ArtifactDigest::of_bytes(&write_catalog(&marketplace)?);
         let batteries_archive = stage.path().join(BUILD_BATTERIES_ARCHIVE);
         pack_tree(&staged, &batteries_archive)?;
         let binary_archive = stage.path().join(platform.archive());
@@ -266,11 +275,7 @@ impl Acquired {
             digest_of(&batteries_archive)?,
         )
         .map_err(invalid)?;
-        verify_packages(&marketplace, &generation).map_err(|error| {
-            InstallError::Invalid(format!(
-                "{error}; if packages changed at commit {commit}, regenerate the catalog with scripts/appa-marketplace.sh and commit it"
-            ))
-        })?;
+        verify_packages(&marketplace, &generation)?;
         let mut archives = BTreeMap::new();
         for name in required_archives(&generation, requirements)? {
             archives.insert(name.clone(), stage.path().join(&name));
@@ -438,6 +443,21 @@ fn source_at_commit(commit: &Commit, stage: &Path) -> Result<PathBuf, InstallErr
     fs::create_dir(&container).map_err(|error| io("stage source", &container, error))?;
     super::archive::extract_archive(&archive, &container).map_err(invalid)?;
     super::archive::single_directory(&container).map_err(invalid)
+}
+
+/// A marketplace tree from Git carries packages and no catalog: the catalog is
+/// derived from them, so it is written here, into the staged tree, before
+/// anything digests or reads it.
+fn write_catalog(marketplace: &Path) -> Result<Vec<u8>, InstallError> {
+    let catalog = Marketplace::render(marketplace).map_err(invalid)?.into_bytes();
+    let path = marketplace.join(CATALOG_FILE);
+    fs::write(&path, &catalog).map_err(|error| io("write the derived catalog", &path, error))?;
+    Ok(catalog)
+}
+
+fn parse_catalog(catalog: &[u8], marketplace: &Path) -> Result<Marketplace, InstallError> {
+    let text = std::str::from_utf8(catalog).map_err(invalid)?;
+    Marketplace::parse(text, &marketplace.join(CATALOG_FILE)).map_err(invalid)
 }
 
 fn git_head(root: &Path) -> Option<String> {

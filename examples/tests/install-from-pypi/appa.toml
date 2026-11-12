@@ -1,0 +1,23 @@
+# Reading a file under /hr/ limits the data to the HR address. After that, an
+# install whose hosts are all PyPI's still runs. `|` separates the rule's
+# alternatives, so one rule covers both hosts. Any other host needs public data.
+
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "mcp/files/read(path:/hr/*)"
+delta = { audience = ["hr@archestra.ai"] }
+
+[[policy.tool]]
+name = "mcp/shell/install(hosts:pypi.org|files.pythonhosted.org)"
+delta = {}
+
+[[policy.tool]]
+name = "mcp/shell/install"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536

@@ -685,8 +685,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_shipped_github_battery_is_detected_by_gh() {
-        let marketplace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace");
-        let catalog = Marketplace::read(&marketplace.join("marketplace.toml")).unwrap();
+        let shipped = super::super::tests::shipped_marketplace();
+        let marketplace = shipped.path().join("marketplace");
+        let catalog = super::super::read_catalog(&marketplace).unwrap();
         let available = batteries(&marketplace, &catalog, Host::ClaudeCode).unwrap();
         let root = tempfile::tempdir().unwrap();
         let with_gh = root.path().join("with-gh");

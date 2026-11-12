@@ -5,6 +5,9 @@ import { join, resolve } from 'node:path'
 import { configuration, guide } from './setup'
 
 const directory = await mkdtemp(join(tmpdir(), 'appa-setup-test-'))
+const contracts = resolve(import.meta.dir, '../../website/content/docs/contracts.md')
+// The operator launcher supplies the contract reference; these tests stand in for it.
+process.env.APPA_OPENCODE_SETUP_CONTRACTS = contracts
 afterAll(() => rm(directory, { recursive: true, force: true }))
 
 test('setup reads the installer catalog, filters host compatibility, and keeps deployment-relative includes', async () => {
@@ -25,7 +28,10 @@ test('setup reads the installer catalog, filters host compatibility, and keeps d
     const battery = JSON.parse((await setup({ operation: 'battery', battery: 'available' }, []))!)
     expect(battery.path).toBe('batteries/available/appa.toml')
     expect(battery.files['README.md']).toBe('Catalog documentation')
-    expect(battery.contracts).toContain('contract')
+    expect(battery.contracts).toBe(await readFile(contracts, 'utf8'))
+    delete process.env.APPA_OPENCODE_SETUP_CONTRACTS
+    await expect(setup({ operation: 'battery', battery: 'available' }, [])).rejects.toThrow('contract reference')
+    process.env.APPA_OPENCODE_SETUP_CONTRACTS = contracts
     await expect(setup({ operation: 'battery', battery: 'incompatible' }, [])).rejects.toThrow('catalog')
     for (const status of ['pending', 'failed', 'needs_auth'] as const) {
       await expect(setup({ operation: 'publish', policy: '[policy]\nversion = 2\n', expected_digest: 'unused' }, [],

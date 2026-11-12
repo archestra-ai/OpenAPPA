@@ -152,7 +152,6 @@ each kind and checks each decision. The battery has no scripts.
 
 ```sh
 cargo test --locked -p appa --test xmemory_policy --test marketplace
-bash scripts/appa-marketplace.sh --check
 appa replay --config examples/live-replays/xmemory/appa.toml \
   examples/live-replays/xmemory/xmemory-battery.appa
 ```

@@ -432,6 +432,10 @@ async fn operator(binary: &Path, config: &Path, project: &Path, marketplace: &Pa
     let mut permissions = fs::metadata(&guide_path).map_err(invalid)?.permissions();
     permissions.set_readonly(true);
     fs::set_permissions(&guide_path, permissions).map_err(invalid)?;
+    // The contract reference is this binary's own, so a version's setup hands
+    // the agent the reference that version's runtime enforces.
+    let contracts_path = guide_path.with_file_name("contracts.md");
+    fs::write(&contracts_path, crate::guide::CONTRACTS).map_err(invalid)?;
     // Escape selector syntax separately from TOML string syntax. No wildcard
     // contract may turn this compatibility reader into general file access.
     let literal = guide_path
@@ -484,6 +488,7 @@ async fn operator(binary: &Path, config: &Path, project: &Path, marketplace: &Pa
             .env("OPENCODE_CONFIG_CONTENT", settings.to_string())
             .env("APPA_OPENCODE_SETUP_CONFIG", config).env("APPA_OPENCODE_SETUP_BINARY", binary)
             .env("APPA_OPENCODE_SETUP_GUIDE", &guide_path)
+            .env("APPA_OPENCODE_SETUP_CONTRACTS", &contracts_path)
             .env("APPA_OPENCODE_BATTERIES", marketplace.join("batteries"))
             .env("APPA_OPENCODE_RUNTIME_URL", url).kill_on_drop(true);
         let mut session = crate::child_process::spawn_async(&mut command).map_err(invalid)?;
