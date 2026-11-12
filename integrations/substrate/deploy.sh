@@ -66,8 +66,8 @@ envsubst '${WORKER_IMAGE}' <"$here/manifests/workerpool.yaml.tmpl" | k apply -f 
 
 echo "==> Storing the credentials the egress gateway injects"
 k -n "$namespace" create secret generic "$secret" \
-  --from-file=claude-code-oauth-token=<(tr -d '\r\n' <"$CLAUDE_TOKEN_FILE") \
-  --from-file=archestra-token=<(tr -d '\r\n' <"$ARCHESTRA_TOKEN_FILE") \
+  --from-file=claude-code-oauth-token=<(tr -d '[:space:]' <"$CLAUDE_TOKEN_FILE") \
+  --from-file=archestra-token=<(tr -d '[:space:]' <"$ARCHESTRA_TOKEN_FILE") \
   --dry-run=client -o yaml | k apply -f -
 
 echo "==> Granting atespace $atespace the Secrets of namespace $namespace"
