@@ -16,9 +16,8 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
 
-mod common;
-#[path = "common/init_fixture.rs"]
-mod init_fixture;
+use crate::common;
+use crate::common::init_fixture;
 use common::http;
 use init_fixture::{Fixture, executable};
 

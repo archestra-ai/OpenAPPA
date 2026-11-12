@@ -100,7 +100,7 @@ filters its own tool list by `--tool` and by scope, which removes tools
 but never renames them.
 
 ```sh
-cargo test --locked -p appa --test launchdarkly_policy --test marketplace
+cargo test --locked -p appa --test integration -- launchdarkly_policy:: marketplace::
 ```
 
 ## Sanitizers

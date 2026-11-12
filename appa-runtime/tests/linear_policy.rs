@@ -1,7 +1,7 @@
 //! Battery integration: shipped examples, write requirements/effects, cross-provider
 //! confidentiality, and the battery's base and target policies composed the way each
 //! deployment does.
-mod common;
+use crate::common;
 
 use appa_package::BatteryTarget;
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};

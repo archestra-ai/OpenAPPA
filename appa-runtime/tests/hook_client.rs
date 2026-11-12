@@ -6,7 +6,7 @@
 //! the connection while the client is still writing it, testing a broken pipe
 //! instead of the intended answer.
 
-mod common;
+use crate::common;
 use appa_runtime::child_process;
 use common::{serve, serve_runtime};
 

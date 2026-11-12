@@ -1,5 +1,5 @@
 // Run with Bun 1.3.10 from any directory. Dependencies use integrations/opencode/bun.lock.
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dir, '..')
@@ -51,9 +51,6 @@ context_control = true
 timeout_ms = 2000
 max_body_bytes = 65536
 `)
-for (const path of ['SKILL.md', 'references/core.md', 'references/opencode.md']) {
-  files.set(`guide/${path}`, await readFile(join(root, 'integrations/appa-guide', path), 'utf8'))
-}
 let stale = false
 for (const [path, text] of files) {
   const target = join(destination, path)

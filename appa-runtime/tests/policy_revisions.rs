@@ -4,7 +4,7 @@
 //! replays a family across revisions without the earlier revisions' externals, and a publish by
 //! another process fences this one until it serves the new head.
 
-mod common;
+use crate::common;
 use common::{last_offer, raw};
 
 use std::path::Path;

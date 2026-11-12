@@ -1,5 +1,5 @@
 //! Sentry battery: the catalog proxy is selected by its inner tool name; writes need review.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

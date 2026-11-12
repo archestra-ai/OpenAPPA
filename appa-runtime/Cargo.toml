@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 publish = false
 autobins = false
+autotests = false
 
 [lib]
 name = "appa_runtime"
@@ -32,27 +33,32 @@ postgres = ["appa-eventlog/postgres"]
 # embedding host supplies through `HostDefaults`. The daemon never offers it.
 archestra = ["appa-policy/archestra"]
 
-# These integration tests drive the server stack: the MCP endpoint, the
-# installer CLI and `appa replay`. Without `daemon` there is nothing to drive.
+# Each test binary links the whole runtime, so the suites share one:
+# `tests/main.rs` declares every suite as a module. A suite that sets the
+# process environment, or counts what the process spawns, keeps a binary of
+# its own, because the suites running beside it in one process would reach
+# what it sets or add to what it counts.
 [[test]]
-name = "annotate_cli"
-required-features = ["daemon"]
+name = "integration"
+path = "tests/main.rs"
 
 [[test]]
-name = "sanitize_cli"
-required-features = ["daemon"]
+name = "annotators"
 
 [[test]]
-name = "hitl_elicitation"
-required-features = ["daemon"]
+name = "child_process"
 
 [[test]]
-name = "marketplace_cli"
-required-features = ["daemon"]
+name = "databricks_policy"
 
 [[test]]
-name = "replay"
-required-features = ["daemon"]
+name = "github_policy"
+
+[[test]]
+name = "huggingface_targets"
+
+[[test]]
+name = "loopback_proxy"
 
 [dependencies]
 tower = { version = "0.5", features = ["util"], optional = true }

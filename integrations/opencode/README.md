@@ -74,8 +74,11 @@ session, it sets `APPA_OPENCODE_BATTERIES` to the absolute retained marketplace
 Publication still validates includes relative to the deployment config.
 The installer materializes the version's batteries there before setup.
 It sets `APPA_OPENCODE_SETUP_CONFIG` and `APPA_OPENCODE_SETUP_BINARY` only for the
-operator's private setup session. The loaded plugin reads its guide and
-contracts from its own shipped directory.
+operator's private setup session. The package ships no guide or contract
+reference. `appa opencode setup` writes both from the copies compiled into the
+`appa` binary and passes their paths in `APPA_OPENCODE_SETUP_GUIDE` and
+`APPA_OPENCODE_SETUP_CONTRACTS`. The source launcher reads them from
+`integrations/appa-guide` and `website/content/docs/contracts.md`.
 
 ## Developer installation from this checkout
 

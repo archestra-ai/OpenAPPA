@@ -46,7 +46,7 @@ scripts, credentials, and limits.
 the policy. No tool runs; annotators and audience sources do.
 
 [`tests/`](tests) holds the offline cases: one policy and one trace each,
-run by `cargo test -p appa --test replay` and by CI.
+run by `cargo test -p appa --test integration -- replay::` and by CI.
 [`live-replays/`](live-replays) holds two cases whose policies include a
 shipped battery. Their annotators and audience sources call GitHub and
 Linear, so each needs the token its README names.

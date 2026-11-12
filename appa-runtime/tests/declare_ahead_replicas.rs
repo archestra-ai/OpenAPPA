@@ -1,6 +1,6 @@
 //! A return declared ahead is recorded in the family's log, so every runtime process serving
 //! the store sees it: a host with several replicas.
-mod common;
+use crate::common;
 use common::{claude_event, claude_hook, including_session_tool_rules, repo_root};
 
 use std::path::Path;

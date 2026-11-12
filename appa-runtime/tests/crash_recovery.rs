@@ -3,7 +3,7 @@
 //! post for the Claude Code hook it is written as, and every answer is read as
 //! the wire decision the server sends.
 
-mod common;
+use crate::common;
 use common::{ServedRuntime, http, serve_runtime};
 
 use std::path::{Path, PathBuf};

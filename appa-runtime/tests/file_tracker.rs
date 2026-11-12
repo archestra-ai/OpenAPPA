@@ -2,8 +2,6 @@
 //! a label written into a file in one session reaches a command that reads that file in
 //! another.
 
-mod common;
-
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

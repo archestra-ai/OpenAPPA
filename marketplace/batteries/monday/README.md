@@ -149,7 +149,7 @@ recipient identity and refusal paths; marketplace tests check host composition. 
 and simulated approval, and does not execute monday tools.
 
 ```sh
-cargo test --locked -p appa --test monday_policy --test marketplace
+cargo test --locked -p appa --test integration -- monday_policy:: marketplace::
 python3 -m unittest discover -s marketplace/batteries/monday -p 'test_*.py'
 appa replay --config examples/live-replays/monday/appa.toml \
   examples/live-replays/monday/monday-battery.appa

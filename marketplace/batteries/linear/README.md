@@ -139,7 +139,7 @@ side effects and review requirements; tool descriptions and MCP annotations do
 not grant permission.
 
 ```sh
-cargo test --locked -p appa --test linear_policy --test marketplace
+cargo test --locked -p appa --test integration -- linear_policy:: marketplace::
 python3 -m unittest discover -s marketplace/batteries/linear -p 'test_*.py'
 ```
 

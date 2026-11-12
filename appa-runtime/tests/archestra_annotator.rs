@@ -1,8 +1,6 @@
 //! The `archestra` annotator builtin over a real loopback endpoint and the real hook path:
 //! the host supplies the endpoint, the policy only names the builtin.
 
-mod common;
-
 use std::time::Duration;
 
 use appa_runtime::config::{Config, ConfigError, HostDefaults};
@@ -47,8 +45,8 @@ mod served {
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::post;
 
-    use super::common::{actor, audit_len, last_offer, propose, raw, root, serve};
     use super::{defaults, hosted};
+    use crate::common::{actor, audit_len, last_offer, propose, raw, root, serve};
 
     type Requests = Arc<Mutex<Vec<(Option<String>, serde_json::Value)>>>;
 

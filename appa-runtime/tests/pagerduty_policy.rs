@@ -1,5 +1,5 @@
 //! PagerDuty battery: internal reads of operational data, every `manage_*` write reviewed.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

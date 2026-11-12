@@ -3,12 +3,10 @@ import { lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink
 import { tmpdir, homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
-import { existsSync } from 'node:fs'
 import type { Mcp } from '@opencode/schema/mcp'
 
 const checkout = resolve(import.meta.dir, '../..')
 const batteries = join(checkout, 'marketplace/batteries')
-const assets = existsSync(join(import.meta.dir, 'guide/SKILL.md')) ? import.meta.dir : undefined
 const digest = (text: string) => createHash('sha256').update(text).digest('hex')
 const shellQuote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`
 
@@ -20,7 +18,7 @@ export type SetupInput = {
 }
 
 export async function guide() {
-  const root = assets ? join(assets, 'guide') : join(checkout, 'integrations/appa-guide')
+  const root = join(checkout, 'integrations/appa-guide')
   return (await Promise.all(['SKILL.md', 'references/core.md', 'references/opencode.md']
     .map(path => readFile(join(root, path), 'utf8')))).join('\n\n')
 }

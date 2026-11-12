@@ -2,7 +2,7 @@
 //! `claude-code` battery through `[aliases] host`. Composition appends the battery's
 //! rules after the root's, and alias resolution then rebinds every `host/claude-code/…`
 //! id, root and battery alike, so a root rule still matches before the battery's.
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::Duration;

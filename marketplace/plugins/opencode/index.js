@@ -1263,8 +1263,7 @@ function refusal(reply) {
 import { createHash } from "crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "fs/promises";
 import { dirname, isAbsolute, join, resolve } from "path";
-import { existsSync } from "fs";
-var checkout = resolve(import.meta.dir, "../.."), batteries = join(checkout, "marketplace/batteries"), assets = existsSync(join(import.meta.dir, "guide/SKILL.md")) ? import.meta.dir : void 0, digest = (text) => createHash("sha256").update(text).digest("hex");
+var checkout = resolve(import.meta.dir, "../.."), batteries = join(checkout, "marketplace/batteries"), digest = (text) => createHash("sha256").update(text).digest("hex");
 async function configuration(config, binary) {
   if (!isAbsolute(config) || !isAbsolute(binary))
     throw Error("Setup requires absolute config and appa paths.");

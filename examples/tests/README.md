@@ -6,7 +6,7 @@ Each directory has one policy and one test case. Run one with:
 appa replay --config examples/tests/secret-stays-inside/appa.toml examples/tests/secret-stays-inside
 ```
 
-Add `-v` to see every step. `cargo test -p appa --test replay` runs all of them.
+Add `-v` to see every step. `cargo test -p appa --test integration -- replay::` runs all of them.
 `local-annotator` binds a command; it needs `python3`.
 
 | Example | What it pins |

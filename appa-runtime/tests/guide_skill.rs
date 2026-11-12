@@ -4,7 +4,7 @@
 //! package rather than a second skill, and the kagent policies gate runtime
 //! management.
 
-mod common;
+use crate::common;
 use common::repo_root;
 
 use std::fs;
