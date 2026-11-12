@@ -23,6 +23,8 @@ The deployment must enable `policy.deployment.context_control` for
 Set `background: true` to launch without waiting. When the task finishes, its
 checked final text arrives as a message to the owning root. The root can also
 use `appa_collect` to wait for that text, or `appa_cancel` to stop the task.
+With `deliver: false`, the text arrives only through `appa_collect`, and the
+root's Label narrows only when it collects.
 These are ordinary tools; their declarations do not authorize unchecked child
 returns. Handles and delivery end on OpenCode restart or plugin reload.
 Code Mode, native subagents, and background shell requests remain refused by

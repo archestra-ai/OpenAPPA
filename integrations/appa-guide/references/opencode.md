@@ -80,7 +80,8 @@ destinations with the operator when tool descriptions cannot establish them.
 `appa_subagent` is the only child-launch identity. `background: true` returns
 an owned task handle. `appa_collect` and `appa_cancel` are ordinary tools,
 not launches. Preserve their declarations when enabling background delegation.
-A finished task's admitted return arrives as a message to the owning root.
+A finished task's admitted return arrives as a message to the owning root,
+unless the launch sets `deliver: false`; then only `appa_collect` returns it.
 Delivery and collection both require APPA's independent child-return check.
 Handles and delivery end on OpenCode restart or plugin reload.
 

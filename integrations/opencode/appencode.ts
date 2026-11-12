@@ -323,7 +323,7 @@ export default Plugin.define({
       editor.add({
         name: 'appa_subagent',
         options: { codemode: false },
-        description: 'Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle and keep working; its checked final text arrives later as a message naming the handle. Use appa_collect to wait for it now, or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.',
+        description: 'Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle and keep working; its checked final text arrives later as a message naming the handle, and its return then narrows this session. Set deliver: false as well to receive it only through appa_collect, so it narrows this session only when collected. Use appa_collect to wait for it now, or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.',
         input: Schema.Struct({
           agent: Schema.String,
           description: Schema.String,
@@ -331,11 +331,15 @@ export default Plugin.define({
           model: Schema.optionalKey(Schema.String),
           sessionID: Schema.optionalKey(Schema.String),
           background: Schema.optionalKey(Schema.Boolean),
+          deliver: Schema.optionalKey(Schema.Boolean),
         }),
         output: Schema.String,
         execute: (input, call) => Effect.gen(function* () {
           if (children.has(call.sessionID) || input.sessionID !== undefined) {
             throw new Error('[appencode] Only fresh, one-level delegation is supported.')
+          }
+          if (input.deliver !== undefined && input.background !== true) {
+            throw new Error('[appencode] deliver applies only to background delegation.')
           }
           yield* Effect.tryPromise({ try: () => open(call.sessionID), catch: failure })
           const parent = yield* ctx.session.get({ sessionID: call.sessionID })
@@ -423,7 +427,8 @@ export default Plugin.define({
                 const owned: Task = { handle: task, root: call.sessionID, child: child.id, proposal, promptID: child.promptID,
                   notice: SessionMessage.ID.create(), transition: Semaphore.makeUnsafe(1), state: { status: 'active' } }
                 tasks.set(task, owned)
-                owned.watcher = yield* Effect.forkDetach(watch(owned))
+                // Without delivery, nothing admits the return until appa_collect.
+                if (input.deliver !== false) owned.watcher = yield* Effect.forkDetach(watch(owned))
                 settled = true
                 transferred = true
                 return { output: task, content: task }
@@ -454,7 +459,7 @@ export default Plugin.define({
       editor.add({
         name: 'appa_collect',
         options: { codemode: false },
-        description: 'Wait for an owned background task and return only its APPA-admitted final text. Use it when you need the result before continuing; otherwise it arrives as a message. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.',
+        description: 'Wait for an owned background task and return only its APPA-admitted final text. Use it when you need the result before continuing, or for a task launched with deliver: false; otherwise it arrives as a message. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.',
         input: Schema.Struct({ task: Schema.String }),
         output: Schema.String,
         execute: (input, call) => Effect.gen(function* () {

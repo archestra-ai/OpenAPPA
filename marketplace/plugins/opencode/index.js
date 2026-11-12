@@ -1605,19 +1605,22 @@ ${task.state.value}`;
       editor.add({
         name: "appa_subagent",
         options: { codemode: !1 },
-        description: "Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle and keep working; its checked final text arrives later as a message naming the handle. Use appa_collect to wait for it now, or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.",
+        description: "Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle and keep working; its checked final text arrives later as a message naming the handle, and its return then narrows this session. Set deliver: false as well to receive it only through appa_collect, so it narrows this session only when collected. Use appa_collect to wait for it now, or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.",
         input: Schema29.Struct({
           agent: Schema29.String,
           description: Schema29.String,
           prompt: Schema29.String,
           model: Schema29.optionalKey(Schema29.String),
           sessionID: Schema29.optionalKey(Schema29.String),
-          background: Schema29.optionalKey(Schema29.Boolean)
+          background: Schema29.optionalKey(Schema29.Boolean),
+          deliver: Schema29.optionalKey(Schema29.Boolean)
         }),
         output: Schema29.String,
         execute: (input, call) => Effect4.gen(function* () {
           if (children.has(call.sessionID) || input.sessionID !== void 0)
             throw Error("[appencode] Only fresh, one-level delegation is supported.");
+          if (input.deliver !== void 0 && input.background !== !0)
+            throw Error("[appencode] deliver applies only to background delegation.");
           yield* Effect4.tryPromise({ try: () => open(call.sessionID), catch: failure });
           let parent = yield* ctx.session.get({ sessionID: call.sessionID }), agent = (yield* ctx.agent.list()).data.find((agent2) => agent2.id === input.agent || agent2.name === input.agent);
           if (!agent || agent.mode === "primary" || agent.hidden)
@@ -1696,7 +1699,9 @@ ${task.state.value}`;
                   transition: Semaphore.makeUnsafe(1),
                   state: { status: "active" }
                 };
-                return tasks.set(task, owned), owned.watcher = yield* Effect4.forkDetach(watch(owned)), settled = !0, transferred = !0, { output: task, content: task };
+                if (tasks.set(task, owned), input.deliver !== !1)
+                  owned.watcher = yield* Effect4.forkDetach(watch(owned));
+                return settled = !0, transferred = !0, { output: task, content: task };
               }).pipe(Effect4.uninterruptible);
             yield* ctx.session.wait({ sessionID: child.id });
             let value = yield* Effect4.tryPromise({ try: () => childAnswer(child.id), catch: failure }), returned = yield* runtime("child_end", { child_id: childID, value });
@@ -1722,7 +1727,7 @@ ${task.state.value}`;
       }), editor.add({
         name: "appa_collect",
         options: { codemode: !1 },
-        description: "Wait for an owned background task and return only its APPA-admitted final text. Use it when you need the result before continuing; otherwise it arrives as a message. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.",
+        description: "Wait for an owned background task and return only its APPA-admitted final text. Use it when you need the result before continuing, or for a task launched with deliver: false; otherwise it arrives as a message. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.",
         input: Schema29.Struct({ task: Schema29.String }),
         output: Schema29.String,
         execute: (input, call) => Effect4.gen(function* () {

@@ -370,11 +370,17 @@ the parent can run other permitted tools.
 When the child finishes, the plugin checks its final text through APPA's
 child-return boundary. Then it delivers the admitted text to the parent as a
 synthetic message that names the handle. An idle parent wakes and starts a
-turn. A busy parent receives the message after its current turn. The admitted
-return narrows the parent's Label when APPA admits it, before delivery, even if
-the parent never reads it. Cancel a task before it finishes to avoid that
-narrowing. Delivery is not an `appa_collect` call, so policy rules for
-`appa_collect` do not apply to it; the child-return check does.
+turn. A busy parent receives the message after its current turn. The message
+enters the parent's context, so the admitted return narrows the parent's Label.
+APPA applies that narrowing at admission, just before delivery. Delivery is not
+an `appa_collect` call, so policy rules for `appa_collect` do not apply to it;
+the child-return check does.
+
+Set `deliver: false` together with `background: true` when the parent may not
+need the result. Then nothing admits the return until the parent calls
+`appa_collect`, and the parent's Label narrows only then. A task that is never
+collected never narrows the parent. `deliver` without `background: true` is
+refused.
 
 ```text
 appa_subagent({ agent: "general", description: "Inspect module", prompt: "…", background: true })
@@ -403,7 +409,8 @@ Failed children return neither earlier prose nor raw error details; delivery
 reports only that the return is withheld. Each task produces at most one
 delivered message, and a retried delivery reuses its message ID.
 
-Use `appa_collect` when the parent needs the result before it continues.
+Use `appa_collect` when the parent needs the result before it continues, and
+for tasks launched with `deliver: false`.
 It waits for completion and returns the cached admitted text without repeating
 that admission. If a collection already returned the text, delivery is skipped.
 An interrupted collection does not suppress delivery. Collection
@@ -558,8 +565,8 @@ loading, native tools, session lifecycle, and remedy execution are real.
 They check inherited audience/trust, return floors, sanitizer replacement,
 concurrent identities, interruption, restart, and refused alternate launches.
 Background cases check parent progress while a child is held, delivery to an
-idle parent, narrowing at admission, cached returns, cancellation, reload, and
-lost admission replies.
+idle parent, collect-only tasks, narrowing at admission, cached returns,
+cancellation, reload, and lost admission replies.
 They also check ordinary root flows and replacement of all tool-result
 channels. No inference-policy enforcement is claimed.
 

@@ -228,6 +228,7 @@ builtin = "redact-email"
     const input = { agent: 'general', description: 'Foreground test', prompt: `child:${user.slice('delegate:'.length)}` }
     if (user === 'delegate:background-input' || user.startsWith('delegate:bg-')) Object.assign(input, { background: true })
     if (user === 'delegate:resume-input') Object.assign(input, { sessionID: 'ses_existing' })
+    if (user.startsWith('delegate:bg-quiet') || user === 'delegate:deliver-input') Object.assign(input, { deliver: false })
     if (user === 'delegate:inherit-trust' && previous !== 'appa_subagent' &&
         !conversation.some((message: any) => message.role === 'tool' && message.content.includes('Untrusted source'))) {
       return completion(null, [{ name: 'read', input: { path: 'suspicious.txt' } }])
@@ -414,6 +415,9 @@ test('resume input, nested delegation and alternate commands are refused', async
     expect(JSON.stringify(history)).toContain('Only fresh, one-level delegation')
     expect((await client.session.list({ parentID: session.id })).data.length).toBe(0)
   }
+  const deliver = await delegate('deliver-input')
+  expect(JSON.stringify(deliver.history)).toContain('deliver applies only to background delegation')
+  expect((await client.session.list({ parentID: deliver.session.id })).data.length).toBe(0)
   const nested = await delegate('nested')
   expect(JSON.stringify(nested.history)).toContain('Nested refused')
   const child = (await client.session.list({ parentID: nested.session.id })).data[0]!
@@ -525,6 +529,25 @@ test('a finished background return is admitted, narrows the parent and arrives o
     expect(hooks.filter(hook => hook.event.root_id === live.session.id && hook.event.event === 'child_end')).toHaveLength(returns.length)
     expect(hooks.filter(hook => hook.event.root_id === live.session.id && hook.event.event === 'spawn_result')).toHaveLength(1)
   }
+}, 45_000)
+
+test('a background task without delivery narrows the parent only when collected', async () => {
+  const live = await background('quiet private raw')
+  await client.session.wait({ sessionID: live.child.id })
+  const shell = () => hooks.filter(hook => hook.event.root_id === live.session.id && !hook.event.child_id && hook.event.tool === 'shell' && hook.event.event === 'tool_call').at(-1)!
+  // A delivering watcher admits within milliseconds of the child ending; give it ample time to misbehave.
+  await Bun.sleep(1500)
+  await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:finished-uncollected' })
+  await client.session.wait({ sessionID: live.session.id })
+  expect(shell().reply.decision).toBe('allow_call')
+  expect(hooks.some(hook => hook.event.root_id === live.session.id && hook.event.event === 'child_end')).toBe(false)
+  expect((await client.session.context({ sessionID: live.session.id })).some(message => message.type === 'synthetic')).toBe(false)
+  const collected = JSON.stringify(await taskCalls(live.session.id, [{ name: 'appa_collect', input: { task: live.handle } }]))
+  expect(collected).toContain('Battery result: Contact alice@corp.example')
+  await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:after-collection' })
+  await client.session.wait({ sessionID: live.session.id })
+  expect(shell().reply.decision).toBe('deny_call')
+  expect((await client.session.context({ sessionID: live.session.id })).some(message => message.type === 'synthetic')).toBe(false)
 }, 45_000)
 
 test('two background handles keep identity when completed and collected in reverse order', async () => {
