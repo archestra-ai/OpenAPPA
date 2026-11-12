@@ -680,7 +680,26 @@ An annotator classifies a tool call. It can determine the call's output restrict
 
 Use an annotator when a script or service must determine the rules for a call. For example, a script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
 
-A tool selects one annotator with `annotator = "<name>"`. The annotator supplies `delta`, `forwards`, `requires` (including attention marks), and emitted effects. A `jev` annotator supplies audience and trust only, so its effects, `requires.history`, and `requires.attention` are always empty. Do not also declare these fields on that tool.
+A tool selects one annotator with `annotator = "<name>"`. The annotator supplies `delta`, `forwards`, `requires` (including attention marks), and emitted effects. A `jev` annotator supplies audience and trust only, so its effects, `requires.history`, and `requires.attention` are always empty.
+
+The tool can also declare a label floor beside its annotator. The floor narrows every answer, so no answer can loosen it:
+
+- `requires.trust`: the call requires the higher of this floor and the annotator's floor.
+- `requires.audience.contains`: the call requires these readers and the annotator's. The readers MUST be literal; a placeholder is refused.
+- `delta.trust`: the result carries the lower of this trust and the annotator's.
+
+A tool with an annotator MUST NOT declare `forwards`, `effects`, `delta.audience`, `requires.effects`, or `requires.attention`. The loader refuses each of them.
+
+```toml
+[[policy.annotator]]
+name = "file-tracker"
+
+[[policy.tool]]
+name = "Bash(network_hosts:*)"
+annotator = "file-tracker"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+```
 
 ### Example: annotate a tool call with Claude Code
 

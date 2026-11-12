@@ -184,8 +184,8 @@ enum Command {
         event: appa_runtime::protected_launch::Event,
     },
 
-    /// The file-tracker plugin: `annotate` and `record` answer the runtime, `mcp` serves SafeBash.
-    #[command(hide = true, disable_help_flag = true)]
+    /// List (`labels`) and reset (`reset <path>...`) the labels the file-tracker recorded on files.
+    #[command(disable_help_flag = true)]
     FileTracker {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         arguments: Vec<String>,

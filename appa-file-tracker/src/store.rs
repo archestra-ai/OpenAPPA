@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::label::{Label, Ranks};
+use crate::paths::{covers, tree};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Store {
@@ -31,7 +32,28 @@ pub struct Store {
     /// replayed refusal never takes the reservation of a later, identical proposal.
     #[serde(default)]
     pub given_back: BTreeSet<String>,
+    /// The reservations given back, kept for a day: the runtime releases a call it refused
+    /// once a remedy is accepted without consulting the plugin again, and that release
+    /// settles on what the call saw when it was annotated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub returned: Vec<Reservation>,
+    /// What the history of each git directory a call read holds, by its directory: walking
+    /// a long history on every call would stall the agent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub histories: BTreeMap<PathBuf, History>,
 }
+
+/// The label of every path a repository's history reached, as the path rules give it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct History {
+    /// The digest of the refs and reflogs walked, the path rules and the trust ranks: a
+    /// history walked at another key is walked again.
+    pub key: String,
+    pub label: Label,
+}
+
+/// How long a given-back reservation is kept for a release that comes after a remedy.
+const RETURNED_FOR_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Recorded {
@@ -48,6 +70,9 @@ pub struct Reservation {
     pub arguments: serde_json::Value,
     pub evidence: String,
     pub writes: BTreeMap<PathBuf, String>,
+    /// What each directory output held at the annotation: every entry, with its [`stamp`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub trees: BTreeMap<PathBuf, BTreeMap<PathBuf, String>>,
     /// Seconds since the epoch at the annotation.
     pub created: u64,
     /// The dispatch the runtime released the call as, and the label it published.
@@ -104,11 +129,15 @@ impl Locked {
 }
 
 impl Store {
-    /// The reservation holding `path`, if any call holds it.
+    /// The reservation holding `path`, if any call holds it: one that reserved the path, a
+    /// directory above it, or anything under it.
     pub fn holder(&self, path: &Path) -> Option<&Reservation> {
-        self.reservations
-            .iter()
-            .find(|reservation| reservation.writes.contains_key(path))
+        self.reservations.iter().find(|reservation| {
+            reservation
+                .writes
+                .keys()
+                .any(|held| covers(held, path) || covers(path, held))
+        })
     }
 
     /// Drop every reservation no record will settle: annotated longer than `timeout` ago,
@@ -117,16 +146,13 @@ impl Store {
     /// releases it.
     pub fn expire(&mut self, timeout: std::time::Duration) {
         let now = now();
+        self.returned
+            .retain(|reservation| now.saturating_sub(reservation.created) < RETURNED_FOR_SECS);
         self.reservations.retain(|reservation| {
             reservation.dispatch.is_some()
                 || now.saturating_sub(reservation.created) < timeout.as_secs()
                 || reservation.writes.iter().any(|(path, seen)| &version(path) != seen)
         });
-    }
-
-    /// The label `path` carries from its recorded writes, if any call wrote it.
-    pub fn recorded(&self, path: &Path) -> Option<&Label> {
-        self.files.get(path).map(|recorded| &recorded.label)
     }
 
     /// Settle one released call's outcome on the files it reserved. A success replaces the
@@ -139,6 +165,10 @@ impl Store {
             .clone()
             .expect("a settled reservation was released with its published label");
         for (path, seen) in &reservation.writes {
+            if let Some(before) = reservation.trees.get(path) {
+                self.settle_directory(path, seen, before, &published, success);
+                continue;
+            }
             let now = version(path);
             if !success && &now == seen {
                 continue;
@@ -154,13 +184,82 @@ impl Store {
             self.settled.insert(dispatch);
         }
     }
+
+    /// Settle a directory output on what the call changed in it, never on the directory as a
+    /// whole: each file it created or changed takes the published label, as a file output
+    /// does, and a directory it created takes it whole. A file it left as it was keeps its own
+    /// label, so a build into the project leaves the sources it did not touch as they were.
+    fn settle_directory(
+        &mut self,
+        directory: &Path,
+        seen: &str,
+        before: &BTreeMap<PathBuf, String>,
+        published: &Label,
+        success: bool,
+    ) {
+        let mut changed: Vec<PathBuf> = Vec::new();
+        if seen == "absent" {
+            if directory.exists() {
+                changed.push(directory.to_path_buf());
+            }
+        } else {
+            for (entry, metadata) in tree(directory).unwrap_or_default() {
+                if changed
+                    .iter()
+                    .any(|created| created.is_dir() && covers(created, &entry))
+                {
+                    continue;
+                }
+                match before.get(&entry) {
+                    None => changed.push(entry),
+                    Some(stamped) if !metadata.is_dir() && stamped != &stamp(&metadata) => changed.push(entry),
+                    Some(_) => {}
+                }
+            }
+        }
+        for path in changed {
+            let label = match (success, self.files.get(&path)) {
+                (false, Some(previous)) => previous.label.meet(published, &self.ranks),
+                _ => published.clone(),
+            };
+            let version = version(&path);
+            self.files.insert(path, Recorded { label, version });
+        }
+    }
 }
 
-/// A file's version: the digest of its content, or `absent`.
+/// An entry's kind, size and modification time: what tells a changed entry of a directory
+/// apart from one the call left as it was, without reading its content.
+pub fn stamp(metadata: &std::fs::Metadata) -> String {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    format!("{:?}\t{}\t{modified}", metadata.file_type(), metadata.len())
+}
+
+/// A file's version: the digest of its content, or `absent`. A directory's is the digest of
+/// what it holds: each entry's path, kind, size and modification time. A socket or another
+/// special file has no content to version.
 pub fn version(path: &Path) -> String {
-    match std::fs::read(path) {
-        Ok(bytes) => format!("sha256:{}", hex(&Sha256::digest(&bytes))),
-        Err(_) => "absent".to_string(),
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => {
+            let Ok(entries) = tree(path) else {
+                return "unknown".to_string();
+            };
+            let mut lines: Vec<String> = entries
+                .iter()
+                .map(|(entry, metadata)| format!("{}\t{}", entry.display(), stamp(metadata)))
+                .collect();
+            lines.sort();
+            digest_lines(&lines)
+        }
+        Ok(metadata) if !metadata.is_file() => "special".to_string(),
+        _ => match std::fs::read(path) {
+            Ok(bytes) => format!("sha256:{}", hex(&Sha256::digest(&bytes))),
+            Err(_) => "absent".to_string(),
+        },
     }
 }
 
@@ -200,6 +299,7 @@ mod tests {
                     arguments: serde_json::Value::Null,
                     evidence: String::new(),
                     writes: [(file.clone(), version(&file))].into(),
+                    trees: Default::default(),
                     created: 0,
                     dispatch: None,
                     published: Some(Label::default()),
@@ -228,6 +328,7 @@ mod tests {
                 arguments: serde_json::Value::Null,
                 evidence: String::new(),
                 writes: [(file.clone(), "sha256:before".to_string())].into(),
+                trees: Default::default(),
                 created: 0,
                 dispatch: None,
                 published: Some(Label::default()),

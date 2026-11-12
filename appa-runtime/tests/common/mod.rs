@@ -209,8 +209,9 @@ pub fn repo_root() -> PathBuf {
 }
 
 /// `root` including the shipped battery's rules for the harness's session tools
-/// only: these suites replace the model-backed Bash and Read rules and the
-/// Bash masker with deterministic ones of their own.
+/// only: these suites replace the battery's shell and file rules with
+/// deterministic ones of their own. The battery's Annotator declarations stay, so
+/// the root's bindings of them still load.
 pub fn including_session_tool_rules(dir: &Path, root: &str) -> String {
     let shipped = std::fs::read_to_string(repo_root().join("marketplace/batteries/claude-code/appa.toml"))
         .expect("the shipped battery is readable");
@@ -229,6 +230,7 @@ pub fn including_session_tool_rules(dir: &Path, root: &str) -> String {
         .collect();
     let mut policy = toml::Table::new();
     policy.insert("version".into(), shipped["policy"]["version"].clone());
+    policy.insert("annotator".into(), shipped["policy"]["annotator"].clone());
     policy.insert("tool".into(), toml::Value::Array(tools));
     let battery = dir.join("batteries/claude-code");
     std::fs::create_dir_all(&battery).expect("the battery directory is created");
@@ -242,6 +244,31 @@ pub fn including_session_tool_rules(dir: &Path, root: &str) -> String {
     )
     .expect("the battery writes");
     format!("include = [\"batteries/claude-code/appa.toml\"]\n\n{root}")
+}
+
+/// `policy` with its `appa file-tracker` bindings pointed at the built `appa` and at a
+/// tracker configuration under `dir`, whose store is `dir/file-tracker.json`. The runtime
+/// runs `appa` as its own executable, and a suite's runtime runs inside the test binary.
+pub fn with_a_local_file_tracker(dir: &Path, policy: &str) -> String {
+    let config = dir.join("file-tracker.toml");
+    let store = dir.join("file-tracker.json");
+    std::fs::write(&config, format!("store = {:?}\n", store.display().to_string()))
+        .expect("the tracker configuration writes");
+    let shipped = |verb: &str| format!("[\"appa\", \"file-tracker\", {verb:?}]");
+    let local = |verb: &str| {
+        format!(
+            "[{:?}, \"file-tracker\", {verb:?}, \"--config\", {:?}]",
+            env!("CARGO_BIN_EXE_appa"),
+            config.display().to_string()
+        )
+    };
+    assert!(
+        policy.contains(&shipped("annotate")) && policy.contains(&shipped("record")),
+        "the policy binds the file-tracker"
+    );
+    policy
+        .replace(&shipped("annotate"), &local("annotate"))
+        .replace(&shipped("record"), &local("record"))
 }
 
 /// Every offer a feedback body names, in the order the feedback lists
@@ -465,4 +492,43 @@ impl Classifier {
     pub fn prompt(&self) -> String {
         std::fs::read_to_string(&self.prompt).unwrap_or_default()
     }
+}
+
+/// The include line of a deployment that binds the `coding` battery's canonical shell and
+/// file tools to Claude Code's native ones, which the shipped Claude Code battery instead
+/// blocks or hands to the file-tracker. It writes into `dir` the `coding` battery, a
+/// battery holding only that map, and the shipped Claude Code battery, included in that
+/// order: the coding rules each map entry lowers onto a native tool precede the Claude
+/// Code battery's own rule for it, so a call to it matches a coding rule first.
+pub fn including_coding_on_native_claude_code_tools(dir: &Path) -> &'static str {
+    for battery in ["coding", "claude-code"] {
+        let target = dir.join("batteries").join(battery);
+        std::fs::create_dir_all(&target).expect("the battery directory is created");
+        std::fs::copy(
+            repo_root()
+                .join("marketplace/batteries")
+                .join(battery)
+                .join("appa.toml"),
+            target.join("appa.toml"),
+        )
+        .expect("the battery file is copied");
+    }
+    let map = dir.join("batteries/native-tools");
+    std::fs::create_dir_all(&map).expect("the battery directory is created");
+    std::fs::write(
+        map.join("appa.toml"),
+        r#"[aliases.tool.coding]
+shell = [{ name = "host/claude-code/Bash", args = { command = "command" }, confined = true }]
+powershell = [{ name = "host/claude-code/PowerShell", args = { command = "command" }, confined = true }]
+read_file = [{ name = "host/claude-code/Read", args = { file_path = "file_path" } }]
+search_files = [{ name = "host/claude-code/Grep", args = { path = "path" } }]
+write_file = [{ name = "host/claude-code/Write", args = { file_path = "file_path" } }]
+edit_file = [{ name = "host/claude-code/Edit", args = { file_path = "file_path" } }]
+
+[policy]
+version = 2
+"#,
+    )
+    .expect("the map battery writes");
+    "include = [\"batteries/coding/appa.toml\", \"batteries/native-tools/appa.toml\", \"batteries/claude-code/appa.toml\"]\n"
 }

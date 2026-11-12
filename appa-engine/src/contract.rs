@@ -352,6 +352,12 @@ pub struct LabelRequirements {
     pub audience: Vec<AudienceRequirement>,
 }
 
+impl LabelRequirements {
+    pub fn is_empty(&self) -> bool {
+        self.trust_floor.is_none() && self.audience.is_empty()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requires {
     pub label: LabelRequirements,
@@ -616,18 +622,35 @@ impl PinnedAnnotation {
 
     /// The one complete annotation this pin gives the call under its declaration: the
     /// declaration's operational metadata, the proposed name, and the produced semantic
-    /// fields. Derived on demand — never stored — so a record cannot disagree with its
-    /// own registry.
+    /// fields, narrowed by the label floor the declaration writes beside its Annotator — the
+    /// higher trust floor, every audience requirement of both, and the lower delta trust.
+    /// Derived on demand — never stored — so a record cannot disagree with its own registry.
     pub(crate) fn tool_annotation(&self, declaration: &ToolDeclaration, called: &ToolName) -> ToolAnnotation {
+        let produced = &self.0.produced;
+        let mut delta = produced.delta.clone();
+        let mut requires = produced.requires.clone();
+        if let ToolDeclaration::Annotated {
+            requires: floor,
+            delta_trust,
+            ..
+        } = declaration
+        {
+            delta.trust = [delta.trust, *delta_trust].into_iter().flatten().min();
+            requires.label.trust_floor = [requires.label.trust_floor, floor.trust_floor]
+                .into_iter()
+                .flatten()
+                .max();
+            requires.label.audience.extend(floor.audience.iter().cloned());
+        }
         ToolAnnotation {
             name: called.clone(),
             tags: declaration.tags().to_vec(),
             description: declaration.description().map(str::to_string),
             parameters: declaration.parameters().clone(),
-            delta: self.0.produced.delta.clone(),
-            forwards: self.0.produced.forwards.clone(),
-            emits: self.0.produced.emits.clone(),
-            requires: self.0.produced.requires.clone(),
+            delta,
+            forwards: produced.forwards.clone(),
+            emits: produced.emits.clone(),
+            requires,
         }
     }
 }
@@ -635,7 +658,8 @@ impl PinnedAnnotation {
 /// The registry's entry for one tool declaration: how calls selected by it are annotated.
 /// `Declared` carries the complete static annotation — the declaration *is* the annotation.
 /// `Annotated` carries the operational metadata and names the Annotator that produces the
-/// semantic fields per call; a declaration never carries both.
+/// semantic fields per call, and may write a label floor beside it that every answer is
+/// narrowed by: a policy author's floor holds whatever the Annotator answers.
 // The registry holds each declaration once and hands out references, so the size gap costs nothing.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,6 +673,12 @@ pub enum ToolDeclaration {
         #[serde(default = "crate::params::ToolParameters::open")]
         parameters: crate::params::ToolParameters,
         annotator: AnnotatorName,
+        /// What every call it selects requires, beside what the Annotator answers.
+        #[serde(default, skip_serializing_if = "LabelRequirements::is_empty")]
+        requires: LabelRequirements,
+        /// The highest trust its result carries, whatever the Annotator answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delta_trust: Option<Trust>,
     },
 }
 
@@ -734,6 +764,8 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new("bash-classifier"),
+            requires: Default::default(),
+            delta_trust: None,
         };
         assert_eq!(annotated.annotator().map(|name| name.as_str()), Some("bash-classifier"));
         assert!(annotated.declared().is_none());
@@ -870,6 +902,8 @@ mod tests {
             description: Some("Runs one shell command.".to_string()),
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new("bash-classifier"),
+            requires: Default::default(),
+            delta_trust: None,
         };
         let produced = ProducedAnnotation {
             evidence: None,
@@ -903,6 +937,65 @@ mod tests {
         assert_eq!(materialized.forwards, produced.forwards);
         assert_eq!(materialized.emits, produced.emits);
         assert_eq!(materialized.requires, produced.requires);
+    }
+
+    #[test]
+    fn a_label_floor_beside_an_annotator_narrows_every_answer_and_loosens_none() {
+        let readers = |name: &str| {
+            AudienceRequirement::Includes(RecipientSpec::Static(DeclaredAudience::restricted([
+                crate::label::ReaderId::new(name),
+            ])))
+        };
+        let declaration = ToolDeclaration::Annotated {
+            name: ToolName::new("Bash(network_hosts:*)"),
+            tags: Vec::new(),
+            description: None,
+            parameters: crate::params::ToolParameters::open(),
+            annotator: AnnotatorName::new("file-tracker"),
+            requires: LabelRequirements {
+                trust_floor: Some(Trust::new(2)),
+                audience: vec![readers("policy")],
+            },
+            delta_trust: Some(Trust::new(1)),
+        };
+        let answer = |delta: u8, floor: u8| ProducedAnnotation {
+            evidence: None,
+            delta: Delta {
+                trust: Some(Trust::new(delta)),
+                audience: None,
+            },
+            forwards: Delta::default(),
+            emits: EffectSet::default(),
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(floor)),
+                    audience: vec![readers("annotator")],
+                },
+                ..Requires::default()
+            },
+        };
+        let digest = crate::value::CanonicalDigest::of_call(
+            &ToolName::new("Bash"),
+            &crate::params::test_arguments(&serde_json::json!({ "command": "ls" })),
+        );
+        let materialize = |produced| {
+            PinnedAnnotation::new(AnnotatorName::new("file-tracker"), digest, produced)
+                .tool_annotation(&declaration, &ToolName::new("Bash"))
+        };
+
+        // A looser answer is narrowed to the floor.
+        let loose = materialize(answer(3, 0));
+        assert_eq!(loose.delta.trust, Some(Trust::new(1)));
+        assert_eq!(loose.requires.label.trust_floor, Some(Trust::new(2)));
+        assert_eq!(
+            loose.requires.label.audience,
+            vec![readers("annotator"), readers("policy")]
+        );
+
+        // A stricter answer keeps its own bounds.
+        let strict = materialize(answer(0, 3));
+        assert_eq!(strict.delta.trust, Some(Trust::new(0)));
+        assert_eq!(strict.requires.label.trust_floor, Some(Trust::new(3)));
     }
 
     #[test]

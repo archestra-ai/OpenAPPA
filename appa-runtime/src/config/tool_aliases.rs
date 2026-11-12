@@ -162,7 +162,9 @@ pub(crate) fn lower(
         .and_then(toml::Value::as_table_mut)
         .expect("a composed config has a policy table");
     refuse_canonical_deployment_names(policy)?;
-    let mut named: BTreeSet<String> = BTreeSet::new();
+    let mut named_tools: BTreeSet<(String, String)> = BTreeSet::new();
+    // Per canonical tool no map binds, how many rules name it.
+    let mut inactive: BTreeMap<(String, String), usize> = BTreeMap::new();
     if let Some(rules) = policy.get_mut("tool").and_then(toml::Value::as_array_mut) {
         for rule in std::mem::take(rules) {
             let Some(name) = rule.get("name").and_then(toml::Value::as_str).map(str::to_owned) else {
@@ -177,9 +179,10 @@ pub(crate) fn lower(
             if rule.get("server").is_some() {
                 return Err(ToolAliasError::ServerSelector { rule: name });
             }
-            named.insert(canonical.namespace.to_owned());
+            let tool = (canonical.namespace.to_owned(), canonical.tool.to_owned());
+            named_tools.insert(tool.clone());
             let Some(bound) = bindings.get(&(canonical.namespace, canonical.tool)) else {
-                tracing::warn!(rule = %name, "no [aliases.tool] map binds this canonical tool; the rule is inactive");
+                *inactive.entry(tool).or_default() += 1;
                 continue;
             };
             for binding in bound {
@@ -188,14 +191,72 @@ pub(crate) fn lower(
         }
     }
     // A map for a namespace no rule names depends on a battery the deployment left out.
-    if let Some(((namespace, _), bound)) = bindings.iter().find(|((namespace, _), _)| !named.contains(*namespace)) {
+    if let Some(((namespace, _), bound)) = bindings
+        .iter()
+        .find(|((namespace, _), _)| !named_tools.iter().any(|(named, _)| named == namespace))
+    {
         return Err(ToolAliasError::UnnamedNamespace {
             origin: bound[0].origin.to_string(),
             namespace: (*namespace).to_owned(),
         });
     }
+    report_unbound(&bindings, &named_tools, &inactive);
     confine(policy, bindings.values().flatten().map(|binding| binding.target));
     Ok(())
+}
+
+/// Log what lowering left unbound, one line per canonical namespace. Where a map binds some
+/// of a namespace's tools, the tools it leaves out are that map's choice, as the `claude-code`
+/// battery leaves Bash and its file tools to the file-tracker; where no map binds any, none of
+/// the namespace's rules reaches a client tool. A map entry for a canonical tool no rule
+/// names, such as a misspelt tool, binds nothing.
+fn report_unbound(
+    bindings: &BTreeMap<(&str, &str), Vec<Binding<'_>>>,
+    named_tools: &BTreeSet<(String, String)>,
+    inactive: &BTreeMap<(String, String), usize>,
+) {
+    let namespaces: BTreeSet<&str> = inactive.keys().map(|(namespace, _)| namespace.as_str()).collect();
+    for namespace in namespaces {
+        let unbound: Vec<String> = inactive
+            .keys()
+            .filter(|(of, _)| of == namespace)
+            .map(|(_, tool)| format!("{FAMILY}/{namespace}/{tool}"))
+            .collect();
+        let rules: usize = inactive
+            .iter()
+            .filter(|((of, _), _)| of == namespace)
+            .map(|(_, count)| count)
+            .sum();
+        let maps: BTreeSet<String> = bindings
+            .iter()
+            .filter(|((of, _), _)| *of == namespace)
+            .flat_map(|(_, bound)| bound.iter().map(|binding| binding.origin.to_string()))
+            .collect();
+        match maps.is_empty() {
+            true => tracing::warn!(
+                namespace,
+                tools = ?unbound,
+                rules,
+                "no [aliases.tool] map binds a tool of this canonical namespace; none of its rules is active"
+            ),
+            false => tracing::info!(
+                namespace,
+                tools = ?unbound,
+                rules,
+                maps = ?maps,
+                "the [aliases.tool] maps bind only some tools of this canonical namespace; the rules for the rest are inactive"
+            ),
+        }
+    }
+    for ((namespace, tool), bound) in bindings {
+        if !named_tools.contains(&((*namespace).to_owned(), (*tool).to_owned())) {
+            tracing::warn!(
+                map = %bound[0].origin,
+                tool = %format!("{FAMILY}/{namespace}/{tool}"),
+                "this [aliases.tool] map binds a canonical tool no rule names, so it binds nothing"
+            );
+        }
+    }
 }
 
 fn take_root_maps(document: &mut toml::Value) -> Result<ToolMaps, ToolAliasError> {

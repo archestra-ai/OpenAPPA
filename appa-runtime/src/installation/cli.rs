@@ -915,8 +915,12 @@ pub(crate) fn render_server_coverage(
 /// rather than one sentence quoting both. Terminal output is not markdown, so
 /// neither is wrapped in backticks.
 fn guide_next(style: Style) -> String {
+    let sandbox = match appa_file_tracker::sandbox_missing() {
+        Some(missing) => format!("\n\n{}", style.detail(&missing)),
+        None => String::new(),
+    };
     format!(
-        "\n{}\n{}\n\n{}\n{}",
+        "\n{}\n{}\n\n{}\n{}{sandbox}",
         crate::style::lead("Next, start a protected session:"),
         style.commands(&["clappa".to_owned()]),
         crate::style::lead("Then, inside it, check your MCP servers and tune the defaults:"),

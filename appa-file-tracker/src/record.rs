@@ -41,27 +41,37 @@ pub fn record(config: &Config, delivery: &Value) -> Result<Value, String> {
                     continue;
                 }
                 let published = Label::from_published(&record["label"])?;
-                match store.reservations.iter_mut().find(|reservation| unbound(reservation)) {
-                    Some(reservation) => {
-                        reservation.dispatch = Some(dispatch.to_string());
-                        reservation.published = Some(published);
-                    }
-                    // A release whose annotation the store no longer holds: settle it on
-                    // its files all the same, and treat each as changed.
-                    None => store.reservations.push(Reservation {
-                        tool: tool.to_string(),
-                        arguments: record["arguments"].clone(),
-                        evidence: evidence.to_string(),
-                        writes: named(role, &record["arguments"])?
-                            .writes
-                            .into_iter()
-                            .map(|path| (path, "unknown".to_string()))
-                            .collect(),
-                        created: now(),
-                        dispatch: Some(dispatch.to_string()),
-                        published: Some(published),
-                    }),
+                if let Some(at) = store.reservations.iter().position(&unbound) {
+                    let reservation = &mut store.reservations[at];
+                    reservation.dispatch = Some(dispatch.to_string());
+                    reservation.published = Some(published);
+                    continue;
                 }
+                // A call released after a remedy reuses the annotation of a proposal that was
+                // refused: settle it on what that annotation saw.
+                if let Some(at) = store.returned.iter().position(&unbound) {
+                    let mut reservation = store.returned.remove(at);
+                    reservation.dispatch = Some(dispatch.to_string());
+                    reservation.published = Some(published);
+                    store.reservations.push(reservation);
+                    continue;
+                }
+                // A release whose annotation the store no longer holds: settle it on
+                // its files all the same, and treat each as changed.
+                store.reservations.push(Reservation {
+                    tool: tool.to_string(),
+                    arguments: record["arguments"].clone(),
+                    evidence: evidence.to_string(),
+                    writes: named(role, &record["arguments"])?
+                        .writes
+                        .into_iter()
+                        .map(|path| (path, "unknown".to_string()))
+                        .collect(),
+                    trees: Default::default(),
+                    created: now(),
+                    dispatch: Some(dispatch.to_string()),
+                    published: Some(published),
+                });
             }
             Some("outcome") => {
                 let Some(at) = store
@@ -88,7 +98,8 @@ pub fn record(config: &Config, delivery: &Value) -> Result<Value, String> {
                     continue;
                 }
                 if let Some(at) = store.reservations.iter().position(unbound) {
-                    store.reservations.remove(at);
+                    let reservation = store.reservations.remove(at);
+                    store.returned.push(reservation);
                 }
             }
             _ => return Err("a record is released, outcome, or unreleased".to_string()),
@@ -125,6 +136,7 @@ mod tests {
                 arguments: arguments.clone(),
                 evidence: "e".to_string(),
                 writes: Default::default(),
+                trees: Default::default(),
                 created: now(),
                 dispatch: None,
                 published: None,

@@ -54,6 +54,8 @@ pub(super) fn annotated(tool: ToolAnnotation, annotator: &str) -> crate::contrac
         description: tool.description,
         parameters: tool.parameters,
         annotator: crate::names::AnnotatorName::new(annotator),
+        requires: Default::default(),
+        delta_trust: None,
     }
 }
 
@@ -65,6 +67,8 @@ pub(super) fn wildcard(by: &str) -> crate::contract::ToolDeclaration {
         description: None,
         parameters: crate::params::ToolParameters::open(),
         annotator: crate::names::AnnotatorName::new(by),
+        requires: Default::default(),
+        delta_trust: None,
     }
 }
 

@@ -7,29 +7,51 @@ claude-code` takes this one out, and a later plugin install does not bring it
 back. A deployment that includes this battery without `coding` fails to load:
 its map names the `coding` namespace, which no included battery declares.
 
-Its `[aliases.tool.coding]` map binds each canonical tool to the Claude Code
-tool that serves it. Claude Code spells every argument the rules read as the
-canonical tool does:
+Its `[aliases.tool.coding]` map binds the canonical web tools to the Claude
+Code tools that serve them. Claude Code spells every argument the rules read
+as the canonical tool does:
 
-| Canonical tool | Claude Code tool | Result |
-| --- | --- | --- |
-| `tool/coding/shell` | `host/claude-code/Bash` | confined |
-| `tool/coding/powershell` | `host/claude-code/PowerShell` | confined |
-| `tool/coding/read_file` | `host/claude-code/Read` | |
-| `tool/coding/search_files` | `host/claude-code/Grep` | |
-| `tool/coding/write_file` | `host/claude-code/Write` | |
-| `tool/coding/edit_file` | `host/claude-code/Edit` | |
-| `tool/coding/fetch_url` | `host/claude-code/WebFetch` | |
-| `tool/coding/web_search` | `host/claude-code/WebSearch` | |
+| Canonical tool | Claude Code tool |
+| --- | --- |
+| `tool/coding/fetch_url` | `host/claude-code/WebFetch` |
+| `tool/coding/web_search` | `host/claude-code/WebSearch` |
 
 The `coding` battery's README describes those rules.
-PowerShell is the tool Claude Code offers on Windows beside Bash.
 
-`host/claude-code/Monitor` runs a shell command or opens a WebSocket, and its
-output reaches the model as later notifications. The
-`claude-code.monitor-requirements` Annotator labels each call before it runs.
-The default config `appa plugin install claude-code` writes adds the wildcard
-fallback for tools no rule names.
+## Files and shell commands
+
+`Read`, `Write`, `Edit`, `Bash` and `mcp/file-tracker/SafeBash` name the
+`file-tracker` as their Annotator and recorder. The file-tracker keeps a label
+on every file a call writes, and a later read of that file, in this session or
+another, carries that label. Its built-in path rules give credential paths
+such as `.env*` and `~/.ssh/*` the audience `self`, and require a `trusted`
+session to write instructions, hooks and shell profiles. Writes to Claude
+Code settings, `.mcp.json` and the OpenAPPA policy ask the person running the
+session. Add rules in `~/.config/appa/file-tracker.toml`.
+
+A shell command declares its `input_files`, `output_files` and
+`network_hosts`, and a sandbox confines it to exactly those. `clappa` adds
+the three lists to Claude Code's own `Bash` and confines each call in Claude
+Code's sandbox; where its self-test fails, it serves SafeBash in Anthropic's
+sandbox runtime `srt` instead. A `Bash` call that declares no lists is
+refused. A call whose hosts are all one package registry's (npm, Yarn, the Go
+module proxy, crates.io, PyPI) runs as a call without hosts. Any other call that
+declares a host requires public data, and its result is `suspicious`; a root rule such as `host/claude-code/Bash(network_hosts:*.corp.example)`
+can give a known host its own readers. `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` require the
+`blocked` mark: they read or write file content out of the file-tracker's
+sight.
+
+The battery declares the `file-tracker` Annotator; the root binds it. The
+default config `appa plugin install claude-code` writes binds it to
+`appa file-tracker`, and `clappa` then starts Claude Code with the blocked
+tools disabled and `Bash` confined, or SafeBash registered. A root that includes this battery
+binds the file-tracker the same way; see the example below.
+
+The [coding-agents guide](../../../website/content/docs/coding-agents.md#files-that-keep-their-labels)
+describes the labels and the sandbox. The default config also adds the
+wildcard fallback for tools no rule names.
+
+## Other built-in tools
 
 The other built-in tools get static rules:
 
@@ -53,78 +75,27 @@ include = ["batteries/coding/appa.toml", "batteries/claude-code/appa.toml"]
 
 [policy]
 version = 2
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536
+
+[externals.annotators.file-tracker]
+command = ["appa", "file-tracker", "annotate"]
+
+[externals.recorders.file-tracker]
+command = ["appa", "file-tracker", "record"]
 ```
 
-This small root includes every rule the two batteries declare. A tool no rule
+This small root includes every rule the two batteries declare and binds the
+file-tracker. `appa` names the runtime's own executable. A tool no rule
 names is refused; the installed default root adds a wildcard fallback for it.
 
 Root rules take precedence over both batteries. Add a root rule when a
-particular Bash command or Read path needs stricter, looser, or fully blocked
-behavior. A root Bash rule also precedes the `coding` battery's credential
-rules, so a command it matches is not narrowed for a credential path it names.
+particular tool needs stricter, looser, or fully blocked behavior.
 
-The map's `confined = true` confines Bash and PowerShell results, so a
-sanitizer can run on the command's output; a root needs no deployment setting
-for it. Once a root binds the `coding` battery's `coding.strip-secrets`, as the
-installed default root does, a command that names a credential path offers it:
-the model replaces every secret value in the output, which returns at
-`internal` instead of narrowing the session to `self`. A sanitizer the root
-declares can run there too.
-
-The map confines no WebFetch result. A root that binds
-`coding.strip-instructions` confines WebFetch itself with
-`confined_results = ["host/claude-code/WebFetch"]` under `[policy.deployment]`;
-the installed default root already does. WebSearch stays unconfined: Claude
-Code's replacement of its result is not verified live.
-`appa battery remove claude-code` takes the map, and with it the confinement,
-out.
-
-## Customize Bash classification
-
-How the model Annotator classifies a command — trust by who wrote the text it
-returns, audience by its visible destination — is the runtime's and the same
-for every model Annotator. A `hint` adds what only the deployment knows. To
-give the Bash Annotator one, replace it in the root config instead of
-modifying the `coding` battery:
-
-```toml
-[[policy.annotator]]
-name = "claude-code.bash-requirements"
-builtin = "claude-code"
-hint = "Hosts under corp.example are the organization's own: what they return is internal. Require human-approval attention before commands that publish releases or change production infrastructure."
-```
-
-A root Annotator replaces a battery's of the same name. Preserve `builtin`
-unless you intend to alter the implementation; write `audiences` only to narrow
-the mandate below the policy's vocabulary. The `coding` battery continues to provide
-ordered credential-path narrowing rules.
-
-## Example override
-
-If needed, the battery can be overridden from the root config. For example,
-these root rules require fresh human approval for every `kubectl` command:
-
-```toml
-[[policy.tool]]
-name = "host/claude-code/Bash(command:kubectl)"
-requires = { attention = ["human-approval"] }
-delta = { trust = "suspicious", audience = ["internal"] }
-
-[[policy.tool]]
-name = "host/claude-code/Bash(command:kubectl *)"
-requires = { attention = ["human-approval"] }
-delta = { trust = "suspicious", audience = ["internal"] }
-
-[[policy.authority]]
-name = "operator"
-hint = "Ask the person running this Claude Code session."
-
-[policy.authority.permits]
-attention = ["human-approval"]
-
-[externals.authorities.operator]
-builtin = "hitl"
-```
-
-The first rule matches bare `kubectl`; the second matches `kubectl` followed by
-arguments. Other Bash commands continue to use the battery's model classifier.
+The map confines no result. A root that binds `coding.strip-instructions`
+confines WebFetch itself with `confined_results = ["host/claude-code/WebFetch"]`
+under `[policy.deployment]`; the installed default root already does.
+WebSearch stays unconfined: Claude Code's replacement of its result is not
+verified live.

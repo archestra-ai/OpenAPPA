@@ -381,13 +381,23 @@ const HEADLINE_WIDTH: usize = 64;
 
 /// The review's first lines, for a harness that shows only a few of them — Claude Code
 /// folds the rest behind "+N more lines". APPA's mark asks the question beside the call
-/// in brief: a shell command and the description it carries, or else the tool and its
-/// arguments on one line. The full review below repeats all of it untrimmed.
+/// in brief: a shell command and the hosts it sends to, or the description it carries when
+/// it names no host, or else the tool and its arguments on one line. The full review below
+/// repeats all of it untrimmed.
 fn headline(artifact: &AuthorityArtifact) -> String {
     let indent = " ".repeat(MARK_TOP.chars().count() + 7);
     let text = |key: &str| artifact.arguments.get(key).and_then(serde_json::Value::as_str);
+    let hosts: Vec<&str> = artifact
+        .arguments
+        .get("network_hosts")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    let sends = (!hosts.is_empty()).then(|| format!("sends to {}", hosts.join(", ")));
     let (call, description) = match text("command") {
-        Some(command) => (format!("$ {command}"), text("description")),
+        Some(command) => (format!("$ {command}"), sends.as_deref().or(text("description"))),
         None => (format!("{} {}", artifact.tool, artifact.arguments), None),
     };
     let mut lines = format!(
@@ -565,6 +575,22 @@ mod tests {
             "▄█▄▄▄█▄  ▀▀█  Approve this call?\n\
              ██▄█▄██   ▄   $ appa battery install slack grain sentry\n\
              \x20             Add the batteries\n"
+        );
+    }
+
+    /// A command that names hosts shows where it sends in place of its description: the
+    /// review's third row is the last a harness shows before it folds the rest.
+    #[test]
+    fn a_shell_command_that_names_hosts_heads_the_review_with_them() {
+        let headline = headline(&artifact(serde_json::json!({
+            "command": "curl -d @notes.txt https://hooks.example",
+            "description": "Post the notes",
+            "network_hosts": ["hooks.example", "api.example"],
+        })));
+        assert_eq!(
+            headline.lines().nth(2).map(str::trim),
+            Some("sends to hooks.example, api.example"),
+            "{headline}"
         );
     }
 

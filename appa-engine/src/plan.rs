@@ -1949,6 +1949,8 @@ mod tests {
                 description: Some("A test tool.".to_string()),
                 parameters: crate::params::test_string_argument_schema("to"),
                 annotator: crate::names::AnnotatorName::new("classifier"),
+                requires: Default::default(),
+                delta_trust: None,
             }],
             sanitizers: vec![redact],
             annotators: vec![crate::registry::AnnotatorDeclaration {
@@ -2109,6 +2111,8 @@ mod tests {
                 description: Some("A test tool.".to_string()),
                 parameters: crate::params::test_string_argument_schema("room"),
                 annotator: crate::names::AnnotatorName::new("directory"),
+                requires: Default::default(),
+                delta_trust: None,
             }],
             sanitizers: vec![
                 output_sanitizer(
@@ -3295,6 +3299,8 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: crate::names::AnnotatorName::new("classifier"),
+            requires: Default::default(),
+            delta_trust: None,
         };
         let with = |others: Vec<ToolDeclaration>| {
             build(RegistryConfig {

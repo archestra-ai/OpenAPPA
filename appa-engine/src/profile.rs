@@ -390,14 +390,29 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
             description,
             parameters,
             annotator,
-        } => serde_json::json!({
-            "name": name,
-            "matcher": matcher,
-            "tags": sorted_set(tags),
-            "parameters": parameters.normalized(),
-            "description": description,
-            "annotator": annotator,
-        }),
+            requires,
+            delta_trust,
+        } => {
+            let mut rendered = serde_json::json!({
+                "name": name,
+                "matcher": matcher,
+                "tags": sorted_set(tags),
+                "parameters": parameters.normalized(),
+                "description": description,
+                "annotator": annotator,
+            });
+            // A floor beside the Annotator is policy, written into the identity when present.
+            if !requires.is_empty() {
+                rendered["requires"] = serde_json::json!({
+                    "trust_floor": requires.trust_floor,
+                    "audience": sorted_set(&requires.audience),
+                });
+            }
+            if let Some(trust) = delta_trust {
+                rendered["delta_trust"] = serde_json::json!(trust);
+            }
+            rendered
+        }
     };
     let mut tools: Vec<_> = registry
         .semantic_tools()
@@ -722,6 +737,8 @@ mod tests {
             description: None,
             parameters: crate::params::ToolParameters::open(),
             annotator: AnnotatorName::new("classifier"),
+            requires: Default::default(),
+            delta_trust: None,
         }
     }
 

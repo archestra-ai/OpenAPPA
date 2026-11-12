@@ -24,11 +24,17 @@ pub struct Config {
 }
 
 /// A path pattern and what it says about every file it matches. `*` matches any run of
-/// characters, `/` included; the pattern is matched against the absolute, resolved path.
+/// characters, `/` included. A pattern with a `/` is matched against the absolute, resolved
+/// path; one without is matched against the file's name, so `*secrets*` names
+/// `db-secrets.yaml` and not every file in a repository called `k8s-secrets`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathRule {
     pub pattern: String,
+    /// Patterns, each matched as `pattern` is, that leave a path out of the rule, such as
+    /// `*.example` for a template beside a credential.
+    #[serde(default)]
+    pub except: Vec<String>,
     /// The label such a file has before any recorded write, and keeps under every later one.
     #[serde(default)]
     pub trust: Option<String>,
@@ -44,7 +50,14 @@ pub struct PathRule {
 
 impl PathRule {
     pub fn matches(&self, path: &Path) -> bool {
-        path.to_str().is_some_and(|path| wildcard(&self.pattern, path))
+        let matches = |pattern: &str| {
+            let text = match pattern.contains('/') {
+                true => path.to_str(),
+                false => path.file_name().and_then(|name| name.to_str()),
+            };
+            text.is_some_and(|text| wildcard(pattern, text))
+        };
+        matches(&self.pattern) && !self.except.iter().any(|except| matches(except))
     }
 
     pub fn label(&self) -> Label {
@@ -81,17 +94,29 @@ pub enum Role {
     Run,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug)]
 pub struct Sandbox {
     /// The sandbox runtime and its arguments; SafeBash appends `--settings <file> -c <command>`.
     pub command: Vec<String>,
     /// Paths a command may read besides its inputs and the system: toolchains under the home
-    /// directory or in another hidden top-level directory, such as `/opt`.
-    #[serde(default)]
+    /// directory or in another hidden top-level directory, such as `/opt/homebrew`. Each is
+    /// assumed to hold no credentials: a path rule hides no file under it.
     pub readable: Vec<PathBuf>,
     /// Seconds a command may run.
     pub timeout_secs: u64,
+}
+
+/// A `[sandbox]` table as written: a deployment's `readable` adds to the built-in one, and
+/// each setting it names replaces the built-in one.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSandbox {
+    #[serde(default)]
+    command: Option<Vec<String>>,
+    #[serde(default)]
+    readable: Vec<String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -108,14 +133,16 @@ struct RawConfig {
     #[serde(default)]
     tool: Vec<ToolRole>,
     #[serde(default)]
-    sandbox: Option<Sandbox>,
+    sandbox: RawSandbox,
 }
 
 impl Config {
     /// The file `--config` names, else `appa/file-tracker.toml` in the user's config directory
-    /// when it exists, over the built-in defaults. A file's path rules and tools are added to
-    /// the built-in ones — a path's label meets every rule that matches it — and its scalar
-    /// settings and sandbox replace the built-in ones.
+    /// when it exists, over the built-in defaults. A file's path rules, tools and readable
+    /// paths are added to the built-in ones — a path's label meets every rule that matches
+    /// it — and its other settings replace the built-in ones. A readable path may start with
+    /// `~/`, the home directory, or `$NAME/`, the directory an environment variable names; one
+    /// that does not exist is dropped.
     pub fn load(explicit: Option<&Path>) -> Result<Config, String> {
         let defaults: RawConfig = toml::from_str(DEFAULT).expect("the built-in configuration parses");
         let file = explicit.map(Path::to_path_buf).or_else(|| {
@@ -141,18 +168,54 @@ impl Config {
                 .ok_or("no store is configured and neither XDG_STATE_HOME nor HOME is set")?
                 .join("appa/file-tracker.json"),
         };
-        let mut paths = raw.path;
-        paths.extend(defaults.path);
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let paths = raw
+            .path
+            .into_iter()
+            .chain(defaults.path)
+            .filter_map(|rule| anchored(rule, home.as_deref()))
+            .collect();
         let mut tools = raw.tool;
         tools.extend(defaults.tool);
+        let readable = raw
+            .sandbox
+            .readable
+            .iter()
+            .chain(&defaults.sandbox.readable)
+            .filter_map(|written| {
+                if let Some(rest) = written.strip_prefix("~/") {
+                    return home.as_ref().map(|home| home.join(rest));
+                }
+                // `$NAME/rest` names a path under the directory an environment variable
+                // holds, and nothing when the variable is not set.
+                if let Some(variable) = written.strip_prefix('$') {
+                    let (name, rest) = variable.split_once('/').unwrap_or((variable, ""));
+                    let base = std::env::var_os(name)
+                        .map(PathBuf::from)
+                        .filter(|base| base.is_absolute())?;
+                    return Some(base.join(rest));
+                }
+                Some(resolve(PathBuf::from(written)))
+            })
+            .filter(|path| path.exists())
+            .collect();
         Ok(Config {
             store,
             paths,
             tools,
-            sandbox: raw
-                .sandbox
-                .or(defaults.sandbox)
-                .expect("the built-in configuration declares a sandbox"),
+            sandbox: Sandbox {
+                command: raw
+                    .sandbox
+                    .command
+                    .or(defaults.sandbox.command)
+                    .expect("the built-in configuration names a sandbox command"),
+                readable,
+                timeout_secs: raw
+                    .sandbox
+                    .timeout_secs
+                    .or(defaults.sandbox.timeout_secs)
+                    .expect("the built-in configuration names a sandbox timeout"),
+            },
             settle_wait: std::time::Duration::from_millis(
                 raw.settle_wait_ms.or(defaults.settle_wait_ms).unwrap_or(3000),
             ),
@@ -169,6 +232,24 @@ impl Config {
     }
 }
 
+/// `rule` with each pattern that starts with `~/` anchored at the resolved home directory,
+/// as the paths a pattern matches are resolved. Without a home directory a rule whose own
+/// pattern starts with `~/` matches nothing and is dropped, and so is such an `except`.
+fn anchored(mut rule: PathRule, home: Option<&Path>) -> Option<PathRule> {
+    let home = home.map(|home| std::fs::canonicalize(home).unwrap_or_else(|_| home.to_path_buf()));
+    let home = home
+        .as_deref()
+        .and_then(Path::to_str)
+        .map(|home| home.trim_end_matches('/'));
+    let anchor = |pattern: &str| match pattern.strip_prefix("~/") {
+        Some(rest) => home.map(|home| format!("{home}/{rest}")),
+        None => Some(pattern.to_owned()),
+    };
+    rule.pattern = anchor(&rule.pattern)?;
+    rule.except = rule.except.iter().filter_map(|pattern| anchor(pattern)).collect();
+    Some(rule)
+}
+
 fn defaults_shell() -> RawConfig {
     RawConfig {
         store: None,
@@ -176,7 +257,7 @@ fn defaults_shell() -> RawConfig {
         reservation_timeout_secs: None,
         path: Vec::new(),
         tool: Vec::new(),
-        sandbox: None,
+        sandbox: RawSandbox::default(),
     }
 }
 
@@ -192,19 +273,26 @@ fn state_home() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
 }
 
-/// `*` matches any run of characters; every other character matches itself.
+/// `*` matches any run of characters; every other character matches itself. Each literal
+/// between stars is taken at its first occurrence, which is the match if any is: the time is
+/// linear in the text, whatever the number of stars.
 fn wildcard(pattern: &str, text: &str) -> bool {
-    match pattern.split_once('*') {
-        None => pattern == text,
-        Some((head, rest)) => {
-            let Some(text) = text.strip_prefix(head) else {
-                return false;
-            };
-            (0..=text.len())
-                .filter(|at| text.is_char_boundary(*at))
-                .any(|at| wildcard(rest, &text[at..]))
+    let mut parts = pattern.split('*');
+    let first = parts.next().expect("split yields a first part");
+    let Some(mut rest) = text.strip_prefix(first) else {
+        return false;
+    };
+    let middle: Vec<&str> = parts.collect();
+    let Some((last, middle)) = middle.split_last() else {
+        return rest.is_empty();
+    };
+    for literal in middle {
+        match rest.find(literal) {
+            Some(at) => rest = &rest[at + literal.len()..],
+            None => return false,
         }
     }
+    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 #[cfg(test)]
@@ -220,6 +308,86 @@ mod tests {
         assert!(wildcard("/etc/ssh/*", "/etc/ssh/sshd_config"));
     }
 
+    /// The linear matcher agrees with the definition — try every split — on every pattern
+    /// and text of up to five characters over `a`, `b` and `*`.
+    #[test]
+    fn the_wildcard_agrees_with_trying_every_split() {
+        fn by_definition(pattern: &str, text: &str) -> bool {
+            match pattern.split_once('*') {
+                None => pattern == text,
+                Some((head, rest)) => text
+                    .strip_prefix(head)
+                    .is_some_and(|text| (0..=text.len()).any(|at| by_definition(rest, &text[at..]))),
+            }
+        }
+        let words = |alphabet: &[char]| -> Vec<String> {
+            let mut all = vec![String::new()];
+            for length in 1..=5 {
+                let mut next: Vec<String> = all.iter().filter(|word| word.len() == length - 1).cloned().collect();
+                next = next
+                    .iter()
+                    .flat_map(|word| alphabet.iter().map(move |letter| format!("{word}{letter}")))
+                    .collect();
+                all.extend(next);
+            }
+            all
+        };
+        let texts = words(&['a', 'b']);
+        for pattern in words(&['a', 'b', '*']) {
+            for text in &texts {
+                assert_eq!(
+                    wildcard(&pattern, text),
+                    by_definition(&pattern, text),
+                    "{pattern:?} on {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_pattern_without_a_slash_names_the_file_and_one_with_a_slash_its_path() {
+        let rule = |pattern: &str| PathRule {
+            pattern: pattern.to_string(),
+            except: Vec::new(),
+            trust: None,
+            audience: None,
+            write_trust: None,
+            write_attention: Vec::new(),
+        };
+        assert!(rule("*secrets*").matches(Path::new("/w/app/db-secrets.yaml")));
+        assert!(!rule("*secrets*").matches(Path::new("/w/k8s-secrets/README.md")));
+        assert!(rule("*/.ssh/*").matches(Path::new("/home/me/.ssh/id_ed25519")));
+        assert!(!rule("*/.ssh/*").matches(Path::new("/home/me/ssh/id_ed25519")));
+    }
+
+    /// `~/` anchors a pattern at the home directory alone: the home's settings match, a
+    /// project's and a path that only contains the home's path do not. Without a home the
+    /// rule is dropped, and a rule written another way is kept as it is.
+    #[test]
+    fn a_pattern_starting_with_a_tilde_names_the_home_directory_only() {
+        let rule = |pattern: &str, except: &[&str]| PathRule {
+            pattern: pattern.to_string(),
+            except: except.iter().map(|except| except.to_string()).collect(),
+            trust: None,
+            audience: None,
+            write_trust: None,
+            write_attention: Vec::new(),
+        };
+        let home = Path::new("/no-such-home/me");
+        let settings = anchored(
+            rule("~/.claude/settings*", &["~/.claude/settings.example*"]),
+            Some(home),
+        )
+        .unwrap();
+        assert!(settings.matches(Path::new("/no-such-home/me/.claude/settings.json")));
+        assert!(!settings.matches(Path::new("/no-such-home/me/.claude/settings.example.json")));
+        assert!(!settings.matches(Path::new("/w/app/.claude/settings.json")));
+        assert!(!settings.matches(Path::new("/w/no-such-home/me/.claude/settings.json")));
+        assert!(anchored(rule("~/.claude/settings*", &[]), None).is_none());
+        let kept = anchored(rule("*/.env*", &["~/.env.example"]), None).unwrap();
+        assert_eq!((kept.pattern.as_str(), kept.except.len()), ("*/.env*", 0));
+    }
+
     #[test]
     fn the_built_in_configuration_classifies_credentials_and_serves_both_harnesses() {
         let config = Config::load(Some(Path::new(concat!(
@@ -227,13 +395,34 @@ mod tests {
             "/file-tracker.toml"
         ))))
         .unwrap();
-        let env = Path::new("/w/app/.env");
-        assert!(
-            config
-                .paths
-                .iter()
-                .any(|rule| rule.matches(env) && rule.audience.as_deref() == Some(&["self".to_string()][..]))
-        );
+        let restricted = |path: &str| {
+            config.paths.iter().any(|rule| {
+                rule.matches(Path::new(path)) && rule.audience.as_deref() == Some(&["self".to_string()][..])
+            })
+        };
+        // A credential and its template, and data and code that name credentials.
+        for (path, credential) in [
+            ("/w/app/.env", true),
+            ("/w/app/.env.production.local", true),
+            ("/w/app/.env.example", false),
+            ("/w/app/.env.template", false),
+            ("/w/app/db-secrets.yaml", true),
+            ("/w/app/credentials", true),
+            ("/w/app/src/credentials/mod.rs", false),
+            ("/w/app/src/secrets.ts", false),
+            ("/w/appa/bench/sanitizer/corpus/coding.strip-secrets.toml", false),
+            ("/w/app/config/prod-secrets.toml", true),
+            ("/w/app/credentials.schema.json", false),
+            ("/w/app/credentials.json", true),
+            ("/w/app/.claude/settings.json", false),
+            ("/w/app/.claude/settings.local.json", true),
+        ] {
+            assert_eq!(restricted(path), credential, "{path}");
+        }
+        if let Some(home) = std::env::var_os("HOME").and_then(|home| std::fs::canonicalize(home).ok()) {
+            let settings = home.join(".claude/settings.json");
+            assert!(restricted(settings.to_str().unwrap()), "{}", settings.display());
+        }
         for tool in [
             "host/claude-code/Read",
             "host/claude-code/Write",
