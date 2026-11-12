@@ -127,5 +127,5 @@ truth for results (see [`../CLAUDE.md`](../CLAUDE.md)).
 ```sh
 cargo build -p appa
 cd bench/sanitizer && uv run pytest -q && uv run ruff check . && uv run ruff format --check .
-cargo test -p appa --test sanitize_cli
+cargo test -p appa --test integration -- sanitize_cli::
 ```

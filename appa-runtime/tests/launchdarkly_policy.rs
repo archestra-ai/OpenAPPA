@@ -1,5 +1,5 @@
 //! LaunchDarkly battery: coarse internal reads; every write needs review, deletes are sensitive.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, AuditLabel, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

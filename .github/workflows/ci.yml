@@ -454,7 +454,8 @@ jobs:
       # also composes into the hosts it declares. No catalog is committed, so
       # no recorded digest can drift from its package.
       - name: Marketplace against the packages it describes
-        run: cargo test -p appa --locked --test marketplace
+        run: |
+          cargo test -p appa --locked --test integration -- marketplace::
 
       # A package ships the externals its policy binds, and their tests sit
       # beside them.
@@ -675,8 +676,8 @@ jobs:
         run: |
           cargo test --locked --package appa --lib -- init:: installation::
           cargo test --locked --package appa \
-            --test init_cli --test marketplace_cli \
-            --test hook_client --test settings_hooks --test child_process
+            --test child_process --test integration -- \
+            init_cli:: marketplace_cli:: hook_client:: settings_hooks::
 
   windows-deployment-checks:
     name: Windows Deployment Checks

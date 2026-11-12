@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use common::repo_root;
 #[cfg(unix)]
 use common::{actor, fake_claude, last_offer, propose, ran, raw, root, unsanitized_offer_of};

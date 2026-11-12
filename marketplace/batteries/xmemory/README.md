@@ -151,7 +151,7 @@ offline replay `examples/live-replays/xmemory/` proposes one call of
 each kind and checks each decision. The battery has no scripts.
 
 ```sh
-cargo test --locked -p appa --test xmemory_policy --test marketplace
+cargo test --locked -p appa --test integration -- xmemory_policy:: marketplace::
 appa replay --config examples/live-replays/xmemory/appa.toml \
   examples/live-replays/xmemory/xmemory-battery.appa
 ```

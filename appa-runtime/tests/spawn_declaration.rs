@@ -1,6 +1,6 @@
 //! A subagent's return declaration through the Claude Code hooks: declared at the spawn's
 //! block without review, or right before the spawn so the spawn meets no block for it.
-mod common;
+use crate::common;
 use common::{claude_event, claude_hook, including_session_tool_rules, offers, repo_root};
 
 use std::path::Path;

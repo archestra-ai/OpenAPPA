@@ -1,6 +1,6 @@
 //! Hugging Face battery: each repository's readers bound the read, writes need trusted data
 //! its readers may see, code run with the token needs a person, and nothing records an effect.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

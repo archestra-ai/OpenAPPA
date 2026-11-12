@@ -1,7 +1,7 @@
 //! `appa replay` over the real hook path: traces run against an in-memory deployment, and
 //! the shipped examples stay green. Every test declares the one policy it needs, next to it.
 
-mod common;
+use crate::common;
 use common::{repo_root, serve};
 
 use std::collections::BTreeSet;

@@ -4,9 +4,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-mod common;
-#[path = "common/init_fixture.rs"]
-mod init_fixture;
+use crate::common;
+use crate::common::init_fixture;
 use common::{RefusingPort, http, repo_root, serve_runtime};
 use init_fixture::{Fixture, Installed, PolicyRoute, runtime_fingerprint, shipped_default_config};
 

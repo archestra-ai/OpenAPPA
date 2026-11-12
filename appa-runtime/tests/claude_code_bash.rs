@@ -3,7 +3,7 @@
 //! to `self` by a static rule, and no classifier is asked. Every other shell command, and
 //! every Monitor call, is the Annotator's. PowerShell follows the same rules.
 #![cfg(unix)]
-mod common;
+use crate::common;
 
 use appa_runtime::api::{ConsultRecord, ConsultTranscriber, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

@@ -60,7 +60,7 @@ The tool list follows `@sentry/mcp-core` 0.39.0 (`toolDefinitions.json`,
 not name is blocked.
 
 ```sh
-cargo test --locked -p appa --test sentry_policy --test marketplace
+cargo test --locked -p appa --test integration -- sentry_policy:: marketplace::
 ```
 
 ## Sanitizers

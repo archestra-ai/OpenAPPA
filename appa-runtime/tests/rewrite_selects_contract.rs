@@ -2,7 +2,7 @@
 //! over real boundaries: a loopback HTTP annotator and sanitizer, a real store, the real hook
 //! path.
 
-mod common;
+use crate::common;
 use common::{actor, offer_of, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};

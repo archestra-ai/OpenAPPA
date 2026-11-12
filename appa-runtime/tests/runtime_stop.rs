@@ -7,9 +7,8 @@ use std::net::TcpListener;
 use std::process::{Command, Output};
 use std::time::Duration;
 
-mod common;
-#[path = "common/init_fixture.rs"]
-mod init_fixture;
+use crate::common;
+use crate::common::init_fixture;
 use common::{RefusingPort, http, serve_runtime};
 use init_fixture::write_shipped_default_config;
 

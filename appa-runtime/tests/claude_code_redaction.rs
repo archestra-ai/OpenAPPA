@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use common::claude_hook;
 
 use appa_runtime::api::{Actor, OfferId, RemedyOutcome, Runtime, TrajectoryId};

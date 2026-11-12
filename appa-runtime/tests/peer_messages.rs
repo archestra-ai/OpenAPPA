@@ -3,7 +3,7 @@
 //! internal sink. A delivered message enters directly when the label its senders stood behind
 //! does not narrow the receiver, and is held otherwise, to be read with `read_peer_message`.
 
-mod common;
+use crate::common;
 use common::{claude_event, claude_hook, including_session_tool_rules, last_offer, repo_root};
 
 use std::path::Path;

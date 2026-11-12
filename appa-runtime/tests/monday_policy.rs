@@ -1,5 +1,5 @@
 //! monday battery: internal reads and reviewed writes, like Linear and PostHog.
-mod common;
+use crate::common;
 
 use appa_package::{BatteryTarget, MANIFEST_FILE, Package, Role};
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};

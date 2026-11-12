@@ -23,7 +23,7 @@ package change needs no catalog change and no two branches conflict over it.
 After adding or editing a package, run:
 
 ```sh
-cargo test -p appa --locked --test marketplace
+cargo test -p appa --locked --test integration -- marketplace::
 ```
 
 The test renders the catalog from the working files. Rendering validates every

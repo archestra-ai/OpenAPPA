@@ -1,5 +1,5 @@
 //! PostHog battery: internal analytics reads, public documentation input, reviewed writes.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

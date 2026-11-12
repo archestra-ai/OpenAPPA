@@ -1,6 +1,6 @@
 //! Cloudflare battery: public documentation reads and internal Workers logs under one
 //! namespace, with no writes.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

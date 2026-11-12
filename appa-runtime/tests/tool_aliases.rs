@@ -1,7 +1,7 @@
 //! A battery writes its rules once for a canonical tool, `tool/<namespace>/<tool>`, and
 //! another battery's `[aliases.tool]` map binds that tool to each client spelling of it.
 //! The client's call is evaluated as sent: only the policy's rules are respelled.
-mod common;
+use crate::common;
 
 use std::path::Path;
 

@@ -1,5 +1,5 @@
 //! Microsoft Learn battery: public documentation reads, untrusted results, no write.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};

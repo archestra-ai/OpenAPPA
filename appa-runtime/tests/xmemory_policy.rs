@@ -1,6 +1,6 @@
 //! xmemory battery: internal reads that keep their trust, trusted writes, admin and
 //! schema changes, reviewed schema migrations and instance deletion.
-mod common;
+use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
