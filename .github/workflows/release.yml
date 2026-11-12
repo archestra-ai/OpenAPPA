@@ -473,11 +473,13 @@ jobs:
           ADK_GO: ${{ needs.publish-oci-images.outputs.appa_kagent_adk_go_digest }}
           TOOLS: ${{ needs.publish-oci-images.outputs.appa_demo_tools_digest }}
           MOCKS: ${{ needs.publish-oci-images.outputs.appa_demo_mocks_digest }}
+          EXTPROC: ${{ needs.publish-oci-images.outputs.appa_extproc_digest }}
         run: |
           digests=$(jq -n --arg runtime "$RUNTIME" --arg adk "$ADK" --arg go "$ADK_GO" \
-            --arg tools "$TOOLS" --arg mocks "$MOCKS" \
+            --arg tools "$TOOLS" --arg mocks "$MOCKS" --arg extproc "$EXTPROC" \
             '{"appa-runtime": $runtime, "appa-kagent-adk": $adk, "appa-kagent-adk-go": $go,
-              "golang-adk": $go, "appa-demo-tools": $tools, "appa-demo-mocks": $mocks}')
+              "golang-adk": $go, "appa-demo-tools": $tools, "appa-demo-mocks": $mocks,
+              "appa-extproc": $extproc}')
           python3 scripts/appa-release-subjects.py "$VERSION" "$digests" release-charts
           echo "images=$(jq -c . release-images.json)" >> "$GITHUB_OUTPUT"
 
@@ -771,7 +773,7 @@ jobs:
             public=europe-west1-docker.pkg.dev/friendly-path-465518-r6/appa-public
           fi
           digests='{}'
-          for image in appa-runtime appa-kagent-adk appa-kagent-adk-go golang-adk appa-demo-tools appa-demo-mocks; do
+          for image in appa-runtime appa-kagent-adk appa-kagent-adk-go golang-adk appa-demo-tools appa-demo-mocks appa-extproc; do
             skopeo copy --all --preserve-digests --retry-times 3 --digestfile digest \
               "docker://$public/$image:v$SOURCE_VERSION" "docker://$staging/$image:publisher-smoke-$GITHUB_RUN_ID"
             digests=$(jq --arg image "$image" --arg digest "$(cat digest)" '.[$image] = $digest' <<< "$digests")
