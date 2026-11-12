@@ -5,8 +5,9 @@ This directory holds the OpenAPPA integration for
 includes the following:
 
 - An `ext_proc` processor that enforces OpenAPPA at Substrate's egress gateway.
-- The manifests that run the processor with an OpenAPPA runtime.
-- A stock agent image to try it with.
+  Substrate's installer deploys it beside an OpenAPPA runtime with
+  `ate-setup deploy --openappa`.
+- A stock agent image and a deploy script to try it with.
 
 - **Public documentation**: [website/content/docs/substrate.md](../../website/content/docs/substrate.md)
 
@@ -23,9 +24,7 @@ integrations/substrate/
 │   ├── jsonrpc.go                 # MCP JSON-RPC over JSON and SSE
 │   ├── admin.go, log.html         # decision log, status and reset (loopback)
 │   └── testdata/flow.appa.toml    # policy for the runtime-backed test
-├── policy/appa.toml               # the deployed policy: the GitHub battery
 ├── manifests/
-│   ├── enforcement.yaml.tmpl      # appa-system: processor + runtime pod, Service
 │   ├── workerpool.yaml.tmpl       # the agent's namespace and WorkerPool
 │   ├── actor-template.yaml.tmpl   # stock Claude Code actor, placeholder credentials
 │   └── egress-policy.yaml.tmpl    # api.anthropic.com and api.githubcopilot.com, tokens injected
@@ -33,7 +32,7 @@ integrations/substrate/
 │   ├── actor-server.mjs           # console, POST /run (Claude Code), POST /curl
 │   ├── mcp-call.sh                # one MCP tool call with curl
 │   └── ui/index.html
-└── deploy.sh                      # build, push, and deploy to a kind install
+└── deploy.sh                      # build, push, and deploy the agent to a kind install
 ```
 
 ## Test

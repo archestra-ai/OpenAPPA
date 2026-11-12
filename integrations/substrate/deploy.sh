@@ -1,28 +1,21 @@
 #!/usr/bin/env bash
 # envsubst takes the names to substitute as a literal '${VAR}' list.
 # shellcheck disable=SC2016
-# Deploy OpenAPPA at an installed Agent Substrate's egress gateway, and one
-# stock Claude Code actor to try it with.
+# Deploy one stock Claude Code actor to try OpenAPPA at an Agent Substrate
+# egress gateway. Substrate must be installed with `ate-setup deploy --openappa`.
 #
-#   integrations/substrate/deploy.sh          build, push, and create everything
-#   integrations/substrate/deploy.sh delete   remove the actor and both namespaces
-#
-# Substrate must be installed with the processor configured:
-#   --experimental-additional-egress-extproc-service=appa-system/appa-extproc:9443
-#   --experimental-additional-egress-extproc-allow-mode-override
-#   --experimental-additional-egress-extproc-timeout=60s
+#   integrations/substrate/deploy.sh          build, push, and create the actor
+#   integrations/substrate/deploy.sh delete   remove the actor and its namespace
 #
 # Required environment:
 #   WORKER_IMAGE        the installed Substrate's ateworker-gvisor image
 #   CLAUDE_TOKEN_FILE   a file holding a `claude setup-token` OAuth token
-#   GITHUB_TOKEN_FILE   a file holding a GitHub token: the actor's, injected
-#                       by the egress gateway, and the policy's, for its
-#                       repository-visibility lookups
+#   GITHUB_TOKEN_FILE   a file holding a GitHub token, injected by the egress
+#                       gateway into the actor's MCP requests
 #
 # Optional environment:
 #   KUBE_CONTEXT        kubeconfig context (default: kind-substrate)
 #   IMAGE_REPO          registry the cluster pulls from (default: localhost:5001)
-#   RUNTIME_IMAGE       OpenAPPA runtime image (default: ghcr.io/archestra-ai/appa-runtime:v0.42.0)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -39,7 +32,7 @@ ate() { kubectl ate --context "$context" "$@"; }
 if [[ "${1:-}" == "delete" ]]; then
   ate delete actor "$actor" -a "$atespace" 2>/dev/null || true
   ate delete actor-template "$actor" -a "$atespace" 2>/dev/null || true
-  k delete namespace "$namespace" appa-system --ignore-not-found
+  k delete namespace "$namespace" --ignore-not-found
   echo "Deleted. The atespace and its namespace grant remain."
   exit 0
 fi
@@ -48,7 +41,6 @@ fi
 : "${CLAUDE_TOKEN_FILE:?set CLAUDE_TOKEN_FILE to a file holding a claude setup-token token}"
 : "${GITHUB_TOKEN_FILE:?set GITHUB_TOKEN_FILE to a file holding a GitHub token}"
 export WORKER_IMAGE
-export RUNTIME_IMAGE="${RUNTIME_IMAGE:-ghcr.io/archestra-ai/appa-runtime:v0.42.0}"
 
 # Each run tags its own build, and the manifests pin the pushed digest.
 tag="dev-$(date +%Y%m%d%H%M%S)"
@@ -58,19 +50,9 @@ build() {
   docker inspect --format '{{index .RepoDigests 0}}' "$repo/$1:$tag"
 }
 
-echo "==> Building the ext_proc processor and the agent image"
-EXTPROC_IMAGE="$(build appa-extproc "$here/appa-extproc")"
+echo "==> Building the agent image"
 ACTOR_IMAGE="$(build appa-substrate-agent "$here/workload")"
-export EXTPROC_IMAGE ACTOR_IMAGE
-
-echo "==> Deploying the enforcement point to appa-system"
-envsubst '${EXTPROC_IMAGE} ${RUNTIME_IMAGE}' <"$here/manifests/enforcement.yaml.tmpl" | k apply -f -
-k -n appa-system create configmap appa-policy --from-file=appa.toml="$here/policy/appa.toml" \
-  --dry-run=client -o yaml | k apply -f -
-k -n appa-system create secret generic appa-github-token \
-  --from-file=token=<(tr -d '[:space:]' <"$GITHUB_TOKEN_FILE") --dry-run=client -o yaml | k apply -f -
-k -n appa-system rollout restart deployment/appa-extproc
-k -n appa-system rollout status deployment/appa-extproc --timeout=3m
+export ACTOR_IMAGE
 
 echo "==> Applying the namespace and worker pool"
 envsubst '${WORKER_IMAGE}' <"$here/manifests/workerpool.yaml.tmpl" | k apply -f -
@@ -119,6 +101,6 @@ Done. Open the actor's console through Substrate's router, and the egress
 decisions beside it:
 
   kubectl ate --context $context proxy actor $actor 8000:8080 -a $atespace
-  kubectl --context $context -n appa-system port-forward deploy/appa-extproc 8001:8081
+  kubectl --context $context -n ate-system port-forward deploy/openappa 8001:8081
   open 'http://localhost:8000/?log-port=8001'
 EOF
