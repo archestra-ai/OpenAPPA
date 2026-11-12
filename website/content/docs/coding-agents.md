@@ -5,30 +5,47 @@ order: 4
 description: Tool-flow enforcement, file labels, SafeBash, shell rules, and checked delegation for coding agents.
 ---
 
-OpenAPPA checks coding-agent flows at the harness boundary. The [Claude Code](/claude-code) integration checks built-in and MCP tool calls and results. It adds three default boundaries: protected sessions, checked subagent returns, and contracts for native file and shell tools.
+OpenAPPA monitors and restricts coding agent tool calls and subagent execution through harness hooks and the runtime's `appa` MCP server. For [Claude Code](/claude-code), it enforces three core boundaries: protected sessions, validated subagent returns, and policy contracts for native filesystem and shell tools.
+
+> **Scope Note:** OpenAPPA tracks information flow and validates tool invocations. It builds no sandbox of its own: in Claude Code it confines each shell command in the harness's sandbox ([SafeBash](#safebash)). For other harnesses, pair it with operating-system sandboxing (such as containers or namespaces).
 
 ## Protected sessions
 
-`appa plugin install claude-code` adds hook entries, the `appa` MCP server, the `appa-guide` skill, and the `clappa` command to your Claude Code setup. The hooks act only in a process that has `APPA_GATE=1`. A plain `claude` session runs without OpenAPPA checks, labels, or blocked calls. The `appa` MCP tools stay visible to the model in that session.
+Running `appa plugin install claude-code` installs lifecycle hooks, the `appa` MCP server, the `appa-guide` skill, and the `clappa` launcher into your Claude Code setup.
 
-Start `clappa` for a protected session and `claude` for an ordinary session. `clappa` is the supported launcher. It sets `APPA_GATE=1` when Claude Code starts. Protection runs on the client, so Claude Code settings can turn it off with `APPA_GATE` or `disableAllHooks`.
+### Activation and environment invariants
 
-`clappa` is not the only way to set the gate. A session that gets `APPA_GATE=1` from your own launcher or from `env` in Claude Code settings runs the same hooks and policy. Also set `CLAUDE_CODE_DISABLE_AGENT_VIEW=1`, because OpenAPPA does not support backgrounded sessions. `clappa` also provides the following, which a session without it does not have unless your launcher sets the same values:
+Enforcement hooks evaluate calls only when `APPA_GATE=1` is set in the process environment:
 
-- **A launch token.** Without it, a new session ID opens a fresh label.
-- **A fork's parent.** Without it, a fork runs with a clean label even though it carries the parent's conversation. Do not fork such a session.
-- **A messaging address.** Without it, a session cannot receive peer messages.
-- **A confined shell.** Without it, Claude Code's own `Bash` declares no file lists, and the file-tracker refuses every `Bash` call. Register SafeBash instead: an MCP server named `file-tracker` that runs `appa file-tracker mcp`. Also list `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit` in `permissions.deny`.
+- **Unprotected (`claude`):** Standard execution runs without policy checks, flow labeling, or tool call blocking. The `appa` MCP tools remain exposed to the model.
+- **Protected (`clappa`):** The supported launcher automatically sets `APPA_GATE=1`.
+- **Custom Launchers:** When invoking Claude Code directly, export `APPA_GATE=1` and set `CLAUDE_CODE_DISABLE_AGENT_VIEW=1` (backgrounded sessions are unsupported).
 
-Protected sessions fail closed: while the runtime is unavailable, every hooked action is blocked. The status line shows the trajectory's current trust and audience. The [Claude Code guide](/claude-code) covers installation, policy setup, and a first blocked flow.
+`clappa` also supplies the following values. A session started another way does not have them unless its launcher sets the same values:
+- **Launch token:** Without it, each new session ID opens a fresh label.
+- **Fork parent:** Without it, a forked session carries the parent's conversation but starts at a clean label, without the parent's `taint`. Do not fork such a session.
+- **Messaging address:** Without it, a session cannot receive peer messages.
+- **Confined shell:** Without it, Claude Code's own `Bash` declares no file lists, and the file-tracker refuses every `Bash` call. Register SafeBash instead: an MCP server named `file-tracker` that runs `appa file-tracker mcp`. Also list `Bash`, `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit` in `permissions.deny`.
+
+### Boundary limitations and failure modes
+
+- **Client-Side Enforcement:** Protection runs on the client, so Claude Code settings can turn it off with `APPA_GATE` or `disableAllHooks`.
+- **Fail-Closed Behavior:** If the OpenAPPA runtime disconnects or becomes unavailable, all hooked actions block by default.
+- **Status line:** The terminal status line displays the active trajectory's trust level and audience scope. See the [Claude Code guide](/claude-code) for setup and policy enforcement walk-throughs.
 
 ## Subagent return checks
 
-When a main agent delegates through Claude Code's `Agent` tool, OpenAPPA first checks that the subagent definition does not declare `maxTurns`. Claude Code bypasses return hooks when that setting is present. OpenAPPA therefore refuses the prompt if project, user, or plugin frontmatter declares it. The scan covers the first 64 KiB. Unclosed or unclassifiable frontmatter fails closed.
+When a parent agent delegates through Claude Code's native `Agent` tool, OpenAPPA intercepts execution at two points:
 
-OpenAPPA then holds the spawn until the parent declares a return contract. The contract can accept the final message unchanged, bound it to a declared Label, or require a sanitizer. The agent declares the contract itself, right before the `Agent` call, with `execute_remedy_plan` and no `offer_id`. OpenAPPA asks a person only when the spawn has another gap that an authority must approve. OpenAPPA checks the child's tool calls normally, then validates its final message before the parent can receive it. A refused return keeps the child running until it produces an admissible message.
+1. **Frontmatter Validation:** Claude Code bypasses return hooks if a subagent definition declares `maxTurns`. To prevent hook evasion, OpenAPPA scans the first 64 KiB of user, project, and plugin frontmatter. If `maxTurns` is present, or if frontmatter is unclosed or unparseable, OpenAPPA rejects the prompt (fail-closed).
+2. **Contract Declaration:** OpenAPPA suspends subagent spawning until the parent agent registers a return contract. The parent registers this contract immediately before the `Agent` call using `execute_remedy_plan` (omitting `offer_id`). The contract can:
+   - Accept the child's final response unmodified.
+   - Constrain the response to a specified security label.
+   - Route the output through a designated sanitizer.
 
-This lets a subagent read a private ticket or credential-adjacent log and return only a result the parent trajectory may hold. See [Subagent reads](/how-it-works#subagent-reads) and [Subagent Returns](/contracts#subagent-returns).
+OpenAPPA asks a person only when the spawn has another gap that an authority must approve.
+
+During execution, OpenAPPA monitors child tool calls under standard policy. Once the child finishes, OpenAPPA intercepts and validates the final response payload before releasing it to the parent context. If validation fails, the child remains active until it produces an admissible response. This mechanism allows subagents to inspect sensitive files (e.g. credential-adjacent logs or private tickets) without leaking prohibited data back into the parent trajectory. See [Subagent reads](/how-it-works#subagent-reads) and [Subagent Returns](/contracts#subagent-returns).
 
 ## Shell and native file tools
 
