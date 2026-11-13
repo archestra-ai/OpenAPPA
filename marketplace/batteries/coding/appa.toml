@@ -8,7 +8,10 @@
 # credential rules come before each tool's bare rule. A name written
 # with a selector is declared, and a call no selector matches falls through to
 # the root's `*` wildcard rule, so the bare rules at the end of each group are
-# what keep ordinary commands, reads, searches and writes running.
+# what keep ordinary commands, reads, searches and writes running. A rule takes
+# each contract field it omits from a later rule that matches every call it
+# matches, so the static rules write `annotator = ""`: the Annotator of the
+# tool's bare rule does not judge the calls they label.
 
 
 [policy]
@@ -32,606 +35,727 @@ version = 2
 # `os.environ`, `process.env.X` or `.envrc`.
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env.local*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.env.local*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.env.local*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".env.local*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env.prod*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.env.prod*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.env.prod*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".env.prod*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env.dev*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.env.dev*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.env.dev*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".env.dev*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env.staging*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.env.staging*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.env.staging*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".env.staging*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .env.test*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.env.test*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.env.test*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".env.test*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.env)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.env *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.env)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.env *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".env"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.env"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:* .env;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .claude.json)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .claude.json *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.claude.json)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.claude.json *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.claude.json)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.claude.json *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".claude.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.claude.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .claude.json;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .credentials.json)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .credentials.json *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.credentials.json)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.credentials.json *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.credentials.json)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.credentials.json *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".credentials.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.credentials.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .credentials.json;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.ssh/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.aws/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .netrc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .netrc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.netrc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.netrc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.netrc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.netrc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".netrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.netrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .netrc;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.config/gh/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* id_rsa)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* id_rsa *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/id_rsa)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/id_rsa *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=id_rsa)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=id_rsa *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*"id_rsa"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/id_rsa"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* id_rsa;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* id_ed25519)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* id_ed25519 *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/id_ed25519)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/id_ed25519 *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=id_ed25519)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=id_ed25519 *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*"id_ed25519"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/id_ed25519"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* id_ed25519;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/proc/*environ*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/Library/Keychains/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.docker/config.json*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .git-credentials)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .git-credentials *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.git-credentials)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.git-credentials *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.git-credentials)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.git-credentials *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".git-credentials"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.git-credentials"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .git-credentials;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.kube/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .npmrc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .npmrc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.npmrc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.npmrc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.npmrc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.npmrc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".npmrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.npmrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .npmrc;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .pypirc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .pypirc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.pypirc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.pypirc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.pypirc)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.pypirc *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".pypirc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.pypirc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .pypirc;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.azure/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.gnupg/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.config/gcloud/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*.password-store/*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .vault-token)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .vault-token *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.vault-token)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.vault-token *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.vault-token)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.vault-token *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".vault-token"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.vault-token"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .vault-token;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -643,66 +767,79 @@ tags = ["credentials"]
 # inside `$(...)`, a heredoc, an alias) reaches the Bash Annotator below.
 [[policy.tool]]
 name = "tool/coding/shell(command:* .databrickscfg)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .databrickscfg *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.databrickscfg)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*/.databrickscfg *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.databrickscfg)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*=.databrickscfg *)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*".databrickscfg"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/shell(command:*/.databrickscfg"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:* .databrickscfg;*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*databricks*auth token*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*databricks*auth env*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*databricks*secrets get-secret*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*databricks*configure*)"
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -777,916 +914,1099 @@ annotator = "claude-code.bash-requirements"
 # selector matches case-sensitively, so another spelling reaches the Annotator.
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .env)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .env *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .env.local*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.env.local*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env.local*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".env.local*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.env.local*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .env.prod*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.env.prod*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env.prod*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".env.prod*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.env.prod*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .env.dev*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.env.dev*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env.dev*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".env.dev*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.env.dev*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .env.staging*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.env.staging*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env.staging*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".env.staging*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.env.staging*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .env.test*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.env.test*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env.test*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".env.test*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.env.test*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.env)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.env *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.env *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.env)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.env *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".env"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.env"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .env;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.env"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .claude.json)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .claude.json *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.claude.json)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.claude.json *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.claude.json)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.claude.json *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".claude.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.claude.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .claude.json;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.claude.json)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.claude.json *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.claude.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .credentials.json)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .credentials.json *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.credentials.json)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.credentials.json *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.credentials.json)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.credentials.json *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".credentials.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.credentials.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .credentials.json;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.credentials.json)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.credentials.json *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.credentials.json"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .netrc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .netrc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.netrc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.netrc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.netrc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.netrc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".netrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.netrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .netrc;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.netrc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.netrc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.netrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* id_rsa)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* id_rsa *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/id_rsa)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/id_rsa *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=id_rsa)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=id_rsa *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*"id_rsa"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/id_rsa"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* id_rsa;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\id_rsa)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\id_rsa *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\id_rsa"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* id_ed25519)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* id_ed25519 *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/id_ed25519)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/id_ed25519 *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=id_ed25519)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=id_ed25519 *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*"id_ed25519"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/id_ed25519"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* id_ed25519;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\id_ed25519)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\id_ed25519 *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\id_ed25519"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .git-credentials)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .git-credentials *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.git-credentials)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.git-credentials *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.git-credentials)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.git-credentials *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".git-credentials"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.git-credentials"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .git-credentials;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.git-credentials)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.git-credentials *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.git-credentials"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .npmrc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .npmrc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.npmrc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.npmrc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.npmrc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.npmrc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".npmrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.npmrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .npmrc;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.npmrc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.npmrc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.npmrc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .pypirc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .pypirc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.pypirc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.pypirc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.pypirc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.pypirc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".pypirc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.pypirc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .pypirc;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.pypirc)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.pypirc *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.pypirc"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .vault-token)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .vault-token *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.vault-token)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.vault-token *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.vault-token)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.vault-token *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".vault-token"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.vault-token"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .vault-token;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.vault-token)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.vault-token *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.vault-token"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .databrickscfg)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .databrickscfg *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.databrickscfg)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.databrickscfg *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.databrickscfg)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*=.databrickscfg *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*".databrickscfg"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/.databrickscfg"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:* .databrickscfg;*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.databrickscfg)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.databrickscfg *)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\.databrickscfg"*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.ssh/*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.ssh\\*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.aws/*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.aws\\*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.kube/*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.kube\\*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.azure/*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.azure\\*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.gnupg/*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.gnupg\\*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.password-store/*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.password-store\\*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.config/gh/*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.config\\gh\\*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/gcloud/*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.docker/config.json*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*.docker\\config.json*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*GitHub CLI*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*\\gcloud\\*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*Get-StoredCredential*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*Get-Secret*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*/proc/*environ*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*databricks*auth token*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*databricks*auth env*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*databricks*secrets get-secret*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
 [[policy.tool]]
 name = 'tool/coding/powershell(command:*databricks*configure*)'
+annotator = ""
 delta = { audience = ["self"] }
 tags = ["credentials"]
 
@@ -2953,80 +3273,99 @@ delta = {}
 # host such as `code.claude.com.example` falls through to the bare rule.
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://openappa.com/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://archestra.ai/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://code.claude.com/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://docs.anthropic.com/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://platform.claude.com/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://developers.openai.com/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://learn.chatgpt.com/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://doc.rust-lang.org/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://docs.python.org/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://docs.astral.sh/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://www.typescriptlang.org/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://nodejs.org/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://developer.mozilla.org/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://modelcontextprotocol.io/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://kubernetes.io/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://helm.sh/*)"
+annotator = ""
 delta = {}
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://docs.github.com/*)"
+annotator = ""
 delta = {}
 
 # Google sees the search query; strangers write the results.
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://www.google.com/search?*)"
+annotator = ""
 delta = { trust = "suspicious" }
 tags = ["web"]
 
 [[policy.tool]]
 name = "tool/coding/fetch_url(url:https://google.com/search?*)"
+annotator = ""
 delta = { trust = "suspicious" }
 tags = ["web"]
 

@@ -68,26 +68,36 @@ recorder = "file-tracker"
 # them and takes the rule for any host.
 [[policy.tool]]
 name = "tool/file-tracker/shell(network_hosts:registry.npmjs.org)"
+delta = {}
+requires = {}
 annotator = "file-tracker"
 recorder = "file-tracker"
 
 [[policy.tool]]
 name = "tool/file-tracker/shell(network_hosts:registry.yarnpkg.com)"
+delta = {}
+requires = {}
 annotator = "file-tracker"
 recorder = "file-tracker"
 
 [[policy.tool]]
 name = "tool/file-tracker/shell(network_hosts:*.golang.org)"
+delta = {}
+requires = {}
 annotator = "file-tracker"
 recorder = "file-tracker"
 
 [[policy.tool]]
 name = "tool/file-tracker/shell(network_hosts:*.crates.io)"
+delta = {}
+requires = {}
 annotator = "file-tracker"
 recorder = "file-tracker"
 
 [[policy.tool]]
 name = "tool/file-tracker/shell(network_hosts:pypi.org|files.pythonhosted.org)"
+delta = {}
+requires = {}
 annotator = "file-tracker"
 recorder = "file-tracker"
 
@@ -111,4 +121,5 @@ recorder = "file-tracker"
 # cannot run them either.
 [[policy.tool]]
 name = "tool/file-tracker/unmediated"
+annotator = ""
 requires = { attention = ["blocked"] }

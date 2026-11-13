@@ -131,6 +131,7 @@ async fn restricted_linear_content_can_reach_a_github_destination_with_the_same_
         r#"
 [[policy.tool]]
 name = "mcp/github/issue_write(repo:private)"
+annotator = ""
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["alice@corp.example"] } }
 "#,

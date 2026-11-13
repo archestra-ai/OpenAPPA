@@ -63,10 +63,12 @@ delta = {}
 # session's label. A send by name falls through to the battery's internal sink.
 [[policy.tool]]
 name = "host/claude-code/SendMessage(to:uds:*)"
+requires = {}
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/SendMessage(to:pipe:*)"
+requires = {}
 delta = {}
 
 # A peer message the runtime held. Its content carries the label the runtime

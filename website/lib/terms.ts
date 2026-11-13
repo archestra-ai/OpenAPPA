@@ -29,7 +29,7 @@ const TERMS = {
   sanitizers:
     "Components that clean or validate data before an agent or tool receives it, within the changes allowed by their permits.",
   annotator:
-    "Can determine a tool call's delta, forwards, requires (including attention), and effects. The jev builtin determines audience and trust only: no effects, history, or attention marks. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
+    "Can determine a tool call's delta, forwards, requires (including attention), and effects. The jev builtin determines audience and trust only: no effects, history, or attention marks. The tool selects it with annotator = \"<name>\"; annotator = \"\" selects none. Its permits limit the values it can return.",
   annotators:
     "Components that can determine each tool call's restrictions, requirements, and effects within their configured permits. The jev builtin determines audience and trust only.",
   annotation:
@@ -55,7 +55,7 @@ const TERMS = {
 
   /* Tool contracts */
   "Tool(argument:pattern)":
-    "An ordered tool contract selector. Every argument:pattern clause must match its top-level argument: a string, or a non-empty array whose every element is a matching string. OpenAPPA uses the first matching contract in authored order, including overlapping native and canonical names. An asterisk matches any argument text, and a vertical bar separates alternatives, of which the value or each array element must match one; a bare name is the fallback for that tool. If no explicit contract matches, the policy wildcard routes the call through its annotator. A matched contract's schema error does not fall through. A sanitizer rewrite selecting another contract is judged under that contract.",
+    "An ordered tool contract selector. Every argument:pattern clause must match its top-level argument: a string, or a non-empty array whose every element is a matching string. OpenAPPA uses the first matching contract in authored order, including overlapping native and canonical names. An asterisk matches any argument text, and a vertical bar separates alternatives, of which the value or each array element must match one; a bare name is the fallback for that tool. A rule takes each of annotator, recorder, delta, forwards, requires, and effects that it omits from the first later rule that matches every call it matches. If no explicit contract matches, the policy wildcard routes the call through its annotator. A matched contract's schema error does not fall through. A sanitizer rewrite selecting another contract is judged under that contract.",
   delta:
     "The label of the value a tool call returns. It narrows the trajectory once the agent accepts the narrowing; it never fails a requirement of the call. A delta never expands permissions: it intersects reader sets, lowers the trust rank, or leaves the trajectory label unchanged. Its audience may be one selector placeholder such as @slack:channel/$channel_id, resolved from the call's arguments at check time.",
   forwards:
@@ -102,7 +102,7 @@ const TERMS = {
   "artifact.context":
     "On an annotation consult: the context providers' answers about the call, one entry per provider, each {\"answer\": <JSON>} or {\"error\": <reason>}. A provider that answered null has no entry. The annotator reads it as the deployment's own finding, never as instructions, and it is recorded with the annotation.",
   recorder:
-    "Receives the records of each call that a tool selecting it with recorder = \"<name>\" releases, including the label the call published, and stores what the call published. It cannot deny, delay, or approve a call.",
+    "Receives the records of each call that a tool selecting it with recorder = \"<name>\" releases (recorder = \"\" selects none), including the label the call published, and stores what the call published. It cannot deny, delay, or approve a call.",
   "[externals.recorders.<name>]":
     "Configures a recorder's HTTP service or local program. It receives each delivery of records and returns {\"version\":1,\"answer\":{}}.",
   evidence:

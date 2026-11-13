@@ -1719,24 +1719,47 @@ delta = {}
     ));
 }
 
-/// A recorder binds to the declaration that names it: the first matching selector wins, a call
-/// the explicit declarations do not cover falls to the wildcard's recorder, and a declaration
-/// that names none has none.
+/// A rule takes each contract field it does not write from the first later rule that selects
+/// every call it selects. The routing is written once on the widest rule; a narrower rule's
+/// own field replaces the wider one's rather than meeting it, `""` writes "no Annotator" or
+/// "no recorder", and a later rule that selects only some of a rule's calls passes nothing
+/// on. The policy is the one that writes every inherited field out: same identity, same
+/// recorders.
 #[test]
-fn a_recorder_follows_the_declaration_a_call_selects() {
-    let config = load(
-        r#"
+fn a_rule_takes_the_fields_it_omits_from_a_later_rule_that_selects_every_call_it_selects() {
+    let head = r#"
 version = 2
 
 [[annotator]]
 name = "file-tracker"
+"#;
+    let composed = load(&format!(
+        r#"{head}
+[[tool]]
+name = "Bash(hosts:reddit.com)"
+delta = {{ trust = "suspicious" }}
 
 [[tool]]
-name = "Write(file_path:/scratch/*)"
-delta = {}
+name = "Bash(hosts:*.corp)"
+requires = {{ audience = {{ contains = ["internal"] }} }}
 
 [[tool]]
-name = "Write"
+name = "Bash(hosts:scratch,mode:*)"
+annotator = ""
+recorder = ""
+
+[[tool]]
+name = "Bash(mode:quiet)"
+requires = {{ trust = "trusted" }}
+
+[[tool]]
+name = "Bash(hosts:*)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = {{ audience = {{ contains = ["public"] }} }}
+
+[[tool]]
+name = "Bash"
 annotator = "file-tracker"
 recorder = "file-tracker"
 
@@ -1744,29 +1767,141 @@ recorder = "file-tracker"
 name = "*"
 annotator = "file-tracker"
 recorder = "catch-all"
-"#,
-    )
+"#
+    ))
     .expect("the policy loads");
-    let engine = config.engine();
-    let recorder = |tool: &str, arguments: &str| {
-        let call = engine
+    let written_out = load(&format!(
+        r#"{head}
+[[tool]]
+name = "Bash(hosts:reddit.com)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = {{ audience = {{ contains = ["public"] }} }}
+delta = {{ trust = "suspicious" }}
+
+[[tool]]
+name = "Bash(hosts:*.corp)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = {{ audience = {{ contains = ["internal"] }} }}
+
+[[tool]]
+name = "Bash(hosts:scratch,mode:*)"
+annotator = ""
+recorder = ""
+requires = {{ audience = {{ contains = ["public"] }} }}
+
+[[tool]]
+name = "Bash(mode:quiet)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = {{ trust = "trusted" }}
+
+[[tool]]
+name = "Bash(hosts:*)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = {{ audience = {{ contains = ["public"] }} }}
+
+[[tool]]
+name = "Bash"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[tool]]
+name = "*"
+annotator = "file-tracker"
+recorder = "catch-all"
+"#
+    ))
+    .expect("the written-out policy loads");
+    assert_eq!(composed.engine().identity(), written_out.engine().identity());
+
+    let engine = composed.engine();
+    let call = |tool: &str, arguments: &str| {
+        engine
             .resolve_call(ToolName::new(tool), arguments.as_bytes())
-            .expect("the call resolves");
-        engine.recorder(&call).map(|name| name.as_str().to_string())
+            .expect("the call resolves")
     };
-    assert_eq!(recorder("Write", r#"{"file_path":"/scratch/a"}"#), None);
-    assert_eq!(
-        recorder("Write", r#"{"file_path":"/repo/a"}"#).as_deref(),
-        Some("file-tracker")
-    );
-    assert_eq!(recorder("Unwritten", "{}").as_deref(), Some("catch-all"));
-    assert_eq!(
+    let recorder = |tool: &str, arguments: &str| {
+        engine
+            .recorder(&call(tool, arguments))
+            .map(|name| name.as_str().to_string())
+    };
+    let annotator = |tool: &str, arguments: &str| {
         engine
             .registry()
-            .recorders()
-            .into_iter()
-            .map(|name| name.as_str())
-            .collect::<Vec<_>>(),
-        ["catch-all", "file-tracker"]
+            .declaration(&call(tool, arguments))
+            .and_then(|declaration| declaration.annotator())
+            .map(|name| name.as_str().to_string())
+    };
+    for (arguments, routed) in [
+        (r#"{"hosts":"reddit.com"}"#, true),
+        (r#"{"hosts":"git.corp"}"#, true),
+        (r#"{"hosts":"scratch","mode":"x"}"#, false),
+        // `Bash(hosts:*)` selects only the calls that name hosts, so `mode:quiet` takes
+        // the bare rule's routing, and a quiet call naming a host keeps its own rule.
+        (r#"{"mode":"quiet"}"#, true),
+        (r#"{"mode":"quiet","hosts":"example.com"}"#, true),
+    ] {
+        let expected = routed.then(|| "file-tracker".to_string());
+        assert_eq!(recorder("Bash", arguments), expected, "{arguments}");
+        assert_eq!(annotator("Bash", arguments), expected, "{arguments}");
+    }
+    assert_eq!(recorder("Unwritten", "{}").as_deref(), Some("catch-all"));
+
+    // The quiet call that names a host is selected by `Bash(mode:quiet)`, whose `requires`
+    // it keeps: `Bash(hosts:*)` does not select every quiet call, so it passes nothing on.
+    let Some(ToolDeclaration::Annotated { requires, .. }) = engine
+        .registry()
+        .declaration(&call("Bash", r#"{"mode":"quiet","hosts":"example.com"}"#))
+    else {
+        panic!("the quiet rule routes through the file-tracker");
+    };
+    assert!(requires.audience.is_empty(), "{requires:?}");
+}
+
+/// A field an Annotator answers is refused beside it whether the rule writes the Annotator
+/// or takes it from a wider rule.
+#[test]
+fn an_inherited_annotator_refuses_the_fields_it_answers() {
+    let refused = load(
+        r#"
+version = 2
+
+[[annotator]]
+name = "classifier"
+
+[[tool]]
+name = "shell(command:* .env)"
+delta = { audience = ["self"] }
+
+[[tool]]
+name = "shell"
+annotator = "classifier"
+"#,
     );
+    assert!(matches!(
+        refused,
+        Err(ConfigError::AnnotatorWithStatics { tool, annotator, field: "delta.audience" })
+            if tool == "shell(command:* .env)" && annotator == "classifier"
+    ));
+    load(
+        r#"
+version = 2
+
+[[annotator]]
+name = "classifier"
+
+[[tool]]
+name = "shell(command:* .env)"
+annotator = ""
+delta = { audience = ["self"] }
+
+[[tool]]
+name = "shell"
+annotator = "classifier"
+"#,
+    )
+    .expect("`annotator = \"\"` keeps the static rule static");
 }

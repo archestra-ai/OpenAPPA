@@ -142,26 +142,25 @@ pub(crate) struct RawTool {
     pub(crate) delta: Option<RawDelta>,
     pub(crate) forwards: Option<RawDelta>,
     pub(crate) requires: Option<RawRequires>,
-    #[serde(default)]
-    pub(crate) effects: Vec<String>,
+    pub(crate) effects: Option<Vec<String>>,
     pub(crate) implementation: Option<toml::Value>,
     pub(crate) parameters: Option<serde_json::Value>,
-    /// The registered `[[annotator]]` that produces this tool's semantics per call. Replaces
-    /// the static `delta`/`forwards`/`requires`/`effects` — a declaration carries one recipe.
+    /// The registered `[[annotator]]` that produces this tool's semantics per call; `""` names
+    /// none. Beside it a rule writes only a label floor.
     pub(crate) annotator: Option<String>,
     /// The `[externals.recorders]` entry that receives the label each released call of this
-    /// declaration publishes. Routing only: it changes no decision.
+    /// declaration publishes; `""` names none. Routing only: it changes no decision.
     pub(crate) recorder: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDelta {
     pub(crate) trust: Option<String>,
     pub(crate) audience: Option<Vec<String>>,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRequires {
     pub(crate) trust: Option<String>,
@@ -171,7 +170,7 @@ pub(crate) struct RawRequires {
     pub(crate) attention: Option<Vec<String>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRequiresAudience {
     pub(crate) contains: Option<Vec<String>>,
@@ -180,7 +179,7 @@ pub(crate) struct RawRequiresAudience {
     pub(crate) within: Option<serde::de::IgnoredAny>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawHistory {
     #[serde(default)]

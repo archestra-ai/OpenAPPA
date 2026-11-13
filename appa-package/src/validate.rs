@@ -637,7 +637,11 @@ fn check_stands_alone(policy: &Path, base: &Value, tools: &[String]) -> Result<(
         .filter_map(|annotator| annotator.get("name").and_then(Value::as_str))
         .collect();
     let uses = declarations(base, "tool").filter_map(|tool| tool.get("annotator").and_then(Value::as_str));
-    if let Some(annotator) = uses.into_iter().find(|annotator| !declared.contains(annotator)) {
+    // `annotator = ""` names no Annotator.
+    if let Some(annotator) = uses
+        .into_iter()
+        .find(|annotator| !annotator.is_empty() && !declared.contains(annotator))
+    {
         return Err(PackageError::BaseUsesTargetAnnotator {
             policy: policy.to_path_buf(),
             annotator: annotator.to_owned(),

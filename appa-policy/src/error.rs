@@ -71,15 +71,13 @@ pub enum ConfigError {
         spelling: String,
     },
     #[error(
-        "tool {tool} names annotator {annotator} and also declares `{field}`; beside an Annotator a rule writes only a label floor: `requires.trust`, `requires.audience.contains`, and `delta.trust`"
+        "tool {tool} names annotator {annotator} and also declares `{field}`, each written on the rule or taken from a later rule that selects every call it selects; beside an Annotator a rule writes only a label floor: `requires.trust`, `requires.audience.contains`, and `delta.trust`"
     )]
     AnnotatorWithStatics {
         tool: String,
         annotator: String,
         field: &'static str,
     },
-    #[error("tool {tool} names an empty recorder")]
-    EmptyRecorder { tool: String },
     #[error("tool {tool}: annotator {annotator} input {input} reads {reads}, {reason}")]
     AnnotatorInput {
         tool: String,

@@ -223,18 +223,22 @@ delta = {}
 # from repositories, issues and web pages.
 [[policy.tool]]
 name = "host/claude-code/RemoteTrigger(action:list_runs)"
+requires = {}
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "host/claude-code/RemoteTrigger(action:get_run_log)"
+requires = {}
 delta = { trust = "suspicious" }
 
 [[policy.tool]]
 name = "host/claude-code/RemoteTrigger(action:list)"
+requires = {}
 delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/RemoteTrigger(action:get)"
+requires = {}
 delta = {}
 
 [[policy.tool]]

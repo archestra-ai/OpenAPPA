@@ -48,76 +48,91 @@ selectors = [
 
 [[policy.tool]]
 name = "mcp/github/get_file_contents"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_branches"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_commits"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_commit"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_tags"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_tag"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_releases"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_latest_release"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_release_by_tag"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_repository_collaborators"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_issues"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/issue_read"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/get_label"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/list_pull_requests"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/pull_request_read"
+delta = {}
 annotator = "github.repository-visibility"
 tags = ["github"]
 
@@ -125,65 +140,82 @@ tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/fork_repository"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_branch"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_or_update_file"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/push_files"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/delete_file"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/issue_write"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/sub_issue_write"
+delta = {}
+requires = {}
 annotator = "github.repository-readers"
 tags = ["github"]
 
 [[policy.tool]]
 name = "mcp/github/add_issue_comment"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/create_pull_request"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/update_pull_request"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/update_pull_request_branch"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/merge_pull_request"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/pull_request_review_write"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/add_comment_to_pending_review"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/add_reply_to_pull_request_comment"
+requires = {}
 annotator = "github.repository-readers"
 
 [[policy.tool]]
 name = "mcp/github/request_copilot_review"
+requires = {}
 annotator = "github.repository-readers"

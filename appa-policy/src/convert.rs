@@ -103,7 +103,8 @@ fn top_trust(chain: &TrustChain) -> Trust {
 }
 
 impl RawTool {
-    pub(crate) fn convert(mut self, chain: &TrustChain) -> Result<ToolDeclaration, ConfigError> {
+    /// Spell the rule's name as a canonical tool: `server` qualifies a short MCP tool name.
+    pub(crate) fn qualify(&mut self) -> Result<(), ConfigError> {
         if let Some(server) = self.server.take() {
             let (name, selector) = split_selector(&self.name);
             let invalid = |reason: String| ConfigError::ToolServer {
@@ -117,6 +118,28 @@ impl RawTool {
                 .map_err(|error| invalid(error.to_string()))?;
             self.name = format!("{id}{selector}");
         }
+        Ok(())
+    }
+
+    /// Take each contract field this rule does not write from `wider`, a later rule that
+    /// selects every call this one selects. Called for each such rule in policy order, so a
+    /// field comes from the first of them that writes it.
+    pub(crate) fn inherit(&mut self, wider: &RawTool) {
+        fn fill<T: Clone>(own: &mut Option<T>, wider: &Option<T>) {
+            if own.is_none() {
+                own.clone_from(wider);
+            }
+        }
+        fill(&mut self.annotator, &wider.annotator);
+        fill(&mut self.recorder, &wider.recorder);
+        fill(&mut self.delta, &wider.delta);
+        fill(&mut self.forwards, &wider.forwards);
+        fill(&mut self.requires, &wider.requires);
+        fill(&mut self.effects, &wider.effects);
+    }
+
+    /// The declaration of a qualified rule whose inheritance is resolved.
+    pub(crate) fn convert(self, chain: &TrustChain) -> Result<ToolDeclaration, ConfigError> {
         let ctx = || format!("tool {}", self.name);
         for argument in url_host_wildcards(&ToolName::new(self.name.clone())) {
             tracing::warn!(
@@ -132,7 +155,7 @@ impl RawTool {
             })?,
             None => ToolParameters::open(),
         };
-        if let Some(annotator) = self.annotator {
+        if let Some(annotator) = self.annotator.filter(|annotator| !annotator.is_empty()) {
             // Beside an Annotator a rule may write a label floor: a trust floor, the readers
             // the data must reach, and a lowest result trust. Every other field is the
             // Annotator's to answer.
@@ -144,7 +167,7 @@ impl RawTool {
             if self.forwards.is_some() {
                 return Err(refused("forwards"));
             }
-            if !self.effects.is_empty() {
+            if self.effects.as_ref().is_some_and(|effects| !effects.is_empty()) {
                 return Err(refused("effects"));
             }
             let delta_trust = match self.delta {
@@ -190,7 +213,7 @@ impl RawTool {
             Some(r) => r.convert(chain, &ctx())?,
             None => Requires::default(),
         };
-        let emits = EffectSet::new(self.effects.into_iter().map(EffectKind::new)).map_err(|duplicate| {
+        let emits = EffectSet::new(self.effects.into_iter().flatten().map(EffectKind::new)).map_err(|duplicate| {
             ConfigError::DuplicateEffect {
                 tool: self.name.clone(),
                 kind: duplicate.0.as_str().to_string(),

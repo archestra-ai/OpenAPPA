@@ -249,6 +249,7 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/archestra/transfer_workspace_file(direction:download)"
+requires = {}
 delta = { audience = ["internal"] }
 
 [[policy.tool]]
