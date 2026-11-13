@@ -66,8 +66,8 @@ permits = { attention = ["release-review"] }
 async fn a_policy_this_deployment_cannot_run_is_refused_at_creation() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let sessions = sessions(&dir, Duration::from_secs(600));
-    // The playground routes every named annotator to its own handler, and a
-    // builtin annotator takes no such binding — so a policy naming one cannot
+    // The playground routes every named annotator to its own handler, and an
+    // annotator naming `uses` takes no such binding — so a policy naming one cannot
     // run here and is refused when the session is created.
     let policy = r#"
 version = 2
@@ -75,7 +75,7 @@ trust_chain = ["suspicious", "trusted"]
 
 [[annotator]]
 name = "classify"
-builtin = "llm"
+uses = "llm"
 
 [[tool]]
 name = "list_customers"
@@ -86,7 +86,7 @@ annotator = "classify"
         .create(policy, &[System::Crm].into_iter().collect(), MODEL)
         .await
     else {
-        panic!("a builtin annotator would run on the demo host itself, so the policy must be refused");
+        panic!("an annotator naming uses would run on the demo host itself, so the policy must be refused");
     };
     assert!(matches!(error, CreateError::Policy(_)), "got: {error}");
 }

@@ -253,7 +253,7 @@ async fn a_bound_secret_masker_delivers_the_masked_shell_output() {
     let include = including_coding_on_native_claude_code_tools(dir.path());
     let default = std::fs::read_to_string(repo_root().join("marketplace/plugins/claude-code/default.appa.toml"))
         .expect("the initialized default is readable");
-    let bound = "[externals.sanitizers.\"coding.strip-secrets\"]\nbuiltin = \"claude-code\"\n";
+    let bound = "[externals.sanitizers.\"coding.strip-secrets\"]\nuses = \"claude-code\"\n";
     assert!(
         default.contains(bound),
         "the default binds the masker to the Claude Code model"

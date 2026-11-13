@@ -144,7 +144,7 @@ it depends on. Examples:
 ## Battery support
 
 - Add any root support the battery requires, such as its human-approval
-  Authority. If an existing `builtin hitl` Authority handles the relevant
+  Authority. If an existing `uses = "hitl"` Authority handles the relevant
   attention mark but cannot review public audiences, expand its permits
   instead of adding another Authority. Do not modify an explicit hard denial.
   Describe the resulting behavior, not this wiring.
@@ -210,7 +210,7 @@ Apply these rules:
   `"private"`, `@company`, or another plausible reader or group for `self`
   or `internal`.
 
-For public-audience requirements, reuse an appropriate `builtin hitl`
+For public-audience requirements, reuse an appropriate `uses = "hitl"`
 Authority and extend its audience permit instead of adding attention solely
 to route reviews. Preserve hard denials when the operator requested them, a
 root rule or comment declares them, or a mark is intentionally unserved. If

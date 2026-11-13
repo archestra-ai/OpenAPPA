@@ -411,7 +411,7 @@ version = 2
 
 [[policy.annotator]]
 name = "any"
-builtin = "claude-code"
+uses = "claude-code"
 
 [[policy.tool]]
 name = "*"

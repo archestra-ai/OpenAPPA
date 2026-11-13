@@ -1,7 +1,7 @@
 # Sanitizer: LLM sanitizers through the production consult path
 
-This benchmark asks OpenAPPA's model sanitizers (`builtin = "llm"` and
-`builtin = "claude-code"`) to rewrite fixed values, and scores what a session
+This benchmark asks OpenAPPA's model sanitizers (`uses = "llm"` and
+`uses = "claude-code"`) to rewrite fixed values, and scores what a session
 would admit. It measures three things per sanitizer:
 
 | Question | Metric |
@@ -33,8 +33,8 @@ whether it would offer the sanitizer on a given value.
 | Arm | Backend |
 |---|---|
 | `identity` | A command sanitizer that returns every value unchanged. It is the raw-acceptance ceiling: every block lifts and every payload crosses. Without a sanitizer the block stays and nothing crosses. |
-| `claude-code` | The `claude-code` builtin. Default model `sonnet` and the runtime's default 60 s consult budget, as the shipped Claude Code profile has. |
-| `llm` | The `llm` builtin under `[externals.llm]`. Default `anthropic` / `claude-haiku-4-5`. |
+| `claude-code` | `uses = "claude-code"`. Default model `sonnet` and the runtime's default 60 s consult budget, as the shipped Claude Code profile has. |
+| `llm` | `uses = "llm"` under `[externals.llm]`. Default `anthropic` / `claude-haiku-4-5`. |
 
 [`policy.toml`](policy.toml) composes the sanitizers a Claude Code deployment
 runs. It includes the `claude-code`, `coding`, and `cloudflare` batteries as

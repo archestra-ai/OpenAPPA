@@ -21,10 +21,10 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
         dir,
         r#"
 [externals.sanitizers."pagerduty.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."pagerduty.redact-for-public"]
-builtin = "claude-code"
+uses = "claude-code"
 "#,
     )
     .await

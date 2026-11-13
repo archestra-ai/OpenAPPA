@@ -60,4 +60,4 @@ timeout_ms = 5000
 max_body_bytes = 65536
 
 [externals.sanitizers.complainant-redactor]
-builtin = "redact-email"
+uses = "redact-email"

@@ -1,4 +1,4 @@
-//! The `claude-code` builtin: one isolated, tool-less `claude` process per consult.
+//! The `claude-code` implementation: one isolated, tool-less `claude` process per consult.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use crate::config::ClaudeCode;
 use crate::consult::{AnnotationAnswer, AnnotationDeclaration, ModelPrompt};
 use crate::external::{ConsultGates, NoAnswerReason, Transcript, acquire_within};
-use appa_policy::AnnotatorBuiltin;
+use appa_policy::AnnotatorUses;
 
 /// The CLI's `--output-format json` result. On a failure the CLI still exits through
 /// this envelope: `is_error` set and its own message — "Not logged in · Please run
@@ -135,7 +135,7 @@ impl ClaudeCodeBackend {
         seen: Option<&mut Transcript>,
     ) -> Result<serde_json::Value, NoAnswerReason> {
         let deadline = tokio::time::Instant::now() + self.config.limits.timeout;
-        let gate = self.gates.model(AnnotatorBuiltin::ClaudeCode);
+        let gate = self.gates.model(AnnotatorUses::ClaudeCode);
         let permit = acquire_within(&gate, deadline, "claude", name).await?;
         let answered = run_claude_code(self, prompt, deadline, seen).await;
         drop(permit);

@@ -1,4 +1,4 @@
-//! The `archestra` builtin: the rendered [`ModelPrompt`] posted to an endpoint the embedding
+//! The `archestra` implementation: the rendered [`ModelPrompt`] posted to an endpoint the embedding
 //! host supplies, which picks and calls the model itself. The host sees what an `llm`
 //! provider would — the declaration in `system`, the redacted artifact in `input`, the
 //! per-kind output schema in `schema` — plus, in `kind`, which component is asking
@@ -13,7 +13,7 @@ use crate::config::{Endpoint, EndpointHost, EndpointToken, ModelLimits};
 use crate::consult::{ConsultKind, ModelPrompt};
 use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, Transcript, read_body, refusal_detail};
 use appa_engine::value::TrajectoryId;
-use appa_policy::AnnotatorBuiltin;
+use appa_policy::AnnotatorUses;
 
 /// The trajectory a consult is made for, and the tool call it judges, if any. The host
 /// files the model call it makes under the session and caller that own this trajectory.
@@ -53,7 +53,7 @@ struct Request<'a> {
     attribution: Option<&'a Attribution>,
 }
 
-/// One client for the host's endpoint, shared by every `builtin = "archestra"` Annotator of
+/// One client for the host's endpoint, shared by every `uses = "archestra"` Annotator of
 /// the deployment. Its permit pool is the runtime's `archestra` gate.
 #[derive(Clone)]
 pub struct ArchestraBackend {
@@ -93,7 +93,7 @@ impl ArchestraBackend {
     ) -> Result<serde_json::Value, NoAnswerReason> {
         consult_with_retries(
             &self.gates,
-            AnnotatorBuiltin::Archestra,
+            AnnotatorUses::Archestra,
             self.timeout,
             self.max_body_bytes,
             name,

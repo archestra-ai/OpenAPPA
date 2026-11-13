@@ -15,7 +15,7 @@ use appa_engine::authority::{ContextHint, HintTooLong};
 use appa_engine::label::{ChainAudience, ReaderId};
 use appa_engine::names::{ContextProviderName, ProviderName, SanitizerName};
 use appa_package::BatteryTarget;
-use appa_policy::AnnotatorBuiltin;
+use appa_policy::AnnotatorUses;
 use appa_runtime_api::PrincipalSource;
 use serde::Deserialize;
 
@@ -121,8 +121,8 @@ impl PolicyFile {
 pub struct HostDefaults {
     pub consult_timeout: Duration,
     pub max_body_bytes: usize,
-    /// The endpoint that serves the `archestra` annotator builtin. No policy text can name
-    /// one, so a document that declares the builtin opens only where the host supplies it.
+    /// The endpoint that serves the `archestra` implementation. No policy text can name
+    /// one, so a document that declares that implementation opens only where the host supplies it.
     #[cfg(feature = "archestra")]
     pub archestra: Option<ArchestraEndpoint>,
 }
@@ -230,7 +230,7 @@ enum IncludeAdmission {
     Consumed,
 }
 
-/// The API providers the `llm` builtin speaks to. Closed: the transport is compiled in
+/// The API providers the `llm` implementation speaks to. Closed: the transport is compiled in
 /// per provider, so a name outside this set is a configuration refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProvider {
@@ -277,8 +277,8 @@ pub struct Externals {
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Implementation>,
     pub sanitizers: BTreeMap<String, Implementation>,
-    /// One implementation per policy-declared `[[annotator]]` that names no `builtin` on
-    /// its declaration. An Annotator that carries a stock builtin takes no entry here.
+    /// One implementation per policy-declared `[[annotator]]` that names no `uses` on
+    /// its declaration. An Annotator that names a model takes no entry here.
     pub annotators: BTreeMap<String, Transport>,
     /// One entry per audience source provider the policy's `[audience]` table references,
     /// under the provider's name, plus one per entry a provider's `lookup` names.
@@ -293,34 +293,34 @@ pub struct Externals {
     /// records of every call whose declaration names it, after they are appended. Never
     /// consulted: a recorder neither denies nor delays a call.
     pub recorders: BTreeMap<String, Transport>,
-    /// Deployment knobs for the stock `claude-code` builtin.
+    /// Deployment knobs for the `claude-code` implementation.
     pub claude_code: ClaudeCode,
-    /// The profile the stock `llm` builtin consults, where the deployment declares one.
+    /// The profile the `llm` implementation consults, where the deployment declares one.
     pub llm: Option<LlmProfile>,
     /// The profile the stock `jev` annotator consults, where the deployment declares one.
     pub jev: Option<JevProfile>,
-    /// The host's endpoint for the `archestra` builtin, where the host supplies one.
+    /// The host's endpoint for the `archestra` implementation, where the host supplies one.
     #[cfg(feature = "archestra")]
     pub archestra: Option<Endpoint>,
 }
 
 impl Externals {
-    /// The limits of `builtin`'s table, where the deployment declares one.
-    pub(crate) fn model_limits(&self, builtin: AnnotatorBuiltin) -> Option<ModelLimits> {
-        match builtin {
-            AnnotatorBuiltin::ClaudeCode => Some(self.claude_code.limits),
-            AnnotatorBuiltin::Llm => self.llm.as_ref().map(|llm| llm.limits),
-            AnnotatorBuiltin::Jev => self.jev.as_ref().map(|jev| jev.limits),
+    /// The limits of `uses`'s table, where the deployment declares one.
+    pub(crate) fn model_limits(&self, uses: AnnotatorUses) -> Option<ModelLimits> {
+        match uses {
+            AnnotatorUses::ClaudeCode => Some(self.claude_code.limits),
+            AnnotatorUses::Llm => self.llm.as_ref().map(|llm| llm.limits),
+            AnnotatorUses::Jev => self.jev.as_ref().map(|jev| jev.limits),
             #[cfg(feature = "archestra")]
-            AnnotatorBuiltin::Archestra => self.archestra.as_ref().map(|_| ModelLimits::MODEL_CALL),
+            AnnotatorUses::Archestra => self.archestra.as_ref().map(|_| ModelLimits::MODEL_CALL),
         }
     }
 
     /// The longest budget any one machine consult of this deployment runs under.
     pub(crate) fn longest_consult(&self) -> Duration {
-        AnnotatorBuiltin::ALL
+        AnnotatorUses::ALL
             .into_iter()
-            .filter_map(|builtin| self.model_limits(builtin))
+            .filter_map(|uses| self.model_limits(uses))
             .map(|limits| limits.timeout)
             .fold(self.timeout, Duration::max)
     }
@@ -440,8 +440,8 @@ pub(crate) fn lookup_targets_of(document: &toml::Value) -> BTreeMap<String, Stri
         .unwrap_or_default()
 }
 
-/// One model builtin's consult limits: the budget of one consult, its wait for a permit
-/// included, and how many of its consults the runtime runs at once. Each model builtin
+/// One model's consult limits: the budget of one consult, its wait for a permit
+/// included, and how many of its consults the runtime runs at once. Each model
 /// reads its own from its `[externals.*]` table as `timeout_ms` and `max_concurrent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelLimits {
@@ -490,7 +490,7 @@ impl ModelLimits {
     }
 }
 
-/// How this deployment runs the stock `claude-code` builtin. `command` overrides the
+/// How this deployment runs the `claude-code` implementation. `command` overrides the
 /// executable (a service environment often strips `PATH`); `model` pins the model the
 /// consult runs on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -623,12 +623,12 @@ pub enum Transport {
     Command(ResolverCommand),
 }
 
-/// How one authority or sanitizer is served — a transport or a builtin name — a closed
+/// How one authority or sanitizer is served — a transport or a `uses` name — a closed
 /// choice per entry.
 #[derive(Debug, Clone)]
 pub enum Implementation {
     Transport(Transport),
-    Builtin(String),
+    Uses(String),
 }
 
 /// One `[externals.audience.<name>]` entry: how it answers, and — for a provider whose
@@ -662,11 +662,11 @@ pub struct ResolverCommand {
     pub token_env: Vec<String>,
 }
 
-pub const CLAUDE_CODE_BUILTIN: &str = AnnotatorBuiltin::ClaudeCode.wire_name();
-pub const LLM_BUILTIN: &str = AnnotatorBuiltin::Llm.wire_name();
-pub const JEV_BUILTIN: &str = AnnotatorBuiltin::Jev.wire_name();
+pub const CLAUDE_CODE_USES: &str = AnnotatorUses::ClaudeCode.wire_name();
+pub const LLM_USES: &str = AnnotatorUses::Llm.wire_name();
+pub const JEV_USES: &str = AnnotatorUses::Jev.wire_name();
 #[cfg(feature = "archestra")]
-pub const ARCHESTRA_BUILTIN: &str = AnnotatorBuiltin::Archestra.wire_name();
+pub const ARCHESTRA_USES: &str = AnnotatorUses::Archestra.wire_name();
 
 /// One external endpoint: a validated URL plus its bearer token, if
 /// the service needs one. `https` reaches anywhere; `http` only
@@ -871,8 +871,8 @@ pub enum ConfigError {
     InvalidLlmProvider { provider: String },
     #[error("the {section} entry {name:?} must name exactly one implementation, and only url takes token_env")]
     ImplementationChoice { section: &'static str, name: String },
-    #[error("the {section} entry {name:?} cannot be builtin")]
-    BuiltinNotAllowed { section: &'static str, name: String },
+    #[error("the {section} entry {name:?} cannot take uses")]
+    UsesNotAllowed { section: &'static str, name: String },
     #[error("the audience entry {name:?} maps {member:?}, {reason}")]
     BadReaderMapping {
         name: String,
@@ -887,13 +887,13 @@ pub enum ConfigError {
     ChainedLookup { name: String, target: String },
     #[error("the audience entry {name:?} is a readers table, which only another entry's lookup can name")]
     ReadersWithoutLookup { name: String },
-    #[error("the {section} entry {name:?} names the builtin {builtin:?}, which is not a valid implementation name")]
-    InvalidBuiltinName {
+    #[error("the {section} entry {name:?} uses {uses:?}, which is not a valid implementation name")]
+    InvalidUsesName {
         section: &'static str,
         name: String,
-        builtin: String,
+        uses: String,
     },
-    #[error("the {section} entry {name:?} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
+    #[error("the {section} entry {name:?} uses \"llm\", but the deployment declares no [externals.llm]")]
     LlmNotConfigured { section: &'static str, name: String },
     #[error("the context entry {name:?} hint is {len} characters, over the maximum {max}")]
     ContextHintTooLong { name: String, len: usize, max: usize },
@@ -928,7 +928,7 @@ pub enum ConfigError {
 }
 
 /// The five sections a component binds under. Every section takes a URL or a command;
-/// which builtin names a section accepts is the one difference, and the audience section
+/// which `uses` names a section accepts is the one difference, and the audience section
 /// alone takes a `readers` roster and a `lookup` redirect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Section {
@@ -973,25 +973,25 @@ impl Section {
         format!("{}.{name}", self.name())
     }
 
-    /// Whether `builtin` is a name this section may bind. Authorities and sanitizers take
-    /// the stock names, the model builtins, and any module-grammar name (the module's
-    /// presence is checked when the deployment opens); an Annotator names a stock builtin
-    /// on its policy declaration instead, and an audience entry is never a builtin.
-    fn check_builtin(self, name: &str, builtin: &str) -> Result<(), ConfigError> {
+    /// Whether `uses` is a name this section may bind. Authorities and sanitizers take
+    /// the stock names, the models, and any module-grammar name (the module's
+    /// presence is checked when the deployment opens); an Annotator names its model
+    /// on its policy declaration instead, and an audience entry never takes `uses`.
+    fn check_uses(self, name: &str, uses: &str) -> Result<(), ConfigError> {
         let allowed = match self {
             Section::Annotators | Section::Audience | Section::Context | Section::Recorders => {
-                return Err(ConfigError::BuiltinNotAllowed {
+                return Err(ConfigError::UsesNotAllowed {
                     section: self.name(),
                     name: name.to_string(),
                 });
             }
-            Section::Authorities | Section::Sanitizers => crate::builtins::valid_implementation_name(builtin),
+            Section::Authorities | Section::Sanitizers => crate::uses::valid_implementation_name(uses),
         };
         if !allowed {
-            return Err(ConfigError::InvalidBuiltinName {
+            return Err(ConfigError::InvalidUsesName {
                 section: self.name(),
                 name: name.to_string(),
-                builtin: builtin.to_string(),
+                uses: uses.to_string(),
             });
         }
         Ok(())
@@ -1183,7 +1183,8 @@ enum RawTokenEnv {
 struct RawBinding {
     url: Option<String>,
     token_env: Option<RawTokenEnv>,
-    builtin: Option<String>,
+    #[serde(alias = "builtin")]
+    uses: Option<String>,
     command: Option<Vec<String>>,
 }
 
@@ -1194,7 +1195,8 @@ struct RawBinding {
 struct RawContextBinding {
     url: Option<String>,
     token_env: Option<RawTokenEnv>,
-    builtin: Option<String>,
+    #[serde(alias = "builtin")]
+    uses: Option<String>,
     command: Option<Vec<String>>,
     hint: Option<String>,
 }
@@ -1204,14 +1206,14 @@ impl RawContextBinding {
         let RawContextBinding {
             url,
             token_env,
-            builtin,
+            uses,
             command,
             hint,
         } = self;
         let binding = RawBinding {
             url,
             token_env,
-            builtin,
+            uses,
             command,
         };
         (binding, hint)
@@ -1504,7 +1506,7 @@ impl Config {
         let archestra = defaults
             .archestra
             .map(|ArchestraEndpoint { url, token }| {
-                let url = validated_url("archestra", ARCHESTRA_BUILTIN, url)?;
+                let url = validated_url("archestra", ARCHESTRA_USES, url)?;
                 Ok::<_, ConfigError>(Endpoint::new(url, Some(EndpointToken::Set(token))))
             })
             .transpose()?;
@@ -1933,7 +1935,7 @@ pub(crate) fn refuse_include_entry(entry: &str) -> Result<(), ConfigError> {
 }
 
 /// A hosted document's author runs nothing on the machine that holds it: no binding takes
-/// a `command`, and the `claude-code` builtin stays on the executable the host installed.
+/// a `command`, and the `claude-code` implementation stays on the executable the host installed.
 fn refuse_hosted_commands(externals: &RawExternals) -> Result<(), ConfigError> {
     if let Some((section, name)) = externals.commanded().next() {
         return Err(ConfigError::HostedCommand {
@@ -2035,6 +2037,14 @@ fn add_composed_metadata(
 
 fn declaration_name(declaration: &toml::Value) -> Option<&str> {
     declaration.as_table()?.get("name")?.as_str()
+}
+
+/// A declaration's or binding's `uses`, read under `builtin` too: the key's earlier spelling,
+/// which configs written before the rename and every policy file a log stored still carry. The
+/// typed parse takes both spellings (`#[serde(alias)]`); this reads the untyped document the
+/// same way.
+pub(crate) fn uses_of(entry: &toml::Value) -> Option<&toml::Value> {
+    entry.get("uses").or_else(|| entry.get("builtin"))
 }
 
 /// The named components a root may replace in an included default: Annotators and
@@ -2159,8 +2169,8 @@ struct Composition {
     document: toml::Value,
     version: i64,
     root_components: std::collections::BTreeSet<(String, String)>,
-    /// The root components that name their builtin, and so take no binding.
-    root_builtin_components: std::collections::BTreeSet<(String, String)>,
+    /// The root components that name their `uses`, and so take no binding.
+    root_uses_components: std::collections::BTreeSet<(String, String)>,
     /// The annotators and sanitizers the root binds under its own `[externals]`.
     root_bound: std::collections::BTreeSet<(String, String)>,
     /// The included Sanitizer declarations a root declaration replaced: their scope says
@@ -2169,7 +2179,7 @@ struct Composition {
     replaced_components: std::collections::BTreeSet<(String, String)>,
     origins: BTreeMap<String, PathBuf>,
     tool_maps: Vec<(tool_aliases::MapOrigin, tool_aliases::ToolMaps)>,
-    /// The included Sanitizers that name no builtin: each runs only where the deployment
+    /// The included Sanitizers that name no `uses`: each runs only where the deployment
     /// binds it, and is left out of the composed policy where nothing does.
     included_sanitizers: std::collections::BTreeSet<String>,
     /// The root's own `confined_results`, which composition never drops.
@@ -2184,7 +2194,7 @@ impl Composition {
         let policy = document.get("policy").ok_or(ConfigError::InvalidPolicyVersion)?;
         let version = policy_version(policy).ok_or(ConfigError::InvalidPolicyVersion)?;
         let root_components = declared_components(policy);
-        let root_builtin_components = REPLACEABLE
+        let root_uses_components = REPLACEABLE
             .into_iter()
             .flat_map(|field| {
                 policy
@@ -2192,7 +2202,7 @@ impl Composition {
                     .and_then(toml::Value::as_array)
                     .into_iter()
                     .flatten()
-                    .filter(|declaration| declaration.get("builtin").is_some())
+                    .filter(|declaration| uses_of(declaration).is_some())
                     .filter_map(declaration_name)
                     .map(move |name| (field.to_owned(), name.to_owned()))
             })
@@ -2228,7 +2238,7 @@ impl Composition {
             document,
             version,
             root_components,
-            root_builtin_components,
+            root_uses_components,
             root_bound,
             replaced_sanitizers: Vec::new(),
             replaced_components: std::collections::BTreeSet::new(),
@@ -2323,7 +2333,7 @@ impl Composition {
             if REPLACEABLE.contains(&field.as_str()) {
                 // An Annotator or a Sanitizer is one named policy component, not an ordered
                 // matcher. The root may replace one included default so a deployment can own
-                // its trusted hint, mandate, and model builtin without editing a battery. A
+                // its trusted hint, mandate, and model without editing a battery. A
                 // second included declaration with that name remains in the composed policy,
                 // where normal duplicate validation refuses it instead of silently choosing
                 // between two batteries.
@@ -2343,7 +2353,7 @@ impl Composition {
                 self.included_sanitizers.extend(
                     declarations
                         .iter()
-                        .filter(|declaration| declaration.get("builtin").is_none())
+                        .filter(|declaration| uses_of(declaration).is_none())
                         .filter_map(declaration_name)
                         // The engine applies `attest-schema` itself; it takes no binding.
                         .filter(|name| *name != SanitizerName::ATTEST_SCHEMA)
@@ -2409,14 +2419,14 @@ impl Composition {
             };
             for (name, entry) in entries {
                 // An included binding for a component the root declares belongs to the
-                // declaration the root replaces. The root's own binding, or a builtin on its
+                // declaration the root replaces. The root's own binding, or a `uses` on its
                 // declaration, takes its place; a root declaration with neither keeps the
                 // included binding. This reads only the root, so it holds whichever of a
                 // battery's files declares the component and whichever binds it, in any order.
                 if let Some(component) = component {
                     let key = (component.to_owned(), name.clone());
                     if self.root_components.contains(&key)
-                        && (self.root_bound.contains(&key) || self.root_builtin_components.contains(&key))
+                        && (self.root_bound.contains(&key) || self.root_uses_components.contains(&key))
                     {
                         continue;
                     }
@@ -2530,7 +2540,7 @@ fn compose_included_confinement(
     Ok(tagged)
 }
 
-/// An included Sanitizer that names no builtin says what to remove, not which model
+/// An included Sanitizer that names no `uses` says what to remove, not which model
 /// removes it: that is the deployment's to say, by binding it under `[externals.sanitizers]`
 /// or by re-declaring it. One nothing binds is left out of the composed policy, so no plan
 /// offers a consult that cannot answer, and the deployment decides as it would without the
@@ -2642,11 +2652,11 @@ fn split_context(raw: BTreeMap<String, RawContextBinding>) -> Result<SplitContex
 
 type SplitContext = (BTreeMap<String, RawBinding>, BTreeMap<ContextProviderName, ContextHint>);
 
-/// An annotator or context-provider binding after its section refused every `builtin` at parse.
+/// An annotator or context-provider binding after its section refused every `uses` at parse.
 fn transport_only(implementation: Implementation) -> Transport {
     match implementation {
         Implementation::Transport(transport) => transport,
-        Implementation::Builtin(_) => unreachable!("the annotators and context sections refuse every builtin"),
+        Implementation::Uses(_) => unreachable!("the annotators and context sections refuse every uses"),
     }
 }
 
@@ -2666,7 +2676,7 @@ fn resolve_bindings(
 }
 
 /// One entry's implementation choice: exactly one of `url` (with an optional token), a
-/// `command`, or a `builtin` the section accepts.
+/// `command`, or a `uses` the section accepts.
 fn resolve_binding(
     section: Section,
     name: &str,
@@ -2678,24 +2688,24 @@ fn resolve_binding(
     let RawBinding {
         url,
         token_env,
-        builtin,
+        uses,
         command,
     } = entry;
-    match (url, builtin, command) {
+    match (url, uses, command) {
         (Some(url), None, None) => {
             let url = validated_url(section.name(), name, url)?;
             let token = resolve_token(section.name(), name, token_env, keys)?;
             Ok(Implementation::Transport(Transport::Url(Endpoint::new(url, token))))
         }
-        (None, Some(builtin), None) if token_env.is_none() => {
-            section.check_builtin(name, &builtin)?;
-            if builtin == LLM_BUILTIN && !llm_configured {
+        (None, Some(uses), None) if token_env.is_none() => {
+            section.check_uses(name, &uses)?;
+            if uses == LLM_USES && !llm_configured {
                 return Err(ConfigError::LlmNotConfigured {
                     section: section.name(),
                     name: name.to_string(),
                 });
             }
-            Ok(Implementation::Builtin(builtin))
+            Ok(Implementation::Uses(uses))
         }
         (None, None, Some(argv)) => Ok(Implementation::Transport(Transport::Command(resolve_command(
             section, name, argv, token_env, origins,
@@ -3198,7 +3208,7 @@ mod tests {
     enum Bound<'a> {
         Url,
         Command(&'a ResolverCommand),
-        Builtin(&'a str),
+        Uses(&'a str),
         Readers,
     }
 
@@ -3236,7 +3246,7 @@ mod tests {
         };
         table.get(name).map(|implementation| match implementation {
             Implementation::Transport(transport) => Bound::of(transport),
-            Implementation::Builtin(builtin) => Bound::Builtin(builtin),
+            Implementation::Uses(uses) => Bound::Uses(uses),
         })
     }
 
@@ -3470,10 +3480,10 @@ mod tests {
         );
     }
 
-    /// Every kind × transport cell: which of `url`, `command`, and each builtin name a
+    /// Every kind × transport cell: which of `url`, `command`, and each `uses` name a
     /// section accepts.
     #[test]
-    fn every_section_takes_the_same_transports_and_its_own_builtins() {
+    fn every_section_takes_the_same_transports_and_its_own_uses_names() {
         let entry = |section: Section, body: &str| {
             format!("{MINIMAL}\n{LLM_TABLE}\n[externals.{}.x]\n{body}\n", section.name())
         };
@@ -3493,16 +3503,15 @@ mod tests {
             );
         }
 
-        let cell = |section: Section, builtin: &str| parse(&entry(section, &format!("builtin = \"{builtin}\"")));
-        let accepts = |section: Section, builtin: &str| {
-            let config =
-                cell(section, builtin).unwrap_or_else(|error| panic!("{} takes {builtin}: {error}", section.name()));
+        let cell = |section: Section, uses: &str| parse(&entry(section, &format!("uses = \"{uses}\"")));
+        let accepts = |section: Section, uses: &str| {
+            let config = cell(section, uses).unwrap_or_else(|error| panic!("{} takes {uses}: {error}", section.name()));
             assert!(matches!(
                 bound(section, &config, "x"),
-                Some(Bound::Builtin(name)) if name == builtin
+                Some(Bound::Uses(name)) if name == uses
             ));
         };
-        // Each section takes the builtins it owns (`external::builtin_backend`: `hitl` and
+        // Each section takes the `uses` names it owns (`external::uses_backend`: `hitl` and
         // the stock `approve` for authorities, the stock redactors for sanitizers, the model
         // transports for both) and any module name, resolved once modules load.
         for (section, owned) in [
@@ -3515,23 +3524,23 @@ mod tests {
                 ["redact-email", "redact-secrets", "claude-code", "llm", "some-module"],
             ),
         ] {
-            for builtin in owned {
-                accepts(section, builtin);
+            for uses in owned {
+                accepts(section, uses);
             }
         }
-        // An Annotator names a stock builtin on its policy declaration, never here, and a
-        // context provider takes none; an audience entry has no builtin key at all.
-        for builtin in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
+        // An Annotator names its model on its policy declaration, never here, and a
+        // context provider takes none; an audience entry has no `uses` key at all.
+        for uses in ["hitl", "approve", "redact-email", "claude-code", "llm", "some-module"] {
             for section in [Section::Annotators, Section::Context, Section::Recorders] {
                 assert!(
-                    matches!(cell(section, builtin), Err(ConfigError::BuiltinNotAllowed { .. })),
-                    "{} must refuse builtin {builtin}",
+                    matches!(cell(section, uses), Err(ConfigError::UsesNotAllowed { .. })),
+                    "{} must refuse uses {uses}",
                     section.name()
                 );
             }
             assert!(
-                toml::from_str::<RawConfig>(&entry(Section::Audience, &format!("builtin = \"{builtin}\""))).is_err(),
-                "audience must refuse builtin {builtin}"
+                toml::from_str::<RawConfig>(&entry(Section::Audience, &format!("uses = \"{uses}\""))).is_err(),
+                "audience must refuse uses {uses}"
             );
         }
     }
@@ -3599,9 +3608,9 @@ mod tests {
     }
 
     #[test]
-    fn the_llm_builtin_needs_the_llm_table() {
+    fn uses_llm_needs_the_llm_table() {
         for section in [Section::Authorities, Section::Sanitizers] {
-            let text = format!("{MINIMAL}\n[externals.{}.x]\nbuiltin = \"llm\"\n", section.name());
+            let text = format!("{MINIMAL}\n[externals.{}.x]\nuses = \"llm\"\n", section.name());
             assert!(
                 matches!(parse(&text), Err(ConfigError::LlmNotConfigured { .. })),
                 "{} llm without a profile must refuse",
@@ -3673,12 +3682,8 @@ mod tests {
         const LLM: &str = "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n";
         const CLAUDE: &str = "[externals.claude_code]\n";
         let limits = |config: &Config| {
-            [
-                AnnotatorBuiltin::ClaudeCode,
-                AnnotatorBuiltin::Llm,
-                AnnotatorBuiltin::Jev,
-            ]
-            .map(|builtin| config.externals.model_limits(builtin))
+            [AnnotatorUses::ClaudeCode, AnnotatorUses::Llm, AnnotatorUses::Jev]
+                .map(|uses| config.externals.model_limits(uses))
         };
         let defaults = parse(&format!("{MINIMAL}\n{CLAUDE}{LLM}{JEV}")).expect("the model tables validate");
         assert_eq!(
@@ -3730,16 +3735,16 @@ mod tests {
     #[test]
     fn an_entry_names_exactly_one_implementation() {
         let both =
-            format!("{MINIMAL}\n[externals.authorities.auto]\nurl = \"https://a.example\"\nbuiltin = \"approve\"\n");
+            format!("{MINIMAL}\n[externals.authorities.auto]\nurl = \"https://a.example\"\nuses = \"approve\"\n");
         assert!(matches!(parse(&both), Err(ConfigError::ImplementationChoice { .. })));
 
         let neither = format!("{MINIMAL}\n[externals.authorities.auto]\n");
         assert!(matches!(parse(&neither), Err(ConfigError::ImplementationChoice { .. })));
 
-        let token = format!("{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\ntoken_env = \"APPA_X\"\n");
+        let token = format!("{MINIMAL}\n[externals.authorities.auto]\nuses = \"approve\"\ntoken_env = \"APPA_X\"\n");
         assert!(matches!(parse(&token), Err(ConfigError::ImplementationChoice { .. })));
 
-        let no_tokens = format!("{MINIMAL}\n[externals.authorities.auto]\nbuiltin = \"approve\"\ntoken_env = []\n");
+        let no_tokens = format!("{MINIMAL}\n[externals.authorities.auto]\nuses = \"approve\"\ntoken_env = []\n");
         assert!(matches!(
             parse(&no_tokens),
             Err(ConfigError::ImplementationChoice { .. })
@@ -3760,12 +3765,12 @@ mod tests {
     }
 
     #[test]
-    fn a_builtin_name_outside_the_grammar_is_refused() {
+    fn a_uses_name_outside_the_grammar_is_refused() {
         for bad in ["Upper", "under_score", "-lead", ""] {
-            let text = format!("{MINIMAL}\n[externals.sanitizers.pii]\nbuiltin = \"{bad}\"\n");
+            let text = format!("{MINIMAL}\n[externals.sanitizers.pii]\nuses = \"{bad}\"\n");
             assert!(
-                matches!(parse(&text), Err(ConfigError::InvalidBuiltinName { .. })),
-                "builtin name {bad:?} must refuse",
+                matches!(parse(&text), Err(ConfigError::InvalidUsesName { .. })),
+                "uses = {bad:?} must refuse",
             );
         }
     }
@@ -3902,7 +3907,7 @@ mod tests {
 
                 [[policy.annotator]]
                 name = "battery.classifier"
-                builtin = "claude-code"
+                uses = "claude-code"
                 audiences = []
                 hint = "Classify commands for this deployment."
 
@@ -3920,7 +3925,7 @@ mod tests {
 
                 [[policy.annotator]]
                 name = "battery.classifier"
-                builtin = "claude-code"
+                uses = "claude-code"
                 audiences = []
                 hint = "The battery default."
 
@@ -3945,6 +3950,58 @@ mod tests {
         appa_policy::Config::from_toml_str(&policy).expect("the composed policy has one complete Annotator");
     }
 
+    /// `builtin` is the earlier spelling of `uses`, and configs and stored policy files written
+    /// before the rename carry it. It reads the same in every position: on a declaration, in a
+    /// binding, and in the untyped composition that drops an included sanitizer naming no
+    /// `uses`. An entry that spells both is refused.
+    #[test]
+    fn a_document_spelling_uses_as_builtin_loads_the_same() {
+        let load = |key: &str, extra: &str| {
+            let dir = tempfile::tempdir().expect("temp directory");
+            let root = format!(
+                "include = [\"battery.toml\"]\n[policy]\nversion = 2\n[policy.deployment]\nconfined_results = [\"Bash\"]\n\
+                 [[policy.annotator]]\nname = \"battery.classifier\"\n{key} = \"claude-code\"\naudiences = []\n\
+                 [[policy.authority]]\nname = \"auto\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n\
+                 [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n\
+                 [externals.authorities.auto]\n{key} = \"approve\"\n{extra}"
+            );
+            let battery = format!(
+                "[policy]\nversion = 2\n\
+                 [[policy.annotator]]\nname = \"battery.classifier\"\n{key} = \"claude-code\"\naudiences = []\n\
+                 [[policy.sanitizer]]\nname = \"battery.strip\"\non = [\"tool_output\"]\n{key} = \"claude-code\"\n\
+                 tags = [\"battery\"]\n[policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n\
+                 [[policy.tool]]\nname = \"Bash\"\ntags = [\"battery\"]\nannotator = \"battery.classifier\"\n"
+            );
+            std::fs::write(dir.path().join("appa.toml"), root).expect("write root config");
+            std::fs::write(dir.path().join("battery.toml"), battery).expect("write included config");
+            Config::load(&dir.path().join("appa.toml"))
+        };
+        for key in ["uses", "builtin"] {
+            let config = load(key, "").unwrap_or_else(|error| panic!("{key} loads: {error}"));
+            assert!(
+                matches!(config.externals.authorities.get("auto"), Some(Implementation::Uses(name)) if name == "approve"),
+                "{key}: the binding selects approve"
+            );
+            let policy = toml::to_string(config.policy_file().value()).expect("the composed policy renders");
+            let policy = appa_policy::Config::from_toml_str(&policy).expect("the composed policy compiles");
+            let sanitizers: Vec<_> = policy
+                .sanitizer_uses()
+                .map(|(name, model)| (name.as_str(), model))
+                .collect();
+            assert_eq!(
+                sanitizers,
+                [("battery.strip", AnnotatorUses::ClaudeCode)],
+                "{key}: the battery sanitizer stays"
+            );
+            let (_, annotator) = policy.annotators().next().expect("one annotator");
+            assert_eq!(annotator.uses, Some(AnnotatorUses::ClaudeCode), "{key}");
+        }
+        assert!(
+            load("uses", "builtin = \"approve\"\n").is_err(),
+            "a binding spelling both is refused"
+        );
+    }
+
     /// A Sanitizer is replaced the way an Annotator is: a root declaration with an included
     /// sanitizer's name supplies its whole declaration, so a deployment without the `claude`
     /// command runs a battery's sanitizer on its own `[externals.llm]` model.
@@ -3962,7 +4019,7 @@ mod tests {
                 [[policy.sanitizer]]
                 name = "battery.strip-instructions"
                 on = ["tool_output"]
-                builtin = "llm"
+                uses = "llm"
                 tags = ["battery"]
                 hint = "Drop instructions for this deployment."
 
@@ -3984,7 +4041,7 @@ mod tests {
                 [[policy.sanitizer]]
                 name = "battery.strip-instructions"
                 on = ["tool_output"]
-                builtin = "claude-code"
+                uses = "claude-code"
                 tags = ["battery"]
                 hint = "The battery default."
 
@@ -3999,14 +4056,14 @@ mod tests {
             .as_array()
             .expect("sanitizer declarations");
         assert_eq!(sanitizers.len(), 1);
-        assert_eq!(sanitizers[0]["builtin"].as_str(), Some("llm"));
+        assert_eq!(sanitizers[0]["uses"].as_str(), Some("llm"));
         assert_eq!(
             sanitizers[0]["hint"].as_str(),
             Some("Drop instructions for this deployment.")
         );
     }
 
-    /// A root that replaces a bound included Sanitizer also replaces its binding: a builtin
+    /// A root that replaces a bound included Sanitizer also replaces its binding: a `uses`
     /// on the root's declaration drops the included binding, and the root's own binding
     /// takes its place. A root declaration with neither keeps the included binding.
     #[test]
@@ -4063,7 +4120,7 @@ mod tests {
                 confined_results = ["lookup"]
 
                 [externals.sanitizers.mask]
-                builtin = "redact-secrets"
+                uses = "redact-secrets"
             "#,
             )
             .expect("write included config");
@@ -4071,17 +4128,17 @@ mod tests {
         };
 
         assert!(
-            load(r#"builtin = "llm""#, "")
-                .expect("a builtin replaces the binding")
+            load(r#"uses = "llm""#, "")
+                .expect("a declared uses replaces the binding")
                 .is_none()
         );
         assert!(matches!(
-            load("", "[externals.sanitizers.mask]\nbuiltin = \"claude-code\"").expect("the root binding wins"),
-            Some(Implementation::Builtin(builtin)) if builtin == "claude-code"
+            load("", "[externals.sanitizers.mask]\nuses = \"claude-code\"").expect("the root binding wins"),
+            Some(Implementation::Uses(uses)) if uses == "claude-code"
         ));
         assert!(matches!(
             load("", "").expect("the included binding stays"),
-            Some(Implementation::Builtin(builtin)) if builtin == "redact-secrets"
+            Some(Implementation::Uses(uses)) if uses == "redact-secrets"
         ));
     }
 
@@ -4110,7 +4167,7 @@ mod tests {
             [policy.deployment]
             confined_results = ["lookup"]
         "#;
-        let target = "[policy]\nversion = 2\n[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+        let target = "[policy]\nversion = 2\n[externals.sanitizers.mask]\nuses = \"redact-secrets\"\n";
         let load = |root_sanitizer: &str, root_externals: &str| {
             let dir = tempfile::tempdir().expect("temp directory");
             std::fs::write(dir.path().join("base.toml"), base).expect("write base");
@@ -4139,25 +4196,25 @@ mod tests {
             (config.externals.sanitizers.get("mask").cloned(), confined)
         };
 
-        let (binding, confined) = load("builtin = \"llm\"\ntags = [\"battery\"]", "");
-        assert!(binding.is_none(), "a root builtin replaces the target's binding");
+        let (binding, confined) = load("uses = \"llm\"\ntags = [\"battery\"]", "");
+        assert!(binding.is_none(), "a root uses replaces the target's binding");
         assert_eq!(confined, ["lookup"]);
         let (binding, _) = load(
             "tags = [\"battery\"]",
-            "[externals.sanitizers.mask]\nbuiltin = \"claude-code\"\n",
+            "[externals.sanitizers.mask]\nuses = \"claude-code\"\n",
         );
         assert!(
-            matches!(binding, Some(Implementation::Builtin(builtin)) if builtin == "claude-code"),
+            matches!(binding, Some(Implementation::Uses(uses)) if uses == "claude-code"),
             "the root binding wins over the target's"
         );
-        let (_, confined) = load("builtin = \"llm\"\ntags = [\"other\"]", "");
+        let (_, confined) = load("uses = \"llm\"\ntags = [\"other\"]", "");
         assert!(
             confined.is_empty(),
             "a replacement that cannot reach `lookup` releases its confinement"
         );
     }
 
-    /// An included Sanitizer that names no builtin runs only where the deployment binds it.
+    /// An included Sanitizer that names no `uses` runs only where the deployment binds it.
     /// Unbound, it is left out with the confinement only it could reach, so the composed
     /// policy is the one the battery would compose to without it. The root's own
     /// confinement stays either way.
@@ -4224,7 +4281,7 @@ mod tests {
             "unbound: the sanitizer and the confinement only it reaches are left out; the root's stays"
         );
         assert_eq!(
-            composed("[externals.sanitizers.\"tracker.redact\"]\nbuiltin = \"redact-email\"\n"),
+            composed("[externals.sanitizers.\"tracker.redact\"]\nuses = \"redact-email\"\n"),
             (
                 vec!["tracker.redact".to_string()],
                 vec!["mcp/tracker/list".to_string(), "mcp/tracker/read".to_string()]
@@ -4241,7 +4298,7 @@ mod tests {
         assert_eq!(
             composed_with(
                 unscoped,
-                "[externals.sanitizers.\"tracker.all\"]\nbuiltin = \"redact-email\"\n"
+                "[externals.sanitizers.\"tracker.all\"]\nuses = \"redact-email\"\n"
             ),
             (
                 vec!["tracker.all".to_string()],

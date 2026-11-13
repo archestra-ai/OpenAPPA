@@ -33,7 +33,7 @@ timeout_ms = 1000
 max_body_bytes = 4096
 
 [externals.sanitizers.redactor]
-builtin = "redact-email"
+uses = "redact-email"
 "#;
 
 const RAW_BODY: &str = "mail alice@corp.example today";

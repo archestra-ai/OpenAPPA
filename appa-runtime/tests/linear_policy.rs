@@ -81,7 +81,7 @@ async fn runtime(dir: &tempfile::TempDir, extra: &str, source: Option<&str>) -> 
     let text = std::fs::read_to_string(repo_root().join("examples/live-replays/linear/appa.toml"))
         .unwrap()
         .replace("../../../marketplace/", "marketplace/")
-        .replace("builtin = \"hitl\"", "builtin = \"approve\"");
+        .replace("uses = \"hitl\"", "uses = \"approve\"");
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, format!("{text}\n{extra}")).unwrap();
     session_runtime(dir.path(), &path).await

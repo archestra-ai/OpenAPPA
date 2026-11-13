@@ -447,7 +447,7 @@ The initial bootstrap policy only contains `appa-guide`'s internal inspection ac
    - Pod logs, cluster events, and diagnostic feeds (`k8s_get_pod_logs`, `k8s_get_events`): incoming cluster data (`delta = { trust = "suspicious" }`).
    - Cluster changes and destructive actions (`k8s_delete_resource`): require human approval (`requires = { trust = "trusted", attention = ["human-approval"] }`, `delta = {}`).
    Do NOT enumerate dozens of unused tools from servers that no agent declares; undeclared tools stay safely refused by default under least privilege. Keep the policy compact and concise.
-2. Construct the full starting policy: keep the guide's internal bootstrap declarations, append the new `[[policy.tool]]` contracts, and declare the `oncall` authority (`builtin = "hitl"`). Include any matched batteries.
+2. Construct the full starting policy: keep the guide's internal bootstrap declarations, append the new `[[policy.tool]]` contracts, and declare the `oncall` authority (`uses = "hitl"`). Include any matched batteries.
 3. Present the proposal in human, user-friendly language:
    - **Discovered tools & agents**: list the discovered tools and state which agents are protected with OpenAPPA and which are unprotected. Never use the words "gated" or "ungated".
    - **Policy recommendations**: explain what rules will be created (what's allowed, what's tagged suspicious, what needs approval).

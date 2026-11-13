@@ -3,7 +3,7 @@
 One Annotator, `jev.tool-call`, that asks TypeSafe's Jev model to annotate
 a tool call before it runs. Jev is a small hosted classifier: an answer
 takes about 0.3 s, against several seconds for a general model. The client is
-built into the runtime as the `jev` builtin; the battery is the
+built into the runtime as `uses = "jev"`; the battery is the
 Annotator's declaration, its credential, and its setup. The battery
 declares no tool. A deployment routes its own tools to
 the Annotator.
@@ -40,13 +40,13 @@ annotator = "jev.tool-call"
 ```
 
 To have Jev annotate a tool another battery routes to a model, declare an
-Annotator with that battery's Annotator name and `builtin = "jev"` in the
+Annotator with that battery's Annotator name and `uses = "jev"` in the
 root config. A root declaration replaces the battery's:
 
 ```toml
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
-builtin = "jev"
+uses = "jev"
 ranks = ["suspicious", "trusted"]
 audiences = ["self", "internal"]
 marks = []
@@ -65,19 +65,19 @@ token_env = "APPA_PROVIDER_JEV_API_KEY"
 
 ## Files
 
-**`appa.toml`** declares `jev.tool-call` on the `jev` builtin and the
+**`appa.toml`** declares `jev.tool-call` with `uses = "jev"` and the
 `[externals.jev]` profile that names the key. The mandate admits both ends
 of the trust chain and the `self` and `internal` audiences; `public` is
 always admissible.
 
-## How the builtin answers
+## How `jev` answers
 
 Each consult asks Jev four questions about the complete call: who may read
 its result, who wrote it, who the call delivers data to, and whether it
 carries trajectory data out of the operator's control. A read that only
 names what to read from an internal service does not. Each question
 carries OpenAPPA's label guide for its label: the rule, the criteria, and
-worked examples, the same guide a model builtin reads. The Annotator's
+worked examples, the same guide a model reads. The Annotator's
 `hint` is added to each question.
 
 | Jev's label | Annotation |
@@ -90,7 +90,7 @@ worked examples, the same guide a model builtin reads. The Annotator's
 | call delivers data outside it | `requires.audience = { contains = "public" }` |
 | call sends or writes what the trajectory holds where people or outside services read it, or runs it | `requires.trust` = the mandate's highest rank |
 
-For each label the builtin answers Jev's likeliest option. When two
+For each label `jev` answers Jev's likeliest option. When two
 options are equally likely, it answers the safer one: the narrower result
 audience, the lower trust rank, or the wider required audience. The
 consult is no answer, and the runtime refuses the call, when the mandate
@@ -132,7 +132,7 @@ Jev answers `delta` and `requires` over audience and trust only. It never
 answers `emits`, `requires.history`, or `requires.attention`. Route a tool
 here only when its policy needs none of them.
 
-The builtin judges the complete call. A deployment is refused when a `jev`
+`jev` judges the complete call. A deployment is refused when a `jev`
 Annotator declares `inputs` or its mandate admits fewer than two trust
 ranks.
 A consult larger than 64 KiB is no answer; nothing is sent.

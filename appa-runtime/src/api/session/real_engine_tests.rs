@@ -290,7 +290,7 @@ name = "approver"
 [policy.authority.permits]
 attention = ["irreversible"]
 [policy.authority.implementation]
-builtin = "approve"
+uses = "approve"
 "#;
     assert!(matches!(
         Runtime::open(config_with(policy, None), dir.path().join("appa.db"), None),
@@ -2041,7 +2041,7 @@ fn substituting_config(policy: &str, authority_url: Option<&str>) -> Config {
     };
     let text = format!(
         "[policy]\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\
-             [externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n{binding}"
+             [externals.sanitizers.redactor]\nuses = \"redact-email\"\n{binding}"
     );
     config_from(&text)
 }
@@ -6011,7 +6011,7 @@ timeout_ms = 2000
 max_body_bytes = 65536
 
 [externals.authorities.rollout]
-builtin = "approve"
+uses = "approve"
 "#;
 
 fn bare(tool: &str) -> ProposedCall {
@@ -6250,7 +6250,7 @@ async fn a_recorded_command_annotation_keeps_its_stderr() {
     assert_eq!(record.context.call_id.as_deref(), Some("host-call-1"));
 }
 
-/// The `jev` builtin's record names its own backend, and its diagnostics are the
+/// The `jev` implementation's record names its own backend, and its diagnostics are the
 /// `jev_diagnostics` object: what each attempt did and how each label settled.
 #[tokio::test]
 async fn a_recorded_jev_annotation_carries_its_diagnostics() {
@@ -6262,7 +6262,7 @@ async fn a_recorded_jev_annotation_carries_its_diagnostics() {
     let path = dir.path().join("appa.toml");
     std::fs::write(
         &path,
-        "[policy]\nversion = 2\n\n[[policy.annotator]]\nname = \"gatekeeper\"\nbuiltin = \"jev\"\n\n\
+        "[policy]\nversion = 2\n\n[[policy.annotator]]\nname = \"gatekeeper\"\nuses = \"jev\"\n\n\
              [[policy.tool]]\nname = \"*\"\nannotator = \"gatekeeper\"\n\n\
              [externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\n\
              [externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",

@@ -29,11 +29,11 @@ def _provenance() -> dict:
 def _backend(args: argparse.Namespace, arm: str) -> runner.Backend:
     match arm:
         case "identity":
-            return runner.Backend(builtin="identity", max_body_bytes=args.max_body_bytes)
+            return runner.Backend(uses="identity", max_body_bytes=args.max_body_bytes)
         case "claude-code":
             command = args.claude_command or runner.resolve_claude_command()
             return runner.Backend(
-                builtin="claude-code",
+                uses="claude-code",
                 model=args.claude_model,
                 claude_dir=str(Path(command).parent) if command else None,
                 consult_timeout_ms=args.consult_timeout_ms,
@@ -42,7 +42,7 @@ def _backend(args: argparse.Namespace, arm: str) -> runner.Backend:
             )
         case "llm":
             return runner.Backend(
-                builtin="llm",
+                uses="llm",
                 provider=args.llm_provider,
                 model=args.llm_model,
                 url=args.llm_url,

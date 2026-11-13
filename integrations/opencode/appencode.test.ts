@@ -304,7 +304,7 @@ on = ["tool_output"]
 audience = { from = ["self"], to = ["public"] }
 
 [externals.sanitizers.mask-email]
-builtin = "redact-email"
+uses = "redact-email"
 `)
     await start()
   }, 15_000)

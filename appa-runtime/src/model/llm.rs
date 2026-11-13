@@ -1,5 +1,5 @@
-//! The `llm` builtin: the deployment's one API-key model profile, consulted in-process.
-//! It receives the same [`ModelPrompt`] rendering the `claude-code` builtin does — the
+//! The `llm` implementation: the deployment's one API-key model profile, consulted in-process.
+//! It receives the same [`ModelPrompt`] rendering the `claude-code` implementation does — the
 //! declaration in the system prompt, the artifact as the user turn, the per-kind output
 //! schema as the provider's native structured output — so a component switched between
 //! the two transports sees the same question. Every failure the provider returns is no
@@ -19,7 +19,7 @@ use super::consult_with_retries;
 use crate::config::{LlmProfile, LlmProvider, ProfileKey, Token};
 use crate::consult::ModelPrompt;
 use crate::external::{ConsultGates, NoAnswerReason, Transcript};
-use appa_policy::AnnotatorBuiltin;
+use appa_policy::AnnotatorUses;
 
 /// The answer budget: an answer restates at most the artifact (a sanitizer's rewritten
 /// body) plus the schema's own overhead, and never less than a short ruling needs.
@@ -37,7 +37,7 @@ fn answer_budget(input: &str, max_body_bytes: usize) -> u64 {
 }
 
 /// One provider client built from the `[externals.llm]` profile at open, shared by every
-/// `builtin = "llm"` entry of the deployment. Its permit pool is the runtime's `llm` gate.
+/// `uses = "llm"` entry of the deployment. Its permit pool is the runtime's `llm` gate.
 #[derive(Clone)]
 pub struct LlmBackend {
     /// `None` for a deferred key: its configuration never serves, and no consult is sent.
@@ -48,7 +48,7 @@ pub struct LlmBackend {
     gates: ConsultGates,
 }
 
-/// The providers the builtin speaks to, closed: each is compiled in and dispatched by
+/// The providers the implementation speaks to, closed: each is compiled in and dispatched by
 /// match. OpenAI goes through the chat-completions API so an OpenAI-compatible `url`
 /// works unchanged.
 #[derive(Clone)]
@@ -131,7 +131,7 @@ impl LlmBackend {
         };
         consult_with_retries(
             &self.gates,
-            AnnotatorBuiltin::Llm,
+            AnnotatorUses::Llm,
             self.timeout,
             self.max_body_bytes,
             name,
@@ -313,7 +313,7 @@ mod tests {
 
     fn built_under(provider: LlmProvider, url: String, max_concurrent: usize, max_body_bytes: usize) -> LlmBackend {
         let gates = ConsultGates::per_runtime();
-        gates.resize(AnnotatorBuiltin::Llm, max_concurrent);
+        gates.resize(AnnotatorUses::Llm, max_concurrent);
         LlmBackend::new(
             &profile(provider, Some(url), Some("sekret"), max_concurrent),
             max_body_bytes,

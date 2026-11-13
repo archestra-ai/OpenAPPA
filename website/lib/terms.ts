@@ -29,9 +29,9 @@ const TERMS = {
   sanitizers:
     "Components that clean or validate data before an agent or tool receives it, within the changes allowed by their permits.",
   annotator:
-    "Can determine a tool call's delta, forwards, requires (including attention), and effects. The jev builtin determines audience and trust only: no effects, history, or attention marks. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
+    "Can determine a tool call's delta, forwards, requires (including attention), and effects. An annotator that uses jev determines audience and trust only: no effects, history, or attention marks. The tool selects it with annotator = \"<name>\". Its permits limit the values it can return.",
   annotators:
-    "Components that can determine each tool call's restrictions, requirements, and effects within their configured permits. The jev builtin determines audience and trust only.",
+    "Components that can determine each tool call's restrictions, requirements, and effects within their configured permits. An annotator that uses jev determines audience and trust only.",
   annotation:
     "The restrictions, requirements, and effects for one tool call. These come from a static tool contract or an annotator. Changing an annotated call requires a new annotation; replaying it uses the recorded answer.",
   "[[policy.annotator]]":
@@ -110,7 +110,7 @@ const TERMS = {
   "[externals.annotators.<name>]":
     "Configures an annotator's HTTP service or local program. Every implementation receives a consult request and must return values within the annotator's permits.",
   "[externals.<kind>.<name>]":
-    "Configures how OpenAPPA calls a component. The kind identifies its role — authorities, sanitizers, annotators, recorders, audience, or context — and the name matches its policy declaration. Use url for a service or command for a local program. Authorities and sanitizers also accept builtin here.",
+    "Configures how OpenAPPA calls a component. The kind identifies its role — authorities, sanitizers, annotators, recorders, audience, or context — and the name matches its policy declaration. Use url for a service or command for a local program. Authorities and sanitizers also accept uses here.",
   declaration:
     "Instructions and limits that OpenAPPA includes in a consult request. These come from the policy, not from the agent. Their fields depend on the component receiving the request.",
   artifact:
@@ -153,20 +153,22 @@ const TERMS = {
     "The named approvals an authority can give for a call. [\"*\"] alone means every mark the policy declares except blocked. Annotators can require only marks the policy declares.",
   blocked:
     "The reserved attention mark that denies a call outright. No authority can permit it and a [\"*\"] permit does not cover it, so a tool that requires it has no remedy.",
-  'builtin = "hitl"':
+  uses:
+    "Selects an implementation OpenAPPA provides by name instead of a url or command: hitl, a stock implementation such as approve or redact-secrets, a model such as claude-code or llm, or a module loaded from --modules-dir. Authorities and sanitizers take it under [externals]; annotators and sanitizers can also name a model on their declaration.",
+  'uses = "hitl"':
     "Asks a person to approve or deny the call through the agent integration.",
-  'builtin = "approve"':
+  'uses = "approve"':
     "Automatically approves every request within the authority's permits. OpenAPPA applies a plan that needs only such authorities itself, so the agent does not see the block.",
-  'builtin = "claude-code"':
+  'uses = "claude-code"':
     "Runs Claude Code locally to answer a component's request. Each request starts a new claude -p process with the policy instructions and request data. Requires Claude Code on the machine running OpenAPPA.",
-  'builtin = "llm"':
+  'uses = "llm"':
     "Uses the model configured under [externals.llm] to answer a component's request. The model receives the policy instructions and request data and must stay within the component's permits.",
   "[externals.llm]":
-    "Selects the provider, model, authentication, and request limits (timeout_ms, max_concurrent) shared by all builtin = \"llm\" components. This section and its key are required when any component uses that implementation.",
-  'builtin = "jev"':
+    "Selects the provider, model, authentication, and request limits (timeout_ms, max_concurrent) shared by all uses = \"llm\" components. This section and its key are required when any component uses that implementation.",
+  'uses = "jev"':
     "Asks TypeSafe's Jev classifier to label an annotator's call with audience and trust. Sends the tool name and the redacted description and arguments to the TypeSafe API. Requires [externals.jev].",
   "[externals.jev]":
-    "Names the environment variable holding the TypeSafe API key for all builtin = \"jev\" annotators, and optional request limits (timeout_ms, max_concurrent). A deployment that declares a jev annotator opens only when the key is set. The key goes only to TypeSafe's API or to the endpoint the operator sets in APPA_PROVIDER_JEV_API_URL.",
+    "Names the environment variable holding the TypeSafe API key for all uses = \"jev\" annotators, and optional request limits (timeout_ms, max_concurrent). A deployment that declares a jev annotator opens only when the key is set. The key goes only to TypeSafe's API or to the endpoint the operator sets in APPA_PROVIDER_JEV_API_URL.",
 
   /* Sanitizers */
   on: "Selects the data a sanitizer can transform: tool_output for a tool result or child agent's answer, or tool_input for a tool call's arguments.",
@@ -177,12 +179,14 @@ const TERMS = {
   from: "In a sanitizer's permits: for audience, the readers the source audience must contain; for trust, the rank the source must meet or exceed.",
   to: "The audience or trust rank assigned to a sanitizer's result.",
   resolver:
-    "The implementation answering for one registered external: the endpoint, command, builtin, or model behind an authority, sanitizer, annotator, or audience source.",
+    "The implementation answering for one registered external: the endpoint, command, or uses implementation behind an authority, sanitizer, annotator, or audience source.",
   return_schema:
     "The JSON Schema a parent supplies when selecting an attest-schema plan. It specifies the fields and values the child may return. The child receives these requirements when it starts.",
   "attest-schema":
     "Checks a child agent's structured answer against a schema chosen before the child reads untrusted data. It can raise trust up to the parent's rank when the child started. The schema must restrict every field and exclude free text. It does not verify factual accuracy.",
-  'builtin = "redact-email"':
+  'uses = "<module>"':
+    "Runs the authority or sanitizer module of that name, loaded from --modules-dir. The module is native code that runs inside the OpenAPPA process with the same system permissions as OpenAPPA.",
+  'uses = "redact-email"':
     "Replaces email addresses with a fixed placeholder. It does not remove other private information. The result receives the audience or trust rank declared in permits.",
 
   /* Refusals & Model Terms */

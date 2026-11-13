@@ -16,7 +16,6 @@ mod archestra_policy;
 mod audience;
 mod audit_read;
 mod batteries;
-mod builtin_modules;
 mod claude_code_bash;
 mod claude_code_redaction;
 mod claude_code_subagent;
@@ -34,6 +33,7 @@ mod file_tracker_safebash;
 mod grain_policy;
 mod guide_parity;
 mod guide_skill;
+mod modules;
 // Drives the server stack: without `daemon` there is nothing to drive.
 #[cfg(feature = "daemon")]
 mod hitl_elicitation;

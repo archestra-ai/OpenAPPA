@@ -104,7 +104,7 @@ on = ["tool_output"]
 [policy.sanitizer.permits]
 audience = { from = ["internal"], to = ["public"] }
 [externals.sanitizers.mask-email]
-builtin = "redact-email"
+uses = "redact-email"
 `)
   runtimePort = port()
   await startRuntime()
@@ -977,7 +977,7 @@ timeout_ms = 10000
 review_timeout_ms = 30000
 max_body_bytes = 1048576
 [externals.authorities.notion-operator]
-builtin = "hitl"
+uses = "hitl"
 ${FILE_TRACKER}[externals.audience.people]
 url = "${fixture.url}audience"
 selectors = [{ template = "members", feeds = "internal" }]

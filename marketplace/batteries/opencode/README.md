@@ -40,7 +40,7 @@ offers the sanitizer beside the trust narrowing: the model removes every instruc
 its facts, code and links, and the result returns at the session's own
 trust. APPA does not verify what the model removed. The sanitizer names no
 model; bind it under `[externals.sanitizers."opencode.strip-instructions"]`,
-for example with `builtin = "llm"` and the root's `[externals.llm]`. Unbound,
+for example with `uses = "llm"` and the root's `[externals.llm]`. Unbound,
 it is not offered and the web results are not confined.
 
 The deployment must enable `policy.deployment.context_control` for

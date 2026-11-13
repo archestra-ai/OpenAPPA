@@ -9,7 +9,7 @@
 //! Everything the deployment needs on loopback runs on one listener
 //! ([`corporate_agent_demo::shim`]): the corp tools, executed in-process by the
 //! same `corp-systems` code the MCP server wraps, and the `pii-redactor`
-//! sanitizer, which is not a stock builtin.
+//! sanitizer, which is not a stock implementation.
 //!
 //! ```sh
 //! appa-corp-agent --policy ../../bench/corp/policies/appa.toml "Summarise the open deploy tickets"
@@ -321,7 +321,7 @@ fn bind_hosted_externals(config: &mut Config, origin: &str) -> usize {
         .chain(externals.sanitizers.values_mut())
         .filter_map(|implementation| match implementation {
             Implementation::Transport(Transport::Url(endpoint)) => Some(endpoint),
-            Implementation::Builtin(_) | Implementation::Transport(Transport::Command(_)) => None,
+            Implementation::Uses(_) | Implementation::Transport(Transport::Command(_)) => None,
         })
         .chain(audience)
         .chain(annotators);

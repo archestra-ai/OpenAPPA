@@ -46,7 +46,7 @@ jobs:
               - 'appa-engine/**'
               - 'appa-eventlog/**'
               - 'appa-policy/**'
-              - 'appa-builtin/**'
+              - 'appa-module/**'
               - 'appa-adapter-amp/**'
               - 'appa-adapter-opencode/**'
               - 'appa-adapter-kagent/**'
