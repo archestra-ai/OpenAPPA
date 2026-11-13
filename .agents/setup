@@ -37,15 +37,21 @@ export CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE="$gcp_credentials"
 EOF
 fi
 
-# Every orb size has the same 60 GB disk, and test debug info is about a
-# gigabyte of `target/` per feature set. CI drops it the same way. A panic
-# message keeps its file and line; only backtraces lose theirs.
-cargo_profile_marker="# OpenAPPA cargo disk budget"
+# Every orb size has the same 60 GB disk, and debug info is about a gigabyte
+# of `target/` per feature set. CI drops it the same way. The test profile
+# inherits the dev setting, so `cargo build` and `cargo test` still share their
+# dependencies. A panic message keeps its file and line; only backtraces lose
+# theirs.
+legacy_cargo_profile_marker="# OpenAPPA cargo disk budget"
+if grep -Fqx "$legacy_cargo_profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
+  sed -i "/^$legacy_cargo_profile_marker\$/,+1d" "$HOME/.bash_profile"
+fi
+cargo_profile_marker="# OpenAPPA cargo debug info"
 if ! grep -Fqx "$cargo_profile_marker" "$HOME/.bash_profile" 2>/dev/null; then
   cat >> "$HOME/.bash_profile" <<EOF
 
 $cargo_profile_marker
-export CARGO_PROFILE_TEST_DEBUG=0
+export CARGO_PROFILE_DEV_DEBUG=0
 EOF
 fi
 
