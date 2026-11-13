@@ -262,10 +262,13 @@ impl LlmProvider {
 }
 
 /// The registered externals, validated and resolved: the implementation every
-/// bound component runs on, and the deployment-wide tables. Every machine consult
-/// carries an explicit timeout and byte cap and fails closed.
+/// bound component runs on, and the deployment-wide tables. Every `url`, `command` and
+/// model consult carries an explicit timeout and byte cap and fails closed; a loaded
+/// module's call carries the byte cap only.
 #[derive(Debug, Clone)]
 pub struct Externals {
+    /// The budget of one `url` or `command` consult or recorder delivery, and the default
+    /// jev budget. A `claude-code` or `llm` consult runs under its own table's budget.
     pub timeout: Duration,
     /// How long a human review may stay open before the runtime treats
     /// it as no answer. Deliberately separate from
@@ -274,6 +277,8 @@ pub struct Externals {
     /// keep-alive, because a review outliving its session cannot be
     /// answered.
     pub review_timeout: Duration,
+    /// The cap on every external's answer and model's output, and on every tool result
+    /// body: a larger result reaches the model as a placeholder.
     pub max_body_bytes: usize,
     pub authorities: BTreeMap<String, Implementation>,
     pub sanitizers: BTreeMap<String, Implementation>,
@@ -1064,14 +1069,14 @@ struct RawComposedMetadata {
     command_cwd: BTreeMap<String, String>,
 }
 
-/// `[externals]` as written. Every field is optional, and an absent one takes the value
-/// [`RawExternals::default`] names.
-#[derive(Debug, Deserialize)]
+/// `[externals]` as written. Every field is optional, and an absent one takes its type's
+/// default: each limit's newtype names its own, so no list of every field restates them.
+#[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawExternals {
-    timeout_ms: u64,
-    review_timeout_ms: u64,
-    max_body_bytes: usize,
+    timeout_ms: ConsultTimeoutMs,
+    review_timeout_ms: ReviewTimeoutMs,
+    max_body_bytes: BodyCapBytes,
     authorities: BTreeMap<String, RawBinding>,
     sanitizers: BTreeMap<String, RawBinding>,
     annotators: BTreeMap<String, RawBinding>,
@@ -1083,23 +1088,40 @@ struct RawExternals {
     jev: Option<RawJev>,
 }
 
-impl Default for RawExternals {
-    /// A consult answers within 5 s and in 64 KiB; a human review stays open 10 minutes.
-    fn default() -> RawExternals {
-        RawExternals {
-            timeout_ms: 5_000,
-            review_timeout_ms: 600_000,
-            max_body_bytes: 65_536,
-            authorities: BTreeMap::new(),
-            sanitizers: BTreeMap::new(),
-            annotators: BTreeMap::new(),
-            audience: BTreeMap::new(),
-            context: BTreeMap::new(),
-            recorders: BTreeMap::new(),
-            claude_code: None,
-            llm: None,
-            jev: None,
-        }
+/// `[externals] timeout_ms`: the budget of one `url` or `command` consult or recorder
+/// delivery, its wait for a permit included, and the default of `[externals.jev]`. The model
+/// builtins never read it: each runs under its own table's budget.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(transparent)]
+struct ConsultTimeoutMs(u64);
+
+impl Default for ConsultTimeoutMs {
+    fn default() -> ConsultTimeoutMs {
+        ConsultTimeoutMs(5_000)
+    }
+}
+
+/// `[externals] review_timeout_ms`: how long a review the runtime asks through MCP
+/// elicitation stays open.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(transparent)]
+struct ReviewTimeoutMs(u64);
+
+impl Default for ReviewTimeoutMs {
+    fn default() -> ReviewTimeoutMs {
+        ReviewTimeoutMs(600_000)
+    }
+}
+
+/// `[externals] max_body_bytes`: the cap on every external's answer, on a model's output,
+/// and on every tool result body the runtime admits.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(transparent)]
+struct BodyCapBytes(usize);
+
+impl Default for BodyCapBytes {
+    fn default() -> BodyCapBytes {
+        BodyCapBytes(65_536)
     }
 }
 
@@ -1630,9 +1652,9 @@ impl Config {
     ) -> Result<Config, ConfigError> {
         debug_assert!(raw.include.is_empty(), "composed configuration has no includes");
         let RawExternals {
-            timeout_ms,
-            review_timeout_ms,
-            max_body_bytes,
+            timeout_ms: ConsultTimeoutMs(timeout_ms),
+            review_timeout_ms: ReviewTimeoutMs(review_timeout_ms),
+            max_body_bytes: BodyCapBytes(max_body_bytes),
             authorities,
             sanitizers,
             annotators,

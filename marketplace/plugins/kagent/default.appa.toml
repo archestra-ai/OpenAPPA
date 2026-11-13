@@ -119,6 +119,12 @@ trust_below = "trusted"
 audience_missing = ["public"]
 attention = ["*"]
 
+# Deployment-wide limits, shown at their defaults. `timeout_ms` bounds each
+# `url` or `command` external the batteries bind; this policy declares no
+# model sanitizer or annotator. `max_body_bytes` caps every external's answer
+# and every tool result: a larger result reaches the model as a placeholder.
+# `review_timeout_ms` bounds a review that OpenAPPA opens over MCP, and keeps
+# the MCP session open that long plus a minute.
 [externals]
 timeout_ms = 5000
 review_timeout_ms = 600000
