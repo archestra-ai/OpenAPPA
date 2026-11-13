@@ -49,6 +49,9 @@ pub fn labels(config: &Config, paths: &[String]) -> Result<String, String> {
         for (label, path) in rows {
             out.push_str(&format!("  {label:width$}  {path}\n"));
         }
+        if recorded.iter().any(|(path, _)| deleted(path)) {
+            out.push_str("A shell command cannot create a deleted file again until you reset its label.\n");
+        }
         out.push_str(&format!(
             "Reset them with: appa file-tracker reset {}\n",
             root.display()
@@ -116,14 +119,43 @@ pub fn note(config: &Config, directory: &Path) -> Option<String> {
     let met = labeled
         .iter()
         .fold(Label::default(), |met, label| met.meet(label, &store.ranks));
+    let gone: Vec<String> = store
+        .files
+        .iter()
+        .filter(|(path, recorded)| {
+            covers(&directory, path) && restricts(&recorded.label, &store.ranks) && deleted(path)
+        })
+        .map(|(path, _)| path.strip_prefix(&directory).unwrap_or(path).display().to_string())
+        .collect();
+    let gone = match gone.as_slice() {
+        [] => String::new(),
+        [one] => format!(
+            " 1 of them is on a file that no longer exists ({one}): a shell command cannot create it again until you reset it."
+        ),
+        [first, second, third, rest @ ..] if !rest.is_empty() => format!(
+            " {} of them are on files that no longer exist ({first}, {second}, {third} and {} more): a shell command cannot create them again until you reset them.",
+            gone.len(),
+            rest.len()
+        ),
+        names => format!(
+            " {} of them are on files that no longer exist ({}): a shell command cannot create them again until you reset them.",
+            names.len(),
+            names.join(", ")
+        ),
+    };
     Some(format!(
         "{} recorded label{} under this directory ({}) came from earlier sessions; a read of those \
-         files narrows this session. Review them with `appa file-tracker labels` and reset them with \
-         `appa file-tracker reset <path>`.",
+         files narrows this session.{gone} Review them with `appa file-tracker labels` and reset them \
+         with `appa file-tracker reset <path>`.",
         labeled.len(),
         if labeled.len() == 1 { "" } else { "s" },
         describe(&met),
     ))
+}
+
+/// Whether a recorded path no longer exists: its label stays until the person resets it.
+fn deleted(path: &Path) -> bool {
+    path.symlink_metadata().is_err()
 }
 
 fn open(config: &Config) -> Result<Locked, String> {
@@ -162,27 +194,36 @@ fn restricts(label: &Label, ranks: &Ranks) -> bool {
 }
 
 /// One row per entry directly under `root`: a file as itself, a directory as the meet of what
-/// it holds and how many labels that is.
+/// it holds and how many labels that is. Each says which of its labels are on deleted files.
 fn groups(root: &Path, recorded: &[(&PathBuf, &Label)], ranks: &Ranks) -> Vec<(String, String)> {
-    let mut grouped: BTreeMap<PathBuf, (Label, usize, bool)> = BTreeMap::new();
+    let mut grouped: BTreeMap<PathBuf, (Label, usize, bool, usize)> = BTreeMap::new();
     for (path, label) in recorded {
         let relative = path.strip_prefix(root).unwrap_or(path);
         let first: PathBuf = relative
             .components()
             .next()
             .map_or_else(|| PathBuf::from("."), |c| c.as_os_str().into());
-        let entry = grouped.entry(first).or_insert((Label::default(), 0, false));
+        let entry = grouped.entry(first).or_insert((Label::default(), 0, false, 0));
         entry.0 = entry.0.meet(label, ranks);
         entry.1 += 1;
         entry.2 |= relative.components().count() > 1 || path.is_dir();
+        entry.3 += usize::from(deleted(path));
     }
     grouped
         .into_iter()
-        .map(|(first, (label, count, directory))| {
-            let shown = match (directory, count) {
-                (false, _) => first.display().to_string(),
-                (true, 1) => format!("{}/ (1 label)", first.display()),
-                (true, count) => format!("{}/ ({count} labels)", first.display()),
+        .map(|(first, (label, count, directory, gone))| {
+            let first = first.display();
+            let labels = match count {
+                1 => "1 label".to_string(),
+                count => format!("{count} labels"),
+            };
+            let shown = match (directory, gone) {
+                (false, 0) => first.to_string(),
+                (false, _) => format!("{first} (deleted)"),
+                (true, 0) => format!("{first}/ ({labels})"),
+                (true, 1) if count == 1 => format!("{first}/ (1 label, on a deleted file)"),
+                (true, 1) => format!("{first}/ ({labels}, 1 on a deleted file)"),
+                (true, gone) => format!("{first}/ ({labels}, {gone} on deleted files)"),
             };
             (describe(&label), shown)
         })
@@ -190,7 +231,7 @@ fn groups(root: &Path, recorded: &[(&PathBuf, &Label)], ranks: &Ranks) -> Vec<(S
 }
 
 /// A label as the person reads it: `audience self, trust suspicious`.
-fn describe(label: &Label) -> String {
+pub(crate) fn describe(label: &Label) -> String {
     let audience = label
         .audience
         .iter()
