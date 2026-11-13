@@ -61,6 +61,33 @@ fn the_runtime_at_the_deployment_endpoint_is_stopped() {
     assert_eq!(http(&format!("{}/health", served.url), "GET", None), None);
 }
 
+/// A test deployment installed under `APPA_ENDPOINT` is stopped at that
+/// endpoint, not at the default one the installed deployment serves.
+#[test]
+fn without_a_url_the_runtime_at_appa_endpoint_is_stopped() {
+    let (_directory, config, db) = fixture_config();
+    let mut served = serve_runtime(&config, &db);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["runtime", "stop"])
+        .env_remove("APPA_RUNTIME_URL")
+        .env("APPA_ENDPOINT", &served.url)
+        .output()
+        .expect("appa runtime stop runs");
+
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&served.url),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline && !served.has_exited() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(served.has_exited(), "the runtime process is gone");
+}
+
 #[test]
 fn nothing_answering_is_not_a_failure() {
     let refusing = RefusingPort::new();

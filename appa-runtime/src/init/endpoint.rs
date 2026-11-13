@@ -1,7 +1,6 @@
 //! The runtime endpoint: its one validated value, who owns it, and what an
 //! activation may do about it.
 
-use crate::installation::archive::debug_override;
 use crate::loopback_http::{self, Answer, Deadline};
 use crate::runtime_start::STOP_BUDGET;
 #[cfg(unix)]
@@ -24,8 +23,9 @@ use super::powershell;
 ///
 /// One value, validated once before any mutation, delivered explicitly to each
 /// consumer rather than left to per-file default constants. The production
-/// address is fixed; `APPA_ENDPOINT` overrides it in debug builds only, which is
-/// the seam the endpoint tests need.
+/// address is fixed; `APPA_ENDPOINT` overrides it in debug builds only, the seam
+/// the endpoint tests and a second test deployment need
+/// ([`crate::runtime_url::deployment_url`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     url: String,
@@ -33,8 +33,7 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub(super) fn resolve() -> Result<Self, InitError> {
-        let configured = debug_override("APPA_ENDPOINT");
-        Self::parse(configured.as_deref().unwrap_or(crate::runtime_url::DEFAULT_RUNTIME_URL))
+        Self::parse(&crate::runtime_url::deployment_url())
     }
 
     /// `http://` plus a loopback literal and a port. No path, no trailing slash,
