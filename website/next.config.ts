@@ -1,6 +1,10 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  // When `next dev` detects a coding agent, it writes its own AGENTS.md here
+  // by default. For Amp, that file would replace website/CLAUDE.md as the
+  // guidance for this directory, so keep Next from writing it.
+  agentRules: false,
   // The MCP and llms.txt routes read doc markdown from disk on every request;
   // make sure the content directory ships with their serverless functions.
   outputFileTracingIncludes: {
