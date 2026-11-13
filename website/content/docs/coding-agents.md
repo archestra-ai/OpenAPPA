@@ -7,7 +7,7 @@ description: Tool-flow enforcement, file labels, SafeBash, shell rules, and chec
 
 OpenAPPA monitors and restricts coding agent tool calls and subagent execution through harness hooks and the runtime's `appa` MCP server. For [Claude Code](/claude-code), it enforces three core boundaries: protected sessions, validated subagent returns, and policy contracts for native filesystem and shell tools.
 
-> **Scope Note:** OpenAPPA tracks information flow and validates tool invocations. It builds no sandbox of its own: in Claude Code it confines each shell command in the harness's sandbox ([SafeBash](#safebash)). For other harnesses, pair it with operating-system sandboxing (such as containers or namespaces).
+> **Scope Note:** OpenAPPA tracks information flow and validates tool invocations. It builds no sandbox of its own: in Claude Code, the default `file-tracker` battery confines each shell command in the harness's sandbox ([SafeBash](#safebash)). For other harnesses, pair it with operating-system sandboxing (such as containers or namespaces).
 
 ## Protected sessions
 

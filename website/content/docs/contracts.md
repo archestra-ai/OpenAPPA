@@ -154,14 +154,13 @@ The runtime never rewrites tool calls. It evaluates tools and arguments exactly 
 
 `aliases.mcp` and `aliases.host` then resolve the generated rules. Under `aliases.host = { claude-code = ["archestra"] }`, the first rule resolves to `host/archestra/Bash(command:*.env*)`.
 
-A battery MAY declare `aliases.tool` for namespaces it manages. Only root policies may declare `aliases.mcp` and `aliases.host`. The loader rejects the configuration if:
+The root policy and any battery MAY declare `aliases.tool`, including for a namespace another battery writes rules for. Only root policies may declare `aliases.mcp` and `aliases.host`. The loader rejects the configuration if:
 - A rule references an argument that a target does not map.
 - A target maps multiple canonical arguments to the same client argument.
-- Multiple mappings bind the same client tool after alias resolution.
+- Two mappings in one canonical namespace bind the same client tool after alias resolution.
 - A canonical tool mapping defines no client targets.
-- An alias mapping references a canonical namespace not used in any rule.
 
-A `tool/...` rule with no alias binding remains inactive. `confined_results` accepts only client-specific tool names; setting `confined = true` on a target alias automatically adds that client tool to `confined_results`.
+Two canonical namespaces MAY map the same client tool. Their rules then apply in include order, and the first matching rule wins. A `tool/...` rule with no alias binding remains inactive, and a mapping for a namespace no rule names binds nothing; OpenAPPA logs both at load. `confined_results` accepts only client-specific tool names; setting `confined = true` on a target alias automatically adds that client tool to `confined_results`.
 
 Annotators and context providers always receive the native call. Argument placeholders in `audiences` and `inputs` refer to native argument names and are not translated by alias mappings. Code-based annotators that expect canonical argument names will receive missing arguments when invoked by clients with different native schemas. Model-backed annotators inspect the entire call object and adapt to native schemas.
 
@@ -277,7 +276,7 @@ name = "*"
 annotator = "classify_unknown_tool"
 ```
 
-A policy may declare at most one wildcard entry. The wildcard contract requires an `annotator` and cannot define static `delta`, `requires`, `effects`, metadata, or argument selectors.
+A policy may declare at most one wildcard entry. The wildcard contract requires an `annotator`. Beside it, the wildcard can declare only a [label floor](#annotators); it cannot define other static fields, metadata, or argument selectors.
 
 Explicit tool contracts always take precedence over the wildcard, regardless of declaration order. If an explicit contract matches but fails argument schema validation, the engine rejects the call rather than falling back to the wildcard. If no wildcard is configured, any call lacking a matching contract is denied immediately.
 
@@ -1541,7 +1540,7 @@ Implementation requirements by component type:
 | `recorders` | Exactly one of `url` or `command`. | Required for every recorder referenced by a tool contract. |
 | `audience` | Exactly one of `url`, `command`, or `readers`; requires `selectors` on `url` or `command`; optional `lookup`. | Required for each referenced provider and lookup target. Non-empty `readers` tables are valid only on lookup targets. |
 
-OpenAPPA rejects bindings for undeclared components, as well as declared components missing required bindings (except sanitizers, where unbound declarations remain dormant to allow battery pre-configuration). For annotators, `builtin` is declared on `[[policy.annotator]]` rather than under `[externals]`.
+OpenAPPA rejects declared components missing required bindings, and an authority binding that no declaration names. A sanitizer, annotator, recorder, or audience binding that no declaration names stays idle, so a root can bind the components of a battery it may include. For annotators, `builtin` is declared on `[[policy.annotator]]` rather than under `[externals]`.
 
 Included files may add external bindings and annotator builtins, as well as `[externals.jev]` configuration. Included files cannot override root settings for `timeout_ms`, `max_body_bytes`, `review_timeout_ms`, `[externals.claude_code]`, or `[externals.llm]`.
 
