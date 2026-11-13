@@ -103,14 +103,14 @@ rules here decide a call.
 
 The model for both sanitizers is configured in the deployment, not in the
 battery. A deployment runs one by binding it under `[externals.sanitizers]`,
-for example to `builtin = "llm"` or, where the `claude` CLI is installed,
-`builtin = "claude-code"`; the Claude Code
+for example to `uses = "llm"` or, where the `claude` CLI is installed,
+`uses = "claude-code"`; the Claude Code
 plugin's default config binds only `coding.strip-instructions`. A sanitizer the root does not bind is
 not offered. APPA does not verify what the model removed: binding a
 sanitizer registers it as trusted. A root rule for a tool precedes the
 battery's, and a root rule without the battery's tag offers no sanitizer.
 
-The Annotators run the local `claude` command (`builtin = "claude-code"`); on
+The Annotators run the local `claude` command (`uses = "claude-code"`); on
 Windows it must resolve to `claude.exe`. An Annotator reads the client's call
 as sent, under the client's own argument names.
 

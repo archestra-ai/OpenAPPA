@@ -78,7 +78,7 @@ audience_missing = ["public"]
 
 [externals.authorities.reviewer]
 # OpenAPPA's built-in human-in-the-loop authority.
-builtin = "hitl"
+uses = "hitl"
 ```
 
 See [Authorities in Policy configuration](/contracts#authorities) for configuration and supported implementations.
@@ -109,7 +109,7 @@ See [Sanitizers in Policy configuration](/contracts#sanitizers) for service conf
 
 ### Annotators
 
-An annotator classifies a tool call. It can determine the call's output restrictions (`delta`), the restrictions of content it sends (`forwards`), requirements (`requires`), and effects. The `jev` builtin determines audience and trust only: no effects, history, or attention marks. OpenAPPA checks the resulting contract before allowing the call.
+An annotator classifies a tool call. It can determine the call's output restrictions (`delta`), the restrictions of content it sends (`forwards`), requirements (`requires`), and effects. An annotator that uses `jev` determines audience and trust only: no effects, history, or attention marks. OpenAPPA checks the resulting contract before allowing the call.
 
 For example, a Python script can classify files by directory: files in `/srv/public-docs` can be shared publicly, while files in `/srv/customer-records` are restricted to internal users.
 

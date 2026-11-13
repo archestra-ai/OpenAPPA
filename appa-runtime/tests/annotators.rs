@@ -895,7 +895,7 @@ async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
 }
 
 #[cfg(unix)]
-fn builtin_policy(command: &std::path::Path, extra: &str) -> String {
+fn uses_policy(command: &std::path::Path, extra: &str) -> String {
     format!(
         r#"
 [policy]
@@ -903,7 +903,7 @@ version = 2
 
 [[policy.annotator]]
 name = "classifier"
-builtin = "claude-code"
+uses = "claude-code"
 hint = "Treat company-only destinations as audience internal."
 
 [[policy.tool]]
@@ -929,7 +929,7 @@ const NEUTRAL_STRUCTURED: &str = r#"printf '%s' '{"structured_output":{"delta":{
 
 #[cfg(unix)]
 #[tokio::test]
-async fn the_claude_builtin_runs_the_configured_command_and_model() {
+async fn uses_claude_code_runs_the_configured_command_and_model() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let args_path = dir.path().join("args.txt");
     let system_path = dir.path().join("system.txt");
@@ -941,7 +941,7 @@ async fn the_claude_builtin_runs_the_configured_command_and_model() {
             system = system_path.display(),
         ),
     );
-    let runtime = open_runtime(&dir, &builtin_policy(&command, "model = \"pinned-model\"")).await;
+    let runtime = open_runtime(&dir, &uses_policy(&command, "model = \"pinned-model\"")).await;
 
     assert_eq!(
         propose(&runtime, fetch("https://a.example")).await,
@@ -983,17 +983,17 @@ async fn the_claude_builtin_runs_the_configured_command_and_model() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn the_builtin_timeout_is_its_own_budget_and_a_slow_consult_refuses_fast() {
+async fn the_model_timeout_is_its_own_budget_and_a_slow_consult_refuses_fast() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let command = fake_claude(dir.path(), "cat > /dev/null\nsleep 5");
-    let runtime = open_runtime(&dir, &builtin_policy(&command, "timeout_ms = 150")).await;
+    let runtime = open_runtime(&dir, &uses_policy(&command, "timeout_ms = 150")).await;
 
     let started = Instant::now();
     let decision = propose(&runtime, fetch("https://a.example")).await;
     assert!(matches!(decision, HookDecision::Refuse { .. }), "got {decision:?}");
     assert!(
         started.elapsed() < Duration::from_secs(2),
-        "the consult budget is the builtin's own timeout, not the shared 5s"
+        "the consult budget is the model's own timeout, not the shared 5s"
     );
 }
 
@@ -1015,7 +1015,7 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
             seen = seen.display(),
         ),
     );
-    let runtime = open_runtime(&dir, &builtin_policy(&command, "max_concurrent = 2")).await;
+    let runtime = open_runtime(&dir, &uses_policy(&command, "max_concurrent = 2")).await;
 
     let mut proposals = Vec::new();
     for index in 0..5 {
@@ -1094,7 +1094,7 @@ async fn serve_ollama(content: &'static str) -> (String, Arc<Mutex<Vec<serde_jso
     (serve(router).await, requests)
 }
 
-/// An annotator that names `builtin = "llm"` on its declaration is served by the
+/// An annotator that names `uses = "llm"` on its declaration is served by the
 /// deployment's `[externals.llm]` profile and by nothing under `[externals.annotators]`:
 /// the endpoint bound for another annotator sees no request.
 #[tokio::test]
@@ -1110,7 +1110,7 @@ version = 2
 
 [[policy.annotator]]
 name = "classifier"
-builtin = "llm"
+uses = "llm"
 
 [[policy.annotator]]
 name = "other"
@@ -1170,7 +1170,7 @@ version = 2
 
 [[policy.annotator]]
 name = "classifier"
-builtin = "llm"
+uses = "llm"
 
 [[policy.tool]]
 name = "fetch"
@@ -1206,11 +1206,11 @@ url = "{llm_url}"
 
 #[cfg(unix)]
 #[tokio::test]
-async fn a_builtin_annotator_never_touches_an_http_endpoint() {
+async fn an_annotator_naming_uses_never_touches_an_http_endpoint() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, annotator) = serve_annotator().await;
     let command = fake_claude(dir.path(), &format!("cat > /dev/null\n{NEUTRAL_STRUCTURED}"));
-    let config = builtin_policy(&command, "")
+    let config = uses_policy(&command, "")
         .replace(
             "[[policy.tool]]",
             "[[policy.annotator]]\nname = \"other\"\n\n[[policy.tool]]",
@@ -1226,7 +1226,7 @@ async fn a_builtin_annotator_never_touches_an_http_endpoint() {
     );
     assert!(
         annotator.requests().is_empty(),
-        "the builtin annotator answered; the endpoint saw no request"
+        "the model annotator answered; the endpoint saw no request"
     );
 }
 
@@ -1346,7 +1346,7 @@ max_body_bytes = 65536
 url = "{url}"
 
 [externals.authorities.operator]
-builtin = "hitl"
+uses = "hitl"
 "#
     )
 }
@@ -2077,7 +2077,7 @@ fn jev_endpoint() -> &'static Mutex<Vec<Option<String>>> {
     })
 }
 
-/// A hosted deployment whose `classifier` is the `jev` builtin, with `key` as the host's
+/// A hosted deployment whose `classifier` is the `jev` implementation, with `key` as the host's
 /// answer for the profile's `token_env`.
 async fn open_hosted_jev(key: &'static str) -> Arc<Runtime> {
     jev_endpoint();
@@ -2087,7 +2087,7 @@ version = 2
 
 [[policy.annotator]]
 name = "classifier"
-builtin = "jev"
+uses = "jev"
 ranks = ["suspicious", "trusted"]
 
 [[policy.tool]]

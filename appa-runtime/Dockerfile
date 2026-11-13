@@ -33,7 +33,7 @@ COPY appa-adapter-amp appa-adapter-amp
 COPY appa-adapter-opencode appa-adapter-opencode
 COPY appa-adapter-claude-code appa-adapter-claude-code
 COPY appa-adapter-kagent appa-adapter-kagent
-COPY appa-builtin appa-builtin
+COPY appa-module appa-module
 COPY appa-eventlog appa-eventlog
 COPY bench bench
 COPY website-chat-playground website-chat-playground

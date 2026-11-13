@@ -233,7 +233,7 @@ audience = { from = ["self"], to = ["public"] }
 confined_results = ["host/amp/read_credentials"]
 
 [externals.sanitizers.mask-email]
-builtin = "redact-email"
+uses = "redact-email"
 `)
     await start()
   }, 15_000)

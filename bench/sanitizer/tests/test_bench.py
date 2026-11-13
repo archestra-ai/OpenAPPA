@@ -90,7 +90,7 @@ def test_redaction_precision_counts_removed_keep_spans_as_false_positives():
 @pytest.mark.skipif(not runner.APPA_BIN.is_file(), reason="needs target/debug/appa")
 def test_the_identity_arm_derives_every_value_through_the_runtime(tmp_path: Path):
     cases = [c for c in corpus.load() if c.kind != "size"]
-    rows = runner.ask(cases, runner.Backend(builtin="identity"), tmp_path, repeat=1, concurrency=8)
+    rows = runner.ask(cases, runner.Backend(uses="identity"), tmp_path, repeat=1, concurrency=8)
     summary = scoring.summarize(cases, rows, corpus.sanitizers())
     assert summary["unresolved"] == []
     for entry in summary["sanitizers"].values():
@@ -105,7 +105,7 @@ def test_a_run_that_asks_one_sanitizer_still_binds_every_registered_one(tmp_path
     # narrow the bindings.
     asked = sorted(corpus.sanitizers())[0]
     cases = [c for c in corpus.load() if c.kind != "size" and c.sanitizer == asked]
-    rows = runner.ask(cases, runner.Backend(builtin="identity"), tmp_path, repeat=1, concurrency=8)
+    rows = runner.ask(cases, runner.Backend(uses="identity"), tmp_path, repeat=1, concurrency=8)
     assert {row["outcome"] for row in rows} == {"derived"}
     assert len(rows) == len(cases)
 
@@ -201,7 +201,7 @@ def test_a_full_identity_run_packages_for_the_archive(tmp_path: Path):
     # The identity arm echoes every planted secret, so it is the hardest run to archive.
     cases = corpus.load()
     run = tmp_path / "run"
-    rows = runner.ask(cases, runner.Backend(builtin="identity"), run / "identity", repeat=1, concurrency=8)
+    rows = runner.ask(cases, runner.Backend(uses="identity"), run / "identity", repeat=1, concurrency=8)
     summary = scoring.summarize(cases, rows, corpus.sanitizers())
     (run / "identity" / "summary.json").write_text(json.dumps(summary))
     (run / "run-config.json").write_text(json.dumps({"git_sha": "0" * 40, "git_dirty": False}))

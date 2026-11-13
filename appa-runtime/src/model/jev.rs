@@ -1,4 +1,4 @@
-//! The `jev` annotator builtin: TypeSafe's Jev classifier, asked in process.
+//! The `jev` implementation: TypeSafe's Jev classifier, asked in process.
 //!
 //! One consult asks Jev four questions about the complete call and maps its labels onto the
 //! annotation: `delta.audience`, `delta.trust`, `requires.audience` and `requires.trust`. It
@@ -34,7 +34,7 @@ use crate::consult::{AnnotationArtifact, Consult, ConsultBody};
 use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
 use crate::label_guide::{Call, Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
 use appa_engine::contract::{AnnotationContext, ContextEntry};
-use appa_policy::AnnotatorBuiltin;
+use appa_policy::AnnotatorUses;
 use questions::Questions;
 
 const MODEL: &str = "jev-1.13.0";
@@ -207,7 +207,7 @@ impl JevBackend {
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
         let deadline = started + self.budget;
-        let gate = self.gates.model(AnnotatorBuiltin::Jev);
+        let gate = self.gates.model(AnnotatorUses::Jev);
         let permit = acquire_within(&gate, deadline, "jev", &consult.name)
             .await
             .map_err(|reason| (JevFailure::NoAnswer, reason))?;
@@ -859,7 +859,7 @@ mod tests {
             },
         };
         let gates = crate::external::ConsultGates::per_runtime();
-        gates.resize(AnnotatorBuiltin::Jev, max_concurrent);
+        gates.resize(AnnotatorUses::Jev, max_concurrent);
         JevBackend::new(&profile, 65_536, &gates, timing).expect("the key is set")
     }
 

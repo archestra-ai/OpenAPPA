@@ -30,4 +30,4 @@ max_body_bytes = 65536
 command = ["python3", "./read-sensitivity.py"]
 
 [externals.authorities.hitl]
-builtin = "hitl"
+uses = "hitl"

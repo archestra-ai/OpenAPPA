@@ -44,7 +44,7 @@ timeout_ms = 1000
 max_body_bytes = 4096
 
 [externals.sanitizers.redactor]
-builtin = "redact-email"
+uses = "redact-email"
 "#;
 
 fn call(tool: &str) -> ProposedCall {
@@ -549,7 +549,7 @@ async fn a_child_bound_attest_schema_return_crosses_in_engine() {
                 sanitizer: Some("attest-schema".to_string()),
                 label: label("trusted", "public"),
             }),
-        "the reserved builtin carried the crossing in-engine: {entries:?}",
+        "the reserved sanitizer carried the crossing in-engine: {entries:?}",
     );
 }
 

@@ -501,7 +501,7 @@ pub(crate) enum SpawnResultDecision {
 pub enum OpenError {
     #[error("configuration refused: {0}")]
     Config(#[from] crate::config::ConfigError),
-    #[error("builtin modules refused: {0}")]
+    #[error("modules refused: {0}")]
     Modules(String),
     #[error("policy refused: {0}")]
     Policy(Box<appa_policy::ConfigError>),
@@ -526,28 +526,26 @@ pub enum OpenError {
     #[error("[externals] binds {kind} {name}, which the policy does not declare")]
     UndeclaredExternal { kind: &'static str, name: String },
     #[error(
-        "{kind} {name} names a builtin on its declaration and takes no [externals.{kind}s] binding — remove the binding"
+        "{kind} {name} names `uses` on its declaration and takes no [externals.{kind}s] binding — remove the binding"
     )]
-    BoundBuiltin { kind: &'static str, name: String },
-    #[error("{kind} {name} names the builtin \"llm\", but the deployment declares no [externals.llm]")]
+    BoundUses { kind: &'static str, name: String },
+    #[error("{kind} {name} uses \"llm\", but the deployment declares no [externals.llm]")]
     LlmNotConfigured { kind: &'static str, name: String },
-    #[error(
-        "{kind} {name} names the builtin \"{builtin}\", but [externals.{builtin}] cannot serve it: {missing}; set the key and reload"
-    )]
+    #[error("{kind} {name} uses \"{uses}\", but [externals.{uses}] cannot serve it: {missing}; set the key and reload")]
     ModelKeyMissing {
         kind: &'static str,
         name: String,
-        builtin: &'static str,
+        uses: &'static str,
         missing: crate::config::MissingKey,
     },
-    #[error("annotator {0} names the builtin \"jev\", but the deployment declares no [externals.jev]")]
+    #[error("annotator {0} uses \"jev\", but the deployment declares no [externals.jev]")]
     JevNotConfigured(String),
-    #[error("{kind} {name} names the builtin \"archestra\", but the host supplies no archestra endpoint")]
+    #[error("{kind} {name} uses \"archestra\", but the host supplies no archestra endpoint")]
     #[cfg(feature = "archestra")]
     ArchestraNotConfigured { kind: &'static str, name: String },
-    #[error("annotator {0} names the builtin \"jev\", which judges the complete call and takes no inputs")]
+    #[error("annotator {0} uses \"jev\", which judges the complete call and takes no inputs")]
     JevInputs(String),
-    #[error("annotator {0} names the builtin \"jev\", whose mandate must admit at least two trust ranks")]
+    #[error("annotator {0} uses \"jev\", whose mandate must admit at least two trust ranks")]
     JevTrustRanks(String),
     #[error("the database is damaged: {0}")]
     Damaged(String),
@@ -925,7 +923,7 @@ impl Deployment {
     /// keeps nothing.
     fn load(
         config: Config,
-        modules: &crate::builtins::ModuleRegistry,
+        modules: &crate::uses::ModuleRegistry,
         gates: ConsultGates,
         naming: ToolNaming,
     ) -> Result<Deployment, OpenError> {
@@ -937,7 +935,7 @@ impl Deployment {
 
     fn assemble(
         config: Config,
-        modules: &crate::builtins::ModuleRegistry,
+        modules: &crate::uses::ModuleRegistry,
         gates: ConsultGates,
         naming: ToolNaming,
     ) -> Result<Deployment, OpenError> {
@@ -966,22 +964,20 @@ impl Deployment {
                     .map_err(|error| OpenError::Policy(Box::new(error)))?
             }
         };
-        let annotator_builtins = policy
+        let annotator_uses = policy
             .annotators()
-            .filter_map(|(name, binding)| binding.builtin.map(|builtin| (name.as_str().to_string(), builtin)))
+            .filter_map(|(name, binding)| binding.uses.map(|uses| (name.as_str().to_string(), uses)))
             .collect();
-        // A Sanitizer naming a model builtin on its declaration is served by the same backend
-        // a binding naming that builtin resolves to.
+        // A Sanitizer naming a model on its declaration is served by the same backend
+        // a binding naming that model resolves to.
         let mut bindings = in_use;
-        bindings
-            .sanitizers
-            .extend(policy.sanitizer_builtins().map(|(name, builtin)| {
-                (
-                    name.as_str().to_string(),
-                    crate::config::Implementation::Builtin(builtin.wire_name().to_string()),
-                )
-            }));
-        let mut externals = ExternalServices::new(bindings, modules, annotator_builtins, gates)
+        bindings.sanitizers.extend(policy.sanitizer_uses().map(|(name, uses)| {
+            (
+                name.as_str().to_string(),
+                crate::config::Implementation::Uses(uses.wire_name().to_string()),
+            )
+        }));
+        let mut externals = ExternalServices::new(bindings, modules, annotator_uses, gates)
             .map_err(|error| OpenError::Modules(error.to_string()))?;
         externals.credential_store = config.credential_store.clone();
         Ok(Deployment {
@@ -1235,7 +1231,7 @@ pub(crate) enum SpawnCoverage {
 /// Everything `open` and `open_in_memory` share before the log is chosen: the modules, the
 /// consult gates, and the deployment compiled from the configuration.
 struct Prepared {
-    modules: crate::builtins::ModuleRegistry,
+    modules: crate::uses::ModuleRegistry,
     gates: ConsultGates,
     deployment: Deployment,
     naming: ToolNaming,
@@ -1246,8 +1242,7 @@ impl Prepared {
         if config.keys_deferred() {
             return Err(OpenError::KeysDeferred);
         }
-        let modules =
-            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
+        let modules = crate::uses::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         let gates = ConsultGates::per_runtime();
         let deployment = Deployment::load(config, &modules, gates.clone(), naming)?;
         gates.size_by(&deployment.config.externals);
@@ -1396,7 +1391,7 @@ struct Shared {
     /// Entries remain until this runtime is dropped. Hosts with frequent publishes or many lines
     /// must account for that process-memory growth; stored revisions remain replayable on restart.
     revisions: std::sync::Mutex<std::collections::BTreeMap<RevisionKey, Arc<RuntimeEngine>>>,
-    modules: crate::builtins::ModuleRegistry,
+    modules: crate::uses::ModuleRegistry,
     /// What this runtime did, as opposed to what the engine decided: bounded, in this
     /// process, and gone on restart. A diagnostic only — see [`crate::events`].
     events: std::sync::Mutex<crate::events::EventLog>,
@@ -1511,7 +1506,7 @@ impl Runtime {
     /// alone, and names roots uniquely across the whole runtime: the runtime's in-process
     /// diagnostics and each root's last working directory are keyed by root id alone.
     ///
-    /// The `command` gate, each model builtin's gate and the `jev` connection pool are the
+    /// The `command` gate, each model's gate and the `jev` connection pool are the
     /// runtime's, shared by every deployment it serves or pins. The serving deployment's
     /// `max_concurrent` sizes each model gate; a pinned one's does not. The jev pool is keyed
     /// by endpoint and each request carries its own deployment's key.
@@ -1682,8 +1677,7 @@ impl Runtime {
         if (adapter.spell)(&appa_runtime_api::CanonicalTool::control()).is_none() {
             return Err(OpenError::UnspelledControlTool);
         }
-        let modules =
-            crate::builtins::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
+        let modules = crate::uses::load(modules.as_deref()).map_err(|error| OpenError::Modules(error.to_string()))?;
         Deployment::assemble(
             config,
             &modules,
@@ -4257,7 +4251,7 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     // be consulted, so the deployment is refused rather than left believing an
     // implementation runs. Each registered name is bound, with two exceptions: an
     // authority may stay unbound and then returns no answer, and an Annotator that
-    // names a stock builtin on its declaration is complete as written.
+    // names a model on its declaration is complete as written.
     no_undeclared(
         "authority",
         rc.authorities.iter().map(|authority| authority.name.as_str()),
@@ -4268,25 +4262,25 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         .contains_key(appa_engine::names::SanitizerName::ATTEST_SCHEMA)
     {
         return Err(OpenError::UnsupportedPolicy(
-            "[externals] binds sanitizer attest-schema — the reserved builtin is applied by the engine itself and takes no implementation"
+            "[externals] binds sanitizer attest-schema — the reserved sanitizer is applied by the engine itself and takes no implementation"
                 .to_string(),
         ));
     }
-    // A Sanitizer that names a model builtin on its declaration is served by the runtime,
+    // A Sanitizer that names a model on its declaration is served by the runtime,
     // as such an Annotator is below: refused when it is also bound, or when the deployment
     // declares no profile for it. Every other Sanitizer is bound exactly once.
-    let declared_builtins: std::collections::BTreeMap<&str, appa_policy::AnnotatorBuiltin> = policy
-        .sanitizer_builtins()
-        .map(|(name, builtin)| (name.as_str(), builtin))
+    let declared_uses: std::collections::BTreeMap<&str, appa_policy::AnnotatorUses> = policy
+        .sanitizer_uses()
+        .map(|(name, uses)| (name.as_str(), uses))
         .collect();
-    for (name, builtin) in &declared_builtins {
+    for (name, uses) in &declared_uses {
         if externals.sanitizers.contains_key(*name) {
-            return Err(OpenError::BoundBuiltin {
+            return Err(OpenError::BoundUses {
                 kind: "sanitizer",
                 name: name.to_string(),
             });
         }
-        if *builtin == appa_policy::AnnotatorBuiltin::Llm && externals.llm.is_none() {
+        if *uses == appa_policy::AnnotatorUses::Llm && externals.llm.is_none() {
             return Err(OpenError::LlmNotConfigured {
                 kind: "sanitizer",
                 name: name.to_string(),
@@ -4297,15 +4291,15 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     // the host supplies its endpoint.
     #[cfg(feature = "archestra")]
     if externals.archestra.is_none() {
-        let declared = declared_builtins
+        let declared = declared_uses
             .iter()
-            .filter(|(_, builtin)| **builtin == appa_policy::AnnotatorBuiltin::Archestra)
+            .filter(|(_, uses)| **uses == appa_policy::AnnotatorUses::Archestra)
             .map(|(name, _)| name.to_string());
         let bound = externals
             .sanitizers
             .iter()
             .filter(|(_, bound)| {
-                matches!(bound, crate::config::Implementation::Builtin(named) if named == crate::config::ARCHESTRA_BUILTIN)
+                matches!(bound, crate::config::Implementation::Uses(named) if named == crate::config::ARCHESTRA_USES)
             })
             .map(|(name, _)| name.clone());
         if let Some(name) = declared.chain(bound).next() {
@@ -4324,48 +4318,48 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             .iter()
             .filter(|sanitizer| !sanitizer.name.is_attest_schema())
             .map(|sanitizer| sanitizer.name.as_str())
-            .filter(|name| !declared_builtins.contains_key(name)),
+            .filter(|name| !declared_uses.contains_key(name)),
         &externals.sanitizers,
     )?;
-    // A declared builtin is served by the runtime itself, so it is refused when it is also
+    // A declared `uses` is served by the runtime itself, so it is refused when it is also
     // bound, and when this deployment cannot serve it: a consult that can never answer is
     // a misconfiguration to refuse at open, not a no-answer to discover under an agent.
     // Every other Annotator is bound exactly once.
     let mut bound_by_deployment = Vec::new();
     for (annotator, binding) in policy.annotators() {
         let name = annotator.as_str();
-        let Some(builtin) = binding.builtin else {
+        let Some(uses) = binding.uses else {
             bound_by_deployment.push(name);
             continue;
         };
         if externals.annotators.contains_key(name) {
-            return Err(OpenError::BoundBuiltin {
+            return Err(OpenError::BoundUses {
                 kind: "annotator",
                 name: name.to_string(),
             });
         }
-        match builtin {
-            appa_policy::AnnotatorBuiltin::Llm if externals.llm.is_none() => {
+        match uses {
+            appa_policy::AnnotatorUses::Llm if externals.llm.is_none() => {
                 return Err(OpenError::LlmNotConfigured {
                     kind: "annotator",
                     name: name.to_string(),
                 });
             }
-            appa_policy::AnnotatorBuiltin::Jev if externals.jev.is_none() => {
+            appa_policy::AnnotatorUses::Jev if externals.jev.is_none() => {
                 return Err(OpenError::JevNotConfigured(name.to_string()));
             }
             #[cfg(feature = "archestra")]
-            appa_policy::AnnotatorBuiltin::Archestra if externals.archestra.is_none() => {
+            appa_policy::AnnotatorUses::Archestra if externals.archestra.is_none() => {
                 return Err(OpenError::ArchestraNotConfigured {
                     kind: "annotator",
                     name: name.to_string(),
                 });
             }
             // Jev judges the complete call and answers the lowest or the highest rank.
-            appa_policy::AnnotatorBuiltin::Jev if !binding.inputs.is_empty() => {
+            appa_policy::AnnotatorUses::Jev if !binding.inputs.is_empty() => {
                 return Err(OpenError::JevInputs(name.to_string()));
             }
-            appa_policy::AnnotatorBuiltin::Jev
+            appa_policy::AnnotatorUses::Jev
                 if policy
                     .engine()
                     .registry()
@@ -4374,11 +4368,11 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             {
                 return Err(OpenError::JevTrustRanks(name.to_string()));
             }
-            appa_policy::AnnotatorBuiltin::Jev
-            | appa_policy::AnnotatorBuiltin::Llm
-            | appa_policy::AnnotatorBuiltin::ClaudeCode => {}
+            appa_policy::AnnotatorUses::Jev
+            | appa_policy::AnnotatorUses::Llm
+            | appa_policy::AnnotatorUses::ClaudeCode => {}
             #[cfg(feature = "archestra")]
-            appa_policy::AnnotatorBuiltin::Archestra => {}
+            appa_policy::AnnotatorUses::Archestra => {}
         }
     }
     // An Annotator or recorder binding that no declaration names stays idle, as a
@@ -4400,25 +4394,25 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
     // A model profile loads without its key, so a battery installs before the key is
     // exported; a deployment that consults the profile needs the key to open.
     use crate::config::Implementation;
-    use appa_policy::AnnotatorBuiltin;
-    for (builtin, missing) in [
+    use appa_policy::AnnotatorUses;
+    for (uses, missing) in [
         (
-            AnnotatorBuiltin::Llm,
+            AnnotatorUses::Llm,
             externals.llm.as_ref().and_then(crate::config::LlmProfile::missing_key),
         ),
         (
-            AnnotatorBuiltin::Jev,
+            AnnotatorUses::Jev,
             externals.jev.as_ref().and_then(|jev| jev.key.missing()),
         ),
     ] {
         let Some(missing) = missing else { continue };
         let annotators = policy
             .annotators()
-            .filter(|(_, binding)| binding.builtin == Some(builtin))
+            .filter(|(_, binding)| binding.uses == Some(uses))
             .map(|(name, _)| ("annotator", name.as_str()));
         let sanitizers = policy
-            .sanitizer_builtins()
-            .filter(|(_, declared)| *declared == builtin)
+            .sanitizer_uses()
+            .filter(|(_, declared)| *declared == uses)
             .map(|(name, _)| ("sanitizer", name.as_str()));
         let bindings = [
             ("authority", &externals.authorities),
@@ -4426,13 +4420,13 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         ]
         .into_iter()
         .flat_map(|(kind, table)| table.iter().map(move |(name, bound)| (kind, name.as_str(), bound)))
-        .filter(|(_, _, bound)| matches!(bound, Implementation::Builtin(named) if named == builtin.wire_name()))
+        .filter(|(_, _, bound)| matches!(bound, Implementation::Uses(named) if named == uses.wire_name()))
         .map(|(kind, name, _)| (kind, name));
         if let Some((kind, name)) = annotators.chain(sanitizers).chain(bindings).next() {
             return Err(OpenError::ModelKeyMissing {
                 kind,
                 name: name.to_string(),
-                builtin: builtin.wire_name(),
+                uses: uses.wire_name(),
                 missing,
             });
         }
@@ -4777,7 +4771,7 @@ mod deployment_tests {
     }
 
     /// A deployment with no `[externals.annotators]` bindings: the policy under test names
-    /// `builtin = "claude-code"` on the declarations it wants answered by Claude Code.
+    /// `uses = "claude-code"` on the declarations it wants answered by Claude Code.
     fn claude_config(document: &str) -> Config {
         hosted_with_keys(document, &[])
     }
@@ -4797,7 +4791,7 @@ mod deployment_tests {
     fn load(config: Config) -> Result<Deployment, OpenError> {
         Deployment::load(
             config,
-            &crate::builtins::ModuleRegistry::empty(),
+            &crate::uses::ModuleRegistry::empty(),
             test_permits(),
             ToolNaming::AsAuthored,
         )
@@ -4820,7 +4814,7 @@ mod deployment_tests {
                 version = 2
                 [[policy.annotator]]
                 name = "any"
-                builtin = "claude-code"
+                uses = "claude-code"
                 [[policy.tool]]
                 name = "*"
                 annotator = "any"
@@ -4850,14 +4844,14 @@ mod deployment_tests {
     }
 
     #[test]
-    fn a_claude_builtin_deployment_opens_without_an_endpoint() {
+    fn a_claude_code_deployment_opens_without_an_endpoint() {
         let tool_level = claude_config(
             r#"
                 [policy]
                 version = 2
                 [[policy.annotator]]
                 name = "classifier"
-                builtin = "claude-code"
+                uses = "claude-code"
                 [[policy.tool]]
                 name = "lookup"
                 description = "Looks one record up."
@@ -4867,12 +4861,31 @@ mod deployment_tests {
         assert!(
             Deployment::load(
                 tool_level,
-                &crate::builtins::ModuleRegistry::empty(),
+                &crate::uses::ModuleRegistry::empty(),
                 test_permits(),
                 ToolNaming::AsAuthored
             )
             .is_ok()
         );
+    }
+
+    /// A log's policy files are never rewritten, so one stored before `builtin` became `uses`
+    /// must still compile when its history replays.
+    #[test]
+    fn a_stored_policy_spelling_uses_as_builtin_still_compiles() {
+        let stored = br#"
+[policy]
+version = 2
+[[policy.annotator]]
+name = "classify"
+builtin = "claude-code"
+[[policy.tool]]
+name = "lookup"
+annotator = "classify"
+"#;
+        let compiled = compile_stored_policy(stored).expect("the earlier spelling compiles");
+        let (_, annotator) = compiled.annotators().next().expect("one annotator");
+        assert_eq!(annotator.uses, Some(appa_policy::AnnotatorUses::ClaudeCode));
     }
 
     #[test]
@@ -4904,7 +4917,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 version = 2
                 [[policy.annotator]]
                 name = "bash-classifier"
-                builtin = "claude-code"
+                uses = "claude-code"
                 [[policy.annotator]]
                 name = "other-classifier"
                 [[policy.tool]]
@@ -4917,7 +4930,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 annotator = "other-classifier"
             "#,
         );
-        // The builtin Annotator is complete as declared; only the other one is bound here.
+        // The Annotator naming `uses` is complete as declared; only the other one is bound here.
         config
             .externals
             .annotators
@@ -4979,14 +4992,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     }
 
     #[test]
-    fn a_builtin_annotator_takes_no_deployment_binding() {
+    fn an_annotator_naming_uses_takes_no_deployment_binding() {
         let mut bound = claude_config(
             r#"
                 [policy]
                 version = 2
                 [[policy.annotator]]
                 name = "classifier"
-                builtin = "claude-code"
+                uses = "claude-code"
                 [[policy.tool]]
                 name = "lookup"
                 description = "Looks one record up."
@@ -4996,7 +5009,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         bound.externals.annotators.insert("classifier".to_string(), endpoint());
         assert!(matches!(
             load(bound),
-            Err(OpenError::BoundBuiltin { kind: "annotator", name }) if name == "classifier"
+            Err(OpenError::BoundUses { kind: "annotator", name }) if name == "classifier"
         ));
     }
 
@@ -5009,7 +5022,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             version = 2
             [[policy.annotator]]
             name = "classifier"
-            builtin = "llm"
+            uses = "llm"
             [[policy.tool]]
             name = "lookup"
             description = "Looks one record up."
@@ -5034,11 +5047,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         ));
     }
 
-    /// A Sanitizer naming a model builtin on its declaration opens with no binding, is
+    /// A Sanitizer naming a model on its declaration opens with no binding, is
     /// refused beside one, and names `llm` only over a deployment declaring the profile.
     #[test]
-    fn a_declared_sanitizer_builtin_opens_unbound_and_llm_needs_its_profile() {
-        let policy = |builtin: &str| {
+    fn a_sanitizer_declaring_uses_opens_unbound_and_llm_needs_its_profile() {
+        let policy = |uses: &str| {
             format!(
                 r#"
             [policy]
@@ -5050,7 +5063,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             [[policy.sanitizer]]
             name = "clean"
             on = ["tool_output"]
-            builtin = "{builtin}"
+            uses = "{uses}"
             tags = ["records"]
             [policy.sanitizer.permits]
             trust = {{ from = "suspicious", to = "trusted" }}
@@ -5064,11 +5077,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let mut bound = claude_config(&policy("claude-code"));
         bound.externals.sanitizers.insert(
             "clean".to_string(),
-            crate::config::Implementation::Builtin("claude-code".to_string()),
+            crate::config::Implementation::Uses("claude-code".to_string()),
         );
         assert!(matches!(
             load(bound),
-            Err(OpenError::BoundBuiltin { kind: "sanitizer", name }) if name == "clean"
+            Err(OpenError::BoundUses { kind: "sanitizer", name }) if name == "clean"
         ));
 
         assert!(matches!(
@@ -5089,7 +5102,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     #[test]
     fn an_idle_sanitizer_binding_does_not_block_opening() {
         let externals = "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n\
-                         [externals.sanitizers.\"future.mask\"]\nbuiltin = \"llm\"\n";
+                         [externals.sanitizers.\"future.mask\"]\nuses = \"llm\"\n";
         let tool = "[[policy.tool]]\nname = \"post\"\ndelta = {}\ntags = [\"outbound\"]\n";
         let declared = "[[policy.sanitizer]]\nname = \"future.mask\"\non = [\"tool_input\"]\ntags = [\"outbound\"]\n\
                         [policy.sanitizer.permits]\naudience = { from = [\"internal\"], to = [\"public\"] }\n";
@@ -5114,7 +5127,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     fn a_declared_jev_annotator_needs_its_profile_the_complete_call_and_two_ranks() {
         let policy = |mandate: &str, externals: &str| {
             keyed_config(&format!(
-                "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"jev\"\n{mandate}\n\
+                "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\nuses = \"jev\"\n{mandate}\n\
                  [[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\nannotator = \"classifier\"\n\
                  {externals}"
             ))
@@ -5138,19 +5151,19 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     /// A model profile without its key loads, and a deployment opens over it while nothing
     /// consults it; one that consults it refuses to open, naming the consumer and the key.
     #[test]
-    fn a_model_builtin_in_use_needs_its_key_at_open() {
+    fn a_model_in_use_needs_its_key_at_open() {
         use crate::config::MissingKey;
         const JEV: &str = "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n";
         const LLM: &str = "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\n";
         const LLM_KEYED: &str =
             "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n";
-        let annotator = |builtin: &str| {
+        let annotator = |uses: &str| {
             format!(
-                "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"{builtin}\"\nranks = [\"suspicious\", \"trusted\"]\n"
+                "[[policy.annotator]]\nname = \"classifier\"\nuses = \"{uses}\"\nranks = [\"suspicious\", \"trusted\"]\n"
             )
         };
         let authority = "[[policy.authority]]\nname = \"judge\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n\
-                         [externals.authorities.judge]\nbuiltin = \"llm\"\n";
+                         [externals.authorities.judge]\nuses = \"llm\"\n";
         let unset = |var: &str| MissingKey::Unset { var: var.to_string() };
         for (policy, externals, keys, refused) in [
             (String::new(), JEV, &[][..], None),
@@ -5188,12 +5201,12 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 Err(OpenError::ModelKeyMissing {
                     kind,
                     name,
-                    builtin,
+                    uses,
                     missing,
-                }) => Some((kind, name, builtin, missing)),
+                }) => Some((kind, name, uses, missing)),
                 Err(other) => panic!("{document}: {other}"),
             };
-            let refused = refused.map(|(kind, name, builtin, missing)| (kind, name.to_string(), builtin, missing));
+            let refused = refused.map(|(kind, name, uses, missing)| (kind, name.to_string(), uses, missing));
             assert_eq!(opened, refused, "{document}");
         }
     }
@@ -5217,15 +5230,15 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         const LLM_KEYED: &str =
             "[externals.llm]\nprovider = \"openai\"\nmodel = \"gpt\"\ntoken_env = \"APPA_LLM_TOKEN\"\n";
         const TOOL: &str = "[[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\n";
-        let annotator = |builtin: &str| {
+        let annotator = |uses: &str| {
             format!(
-                "[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"{builtin}\"\nranks = [\"suspicious\", \"trusted\"]\n"
+                "[[policy.annotator]]\nname = \"classifier\"\nuses = \"{uses}\"\nranks = [\"suspicious\", \"trusted\"]\n"
             )
         };
-        let authority = |builtin: &str| {
+        let authority = |uses: &str| {
             format!(
                 "[[policy.authority]]\nname = \"judge\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n\
-                 [externals.authorities.judge]\nbuiltin = \"{builtin}\"\n"
+                 [externals.authorities.judge]\nuses = \"{uses}\"\n"
             )
         };
         let document = |policy: &str, externals: &str| format!("[policy]\nversion = 2\n{TOOL}{policy}\n{externals}");
@@ -5307,41 +5320,41 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert!(refused(load(deferred(DOCUMENT))));
     }
 
-    /// A runtime bounds each model builtin's consults by one gate, sized by the serving
+    /// A runtime bounds each model's consults by one gate, sized by the serving
     /// deployment: every deployment it builds draws on the same permits, and an installed
     /// reload resizes the gate for every later consult, a session opened before it included.
     /// A pin and a refused reload leave the size as it is.
     #[test]
-    fn a_runtime_bounds_each_model_builtins_consults_by_one_gate() {
-        use appa_policy::AnnotatorBuiltin;
+    fn a_runtime_bounds_each_models_consults_by_one_gate() {
+        use appa_policy::AnnotatorUses;
         use appa_runtime_api::inventory::ToolInventory;
 
         let tables = vec![
             (
-                AnnotatorBuiltin::Llm,
+                AnnotatorUses::Llm,
                 "[externals.llm]\nprovider = \"ollama\"\nmodel = \"llama\"\n",
             ),
             (
-                AnnotatorBuiltin::Jev,
+                AnnotatorUses::Jev,
                 "[externals.jev]\ntoken_env = \"APPA_PROVIDER_JEV_API_KEY\"\n",
             ),
-            (AnnotatorBuiltin::ClaudeCode, "[externals.claude_code]\n"),
+            (AnnotatorUses::ClaudeCode, "[externals.claude_code]\n"),
         ];
         // A `jev` Annotator with one rank refuses to load, whatever else the policy declares.
-        const REFUSED: &str = "[[policy.annotator]]\nname = \"refused\"\nbuiltin = \"jev\"\nranks = [\"trusted\"]\n\
+        const REFUSED: &str = "[[policy.annotator]]\nname = \"refused\"\nuses = \"jev\"\nranks = [\"trusted\"]\n\
                                [[policy.tool]]\nname = \"other\"\ndescription = \"Looks another record up.\"\nannotator = \"refused\"\n";
-        for (builtin, table) in tables {
+        for (uses, table) in tables {
             let policy = |max_concurrent: u32, extra: &str| {
                 keyed_config(&format!(
-                    "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\nbuiltin = \"{}\"\n\
+                    "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\nuses = \"{}\"\n\
                      ranks = [\"suspicious\", \"trusted\"]\n\
                      [[policy.tool]]\nname = \"lookup\"\ndescription = \"Looks one record up.\"\nannotator = \"classifier\"\n\
                      {extra}{table}max_concurrent = {max_concurrent}\n",
-                    builtin.wire_name()
+                    uses.wire_name()
                 ))
             };
             let with_pool = |max_concurrent: u32| policy(max_concurrent, "");
-            let permits = |deployment: &Deployment| deployment.externals.model_permits(builtin);
+            let permits = |deployment: &Deployment| deployment.externals.model_permits(uses);
             let dir = tempfile::tempdir().expect("a temp dir is creatable");
             let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
             let session = |id: &str| {
@@ -5355,11 +5368,11 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 .inner
                 .shared
                 .gates
-                .model(builtin)
+                .model(uses)
                 .try_acquire_many_owned(2)
                 .expect("the gate is free");
             for deployment in [runtime.inner.deployment(), first.deployment(), second.deployment()] {
-                assert_eq!(permits(&deployment), 0, "{builtin:?}");
+                assert_eq!(permits(&deployment), 0, "{uses:?}");
             }
             drop(held);
 
@@ -5370,8 +5383,8 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 )
                 .expect("publishes");
             let pinned = runtime.pinned(&published);
-            assert!(runtime.reload(policy(7, REFUSED)).is_err(), "{builtin:?}");
-            assert_eq!(permits(&pinned.inner.deployment()), 2, "{builtin:?}");
+            assert!(runtime.reload(policy(7, REFUSED)).is_err(), "{uses:?}");
+            assert_eq!(permits(&pinned.inner.deployment()), 2, "{uses:?}");
 
             runtime.reload(with_pool(3)).expect("reloads");
             for deployment in [
@@ -5379,7 +5392,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 first.deployment(),
                 pinned.inner.deployment(),
             ] {
-                assert_eq!(permits(&deployment), 3, "{builtin:?}");
+                assert_eq!(permits(&deployment), 3, "{uses:?}");
             }
         }
     }
@@ -5731,7 +5744,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             version = 2
             [[policy.annotator]]
             name = "any"
-            builtin = "claude-code"
+            uses = "claude-code"
             [[policy.tool]]
             name = "host/claude-code/Bash"
             [[policy.tool]]

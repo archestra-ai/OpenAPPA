@@ -61,7 +61,7 @@ struct AuthorityDescription {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum AuthorityImplementation {
-    Builtin(String),
+    Uses(String),
     Url,
     Command,
     Unbound,
@@ -71,7 +71,7 @@ enum AuthorityImplementation {
 impl AuthorityImplementation {
     fn as_text(&self) -> String {
         match self {
-            AuthorityImplementation::Builtin(name) => format!("builtin {name}"),
+            AuthorityImplementation::Uses(name) => format!("uses {name}"),
             AuthorityImplementation::Url => "url".to_string(),
             AuthorityImplementation::Command => "command".to_string(),
             AuthorityImplementation::Unbound => "unbound".to_string(),
@@ -152,7 +152,7 @@ impl Bindings<'_> {
             Bindings::Loaded(externals) => match externals.authorities.get(name) {
                 Some(Implementation::Transport(Transport::Url(_))) => AuthorityImplementation::Url,
                 Some(Implementation::Transport(Transport::Command(_))) => AuthorityImplementation::Command,
-                Some(Implementation::Builtin(builtin)) => AuthorityImplementation::Builtin(builtin.clone()),
+                Some(Implementation::Uses(uses)) => AuthorityImplementation::Uses(uses.clone()),
                 None => AuthorityImplementation::Unbound,
             },
             Bindings::Raw(root) => {
@@ -163,17 +163,14 @@ impl Bindings<'_> {
                 else {
                     return AuthorityImplementation::Unbound;
                 };
+                let uses = crate::config::uses_of(binding).and_then(toml::Value::as_str);
                 let Some(binding) = binding.as_table() else {
                     return AuthorityImplementation::Invalid;
                 };
-                match (
-                    binding.get("url"),
-                    binding.get("command"),
-                    binding.get("builtin").and_then(toml::Value::as_str),
-                ) {
+                match (binding.get("url"), binding.get("command"), uses) {
                     (Some(_), None, None) => AuthorityImplementation::Url,
                     (None, Some(_), None) => AuthorityImplementation::Command,
-                    (None, None, Some(builtin)) => AuthorityImplementation::Builtin(builtin.to_string()),
+                    (None, None, Some(uses)) => AuthorityImplementation::Uses(uses.to_string()),
                     _ => AuthorityImplementation::Invalid,
                 }
             }
@@ -839,7 +836,7 @@ mod tests {
         let root = directory.path().join("appa.toml");
         std::fs::write(
             &root,
-            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience]\nself = [\"slack:viewer\"]\n[policy.audience.group.finance]\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nbuiltin = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\nlookup = \"people\"\nselectors = [{ template = \"viewer\", feeds = \"self\" }, { template = \"full-members\", feeds = \"internal\" }, { template = \"user-group/<handle>\" }]\n[externals.audience.people]\nreaders = { \"slack:U1\" = \"alice@corp.example\" }\n",
+            "include = [\"batteries/mail/appa.toml\"]\n[policy]\nversion = 2\n[policy.audience]\nself = [\"slack:viewer\"]\n[policy.audience.group.finance]\nwithin = \"internal\"\nfrom = [\"slack:user-group/finance\"]\n[[policy.authority]]\nname = \"operator\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\naudience_missing = [\"public\"]\neffects_containing = [\"mail.sent\"]\nattention = [\"hitl\"]\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n[externals.authorities.operator]\nuses = \"hitl\"\n[externals.audience.slack]\ncommand = [\"true\"]\nlookup = \"people\"\nselectors = [{ template = \"viewer\", feeds = \"self\" }, { template = \"full-members\", feeds = \"internal\" }, { template = \"user-group/<handle>\" }]\n[externals.audience.people]\nreaders = { \"slack:U1\" = \"alice@corp.example\" }\n",
         )
         .expect("root config");
 
@@ -856,7 +853,7 @@ mod tests {
             policy.authorities,
             [AuthorityDescription {
                 name: "operator".to_string(),
-                implementation: AuthorityImplementation::Builtin("hitl".to_string()),
+                implementation: AuthorityImplementation::Uses("hitl".to_string()),
                 trust_below: Some("trusted".to_string()),
                 audience_missing: Some("public".to_string()),
                 effects_containing: vec!["mail.sent".to_string()],
@@ -891,7 +888,7 @@ mod tests {
         );
         let rendered = render(&root, &[batteries], AdapterName::ClaudeCode, &[]).text;
         assert!(rendered.contains(
-            "operator: builtin hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
+            "operator: uses hitl; permits trust_below=trusted, audience_missing=public, effects_containing=[mail.sent], attention=[hitl]"
         ));
         assert!(
             rendered

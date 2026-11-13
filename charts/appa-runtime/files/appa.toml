@@ -186,7 +186,7 @@ timeout_ms = 5000
 max_body_bytes = 262144
 
 [externals.authorities.oncall]
-builtin = "hitl"
+uses = "hitl"
 
 [externals.annotators.appa-guide-apply]
 command = ["/usr/local/bin/appa-guide-apply-annotator"]

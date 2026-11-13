@@ -1,13 +1,13 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use appa_builtin::{BuiltinError, BuiltinInput, export_builtin_authority};
+use appa_module::{ModuleError, ModuleInput, export_module_authority};
 
 static IN_CALL: AtomicBool = AtomicBool::new(false);
 
-fn fixture(input: &BuiltinInput) -> Result<serde_json::Value, BuiltinError> {
+fn fixture(input: &ModuleInput) -> Result<serde_json::Value, ModuleError> {
     let mode = input.artifact["arguments"].get("mode").and_then(|mode| mode.as_str());
     match mode {
-        Some("error") => Err(BuiltinError::new("the fixture declined")),
+        Some("error") => Err(ModuleError::new("the fixture declined")),
         Some("panic") => panic!("a deliberate fixture panic"),
         Some("big") => Ok(serde_json::json!({ "ruling": "approve", "reason": "x".repeat(1024 * 1024) })),
         Some("gate") => {
@@ -20,4 +20,4 @@ fn fixture(input: &BuiltinInput) -> Result<serde_json::Value, BuiltinError> {
     }
 }
 
-export_builtin_authority!("fixture-auth", fixture);
+export_module_authority!("fixture-auth", fixture);

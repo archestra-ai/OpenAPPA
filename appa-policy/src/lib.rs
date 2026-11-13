@@ -10,7 +10,7 @@ mod raw;
 #[cfg(test)]
 mod tests;
 
-pub use annotator::{AnnotatorBinding, AnnotatorBuiltin, ToolCallSource};
+pub use annotator::{AnnotatorBinding, AnnotatorUses, ToolCallSource};
 pub use config::Config;
 pub use convert::{parse_delta, parse_requires};
 pub use error::ConfigError;

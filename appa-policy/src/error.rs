@@ -42,26 +42,24 @@ pub enum ConfigError {
     #[error("annotator name {0:?} is empty")]
     BadAnnotatorName(String),
     #[error(
-        "annotator {name} names unknown builtin {builtin:?}; the stock annotator builtins are \"claude-code\" and \"llm\""
+        "annotator {name} uses unknown implementation {uses:?}; an annotator declaration may use \"claude-code\" or \"llm\""
     )]
-    UnknownAnnotatorBuiltin { name: String, builtin: String },
+    UnknownAnnotatorUses { name: String, uses: String },
     #[cfg_attr(
         not(feature = "archestra"),
         error(
-            "sanitizer {name} names unknown builtin {builtin:?}; the model sanitizer builtins are \"claude-code\" and \"llm\""
+            "sanitizer {name} uses unknown implementation {uses:?}; a sanitizer declaration may use \"claude-code\" or \"llm\""
         )
     )]
     #[cfg_attr(
         feature = "archestra",
         error(
-            "sanitizer {name} names unknown builtin {builtin:?}; the model sanitizer builtins are \"claude-code\", \"llm\" and \"archestra\""
+            "sanitizer {name} uses unknown implementation {uses:?}; a sanitizer declaration may use \"claude-code\", \"llm\" or \"archestra\""
         )
     )]
-    UnknownSanitizerBuiltin { name: String, builtin: String },
-    #[error(
-        "sanitizer attest-schema names builtin {builtin:?}; the engine applies attest-schema itself, so it takes no model builtin"
-    )]
-    ReservedSanitizerBuiltin { builtin: String },
+    UnknownSanitizerUses { name: String, uses: String },
+    #[error("sanitizer attest-schema uses {uses:?}; the engine applies attest-schema itself, so it uses no model")]
+    ReservedSanitizerUses { uses: String },
     #[error(
         "annotator {annotator} input {input} reads {spelling:?}, which is not an input source: an input reads `$tool_call`, `$tool_call.name`, `$tool_call.description`, `$tool_call.arguments`, or `$tool_call.arguments.<name>`"
     )]

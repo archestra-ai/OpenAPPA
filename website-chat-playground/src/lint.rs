@@ -23,10 +23,10 @@ pub enum PolicyError {
     )]
     SanitizerWithoutHint { name: String },
     #[error(
-        "annotator {name:?} declares a builtin: this playground answers every annotator \
-         through its own hosted directory, and a builtin would run on the demo host itself"
+        "annotator {name:?} declares a uses: this playground answers every annotator \
+         through its own hosted directory, and a uses would run on the demo host itself"
     )]
-    BuiltinAnnotator { name: String },
+    UsesAnnotator { name: String },
 }
 
 impl From<ConfigError> for PolicyError {
@@ -60,10 +60,10 @@ pub fn check_policy(policy: &str, enabled: &BTreeSet<System>) -> Result<CheckedP
         }
     }
 
-    // A visitor's policy never selects an implementation on this host: a builtin annotator
+    // A visitor's policy never selects an implementation on this host: an annotator naming `uses`
     // would start a claude process under the demo service's own account.
-    if let Some((name, _)) = config.annotators().find(|(_, binding)| binding.builtin.is_some()) {
-        return Err(PolicyError::BuiltinAnnotator {
+    if let Some((name, _)) = config.annotators().find(|(_, binding)| binding.uses.is_some()) {
+        return Err(PolicyError::UsesAnnotator {
             name: name.as_str().to_string(),
         });
     }
@@ -146,24 +146,24 @@ mod tests {
     }
 
     #[test]
-    fn a_builtin_annotator_declaration_is_refused() {
-        for builtin in appa_policy::AnnotatorBuiltin::ALL {
+    fn an_annotator_declaring_uses_is_refused() {
+        for uses in appa_policy::AnnotatorUses::ALL {
             let policy = format!(
                 r#"
 version = 2
 [[annotator]]
 name = "classify"
-builtin = "{}"
+uses = "{}"
 [[tool]]
 name = "list_customers"
 description = "Lists the customer records."
 annotator = "classify"
 "#,
-                builtin.wire_name()
+                uses.wire_name()
             );
             assert!(matches!(
                 check_policy(&policy, &systems("crm")),
-                Err(PolicyError::BuiltinAnnotator { name }) if name == "classify"
+                Err(PolicyError::UsesAnnotator { name }) if name == "classify"
             ));
         }
     }

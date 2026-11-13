@@ -43,7 +43,7 @@ review_timeout_ms = REVIEW_TIMEOUT_MS
 max_body_bytes = 4096
 
 [externals.authorities.operator]
-builtin = "hitl"
+uses = "hitl"
 "#;
 
 #[derive(Clone)]
@@ -298,7 +298,7 @@ max_body_bytes = 4096
 url = "{resolver_url}"
 
 [externals.authorities.operator]
-builtin = "hitl"
+uses = "hitl"
 "#,
     );
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -467,7 +467,7 @@ review_timeout_ms = 5000
 max_body_bytes = 4096
 
 [externals.authorities.operator]
-builtin = "hitl"
+uses = "hitl"
 "#;
 
 /// The lines between the coverage heading and the blank line that ends it.
@@ -695,7 +695,7 @@ async fn no_review_channel_reads_differently_from_an_unanswered_review() {
 
 #[tokio::test]
 async fn an_authority_the_deployment_binds_nothing_to_reads_as_a_configuration_gap() {
-    let unbound = policy(5000).replace("[externals.authorities.operator]\nbuiltin = \"hitl\"\n", "");
+    let unbound = policy(5000).replace("[externals.authorities.operator]\nuses = \"hitl\"\n", "");
     let unregistered = execute(
         &deployment_from(unbound).await,
         Reviewer::new(ElicitationAction::Accept),
@@ -927,10 +927,10 @@ review_timeout_ms = 5000
 max_body_bytes = 4096
 
 [externals.authorities.counsel]
-builtin = "hitl"
+uses = "hitl"
 
 [externals.authorities.guard]
-builtin = "hitl"
+uses = "hitl"
 "#;
 
 /// One text answers for both authorities, so no single authority, hint or scope describes

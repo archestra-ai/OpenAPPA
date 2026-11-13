@@ -714,7 +714,7 @@ tags = ["credentials"]
 # hint on how to read that.
 [[policy.annotator]]
 name = "claude-code.bash-repository-requirements"
-builtin = "claude-code"
+uses = "claude-code"
 
 [[policy.tool]]
 name = "tool/coding/shell(command:*git push*)"
@@ -758,7 +758,7 @@ annotator = "claude-code.bash-repository-requirements"
 # belongs in the root's `[policy.deployment] hint`. The mandate leaves `audiences` omitted, so it may name readers.
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
-builtin = "claude-code"
+uses = "claude-code"
 
 [[policy.tool]]
 name = "tool/coding/shell"
@@ -3035,7 +3035,7 @@ tags = ["web"]
 # deployment hint can mark a source trusted or suspicious either way.
 [[policy.annotator]]
 name = "claude-code.fetch-requirements"
-builtin = "claude-code"
+uses = "claude-code"
 
 [[policy.tool]]
 name = "tool/coding/fetch_url"
@@ -3053,8 +3053,8 @@ tags = ["web"]
 # --- sanitizers ---
 
 # The model for each sanitizer is configured in the deployment, not here: the
-# root binds it under `[externals.sanitizers]`, for example `builtin = "llm"`
-# with an `[externals.llm]` profile, `builtin = "claude-code"` where the
+# root binds it under `[externals.sanitizers]`, for example `uses = "llm"`
+# with an `[externals.llm]` profile, `uses = "claude-code"` where the
 # `claude` CLI is installed, or a URL. A sanitizer nothing binds is left out
 # of the composed policy and never offered, and its results stay unconfined.
 

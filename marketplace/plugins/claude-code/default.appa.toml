@@ -97,7 +97,7 @@ delta = {}
 # or require a reader this policy names, exactly as a static rule above would.
 [[policy.annotator]]
 name = "claude-code.undeclared-tool"
-builtin = "claude-code"
+uses = "claude-code"
 ranks = ["suspicious", "trusted"]
 marks = ["human-approval"]
 effects = []
@@ -106,7 +106,7 @@ effects = []
 name = "*"
 annotator = "claude-code.undeclared-tool"
 
-# The reserved builtin sanitizer of a structured subagent return. The
+# The reserved sanitizer of a structured subagent return. The
 # session declares a JSON schema of bounded fields when it starts the
 # subagent; a final message that matches it crosses at the session's own
 # trust instead of the rank the subagent's reads left it at. It runs in
@@ -164,10 +164,10 @@ review_timeout_ms = 600000
 max_body_bytes = 65536
 
 [externals.authorities.hitl]
-builtin = "hitl"
+uses = "hitl"
 
 [externals.sanitizers.redact-for-public]
-builtin = "claude-code"
+uses = "claude-code"
 
 # The file-tracker battery routes Read, Write, Edit, Bash and SafeBash through
 # the file-tracker, which the `appa` executable serves. While the deployment
@@ -190,70 +190,70 @@ command = ["appa", "file-tracker", "record"]
 # `appa battery install` adds that battery. To turn one sanitizer off, delete
 # its binding: the battery then decides as it would without it.
 [externals.sanitizers."coding.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."coding.strip-secrets"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."cloudflare.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."cloudflare.redact-for-public"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."databricks.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."github.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."google-workspace.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."grain.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."huggingface.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."launchdarkly.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."linear.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."linear.redact-for-public"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."microsoft-learn.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."monday.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."monday.strip-secrets"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."notion.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."pagerduty.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."pagerduty.redact-for-public"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."posthog.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."sentry.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."sentry.redact-for-public"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."slack.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 # Who `self` and `internal` are, read from a directory when a decision needs
 # actual membership: a rule naming an individual recipient

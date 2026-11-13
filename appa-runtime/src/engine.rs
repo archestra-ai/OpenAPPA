@@ -792,7 +792,7 @@ impl<'a> PolicyEngine<'a> {
 /// revision, so the deciding engine arrives per event as a [`PolicyEngine`].
 pub struct RuntimeEngine {
     engine: Engine,
-    /// The trusted hint, builtin, and consult input mapping per registered `[[annotator]]`,
+    /// The trusted hint, `uses`, and consult input mapping per registered `[[annotator]]`,
     /// policy-compiled and runtime-owned. The engine sees only the enforced mandate.
     annotators: BTreeMap<String, appa_policy::AnnotatorBinding>,
     /// The policy's `[deployment] hint`, which every annotation consult declares.

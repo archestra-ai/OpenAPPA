@@ -647,7 +647,7 @@ name = "redactor"
 on = ["tool_output"]
 permits = { audience = { from = ["internal"], to = ["public"] } }
 "#,
-        "[externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n",
+        "[externals.sanitizers.redactor]\nuses = \"redact-email\"\n",
         "delta = {}",
     );
     let root = SYNC.root();
@@ -835,7 +835,7 @@ name = "redactor"
 on = ["tool_output"]
 permits = { audience = { from = ["internal"], to = ["public"] } }
 "#,
-        "[externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n",
+        "[externals.sanitizers.redactor]\nuses = \"redact-email\"\n",
         "delta = {}",
     );
     let root = STRUCTURED.root();

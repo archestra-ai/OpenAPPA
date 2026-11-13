@@ -15,7 +15,7 @@ use appa_engine::profile::{BindingMode, ExecutorClass, ProfileDeclaration, neutr
 use appa_engine::registry::{AudienceVocabulary, LoadError, TrustChain, url_host_wildcards};
 use appa_engine::value::ToolName;
 
-use crate::annotator::AnnotatorBuiltin;
+use crate::annotator::AnnotatorUses;
 use crate::error::ConfigError;
 use crate::raw::{
     RawAuthority, RawBoundary, RawDelta, RawDeployment, RawPermits, RawRequires, RawSanitizer, RawSanitizerPermits,
@@ -331,20 +331,20 @@ fn parse_attends(attention: Vec<String>, context: &str) -> Result<Attends, Confi
 }
 
 impl RawSanitizer {
-    /// The registered sanitizer, and the model builtin its declaration names, if any.
-    pub(crate) fn convert(self, chain: &TrustChain) -> Result<(Sanitizer, Option<AnnotatorBuiltin>), ConfigError> {
+    /// The registered sanitizer, and the model its declaration names, if any.
+    pub(crate) fn convert(self, chain: &TrustChain) -> Result<(Sanitizer, Option<AnnotatorUses>), ConfigError> {
         refuse_inline_binding("sanitizer", &self.name, self.implementation.as_ref())?;
         if self.name == SanitizerName::ATTEST_SCHEMA
-            && let Some(builtin) = self.builtin
+            && let Some(uses) = self.uses
         {
-            return Err(ConfigError::ReservedSanitizerBuiltin { builtin });
+            return Err(ConfigError::ReservedSanitizerUses { uses });
         }
-        let builtin = self
-            .builtin
-            .map(|builtin| {
-                AnnotatorBuiltin::parse_sanitizer(&builtin).ok_or_else(|| ConfigError::UnknownSanitizerBuiltin {
+        let uses = self
+            .uses
+            .map(|uses| {
+                AnnotatorUses::parse_sanitizer(&uses).ok_or_else(|| ConfigError::UnknownSanitizerUses {
                     name: self.name.clone(),
-                    builtin,
+                    uses,
                 })
             })
             .transpose()?;
@@ -360,7 +360,7 @@ impl RawSanitizer {
             },
             hint,
         };
-        Ok((sanitizer, builtin))
+        Ok((sanitizer, uses))
     }
 }
 

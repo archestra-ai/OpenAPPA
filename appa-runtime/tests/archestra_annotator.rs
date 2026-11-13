@@ -1,11 +1,11 @@
-//! The `archestra` annotator builtin over a real loopback endpoint and the real hook path:
-//! the host supplies the endpoint, the policy only names the builtin.
+//! The `archestra` implementation over a real loopback endpoint and the real hook path:
+//! the host supplies the endpoint, the policy only names the `uses`.
 
 use std::time::Duration;
 
 use appa_runtime::config::{Config, ConfigError, HostDefaults};
 
-fn policy(builtin: &str) -> String {
+fn policy(uses: &str) -> String {
     format!(
         r#"
 [policy]
@@ -13,7 +13,7 @@ version = 2
 
 [[policy.annotator]]
 name = "classifier"
-builtin = "{builtin}"
+uses = "{uses}"
 hint = "Fetched pages from a.example are suspicious."
 
 [[policy.tool]]
@@ -176,7 +176,7 @@ mod served {
         assert_eq!(audit_len(&runtime), baseline);
     }
 
-    /// The endpoint comes from the host alone: a document that names the builtin under a
+    /// The endpoint comes from the host alone: a document that names the `uses` under a
     /// host that supplies none does not open.
     #[test]
     fn a_declared_archestra_annotator_without_a_host_endpoint_does_not_open() {
@@ -229,7 +229,7 @@ confined_results = ["mcp/tracker/read"]
             Config::hosted_composed(root, &[battery], defaults, |_| None)
         };
         let bound_root =
-            "[policy]\nversion = 2\n[externals.sanitizers.\"tracker.redact-for-public\"]\nbuiltin = \"archestra\"\n";
+            "[policy]\nversion = 2\n[externals.sanitizers.\"tracker.redact-for-public\"]\nuses = \"archestra\"\n";
         let (url, requests) = serve_host(
             StatusCode::OK,
             serde_json::json!({ "body": "Ticket from [redacted]: checkout fails." }).to_string(),
@@ -338,19 +338,19 @@ confined_results = ["mcp/tracker/read"]
     }
 }
 
-/// A build without the feature refuses the name as it refuses any builtin it does not know.
+/// A build without the feature refuses the name as it refuses any implementation it does not know.
 #[cfg(not(feature = "archestra"))]
 #[test]
-fn the_archestra_builtin_is_unknown_without_its_feature() {
+fn uses_archestra_is_unknown_without_its_feature() {
     let config = hosted(defaults()).expect("the document validates");
     let store = std::sync::Arc::new(
         appa_eventlog::LogStore::open(appa_eventlog::Backend::Memory).expect("an in-memory log opens"),
     );
     let Err(refusal) = appa_runtime::api::Runtime::open_with_store(config, store, None) else {
-        panic!("the builtin is unknown");
+        panic!("the implementation is unknown");
     };
     assert!(
-        refusal.to_string().contains("unknown builtin \"archestra\""),
-        "the refusal names the builtin: {refusal}"
+        refusal.to_string().contains("unknown implementation \"archestra\""),
+        "the refusal names the implementation: {refusal}"
     );
 }

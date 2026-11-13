@@ -2,7 +2,7 @@
 #
 # The battery declares no tool. A tool routes to the annotator by name
 # (`annotator = "jev.tool-call"`), and a root `[[policy.annotator]]` that
-# reuses another battery's annotator name with `builtin = "jev"` replaces that
+# reuses another battery's annotator name with `uses = "jev"` replaces that
 # annotator. The README shows both.
 #
 # Jev answers the two label dimensions only: `delta.audience`, `delta.trust`,
@@ -16,7 +16,7 @@ version = 2
 
 [[policy.annotator]]
 name = "jev.tool-call"
-builtin = "jev"
+uses = "jev"
 ranks = ["suspicious", "trusted"]
 audiences = ["self", "internal"]
 marks = []

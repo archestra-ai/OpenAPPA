@@ -125,10 +125,10 @@ dependencies = [
  "appa-adapter-claude-code",
  "appa-adapter-kagent",
  "appa-adapter-opencode",
- "appa-builtin",
  "appa-engine",
  "appa-eventlog",
  "appa-file-tracker",
+ "appa-module",
  "appa-package",
  "appa-policy",
  "appa-runtime-api",
@@ -226,15 +226,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "appa-builtin"
-version = "0.42.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "appa-engine"
 version = "0.42.0"
 dependencies = [
@@ -302,10 +293,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "appa-module"
+version = "0.42.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "appa-module-fixture"
 version = "0.0.0"
 dependencies = [
- "appa-builtin",
+ "appa-module",
  "serde_json",
 ]
 

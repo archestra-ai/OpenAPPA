@@ -9,7 +9,7 @@ use appa_engine::names::{AnnotatorName, RecorderName, SanitizerName};
 use appa_engine::profile::{DeploymentPolicy, ProfileDeclaration};
 use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
 
-use crate::annotator::{AnnotatorBinding, AnnotatorBuiltin, compile_annotators, validate_annotator_inputs};
+use crate::annotator::{AnnotatorBinding, AnnotatorUses, compile_annotators, validate_annotator_inputs};
 use crate::audience::convert_audience;
 use crate::convert::{default_boundary_label, parse_context_hint, split_selector};
 use crate::error::ConfigError;
@@ -21,16 +21,16 @@ const DEFAULT_TRUST_CHAIN: [&str; 2] = ["suspicious", "trusted"];
 /// A fully parsed and **fully validated** policy: the opened [`Engine`] — registry, deployment
 /// profile, and policy identity behind the one validated constructor — plus the
 /// normalized declarations. The runtime owns HTTP and command bindings; an Annotator that
-/// carries a stock builtin names it on its own declaration.
+/// uses a model names it on its own declaration.
 #[derive(Clone, Debug)]
 pub struct Config {
     engine: Engine,
     policy: DeploymentPolicy,
     boundary_label: Label,
-    /// Every registered `[[annotator]]`, with its runtime-owned hint, builtin, and input mapping.
+    /// Every registered `[[annotator]]`, with its runtime-owned hint, `uses`, and input mapping.
     annotators: BTreeMap<AnnotatorName, AnnotatorBinding>,
-    /// Every `[[sanitizer]]` that names a model builtin on its declaration.
-    sanitizer_builtins: BTreeMap<SanitizerName, AnnotatorBuiltin>,
+    /// Every `[[sanitizer]]` that names a model on its declaration.
+    sanitizer_uses: BTreeMap<SanitizerName, AnnotatorUses>,
     /// Every tool a `[deployment]` field names, as authored, with the field it was named in.
     deployment_tools: Vec<(&'static str, String)>,
     /// The deployer's `[deployment] hint`, runtime-owned like an Annotator hint.
@@ -38,8 +38,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// Parse the policy TOML. HTTP and command bindings remain deployment-owned; a stock
-    /// annotator builtin is selected on the declaration that carries it.
+    /// Parse the policy TOML. HTTP and command bindings remain deployment-owned; an
+    /// annotator's model is selected on the declaration that carries it.
     pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
         Config::from_toml_str_routed(s, BTreeMap::new(), Vec::new())
     }
@@ -100,11 +100,11 @@ impl Config {
         }
 
         let mut sanitizers = Vec::new();
-        let mut sanitizer_builtins = BTreeMap::new();
+        let mut sanitizer_uses = BTreeMap::new();
         for s in raw.sanitizer {
-            let (sanitizer, builtin) = s.convert(&trust_chain)?;
-            if let Some(builtin) = builtin {
-                sanitizer_builtins.insert(sanitizer.name.clone(), builtin);
+            let (sanitizer, uses) = s.convert(&trust_chain)?;
+            if let Some(uses) = uses {
+                sanitizer_uses.insert(sanitizer.name.clone(), uses);
             }
             sanitizers.push(sanitizer);
         }
@@ -155,7 +155,7 @@ impl Config {
             policy,
             boundary_label,
             annotators,
-            sanitizer_builtins,
+            sanitizer_uses,
             deployment_tools,
             deployment_hint,
         })
@@ -203,19 +203,19 @@ impl Config {
             .map(|(field, name)| (*field, name.as_str()))
     }
 
-    /// Every `[[annotator]]` with its runtime-owned binding: its hint, the stock builtin it names
-    /// on its declaration, if any, and its consult input mapping. An Annotator naming a builtin
+    /// Every `[[annotator]]` with its runtime-owned binding: its hint, the model it names
+    /// on its declaration, if any, and its consult input mapping. An Annotator naming `uses`
     /// takes no deployment binding; every other Annotator is bound by name under
     /// `[externals.annotators]`.
     pub fn annotators(&self) -> impl Iterator<Item = (&AnnotatorName, &AnnotatorBinding)> {
         self.annotators.iter()
     }
 
-    /// Every `[[sanitizer]]` that names a model builtin on its declaration, with that builtin.
+    /// Every `[[sanitizer]]` that names a model on its declaration, with that model.
     /// Such a Sanitizer takes no deployment binding, exactly as an Annotator naming one; every
     /// other Sanitizer is bound by name under `[externals.sanitizers]`.
-    pub fn sanitizer_builtins(&self) -> impl Iterator<Item = (&SanitizerName, AnnotatorBuiltin)> {
-        self.sanitizer_builtins.iter().map(|(name, builtin)| (name, *builtin))
+    pub fn sanitizer_uses(&self) -> impl Iterator<Item = (&SanitizerName, AnnotatorUses)> {
+        self.sanitizer_uses.iter().map(|(name, uses)| (name, *uses))
     }
 
     /// The deployer's statement about this deployment's environment and trust boundaries, which
