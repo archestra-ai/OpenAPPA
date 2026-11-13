@@ -47,6 +47,11 @@ version = 2
 [policy.deployment]
 context_control = true
 
+# \`timeout_ms\` bounds each \`url\` or \`command\` external. A sanitizer bound to
+# \`builtin = "llm"\` or \`"claude-code"\` runs under that builtin's own
+# \`[externals.llm]\` or \`[externals.claude_code]\` \`timeout_ms\`, 60000 ms by
+# default. \`max_body_bytes\` caps every external's answer and every tool
+# result: a larger result reaches the model as a placeholder.
 [externals]
 timeout_ms = 2000
 max_body_bytes = 65536

@@ -158,10 +158,26 @@ hint = "These arguments leave for readers outside this organization. Remove ever
 [policy.sanitizer.permits]
 audience = { from = ["self"], to = ["public"] }
 
+# Deployment-wide limits, shown at their defaults. `timeout_ms` bounds each
+# `url` or `command` external: the file-tracker below, the command
+# annotators, context providers and audience sources that batteries bind, and
+# `jev` when its battery is installed. It does not bound the `claude-code`
+# sanitizers and annotators; those run under `[externals.claude_code]` below.
+# `max_body_bytes` caps every external's answer, a sanitizer's rewrite
+# included, and every tool result: a larger result reaches the model as a
+# placeholder. `review_timeout_ms` bounds a `hitl` review that OpenAPPA opens
+# over MCP; it does not time Claude Code's own permission prompt.
 [externals]
 timeout_ms = 5000
 review_timeout_ms = 600000
 max_body_bytes = 65536
+
+# Each `claude-code` sanitizer and annotator runs one `claude -p` process,
+# which these limits bound: the budget of one consult, its wait for a free
+# slot included, and how many run at once. Uncomment to change the defaults.
+# [externals.claude_code]
+# timeout_ms = 60000
+# max_concurrent = 4
 
 [externals.authorities.hitl]
 builtin = "hitl"
