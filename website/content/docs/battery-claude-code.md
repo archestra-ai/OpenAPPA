@@ -7,9 +7,13 @@ sidebar: false
 breadcrumb: Claude Code tools
 ---
 
-The `claude-code` battery covers Claude Code's built-in tools. It routes `Read`, `Write`, and `Edit` through the [file-tracker](/coding-agents#files-that-keep-their-labels), confines every shell command to the files and hosts it declares ([SafeBash](/coding-agents#safebash)), and gives the tools only Claude Code offers static rules. It maps the `coding` battery's canonical `fetch_url` and `web_search` tools to `WebFetch` and `WebSearch`, so a config includes both batteries; the `claude-code` battery fails to load without `coding`.
+The `claude-code` battery covers Claude Code's built-in tools. It maps the `coding` battery's canonical tools to Claude Code's `Bash`, `PowerShell`, `Read`, `Grep`, `Write`, `Edit`, `WebFetch` and `WebSearch`, and it maps the `file-tracker` battery's canonical tools to `Bash`, `Read`, `Write`, `Edit`, `PowerShell`, `Monitor`, `Grep` and `NotebookEdit`. It gives the tools only Claude Code offers static rules.
 
-[View the coding battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/coding) and [the claude-code battery source](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/claude-code).
+Every Claude Code install includes the `file-tracker` battery first, then `coding`, then `claude-code`. The first matching rule decides a call, so the `file-tracker` rules below decide the shell and file tools: `Read`, `Write`, and `Edit` go through the [file-tracker](/coding-agents#files-that-keep-their-labels), and every shell command is confined to the files and hosts it declares ([SafeBash](/coding-agents#safebash)).
+
+To turn file tracking off, run `appa battery remove file-tracker`. The `coding` battery's rules then decide those tools: an Annotator classifies each shell command without a sandbox, `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` are available, and files keep no label between sessions. To turn it on again, run `appa battery install file-tracker`.
+
+View the source of the [file-tracker](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/file-tracker), [coding](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/coding) and [claude-code](https://github.com/archestra-ai/OpenAPPA/tree/main/marketplace/batteries/claude-code) batteries.
 
 ## Covered tools
 
@@ -23,11 +27,15 @@ The `claude-code` battery covers Claude Code's built-in tools. It routes `Read`,
 
 The default config `appa plugin install claude-code` writes binds the file-tracker to `appa file-tracker`, which the runtime executable serves. It also handles tools that the batteries do not name. The SafeBash fallback needs `srt` on `PATH`.
 
-The model for the `coding` battery's sanitizers is configured in the deployment, not in the battery. The default config binds `coding.strip-instructions` to the Claude Code model (`builtin = "claude-code"` under `[externals.sanitizers]`), because a Claude Code session has the `claude` CLI. A root can bind it to `builtin = "llm"` instead. The default config leaves `coding.strip-secrets` unbound: the file-tracker labels credential reads, and no shell result is confined for it to run on. APPA does not verify what a sanitizer's model removed: binding a sanitizer registers it as trusted.
+The model for the `coding` battery's sanitizers is configured in the deployment, not in the battery. The default config binds `coding.strip-instructions` to the Claude Code model (`builtin = "claude-code"` under `[externals.sanitizers]`), because a Claude Code session has the `claude` CLI. A root can bind it to `builtin = "llm"` instead. It also binds `coding.strip-secrets`, which a `coding` rule offers on a shell command that names a credential path. While the `file-tracker` battery is included, no `coding` rule decides a shell call, so it is not offered. APPA does not verify what a sanitizer's model removed: binding a sanitizer registers it as trusted.
 
 ## Files
 
 ```text
+file-tracker/
+|-- README.md
+|-- appa-package.toml
+`-- appa.toml
 coding/
 |-- README.md
 |-- appa-package.toml

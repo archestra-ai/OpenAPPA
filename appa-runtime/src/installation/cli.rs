@@ -270,10 +270,11 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
             None => (current, String::from_utf8(before.clone()).map_err(invalid)?),
         };
         selection.set_generation(acquired.generation().clone());
+        let order = plugin_battery_order(acquired.marketplace(), &catalog, &selection)?;
         let mut text = text;
         for name in &args.names {
             selection.select(PackageKind::Battery, name);
-            text = edit::add_include(&text, &includes::battery_include(name))?;
+            text = includes::add_battery(&text, name, &order)?;
         }
         if let [server] = args.server.as_slice()
             && batteries[0].namespaces.len() == 1
@@ -301,6 +302,29 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
         Ok((Some(Version::of(selection.generation())), result))
     })();
     finish(&args.target, "battery.install".into(), result)
+}
+
+/// The batteries the selected plugins require, in their manifests' order: the order a
+/// battery's include takes among the others they list.
+fn plugin_battery_order(
+    marketplace: &Path,
+    catalog: &appa_package::Marketplace,
+    selection: &Selection,
+) -> Result<Vec<PackageName>, InstallError> {
+    let mut order = Vec::new();
+    for entry in catalog
+        .packages
+        .iter()
+        .filter(|entry| entry.kind == PackageKind::Plugin && selection.plugins.contains(entry.name.as_str()))
+    {
+        let manifest =
+            appa_package::Package::read(&marketplace.join(entry.path.as_str()).join(appa_package::MANIFEST_FILE))
+                .map_err(invalid)?;
+        if let Role::Plugin(plugin) = manifest.role {
+            order.extend(plugin.batteries().iter().cloned());
+        }
+    }
+    Ok(order)
 }
 
 /// Whether a credential variable holds a value in this command's environment;
@@ -763,7 +787,7 @@ pub fn install(mut args: Install) -> ExitCode {
         }
         for battery in &included {
             selection.select(PackageKind::Battery, battery);
-            text = edit::add_include(&text, &includes::battery_include(battery))?;
+            text = includes::add_battery(&text, battery, plugin.batteries())?;
         }
         step(Mark::Doing, "verifying artifacts and preparing selected plugins");
         installation.commit_installation(before.as_deref(), text.as_bytes(), &selection)?;

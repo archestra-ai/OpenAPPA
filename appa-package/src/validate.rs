@@ -1211,11 +1211,17 @@ fn check_tool_aliases(
     Ok(map)
 }
 
-/// Each client tool has one canonical reading: the loader refuses a client tool two
-/// bindings name.
+/// Each client tool has one canonical reading per canonical namespace: the loader refuses
+/// a client tool two bindings of one namespace name. Two namespaces may read it.
 fn check_single_claims(policy: &Path, map: &ToolMap) -> Result<(), PackageError> {
+    let namespace = |canonical: &str| canonical.split('/').nth(1).unwrap_or_default().to_owned();
     let mut claimed = BTreeSet::new();
-    match map.values().flatten().find(|target| !claimed.insert(*target)) {
+    match map
+        .iter()
+        .flat_map(|(canonical, targets)| targets.iter().map(move |target| (namespace(canonical), target)))
+        .find(|claim| !claimed.insert(claim.clone()))
+        .map(|(_, target)| target)
+    {
         Some(target) => Err(PackageError::PolicyAliasClaimedTwice {
             policy: policy.to_path_buf(),
             target: target.clone(),

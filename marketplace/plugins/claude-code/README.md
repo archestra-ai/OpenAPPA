@@ -44,11 +44,11 @@ The plugin cannot prevent that observation by denying the later hook.
 
 ### File labels and SafeBash
 
-The Claude Code battery routes `Read`, `Write` and `Edit` through the
+The `file-tracker` battery routes `Read`, `Write` and `Edit` through the
 file-tracker, as both Annotator and recorder, and confines each shell command
 to the files and hosts it declares. The default policy binds the file-tracker
-to `appa file-tracker`, which the runtime executable serves. While the policy
-binds the `file-tracker` recorder, `clappa` loads a preload into Claude Code
+to `appa file-tracker`, which the runtime executable serves. While the config
+includes the `file-tracker` battery, `clappa` loads a preload into Claude Code
 that adds `input_files`, `output_files` and `network_hosts` to `Bash` and
 confines each call in Claude Code's own sandbox. It first runs the preload's
 self-test; on a Claude Code release it was not checked against, or when a
@@ -56,6 +56,11 @@ check fails, it disables `Bash` and registers the file-tracker's SafeBash,
 which needs Anthropic's sandbox runtime `srt` on `PATH`. Either way it starts
 Claude Code with `PowerShell`, `Monitor`, `Grep` and `NotebookEdit` disabled;
 the battery also blocks those tools at the hook.
+
+`appa battery remove file-tracker` turns file tracking off: the `coding`
+battery's rules then decide those tools, the bindings stay idle, and `clappa`
+starts Claude Code's own `Bash` with no preload and no tool disabled.
+`appa battery install file-tracker` turns it on again.
 The [coding-agents guide](../../../website/content/docs/coding-agents.md#files-that-keep-their-labels)
 describes the labels and the sandbox.
 
@@ -129,11 +134,13 @@ Claude Code
 support with that version's own binary. What it installs does not depend on
 the working directory.
 
-A first install includes the `coding` and `claude-code` batteries, the ones
-the plugin requires, as lines of the config's include list
-(`batteries/coding/appa.toml`, `batteries/claude-code/appa.toml`). The
-`claude-code` battery binds the `coding` battery's canonical tools to Claude
-Code's own, and a config that includes it without `coding` fails to load. A
+A first install includes the `file-tracker`, `coding` and `claude-code`
+batteries, the ones the plugin requires, as lines of the config's include list
+in that order (`batteries/file-tracker/appa.toml`,
+`batteries/coding/appa.toml`, `batteries/claude-code/appa.toml`). The
+`claude-code` battery binds the other two batteries' canonical tools to Claude
+Code's own, and the first matching rule decides a call, so the
+`file-tracker` rules decide the shell and file tools. A
 later install leaves the include list alone and warns when one of those
 batteries is not among it. Every install then reads
 the MCP servers Claude Code has configured, in its user scope and in the

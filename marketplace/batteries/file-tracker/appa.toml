@@ -1,0 +1,114 @@
+# File-tracker rules for a coding agent's canonical shell and file tools:
+# `shell`, `read`, `write`, `edit` and `unmediated` under `tool/file-tracker/`.
+# A client battery's `[aliases.tool.file-tracker]` map binds each to the
+# client's own tool. Include this battery before the `coding` battery and the
+# client's battery: the first matching rule decides a call, so these rules
+# decide every tool the map binds. Remove the include to turn file tracking off;
+# the `coding` battery's rules then decide those tools.
+
+# SafeBash, which the file-tracker serves where a client's own shell cannot be
+# confined, is a shell of this battery's own.
+[aliases.tool.file-tracker]
+shell = [{ name = "mcp/file-tracker/SafeBash", args = { network_hosts = "network_hosts" } }]
+
+
+[policy]
+version = 2
+
+# --- files carry labels: the file-tracker reads and writes them ---
+
+# The file-tracker is both the Annotator and the recorder of every file tool.
+# As a recorder it receives the label each released call published (the
+# session's label, met with what the call forwards and brings back) and keeps
+# it on the files the call wrote. As an Annotator it returns that label when a
+# later call, in this session or another, reads the file. Its built-in path
+# rules classify credentials (`.env*`, `~/.ssh/*`, ...) as `self`, and require
+# a trusted session to write instructions, hooks and shell profiles, before
+# any call touches them. The person running the session adds rules in
+# `~/.config/appa/file-tracker.toml`. The root policy binds the file-tracker to
+# `appa file-tracker`.
+[[policy.annotator]]
+name = "file-tracker"
+
+[[policy.tool]]
+name = "tool/file-tracker/read"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "tool/file-tracker/write"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "tool/file-tracker/edit"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+# A shell command declares the files it reads and writes and the hosts it
+# reaches, and a sandbox confines it to exactly those. Under Claude Code,
+# `clappa` adds the three lists to Claude Code's own Bash and confines each
+# call in Claude Code's sandbox; where it cannot, it serves SafeBash instead,
+# which runs in Anthropic's sandbox runtime `srt`. A shell call that names no
+# lists — Claude Code started without `clappa` — is refused: the file-tracker
+# cannot judge it.
+#
+# A call that names a host sends what the session holds to it, so the data
+# must be public; what comes back was written by strangers, so it is
+# `suspicious`. The file-tracker still labels the call's files. A host rule in
+# the root policy is read first and can say otherwise for a host the
+# deployment knows, such as an internal host that requires `internal` readers.
+# A call that names no host matches the rules after these.
+#
+# A package install reaches its registry, which serves public packages and is
+# told only which ones the command fetches: a call whose hosts are all one
+# registry's runs as a call without hosts does. A selector matches a list when
+# every entry matches one of its `|` alternatives, so PyPI's rule names both of
+# its hosts. `upload.pypi.org`, where packages are published, is not one of
+# them and takes the rule for any host.
+[[policy.tool]]
+name = "tool/file-tracker/shell(network_hosts:registry.npmjs.org)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "tool/file-tracker/shell(network_hosts:registry.yarnpkg.com)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "tool/file-tracker/shell(network_hosts:*.golang.org)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "tool/file-tracker/shell(network_hosts:*.crates.io)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "tool/file-tracker/shell(network_hosts:pypi.org|files.pythonhosted.org)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+[[policy.tool]]
+name = "tool/file-tracker/shell(network_hosts:*)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "tool/file-tracker/shell"
+annotator = "file-tracker"
+recorder = "file-tracker"
+
+# --- unmediated execution and content reads: no file label reaches them ---
+
+# These tools run commands, or read or write file content, out of the
+# file-tracker's sight. `clappa` starts Claude Code with them disabled; this
+# rule refuses them at the hook too, so a session started some other way
+# cannot run them either.
+[[policy.tool]]
+name = "tool/file-tracker/unmediated"
+requires = { attention = ["blocked"] }

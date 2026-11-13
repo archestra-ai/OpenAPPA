@@ -72,7 +72,9 @@ pub enum ToolAliasError {
         target: String,
         argument: String,
     },
-    #[error("{first} and {second} both map {client} (bound from {target}), so a call to it has two canonical readings")]
+    #[error(
+        "{first} and {second} both map {client} (bound from {target}), so a call to it has two readings in one canonical namespace"
+    )]
     ClaimedTwice {
         first: String,
         second: String,
@@ -81,8 +83,6 @@ pub enum ToolAliasError {
     },
     #[error("[aliases.tool] does not parse: {source}")]
     Unparsable { source: toml::de::Error },
-    #[error("{origin} maps tools of {namespace:?}, which is not included")]
-    UnnamedNamespace { origin: String, namespace: String },
     #[error("rule {rule:?} reads argument {argument:?}, which the map onto {target} does not bind")]
     UnmappedArgument {
         rule: String,
@@ -190,16 +190,6 @@ pub(crate) fn lower(
             }
         }
     }
-    // A map for a namespace no rule names depends on a battery the deployment left out.
-    if let Some(((namespace, _), bound)) = bindings
-        .iter()
-        .find(|((namespace, _), _)| !named_tools.iter().any(|(named, _)| named == namespace))
-    {
-        return Err(ToolAliasError::UnnamedNamespace {
-            origin: bound[0].origin.to_string(),
-            namespace: (*namespace).to_owned(),
-        });
-    }
     report_unbound(&bindings, &named_tools, &inactive);
     confine(policy, bindings.values().flatten().map(|binding| binding.target));
     Ok(())
@@ -208,8 +198,10 @@ pub(crate) fn lower(
 /// Log what lowering left unbound, one line per canonical namespace. Where a map binds some
 /// of a namespace's tools, the tools it leaves out are that map's choice, as the `claude-code`
 /// battery leaves Bash and its file tools to the file-tracker; where no map binds any, none of
-/// the namespace's rules reaches a client tool. A map entry for a canonical tool no rule
-/// names, such as a misspelt tool, binds nothing.
+/// the namespace's rules reaches a client tool. A map for a namespace no rule names binds
+/// nothing, as the `claude-code` battery's `file-tracker` map does while the deployment
+/// leaves the `file-tracker` battery out; a map entry for a canonical tool no rule names in
+/// an included namespace, such as a misspelt tool, binds nothing either.
 fn report_unbound(
     bindings: &BTreeMap<(&str, &str), Vec<Binding<'_>>>,
     named_tools: &BTreeSet<(String, String)>,
@@ -248,8 +240,26 @@ fn report_unbound(
             ),
         }
     }
+    let named = |namespace: &str| named_tools.iter().any(|(of, _)| of == namespace);
+    let unnamed: BTreeMap<&str, BTreeSet<String>> = bindings
+        .iter()
+        .filter(|((namespace, _), _)| !named(namespace))
+        .fold(BTreeMap::new(), |mut unnamed, ((namespace, _), bound)| {
+            unnamed
+                .entry(*namespace)
+                .or_default()
+                .extend(bound.iter().map(|binding| binding.origin.to_string()));
+            unnamed
+        });
+    for (namespace, maps) in unnamed {
+        tracing::info!(
+            namespace,
+            maps = ?maps,
+            "no included rule names this canonical namespace, so its [aliases.tool] maps bind nothing"
+        );
+    }
     for ((namespace, tool), bound) in bindings {
-        if !named_tools.contains(&((*namespace).to_owned(), (*tool).to_owned())) {
+        if named(namespace) && !named_tools.contains(&((*namespace).to_owned(), (*tool).to_owned())) {
             tracing::warn!(
                 map = %bound[0].origin,
                 tool = %format!("{FAMILY}/{namespace}/{tool}"),
@@ -316,17 +326,20 @@ fn check_target(origin: &MapOrigin, namespace: &str, tool: &str, target: &ToolTa
 const FAMILY_PROBE: &str = "host";
 
 /// Each client tool a call can reach — a target after the root's mcp and host aliases
-/// rebind it — has at most one canonical reading.
+/// rebind it — has at most one canonical reading per canonical namespace. Two namespaces
+/// may read one client tool, as `coding` and `file-tracker` both read Claude Code's Bash:
+/// each lowers its own rules onto it, and the first matching rule decides the call, in
+/// the include order of the batteries that wrote them.
 fn refuse_double_claims(
     bindings: &BTreeMap<(&str, &str), Vec<Binding<'_>>>,
     aliases: &Aliases,
 ) -> Result<(), ToolAliasError> {
-    let mut claims: BTreeMap<String, String> = BTreeMap::new();
+    let mut claims: BTreeMap<(&str, String), String> = BTreeMap::new();
     for ((namespace, tool), bound) in bindings {
         for binding in bound {
             let claimant = format!("{} ({FAMILY}/{namespace}/{tool})", binding.origin);
             for client in rebound(&binding.target.name, aliases) {
-                if let Some(first) = claims.get(&client) {
+                if let Some(first) = claims.get(&(*namespace, client.clone())) {
                     return Err(ToolAliasError::ClaimedTwice {
                         first: first.clone(),
                         second: claimant,
@@ -334,7 +347,7 @@ fn refuse_double_claims(
                         client,
                     });
                 }
-                claims.insert(client, claimant.clone());
+                claims.insert((*namespace, client), claimant.clone());
             }
         }
     }
@@ -636,11 +649,10 @@ delta = {{}}
             "claude-code",
             "[aliases.tool.coding]\nshell = [{ name = 'host/claude-code/Bash' }]\n",
         );
-        let refused = lowered("[policy]\nversion = 2\n", vec![foreign]).unwrap_err();
+        let unincluded = lowered("[policy]\nversion = 2\n", vec![foreign]).expect("a map of an absent namespace loads");
         assert!(
-            matches!(&refused, ToolAliasError::UnnamedNamespace { origin, namespace }
-                if origin == r#"battery "claude-code""# && namespace == "coding"),
-            "{refused:?}"
+            unincluded["policy"].get("tool").is_none(),
+            "a map for a namespace no included rule names binds nothing"
         );
         let unruled = battery(
             "claude-code",
@@ -696,6 +708,28 @@ delta = {{}}
             lowered(rules, vec![claude.clone(), twice]),
             Err(ToolAliasError::ClaimedTwice { client, .. }) if client == "host/claude-code/Bash"
         ));
+        let shared = battery(
+            "claude-code",
+            "[aliases.tool.coding]\nshell = [{ name = 'host/claude-code/Bash' }]\n\n\
+             [aliases.tool.file-tracker]\nshell = [{ name = 'host/claude-code/Bash' }]\n",
+        );
+        let tracked = format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = 'tool/file-tracker/shell'\ndelta = {{ trust = 'suspicious' }}\n{}",
+            rules.trim_start_matches("[policy]\nversion = 2\n")
+        );
+        let composed = lowered(&tracked, vec![shared]).expect("two namespaces may read one client tool");
+        let bash: Vec<_> = composed["policy"]["tool"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|rule| rule["name"].as_str() == Some("host/claude-code/Bash"))
+            .collect();
+        assert_eq!(bash.len(), 2, "each namespace lowers its own rule onto Bash");
+        assert_eq!(
+            bash[0]["delta"]["trust"].as_str(),
+            Some("suspicious"),
+            "the rule composed first, the file-tracker's here, comes first and matches first"
+        );
         let rebound = battery(
             "archestra",
             "[aliases.tool.coding]\nread_file = [{ name = 'host/archestra/Bash' }]\n",

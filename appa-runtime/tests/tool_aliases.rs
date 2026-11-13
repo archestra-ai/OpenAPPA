@@ -5,7 +5,7 @@ use crate::common;
 
 use std::path::Path;
 
-use appa_runtime::config::{Config, ConfigError};
+use appa_runtime::config::Config;
 use appa_runtime_api::{HookDecision, ProposedCall};
 use common::{propose, ran, raw, session_runtime};
 
@@ -105,10 +105,19 @@ async fn a_canonical_rule_matches_each_client_spelling_of_the_call() {
     }
 }
 
+/// A map onto a battery the deployment leaves out binds nothing, so removing that battery
+/// leaves the map's own battery loadable.
 #[test]
-fn a_map_without_the_battery_it_maps_is_refused_at_load() {
+fn a_map_without_the_battery_it_maps_binds_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let root = write_deployment(dir.path(), &[("clients", CLIENTS)]);
-    let refused = Config::load(&root).unwrap_err();
-    assert!(matches!(&refused, ConfigError::ToolAlias(_)), "{refused}");
+    let config = Config::load(&root).expect("a map of an absent namespace loads");
+    assert!(
+        !config
+            .tool_names()
+            .iter()
+            .any(|name| name.starts_with("host/claude-code/")),
+        "{:?}",
+        config.tool_names()
+    );
 }

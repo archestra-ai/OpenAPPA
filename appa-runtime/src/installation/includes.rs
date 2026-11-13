@@ -11,10 +11,22 @@ use appa_package::PackageName;
 use toml_edit::{DocumentMut, Item};
 
 use super::InstallError;
-use crate::config::edit::{bound_servers, document, mcp_bindings};
+use crate::config::edit::{add_include_before, bound_servers, document, mcp_bindings};
 
 pub(crate) fn battery_include(name: &PackageName) -> String {
     format!("batteries/{name}/appa.toml")
+}
+
+/// The text with battery `name` included before the batteries that follow it in `order`,
+/// a plugin's `batteries` list, so its rules compose ahead of theirs.
+pub(crate) fn add_battery(text: &str, name: &PackageName, order: &[PackageName]) -> Result<String, InstallError> {
+    let followers: Vec<&str> = order
+        .iter()
+        .skip_while(|listed| *listed != name)
+        .skip(1)
+        .map(PackageName::as_str)
+        .collect();
+    Ok(add_include_before(text, &battery_include(name), &followers)?)
 }
 
 /// The batteries the include list names: the entries spelled

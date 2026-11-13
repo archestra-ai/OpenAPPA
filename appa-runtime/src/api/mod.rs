@@ -4381,10 +4381,13 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
             appa_policy::AnnotatorBuiltin::Archestra => {}
         }
     }
-    bound_exactly("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
+    // An Annotator or recorder binding that no declaration names stays idle, as a
+    // sanitizer's does: a root binds the file-tracker for the battery that declares it, and
+    // a deployment that leaves the battery out keeps the binding unused.
+    no_unbound("annotator", bound_by_deployment.into_iter(), &externals.annotators)?;
     // A recorder a declaration names that nothing binds would keep no label, and a read of
-    // what its calls wrote would launder it; a binding nothing names is never delivered to.
-    bound_exactly(
+    // what its calls wrote would launder it.
+    no_unbound(
         "recorder",
         policy
             .engine()
@@ -4466,16 +4469,6 @@ fn validate_deployment(policy: &appa_policy::Config, externals: &crate::config::
         }
     }
     Ok(())
-}
-
-fn bound_exactly<'a, Implementation>(
-    kind: &'static str,
-    registered: impl Iterator<Item = &'a str>,
-    bound: &std::collections::BTreeMap<String, Implementation>,
-) -> Result<(), OpenError> {
-    let registered: std::collections::BTreeSet<&str> = registered.collect();
-    no_unbound(kind, registered.iter().copied(), bound)?;
-    no_undeclared(kind, registered.into_iter(), bound)
 }
 
 fn no_unbound<'a, Implementation>(
@@ -4962,7 +4955,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
     }
 
     #[test]
-    fn missing_and_undeclared_annotator_implementations_are_refused() {
+    fn a_missing_annotator_implementation_is_refused_and_an_undeclared_one_stays_idle() {
         let policy = r#"
             [policy]
             version = 2
@@ -4982,10 +4975,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let mut extra = claude_config(policy);
         extra.externals.annotators.insert("classifier".to_string(), endpoint());
         extra.externals.annotators.insert("undeclared".to_string(), endpoint());
-        assert!(matches!(
-            load(extra),
-            Err(OpenError::UndeclaredExternal { kind: "annotator", .. })
-        ));
+        assert!(load(extra).is_ok(), "a binding no declaration names is never consulted");
     }
 
     #[test]

@@ -124,7 +124,11 @@ Recommend a service's MCP battery when the user needs rules for the service
 itself. `Read`, `Write` and `Edit` go through the file-tracker. Label
 paths in `~/.config/appa/file-tracker.toml`, never with root `Read`, `Write`
 or `Edit` rules: a root rule for those tools precedes the battery's and
-stops the file-tracker from recording the label.
+stops the file-tracker from recording the label. These rules come from the
+`file-tracker` battery. When the user wants file tracking off, for example
+because confined shell commands block their work, propose
+`appa battery remove file-tracker`; `appa battery install file-tracker`
+turns it on again.
 
 ### Remaining tools
 

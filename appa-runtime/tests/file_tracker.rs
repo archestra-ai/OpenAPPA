@@ -247,15 +247,15 @@ async fn a_secret_copied_into_a_scratch_file_keeps_its_label_in_a_later_session(
 }
 
 /// The shipped Claude Code deployment, laid out as `appa plugin install claude-code` lays it
-/// out: the Claude Code battery routes Read, Write and Bash to the file-tracker the root
-/// policy binds, refuses a Bash call that declares nothing, and refuses the other unmediated
+/// out: the file-tracker battery, through the Claude Code battery's map, routes Read, Write
+/// and Bash to the file-tracker the root policy binds, refuses a Bash call that declares nothing, and refuses the other unmediated
 /// tools with no remedy.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_blocks_unmediated_tools() {
+async fn the_file_tracker_battery_routes_file_tools_and_bash_to_the_tracker_and_blocks_unmediated_tools() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
-    for battery in ["coding", "claude-code"] {
+    for battery in ["file-tracker", "coding", "claude-code"] {
         let into = root.join("batteries").join(battery);
         std::fs::create_dir_all(&into).unwrap();
         for file in ["appa.toml", "appa-package.toml"] {
@@ -269,7 +269,7 @@ async fn the_claude_code_battery_routes_file_tools_and_bash_to_the_tracker_and_b
     let store = root.join("file-tracker.json");
     let shipped = std::fs::read_to_string(repo.join("marketplace/plugins/claude-code/default.appa.toml")).unwrap();
     let policy = format!(
-        "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{}",
+        "include = [\"batteries/file-tracker/appa.toml\", \"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{}",
         common::with_a_local_file_tracker(&root, &shipped)
     );
     let config_path = root.join("appa.toml");

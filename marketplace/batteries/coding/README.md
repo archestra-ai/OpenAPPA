@@ -4,9 +4,11 @@ This battery gives a coding agent policy-aware shell commands and `self`
 labels on the requester's own secrets. It writes its rules once, for
 canonical tools under `tool/coding/`. A client battery binds each canonical
 tool to the client's own tool with an `[aliases.tool.coding]` map. A rule
-no map binds is inactive. The `claude-code` battery binds only `fetch_url`
-and `web_search`: Claude Code's file tools and its `Bash` go through the
-file-tracker instead.
+no map binds is inactive. The `claude-code` battery binds all eight to
+Claude Code's tools. Where a deployment also includes the `file-tracker`
+battery before this one, its rules come first and decide Claude Code's
+`Bash`, `Read`, `Write`, `Edit`, `PowerShell` and `Grep`, so only the web
+rules here decide a call.
 
 | Canonical tool | What it is | Argument the rules read |
 | --- | --- | --- |
@@ -28,7 +30,7 @@ file-tracker instead.
   inside a word or a string literal, a single-quoted name, and a template such
   as `.env.example` reach the Annotator. Where a client's map entry sets
   `confined = true` and the root binds `coding.strip-secrets` (the Claude Code
-  default does not, because the file-tracker serves Bash there), the command's
+  default does, while the file-tracker battery is left out), the command's
   result is withheld and the battery offers
   `coding.strip-secrets` beside the narrowing: the model replaces
   every secret value in the output with `[redacted-secret]`, and the masked

@@ -494,12 +494,10 @@ impl Classifier {
     }
 }
 
-/// The include line of a deployment that binds the `coding` battery's canonical shell and
-/// file tools to Claude Code's native ones, which the shipped Claude Code battery instead
-/// blocks or hands to the file-tracker. It writes into `dir` the `coding` battery, a
-/// battery holding only that map, and the shipped Claude Code battery, included in that
-/// order: the coding rules each map entry lowers onto a native tool precede the Claude
-/// Code battery's own rule for it, so a call to it matches a coding rule first.
+/// The include line of a deployment without file tracking: the `coding` battery and the
+/// shipped Claude Code battery, whose map binds the `coding` rules to Claude Code's native
+/// shell and file tools, written into `dir`. With the `file-tracker` battery left out, its map
+/// onto those tools binds nothing, so a call to one matches a coding rule first.
 pub fn including_coding_on_native_claude_code_tools(dir: &Path) -> &'static str {
     for battery in ["coding", "claude-code"] {
         let target = dir.join("batteries").join(battery);
@@ -513,22 +511,5 @@ pub fn including_coding_on_native_claude_code_tools(dir: &Path) -> &'static str 
         )
         .expect("the battery file is copied");
     }
-    let map = dir.join("batteries/native-tools");
-    std::fs::create_dir_all(&map).expect("the battery directory is created");
-    std::fs::write(
-        map.join("appa.toml"),
-        r#"[aliases.tool.coding]
-shell = [{ name = "host/claude-code/Bash", args = { command = "command" }, confined = true }]
-powershell = [{ name = "host/claude-code/PowerShell", args = { command = "command" }, confined = true }]
-read_file = [{ name = "host/claude-code/Read", args = { file_path = "file_path" } }]
-search_files = [{ name = "host/claude-code/Grep", args = { path = "path" } }]
-write_file = [{ name = "host/claude-code/Write", args = { file_path = "file_path" } }]
-edit_file = [{ name = "host/claude-code/Edit", args = { file_path = "file_path" } }]
-
-[policy]
-version = 2
-"#,
-    )
-    .expect("the map battery writes");
-    "include = [\"batteries/coding/appa.toml\", \"batteries/native-tools/appa.toml\", \"batteries/claude-code/appa.toml\"]\n"
+    "include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n"
 }
