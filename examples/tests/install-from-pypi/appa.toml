@@ -11,6 +11,7 @@ delta = { audience = ["hr@archestra.ai"] }
 
 [[policy.tool]]
 name = "mcp/shell/install(hosts:pypi.org|files.pythonhosted.org)"
+requires = {}
 delta = {}
 
 [[policy.tool]]

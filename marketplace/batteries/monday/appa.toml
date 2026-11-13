@@ -254,20 +254,24 @@ name = "mcp/monday/vibe_ask"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# Read actions on mixed tools precede their reviewed mutation fallbacks.
+# Read actions on mixed tools precede their reviewed mutation fallbacks, and
+# write `effects = []` so they do not take the fallback's effect.
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent(action:get)"
+effects = []
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent_triggers(action:list)"
+effects = []
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/monday/manage_agent_knowledge(action:list)"
+effects = []
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 

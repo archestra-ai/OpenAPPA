@@ -118,8 +118,9 @@ the files and hosts it declares, and blocks `PowerShell`, `Monitor`, `Grep`
 and `NotebookEdit`. Propose no rule and no Annotator hint for those tools. A command that declares `network_hosts` requires
 public data, and its result is `suspicious`. When the user's work needs a
 known host for `self` or `internal` data, propose a root rule such as
-`host/claude-code/Bash(network_hosts:*.corp.example)` with `annotator` and
-`recorder` set to `file-tracker` and the readers that host may receive.
+`host/claude-code/Bash(network_hosts:*.corp.example)` with the readers that
+host may receive and `delta = {}`. It takes `annotator` and `recorder` from the
+battery's `network_hosts:*` rule, so the file-tracker still confines the command.
 Recommend a service's MCP battery when the user needs rules for the service
 itself. `Read`, `Write` and `Edit` go through the file-tracker. Label
 paths in `~/.config/appa/file-tracker.toml`, never with root `Read`, `Write`
@@ -304,8 +305,8 @@ Looser:
 
 | Option | Change | Cost |
 |---|---|---|
-| `trust-server <server>` | Static rules with `delta = {}` for the server's tools, in place of the Annotator's call-by-call judgment or a battery's `suspicious`. | Text other people write there reaches the session at full trust. |
-| `trusted-sites <domains>` | `host/claude-code/WebFetch(url:https://<domain>/*)` with the root WebFetch rule's `requires` and `delta = {}`, placed before the root WebFetch rule. | Anyone who can edit those pages can steer the agent. |
+| `trust-server <server>` | Static rules with `annotator = ""` and `delta = {}` for the server's tools, in place of the Annotator's call-by-call judgment or a battery's `suspicious`. | Text other people write there reaches the session at full trust. |
+| `trusted-sites <domains>` | `host/claude-code/WebFetch(url:https://<domain>/*)` with `annotator = ""` and `delta = {}`, before the other WebFetch rules. Without `annotator = ""`, it takes the Annotator of the battery's WebFetch rule. | Anyone who can edit those pages can steer the agent. |
 
 Stricter:
 
@@ -314,7 +315,7 @@ Stricter:
 | `no-fallback` | Remove the root's `name = "*"` rule and its `claude-code.undeclared-tool` Annotator. Tools no rule covers are refused. | A newly added MCP server does nothing until `/appa-guide` writes rules for it. |
 | `no-leak-approvals` | Remove `audience_missing` from the `hitl` Authority's permits. A call that would send private data where a wider audience can read it is refused instead of asking. | Deliberately sharing private data needs a policy change first. |
 | `private-folders <paths>` | A `[[path]]` rule per path in `~/.config/appa/file-tracker.toml` with the absolute `pattern = "<path>/*"` and `audience = ["self"]`. | After reading those folders, public sends need approval or are refused. |
-| `suspicious-server <server>` | Static rules with `delta = { trust = "suspicious" }` for the server's tools. | Once the agent reads that server, writes to its own instructions and other trusted-only actions ask the user. |
+| `suspicious-server <server>` | Static rules with `annotator = ""` and `delta = { trust = "suspicious" }` for the server's tools. | Once the agent reads that server, writes to its own instructions and other trusted-only actions ask the user. |
 
 ## Explain a block
 

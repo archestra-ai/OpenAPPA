@@ -7,7 +7,10 @@ use appa_engine::engine::Engine;
 use appa_engine::label::Label;
 use appa_engine::names::{AnnotatorName, RecorderName, SanitizerName};
 use appa_engine::profile::{DeploymentPolicy, ProfileDeclaration};
-use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
+use appa_engine::registry::{
+    AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain, wider_declarations,
+};
+use appa_engine::value::ToolName;
 
 use crate::annotator::{AnnotatorBinding, AnnotatorBuiltin, compile_annotators, validate_annotator_inputs};
 use crate::audience::convert_audience;
@@ -233,26 +236,37 @@ type QualifiedNames = BTreeMap<String, BTreeSet<String>>;
 /// server-qualified spellings of each authored name.
 type CompiledTools = (Vec<ToolDeclaration>, BTreeMap<String, RecorderName>, QualifiedNames);
 
-fn compile_tools(raw: Vec<RawTool>, trust_chain: &TrustChain) -> Result<CompiledTools, ConfigError> {
-    let mut tools = Vec::new();
-    let mut recorders = BTreeMap::new();
+/// A rule takes each contract field it does not write — `annotator`, `recorder`, `delta`,
+/// `forwards`, `requires`, `effects` — from the first later rule that selects every call it
+/// selects and writes it ([`wider_declarations`]). Resolved here, so the engine receives each
+/// rule as one complete declaration, and a policy decides and digests exactly as the policy
+/// that writes every inherited field out. `annotator = ""` and `recorder = ""` write "none".
+fn compile_tools(mut raw: Vec<RawTool>, trust_chain: &TrustChain) -> Result<CompiledTools, ConfigError> {
     let mut qualified = QualifiedNames::new();
-    for mut t in raw {
+    for t in &mut raw {
         let authored = split_selector(&t.name).0.to_string();
-        let recorder = t.recorder.take();
-        let tool = t.convert(trust_chain)?;
-        if let Some(recorder) = recorder {
-            if recorder.is_empty() {
-                return Err(ConfigError::EmptyRecorder {
-                    tool: tool.name().as_str().to_string(),
-                });
-            }
-            recorders.insert(tool.name().as_str().to_string(), RecorderName::new(recorder));
-        }
+        t.qualify()?;
         qualified
             .entry(authored)
             .or_default()
-            .insert(split_selector(tool.name().as_str()).0.to_string());
+            .insert(split_selector(&t.name).0.to_string());
+    }
+    let names: Vec<ToolName> = raw.iter().map(|t| ToolName::new(t.name.clone())).collect();
+    let wider = wider_declarations(&names)?;
+    for (own, wider) in wider.iter().enumerate() {
+        let (head, tail) = raw.split_at_mut(own + 1);
+        for later in wider {
+            head[own].inherit(&tail[later - own - 1]);
+        }
+    }
+    let mut tools = Vec::new();
+    let mut recorders = BTreeMap::new();
+    for mut t in raw {
+        let recorder = t.recorder.take().filter(|recorder| !recorder.is_empty());
+        let tool = t.convert(trust_chain)?;
+        if let Some(recorder) = recorder {
+            recorders.insert(tool.name().as_str().to_string(), RecorderName::new(recorder));
+        }
         tools.push(tool);
     }
     Ok((tools, recorders, qualified))

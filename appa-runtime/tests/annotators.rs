@@ -159,6 +159,7 @@ fn command_policy(script: &str, matched_without_annotator: bool) -> String {
         r#"
 [[policy.tool]]
 name = "fetch(url:https://public*)"
+annotator = ""
 delta = {}
 "#
     } else {

@@ -69,10 +69,10 @@ effects = ["egress"]
 | `forwards` | Label of content the tool sends beyond its arguments. Accepts only literal entries (no `$<argument>` placeholders). |
 | `requires` | Preconditions for executing the call: audience, trust, effects, or attention requirements. |
 | `effects` | Side-effect identifiers recorded in trajectory history after successful execution. |
-| `annotator` | Name of a registered [annotator](#annotators) that dynamically computes the contract for each call. |
-| `recorder` | Name of a registered [recorder](#recorders) that receives audit records for released calls. |
+| `annotator` | Name of a registered [annotator](#annotators) that dynamically computes the contract for each call. `""` names no annotator. |
+| `recorder` | Name of a registered [recorder](#recorders) that receives audit records for released calls. `""` names no recorder. |
 
-If omitted, `delta` and `forwards` add no restrictions, and `requires` imposes no preconditions.
+A rule that omits `annotator`, `recorder`, `delta`, `forwards`, `requires`, or `effects` can take it from a later rule. See [Inherited fields](#inherited-fields). If no later rule gives them, `delta` and `forwards` add no restrictions, and `requires` imposes no preconditions.
 
 A tool contract uses either static fields (`delta`, `forwards`, `requires`, `effects`) or an `annotator`. Beside an annotator, a tool can declare only a [label floor](#annotators); any other static field causes a configuration load error.
 
@@ -261,6 +261,59 @@ Use single-quoted string literals in TOML to preserve backslashes verbatim. In d
 Only the five escape sequences listed above are supported. Other escape sequences cause a configuration load error.
 
 OpenAPPA selects a contract before validating its `parameters` schema. If schema validation fails, the call is rejected; the engine does not fall through to subsequent contracts. If a sanitizer rewrites call arguments, the new arguments undergo fresh contract selection. See [Sanitizers](#sanitizers).
+
+### Inherited fields
+
+A root rule usually overrides one field of a battery rule. The root rule comes first, so it can set that field and inherit the other fields from the battery rule.
+
+A rule can omit these fields: `annotator`, `recorder`, `delta`, `forwards`, `requires`, and `effects`. When a rule omits a field, it inherits the field from a later rule for the same tool. That later rule must match every call that the earlier rule matches:
+
+- A bare rule, a tool name without a selector, matches every call.
+- A selector rule must name only arguments that the earlier rule also names.
+- Each of its patterns must match every value that the earlier rule's pattern for the same argument matches. For example, `*` matches every value of `*.corp.example`.
+
+A selector ignores the arguments that it does not name. Thus `Bash(network_hosts:*)` matches every call that `Bash(network_hosts:*.corp.example)` matches, also a call that sets more arguments.
+
+The earlier rule inherits each field from the first such rule that sets it. A later rule that matches only some of the earlier rule's calls gives no fields. For example, `Bash(mode:quiet)` inherits nothing from `Bash(network_hosts:*)`. A call can set `mode` and omit `network_hosts`.
+
+In the example below, the first rule is a root rule for hosts in `*.corp.example`. The second rule is a battery rule for all hosts:
+
+```toml
+[[policy.annotator]]
+name = "file-tracker"
+
+# Root rule. It inherits annotator, recorder, and delta.
+# Its requires replaces the requires of the battery rule.
+[[policy.tool]]
+name = "host/claude-code/Bash(network_hosts:*.corp.example)"
+requires = { audience = { contains = ["internal"] } }
+
+# Battery rule.
+[[policy.tool]]
+name = "host/claude-code/Bash(network_hosts:*)"
+annotator = "file-tracker"
+recorder = "file-tracker"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+[externals.annotators.file-tracker]
+command = ["appa", "file-tracker", "annotate"]
+
+[externals.recorders.file-tracker]
+command = ["appa", "file-tracker", "record"]
+```
+
+A field that a rule sets replaces all of the inherited field. OpenAPPA does not combine the two values, also not the keys in a table. For example, a rule that sets only `requires = { trust = "trusted" }` does not inherit the `audience` key of the later rule's `requires`. To stop a field from being inherited, set it empty:
+
+- `annotator = ""` uses no annotator.
+- `recorder = ""` uses no recorder.
+- `delta = {}`, `forwards = {}`, `requires = {}`, and `effects = []` add no restriction.
+
+Inheritance follows the order of the composed policy: the root config first, then the included batteries in include order. The wildcard rule `"*"` gives no fields and inherits none.
+
+An inherited annotator has the same limits as an annotator that the rule sets. Beside an annotator, a rule can set `recorder`. From `delta` and `requires`, it can set only `delta.trust`, `requires.trust`, and `requires.audience.contains`. It cannot set `forwards` or a non-empty `effects`. If the rule sets or inherits a different field, the policy does not load.
+
+OpenAPPA resolves inheritance when it loads the policy. A policy that uses inheritance has the same policy identity as a policy that writes each inherited field on its rule. The two policies make the same decision for each call.
 
 ### Handling undeclared tools
 

@@ -65,6 +65,33 @@ impl Pattern {
             .iter()
             .any(|alternative| alternative.contains(&PatternPart::Wildcard))
     }
+
+    /// Whether `wider` matches every value this pattern matches. Each `*` of an alternative
+    /// is replaced by one character no literal of `wider` holds; `wider` can match that
+    /// witness only by spanning the character with its own `*`, which then spans any text in
+    /// its place. So the witness matches exactly when the alternative's whole language does.
+    fn within(&self, wider: &Pattern) -> bool {
+        let free = (0xE000..=0x10FFFF).filter_map(char::from_u32).find(|c| {
+            !wider.0.iter().flatten().any(|part| match part {
+                PatternPart::Literal(literal) => literal.contains(*c),
+                PatternPart::Wildcard => false,
+            })
+        });
+        // Literals that use every character above U+E000 leave no witness: no inheritance.
+        let Some(free) = free else {
+            return false;
+        };
+        self.0.iter().all(|alternative| {
+            let witness: String = alternative
+                .iter()
+                .map(|part| match part {
+                    PatternPart::Literal(literal) => literal.clone(),
+                    PatternPart::Wildcard => free.to_string(),
+                })
+                .collect();
+            wider.matches(&witness)
+        })
+    }
 }
 
 /// A pattern with one alternative serializes as that alternative's parts: alternation adds
@@ -117,6 +144,19 @@ impl ToolMatcher {
                         .filter(|(_, pattern)| pattern.scans())
                         .all(clause_matches)
             }
+        }
+    }
+
+    /// Whether `wider` matches every call this matcher matches. A clause of `wider` holds for
+    /// such a call only where this matcher reads the same argument with a pattern `wider`'s
+    /// pattern contains: a call this matcher selects may omit any other argument.
+    fn within(&self, wider: &ToolMatcher) -> bool {
+        match (self, wider) {
+            (_, ToolMatcher::Bare) => true,
+            (ToolMatcher::Bare, ToolMatcher::Arguments(_)) => false,
+            (ToolMatcher::Arguments(ArgumentPatterns(narrow)), ToolMatcher::Arguments(ArgumentPatterns(wide))) => wide
+                .iter()
+                .all(|(argument, pattern)| narrow.get(argument).is_some_and(|narrow| narrow.within(pattern))),
         }
     }
 
@@ -349,6 +389,37 @@ fn spell_pattern(Pattern(alternatives): &Pattern) -> String {
             .collect()
     };
     alternatives.iter().map(spell).collect::<Vec<_>>().join("|")
+}
+
+/// For each authored declaration name, in order, the later names that select every call it
+/// selects: the same tool, or a server-independent `mcp/*/<tool>` name covering it, with a
+/// selector that matches every call its selector matches. A policy rule takes each contract
+/// field it does not write from the first of these that writes it. The wildcard `"*"` covers
+/// and is covered by none.
+pub fn wider_declarations(authored: &[ToolName]) -> Result<Vec<Vec<usize>>, LoadError> {
+    let parsed = authored
+        .iter()
+        .map(|name| parse_tool_selector(name.as_str()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(parsed
+        .iter()
+        .enumerate()
+        .map(|(own, (contract, matcher))| {
+            let ContractName::Named(tool) = contract else {
+                return Vec::new();
+            };
+            parsed
+                .iter()
+                .enumerate()
+                .skip(own + 1)
+                .filter(|(_, (wider, wider_matcher))| match wider {
+                    ContractName::Named(wider) => wider.matches_name(tool) && matcher.within(wider_matcher),
+                    ContractName::Wildcard => false,
+                })
+                .map(|(index, _)| index)
+                .collect()
+        })
+        .collect())
 }
 
 /// The arguments of an authored declaration name whose pattern puts `*` inside a URL host. A
@@ -3227,6 +3298,93 @@ mod tests {
         assert_eq!(parsed("t(a:x|y|x)").unwrap(), parsed("t(a:x|y)").unwrap());
         assert_eq!(parsed("t(a:x|x)").unwrap(), parsed("t(a:x)").unwrap());
         assert_ne!(parsed("t(a:x|y)").unwrap(), parsed("t(a:x)").unwrap());
+    }
+
+    /// `within` decides containment from one witness value per alternative. Enumeration
+    /// decides it the slow way: every pattern of up to three symbols over `a`, `b` and `*`,
+    /// and two-alternative patterns of up to two symbols each, against every value of up to
+    /// five characters over `a`, `b` and `c`. No pattern writes `c`, which stands for every
+    /// character a pattern does not name: `*a` is not within `a*|b*`, because of `ca`.
+    #[test]
+    fn a_pattern_is_within_another_exactly_when_it_matches_no_value_the_other_refuses() {
+        let mut spellings = vec![String::new()];
+        for _ in 0..3 {
+            let longer: Vec<String> = spellings
+                .iter()
+                .flat_map(|s| ["a", "b", "*"].map(|c| format!("{s}{c}")))
+                .collect();
+            spellings.extend(longer);
+        }
+        spellings.sort();
+        spellings.dedup();
+        let short: Vec<&String> = spellings.iter().filter(|s| s.len() <= 2).collect();
+        let mut patterns = spellings.clone();
+        for (index, one) in short.iter().enumerate() {
+            patterns.extend(short[index + 1..].iter().map(|other| format!("{one}|{other}")));
+        }
+        let pattern = |spelled: &str| match parse_tool_selector(&format!("t(x:{spelled})")) {
+            Ok((_, ToolMatcher::Arguments(ArgumentPatterns(clauses)))) => clauses["x"].clone(),
+            other => panic!("t(x:{spelled}) parses to {other:?}"),
+        };
+        let mut values = vec![String::new()];
+        for length in 1..=5 {
+            let longer: Vec<String> = values
+                .iter()
+                .filter(|v| v.len() == length - 1)
+                .flat_map(|v| ["a", "b", "c"].map(|c| format!("{v}{c}")))
+                .collect();
+            values.extend(longer);
+        }
+        let compiled: Vec<(&String, Pattern)> = patterns.iter().map(|p| (p, pattern(p))).collect();
+        for (narrow_spelled, narrow) in &compiled {
+            let matched: Vec<&String> = values.iter().filter(|v| narrow.matches(v)).collect();
+            for (wide_spelled, wide) in &compiled {
+                let enumerated = matched.iter().all(|v| wide.matches(v));
+                assert_eq!(
+                    narrow.within(wide),
+                    enumerated,
+                    "{narrow_spelled} within {wide_spelled}"
+                );
+            }
+        }
+    }
+
+    /// A rule's wider declarations are the later ones for the same tool, or a
+    /// server-independent name for it, whose every clause it reads with a contained
+    /// pattern. A clause the narrow rule does not read can fail on its calls, and the
+    /// wildcard takes part in no inheritance.
+    #[test]
+    fn a_wider_declaration_is_a_later_one_that_selects_every_call_a_rule_selects() {
+        let wider = |names: &[&str]| {
+            let names: Vec<ToolName> = names.iter().copied().map(ToolName::new).collect();
+            wider_declarations(&names).expect("every name parses")
+        };
+        assert_eq!(
+            wider(&[
+                "bash(hosts:pypi.org|files.pythonhosted.org)",
+                "bash(hosts:*.org)",
+                "bash(hosts:*)",
+                "bash(hosts:pypi.org,port:443)",
+                "bash",
+                "*",
+            ]),
+            vec![vec![1, 2, 4], vec![2, 4], vec![4], vec![4], vec![], vec![]],
+        );
+        // A later narrower rule, a clause the narrow rule omits, and an earlier wider rule
+        // are none of its wider declarations.
+        assert_eq!(
+            wider(&["bash", "bash(hosts:*)", "bash(hosts:a,port:*)", "bash(hosts:a)"]),
+            vec![vec![], vec![], vec![3], vec![]],
+        );
+        assert_eq!(
+            wider(&[
+                "mcp/github/list(owner:me)",
+                "mcp/*/list",
+                "mcp/github/list",
+                "mcp/gitlab/list"
+            ]),
+            vec![vec![1, 2], vec![], vec![], vec![]],
+        );
     }
 
     /// The conjunction: a selector may name several arguments, and a call is selected only

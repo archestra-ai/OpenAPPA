@@ -38,11 +38,13 @@ token_env = "APPA_PROVIDER_HUGGINGFACE_TOKEN"
 
 [[policy.tool]]
 name = "mcp/huggingface/hub_repo_details"
+delta = {}
 annotator = "huggingface.repo-visibility"
 tags = ["huggingface"]
 
 [[policy.tool]]
 name = "mcp/huggingface/hf_fs"
+delta = {}
 annotator = "huggingface.repo-visibility"
 tags = ["huggingface"]
 
@@ -50,8 +52,10 @@ tags = ["huggingface"]
 
 [[policy.tool]]
 name = "mcp/huggingface/hf_fs_write"
+requires = {}
 annotator = "huggingface.repo-readers"
 
 [[policy.tool]]
 name = "mcp/huggingface/create_repo"
+requires = {}
 annotator = "huggingface.repo-readers"

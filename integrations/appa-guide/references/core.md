@@ -11,7 +11,12 @@ reference maps each operation to the host's own tools.
   root rule unless the operator explicitly approves changing or removing
   it.
 - A battery supplies maintained defaults. Never edit a battery. Override
-  a tool contract with a root rule. Override an Annotator by copying its
+  a tool contract with a root rule. A rule replaces only the fields it
+  writes: it takes each of `annotator`, `recorder`, `delta`, `forwards`,
+  `requires` and `effects` it omits from a later rule that matches every
+  call it matches, a battery's included. Write `annotator = ""`,
+  `recorder = ""`, `delta = {}`, `forwards = {}`, `requires = {}` or
+  `effects = []` to clear one. Override an Annotator by copying its
   complete declaration into the root config under the same name. Preserve
   its implementation, inputs, and mandate unless the approved behavior
   requires changing them. Do not remove overlapping root rules; they
