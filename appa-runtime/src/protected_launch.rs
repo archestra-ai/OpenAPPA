@@ -180,18 +180,21 @@ fn bun_options(preload: &Path) -> OsString {
     options
 }
 
-/// Whether the deployment's policy binds the `file-tracker` recorder. A config that does not
-/// read binds nothing: the runtime loads the same file and refuses what it cannot read.
+/// Whether the deployment includes the `file-tracker` battery, whose rules route the shell
+/// and file tools through the file-tracker. A config that does not read includes nothing:
+/// the runtime loads the same file and refuses what it cannot read.
 fn bound(config: &Path) -> bool {
     fs::read_to_string(config)
         .ok()
         .and_then(|text| text.parse::<toml::Table>().ok())
         .is_some_and(|table| {
             table
-                .get("externals")
-                .and_then(|externals| externals.get("recorders"))
-                .and_then(|recorders| recorders.get("file-tracker"))
-                .is_some()
+                .get("include")
+                .and_then(toml::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(toml::Value::as_str)
+                .any(|entry| crate::batteries::name_from_include(Path::new(entry)).as_deref() == Some("file-tracker"))
         })
 }
 
@@ -590,14 +593,23 @@ impl Drop for Signals {
 mod tests {
     use super::*;
 
-    /// The shipped Claude Code policy launches Claude Code without its unmediated tools and
-    /// with SafeBash; a policy that binds no file-tracker launches it unchanged.
+    /// A deployment that includes the file-tracker battery launches Claude Code without its
+    /// unmediated tools and with SafeBash; one that leaves the battery out launches it
+    /// unchanged, even while its root still binds the file-tracker.
     #[test]
-    fn only_a_policy_binding_the_file_tracker_disables_the_unmediated_tools() {
+    fn only_a_deployment_including_the_file_tracker_disables_the_unmediated_tools() {
         let plugin = Path::new(env!("CARGO_MANIFEST_DIR")).join("../marketplace/plugins/claude-code");
-        assert!(bound(&plugin.join("default.appa.toml")));
-        let untracked = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(untracked.path(), "[policy]\nversion = 2\n").unwrap();
+        let shipped = std::fs::read_to_string(plugin.join("default.appa.toml")).unwrap();
+        let config = |include: &str| {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(file.path(), format!("include = [{include}]\n{shipped}")).unwrap();
+            file
+        };
+        let tracked = config(
+            r#""batteries/file-tracker/appa.toml", "batteries/coding/appa.toml", "batteries/claude-code/appa.toml""#,
+        );
+        assert!(bound(tracked.path()));
+        let untracked = config(r#""batteries/coding/appa.toml", "batteries/claude-code/appa.toml""#);
         assert!(!bound(untracked.path()));
 
         let settings = Path::new("hooks.json");

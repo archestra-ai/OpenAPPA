@@ -1,0 +1,16 @@
+schema = 1
+name = "file-tracker"
+description = "File-tracker rules for a coding agent's shell and file tools: a label on every file a read or write touches, kept across sessions, shell commands confined to the files and hosts they declare, and the tools that work out of the file-tracker's sight refused."
+
+[battery]
+policy = "appa.toml"
+hosts = ["claude-code"]
+namespaces = ["file-tracker"]
+helpers = []
+benefit = "Keeps a label on every file the agent reads or writes, across sessions, and confines shell commands to the files and hosts they declare."
+
+[battery.targets.single-user]
+policy = "appa.toml"
+
+[battery.targets.multi-user]
+policy = "appa.toml"

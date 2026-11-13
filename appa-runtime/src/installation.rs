@@ -1281,7 +1281,7 @@ mod tests {
             BTreeMap::from([
                 (
                     "claude-code".to_owned(),
-                    vec!["coding".to_owned(), "claude-code".to_owned()]
+                    vec!["file-tracker".to_owned(), "coding".to_owned(), "claude-code".to_owned()]
                 ),
                 ("kagent".to_owned(), vec![]),
                 ("opencode".to_owned(), vec!["opencode".to_owned()]),

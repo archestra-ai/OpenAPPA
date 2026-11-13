@@ -29,12 +29,14 @@ fn default_config_path() -> PathBuf {
 /// its batteries included. It is what the fixture's config holds.
 pub fn shipped_default_config() -> String {
     let default = fs::read_to_string(default_config_path()).expect("the shipped default is readable");
-    format!("include = [\"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{default}")
+    format!(
+        "include = [\"batteries/file-tracker/appa.toml\", \"batteries/coding/appa.toml\", \"batteries/claude-code/appa.toml\"]\n{default}"
+    )
 }
 
 /// Write the shipped default config into `directory` beside the batteries it includes.
 pub fn write_shipped_default_config(directory: &Path) -> PathBuf {
-    for battery in ["coding", "claude-code"] {
+    for battery in ["file-tracker", "coding", "claude-code"] {
         let into = directory.join("batteries").join(battery);
         fs::create_dir_all(&into).expect("the battery directory is created");
         fs::copy(

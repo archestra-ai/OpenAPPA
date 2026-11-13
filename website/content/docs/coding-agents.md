@@ -49,7 +49,7 @@ During execution, OpenAPPA monitors child tool calls under standard policy. Once
 
 ## Shell and native file tools
 
-Every Claude Code install includes the [Claude Code tools battery](/battery-claude-code). It routes `Read`, `Write`, and `Edit` through the [file-tracker](#files-that-keep-their-labels), confines every shell command to the files and hosts it declares ([SafeBash](#safebash)), and blocks `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`.
+Every Claude Code install includes the `file-tracker` battery, which the [Claude Code tools battery](/battery-claude-code) maps onto Claude Code's tools. It routes `Read`, `Write`, and `Edit` through the [file-tracker](#files-that-keep-their-labels), confines every shell command to the files and hosts it declares ([SafeBash](#safebash)), and blocks `PowerShell`, `Monitor`, `Grep`, and `NotebookEdit`.
 
 The `coding` battery gives the canonical shell and file tools of other harnesses these contracts:
 
@@ -94,7 +94,7 @@ The annotator forwards the combined label of the input files, and the call's res
 
 The label of a copied secret therefore survives across sessions. If the agent reads `.env` and writes its content into `/tmp/notes.txt`, that file now carries `self`. A later shell command that reads `/tmp/notes.txt` narrows its session to `self`, in this session or in any other, so a later public sink such as `WebFetch` is refused.
 
-A call that declares a host sends what the session holds to it. The Claude Code battery therefore requires public data for every networked call, and labels its result `suspicious`, because strangers write what a host returns. The file-tracker still labels the call's files, so a command that reads `.env` and declares a host is refused. A host rule in the root policy is checked first and can give a known host its own contract:
+A call that declares a host sends what the session holds to it. The `file-tracker` battery therefore requires public data for every networked call, and labels its result `suspicious`, because strangers write what a host returns. The file-tracker still labels the call's files, so a command that reads `.env` and declares a host is refused. A host rule in the root policy is checked first and can give a known host its own contract:
 
 ```toml
 [[policy.tool]]
@@ -131,7 +131,7 @@ appa file-tracker reset <path>...      # remove the labels recorded at or under 
 | OpenCode | No file-tracker yet: the battery gives `read`, `write` and `edit` static rules, and a read under `*/private/*` narrows the session to `internal`. | The shell permits only `pwd`. |
 | Amp in an orb | The orb's file system has the trajectory's lifetime, so it counts as part of the trajectory. No file-tracker runs. | A proxy in the orb posts each outbound connection as `host/amp/appa_network`. Sending a file to another thread is an outbound flow that `requires` checks. |
 
-The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the Claude Code battery routes the tools. The SafeBash fallback needs `srt` on `PATH`.
+The `appa` executable serves the file-tracker as `appa file-tracker`. Claude Code's default policy binds it, and the `file-tracker` battery routes the tools through the Claude Code battery's map. `appa battery remove file-tracker` turns file tracking off. The SafeBash fallback needs `srt` on `PATH`.
 
 ### Limits
 

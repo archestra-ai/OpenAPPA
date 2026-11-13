@@ -45,6 +45,13 @@ fn include_list(document: &mut DocumentMut) -> Result<&mut toml_edit::Array, Con
 /// there, under any spelling that names the same battery. A spelling no loader
 /// would resolve is refused here rather than written.
 pub fn add_include(text: &str, include: &str) -> Result<String, ConfigError> {
+    add_include_before(text, include, &[])
+}
+
+/// [`add_include`], placed before the first entry that includes one of the batteries
+/// `followers` names, so its rules compose ahead of theirs; at the end when none is
+/// included. An entry already there stays where it is.
+pub fn add_include_before(text: &str, include: &str, followers: &[&str]) -> Result<String, ConfigError> {
     refuse_include_entry(include)?;
     let mut document = document(text)?;
     let includes = include_list(&mut document)?;
@@ -55,7 +62,16 @@ pub fn add_include(text: &str, include: &str) -> Result<String, ConfigError> {
     if present {
         return Ok(text.to_owned());
     }
-    includes.push(include);
+    let follower = includes.iter().position(|entry| {
+        entry
+            .as_str()
+            .and_then(|entry| crate::batteries::name_from_include(Path::new(entry)))
+            .is_some_and(|name| followers.contains(&name.as_str()))
+    });
+    match follower {
+        Some(index) => includes.insert(index, include),
+        None => includes.push(include),
+    }
     Ok(document.to_string())
 }
 
@@ -299,6 +315,30 @@ mod tests {
         let spelled = "include = ['./batteries/github/appa.toml']\n";
         assert_eq!(add_include(spelled, include).unwrap(), spelled);
         assert_eq!(remove_include(&added, include).unwrap(), AUTHORED);
+    }
+
+    /// A battery whose rules must precede others' goes before the first of them, and an
+    /// entry already present keeps its place.
+    #[test]
+    fn an_include_goes_before_the_batteries_that_follow_it() {
+        let ordered = |text: &str| -> Vec<String> {
+            let document: toml::Table = text.parse().unwrap();
+            document["include"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| crate::batteries::name_from_include(Path::new(entry.as_str().unwrap())).unwrap())
+                .collect()
+        };
+        let text = "include = ['batteries/github/appa.toml', 'batteries/coding/appa.toml', 'batteries/claude-code/appa.toml']\n";
+        let added = add_include_before(text, "batteries/file-tracker/appa.toml", &["coding", "claude-code"]).unwrap();
+        assert_eq!(ordered(&added), ["github", "file-tracker", "coding", "claude-code"]);
+        assert_eq!(
+            add_include_before(&added, "batteries/file-tracker/appa.toml", &["github"]).unwrap(),
+            added
+        );
+        let appended = add_include_before(text, "batteries/slack/appa.toml", &["notion"]).unwrap();
+        assert_eq!(ordered(&appended), ["github", "coding", "claude-code", "slack"]);
     }
 
     /// A spelling no loader resolves is refused before it reaches the document, with
