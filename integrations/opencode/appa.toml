@@ -7,6 +7,12 @@ version = 2
 name = "host/opencode/appa_subagent"
 
 [[policy.tool]]
+name = "host/opencode/appa_collect"
+
+[[policy.tool]]
+name = "host/opencode/appa_cancel"
+
+[[policy.tool]]
 name = "host/opencode/read(path:*/private/*)"
 delta = { audience = ["internal"] }
 
