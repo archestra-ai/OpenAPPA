@@ -121,7 +121,9 @@ appa file-tracker reset <path>...      # remove the labels recorded at or under 
 
 `reset` removes recorded labels only. A path rule still labels each file it matches, so `.env` keeps `self`. A label recorded on a directory above the path still covers it; `reset` names that directory. A session already running keeps its own label, and the files it writes next are labeled again.
 
-`clappa` says before a session starts when files under the working directory carry recorded labels. An agent cannot reset a label itself: the label store is outside every command's declared outputs, so the sandbox keeps it read-only. A call that declares the store as an output asks the person running the session first.
+A recorded label stays after its file is deleted. When the label restricts the audience or lowers trust, a shell command that names the file in `output_files` cannot create it again: the sandbox hides the path, so the write fails. The command's result names the file and the `reset` command that frees it, and `labels` marks the file `(deleted)`.
+
+`clappa` says before a session starts when files under the working directory carry recorded labels, and which of those files no longer exist. An agent cannot reset a label itself: the label store is outside every command's declared outputs, so the sandbox keeps it read-only. A call that declares the store as an output asks the person running the session first.
 
 ### Per harness
 

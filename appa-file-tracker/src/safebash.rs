@@ -71,7 +71,7 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
     for dir in [&runtime, &temporary] {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     }
-    let mut settings = settings(config, &named, Concealing::Restricted)?;
+    let (mut settings, hidden_outputs) = settings(config, &named, Concealing::Restricted)?;
     push(&mut settings["filesystem"]["allowRead"], &runtime);
     push(&mut settings["filesystem"]["allowWrite"], &temporary);
     let file = Removed(tempfile_in_temp(&settings)?);
@@ -103,11 +103,19 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
     }
     let finished = supervise(sandbox, config.sandbox.timeout_secs)?;
     let failed = !finished.status.is_some_and(|status| status.success());
-    let removed = unwritten(&placeholders, failed);
-    let note = match removed.is_empty() || !failed {
+    // A hidden output's placeholder is removed like any other, but its note says why the
+    // command could not write it instead.
+    let removed: Vec<PathBuf> = unwritten(&placeholders, failed)
+        .into_iter()
+        .filter(|path| !hidden_outputs.iter().any(|(hidden, _)| hidden == path))
+        .collect();
+    let mut note = match removed.is_empty() || !failed {
         true => String::new(),
         false => format!("\n{}", unwritten_note(&removed)),
     };
+    for (_, hidden) in &hidden_outputs {
+        note.push_str(&format!("\n{hidden}"));
+    }
     Ok(finished.report(config.sandbox.timeout_secs, &note))
 }
 
@@ -118,6 +126,24 @@ fn unwritten_note(removed: &[PathBuf]) -> String {
     format!(
         "[appa] {} did not exist, so the command found an empty file in its place; it is removed again. A tool that refuses an empty file, such as uv with uv.lock, needs the file's directory declared with a trailing / in output_files instead.",
         names.join(", ")
+    )
+}
+
+/// What the model reads when a call names as an output a file that does not exist but carries
+/// a label an earlier session recorded: the sandbox hides it, which leaves it unwritable, and
+/// only the person can remove the label.
+fn hidden_output_note(path: &Path, label: &crate::label::Label) -> String {
+    let shown = path.display().to_string();
+    let plain = shown
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+@:,%".contains(c));
+    let argument = match plain {
+        true => shown.clone(),
+        false => quoted(path),
+    };
+    format!(
+        "[appa] {shown} does not exist, but an earlier session recorded the label \"{}\" on it, so the sandbox hides it and this command cannot create it. Only the person can remove that label: ask them to run `appa file-tracker reset {argument}` in their own terminal, then run this call again.",
+        crate::reset::describe(label)
     )
 }
 
@@ -180,7 +206,8 @@ impl Drop for Removed {
 /// needs none.
 ///
 /// In `placeholders` are the absent outputs created for the sandbox to open, each with its
-/// modification time; the preload removes each the command did not write.
+/// modification time; the preload removes each the command did not write. In `hiddenOutputs`
+/// are the file outputs a recorded label hides, each with the note the model reads about it.
 pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let role = ToolRole {
         name: "Bash".to_string(),
@@ -199,9 +226,13 @@ pub fn sandbox(config: &Config, arguments: &Value) -> Result<Value, String> {
     let placeholders = prepare(&named)?;
     let temporary = unique("appa-bash");
     std::fs::create_dir_all(&temporary).map_err(|error| format!("{}: {error}", temporary.display()))?;
-    let mut settings = settings(config, &named, concealing)?;
+    let (mut settings, hidden_outputs) = settings(config, &named, concealing)?;
     push(&mut settings["filesystem"]["allowWrite"], &temporary);
     settings["tmpdir"] = json!(temporary);
+    settings["hiddenOutputs"] = hidden_outputs
+        .iter()
+        .map(|(path, note)| json!({ "path": path, "note": note }))
+        .collect();
     let identity: String = identity()
         .into_iter()
         .map(|(name, value)| {
@@ -587,7 +618,10 @@ fn around(root: &Path, holes: &[PathBuf]) -> Vec<PathBuf> {
 /// to the outputs alone, and within a directory output not to what [`guarded`] keeps. The
 /// proxy admits the declared hosts alone, and a command connects to the sockets it declares
 /// alone.
-fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Value, String> {
+///
+/// Beside the settings come the file outputs a recorded label hides, each with its
+/// [`hidden_output_note`]: the hiding lies over the write, so the command cannot create them.
+fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<(Value, Vec<(PathBuf, String)>), String> {
     let locked = Locked::open(&config.store)?;
     let store = &locked.store;
     let declared = |path: &PathBuf| named.reads.iter().any(|read| covers(read, path));
@@ -640,6 +674,13 @@ fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Va
         .iter()
         .filter(|(path, recorded)| !declared(path) && concealing.hides(&recorded.label, &store.ranks))
         .map(|(path, _)| path.clone())
+        .collect();
+    // A file output is among them only while it does not exist: one that exists is read.
+    let hidden_outputs: Vec<(PathBuf, String)> = named
+        .writes
+        .iter()
+        .filter(|write| !named.directories.contains(write) && unseen.contains(write))
+        .map(|write| (write.clone(), hidden_output_note(write, &store.files[write].label)))
         .collect();
     // A toolchain opens to a call that does not declare it around each such file in it, a
     // mount each, so one that holds more than [`TOOLCHAIN_HOLES`] stays closed, and so does
@@ -706,7 +747,7 @@ fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Va
             false => network["allowAllUnixSockets"] = json!(true),
         }
     }
-    Ok(json!({
+    let settings = json!({
         "filesystem": {
             "denyRead": hidden,
             "allowRead": readable,
@@ -714,7 +755,8 @@ fn settings(config: &Config, named: &Named, concealing: Concealing) -> Result<Va
             "denyWrite": unwritable,
         },
         "network": network,
-    }))
+    });
+    Ok((settings, hidden_outputs))
 }
 
 fn tempfile_in_temp(settings: &Value) -> Result<PathBuf, String> {
@@ -806,6 +848,59 @@ pub fn serve(config: &Config) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file output that does not exist but carries a recorded label stays hidden, which
+    /// leaves it unwritable, so the confinement names it with the reset that frees it. One that
+    /// exists is read, so its label counts and it is written as any output is.
+    #[test]
+    fn an_absent_output_with_a_recorded_label_is_named_as_hidden() {
+        use crate::label::{Label, Ranks};
+        use crate::store::Recorded;
+        let dir = unique("appa-ft-hidden-output");
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = std::fs::canonicalize(&dir).unwrap();
+        let config_path = dir.join("file-tracker.toml");
+        std::fs::write(
+            &config_path,
+            format!("store = {:?}\n", dir.join("state/store.json").display().to_string()),
+        )
+        .unwrap();
+        let config = Config::load(Some(&config_path)).unwrap();
+        let (gone, present) = (dir.join("gone.txt"), dir.join("present.txt"));
+        std::fs::write(&present, "kept").unwrap();
+        let mut locked = Locked::open(&config.store).unwrap();
+        locked.store.ranks = Ranks(vec!["suspicious".to_string(), "trusted".to_string()]);
+        for path in [&gone, &present] {
+            let label = Label {
+                trust: Some("suspicious".to_string()),
+                audience: vec![],
+            };
+            let version = crate::store::version(path);
+            locked.store.files.insert(path.clone(), Recorded { label, version });
+        }
+        locked.save().unwrap();
+
+        let call = json!({ "input_files": [], "output_files": [gone, present], "network_hosts": [] });
+        let settings = sandbox(&config, &call).unwrap();
+        let _ = std::fs::remove_dir_all(settings["tmpdir"].as_str().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let hidden = settings["hiddenOutputs"].as_array().unwrap();
+        assert_eq!(hidden.len(), 1, "{settings}");
+        assert_eq!(hidden[0]["path"], json!(gone));
+        let note = hidden[0]["note"].as_str().unwrap();
+        assert!(note.contains("\"trust suspicious\""), "{note}");
+        assert!(
+            note.contains(&format!("appa file-tracker reset {}", gone.display())),
+            "{note}"
+        );
+        assert!(
+            settings["filesystem"]["denyRead"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(gone))
+        );
+    }
 
     #[test]
     fn every_top_level_entry_but_the_system_is_hidden() {
