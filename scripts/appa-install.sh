@@ -230,7 +230,10 @@ case :${PATH:-}: in
     # needed. fish keeps its own path command. A shell this does not know gets
     # the bare line to place itself, which is all that can honestly be said.
     add_to_path=
-    case ${SHELL##*/} in
+    # A container build or a cron job runs with no SHELL, which is a shell
+    # this does not know.
+    login_shell=${SHELL:-}
+    case ${login_shell##*/} in
       fish)
         add_to_path="fish_add_path $install_dir"
         ;;

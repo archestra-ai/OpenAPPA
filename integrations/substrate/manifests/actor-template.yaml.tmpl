@@ -1,0 +1,48 @@
+# ActorTemplate (protojson-shaped ateapi.ActorTemplate) for a stock Claude
+# Code actor. Applied with `kubectl ate create actor-template -f -` after
+# substituting ${ACTOR_IMAGE}.
+#
+# Both credentials are placeholders. The actor's EgressPolicy replaces each
+# Authorization header outside the sandbox, so neither token is in the
+# actor's environment, its filesystem, or its snapshots.
+metadata:
+  atespace: appa-substrate-demo
+  name: agent
+workerSelector:
+  matchLabels:
+    workload: appa-substrate-agent
+containers:
+- name: agent
+  image: ${ACTOR_IMAGE}
+  env:
+  - { name: ACTOR_NAME, value: agent }
+  - { name: ACTOR_ATESPACE, value: appa-substrate-demo }
+  - { name: GITHUB_TOKEN, value: injected-by-substrate-egress }
+  - { name: CLAUDE_CODE_OAUTH_TOKEN, value: injected-by-substrate-egress }
+  - { name: AGENT_EGRESS_HOSTS, value: "api.anthropic.com,api.githubcopilot.com" }
+  # The egress gateway terminates TLS for the hosts it injects into, so
+  # clients must trust the gateway's CA as well as the public roots.
+  - { name: NODE_EXTRA_CA_CERTS, value: /run/ate/egress-trust-bundle/trust-bundle.pem }
+  - { name: CURL_CA_BUNDLE, value: /run/ate/egress-trust-bundle/trust-bundle.pem }
+  volumeMounts:
+  - name: system-info
+    mountPath: /run/ate
+  wakeupProbe:
+    httpGet:
+      path: /healthz
+      port: 8080
+volumes:
+- name: system-info
+  systemInfo:
+    dataSources:
+    - trustBundle:
+        names:
+        - egress-mitm.ate.dev
+        - system-roots.ate.dev
+        path: egress-trust-bundle/trust-bundle.pem
+resources:
+  limits:
+    cpuMillicores: 1000
+    memoryBytes: 2147483648 # 2Gi
+snapshotConfig:
+  preferredFidelity: SNAPSHOT_FIDELITY_MEMORY

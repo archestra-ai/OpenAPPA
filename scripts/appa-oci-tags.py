@@ -29,6 +29,7 @@ IMAGE_PACKAGES = (
     "appa-kagent-adk-go",
     "appa-demo-tools",
     "appa-demo-mocks",
+    "appa-extproc",
     "golang-adk",
 )
 

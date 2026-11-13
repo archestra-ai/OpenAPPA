@@ -19,6 +19,7 @@
         "golang-adk",
         "appa-demo-tools",
         "appa-demo-mocks",
+        "appa-extproc",
         "charts/appa-runtime",
         "charts/appa-kagent-demo"
       ]
