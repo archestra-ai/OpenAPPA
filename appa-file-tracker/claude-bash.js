@@ -222,6 +222,7 @@ const HINTS = [
  * empty on purpose stays.
  */
 function unwritten(confined, failed) {
+  const hidden = new Set((confined.hiddenOutputs ?? []).map(({ path: output }) => output));
   const removed = (confined.placeholders ?? []).filter(({ path: placeholder, modified }) => {
     try {
       const stat = fs.lstatSync(placeholder, { bigint: true });
@@ -232,8 +233,19 @@ function unwritten(confined, failed) {
       return false;
     }
   });
-  if (!failed || removed.length === 0) return "";
-  return `[appa] ${removed.map(({ path: placeholder }) => placeholder).join(", ")} did not exist, so the command found an empty file in its place; it is removed again. A tool that refuses an empty file, such as uv with uv.lock, needs the file's directory declared with a trailing / in output_files instead.`;
+  // A hidden output's placeholder is removed too; its own note says why it stayed unwritten.
+  const shown = removed.filter(({ path: placeholder }) => !hidden.has(placeholder));
+  if (!failed || shown.length === 0) return "";
+  return `[appa] ${shown.map(({ path: placeholder }) => placeholder).join(", ")} did not exist, so the command found an empty file in its place; it is removed again. A tool that refuses an empty file, such as uv with uv.lock, needs the file's directory declared with a trailing / in output_files instead.`;
+}
+
+/**
+ * What the model reads about each file output the call's confinement hides: it does not exist
+ * but carries a label an earlier session recorded, so the command cannot create it, whatever
+ * its exit code says.
+ */
+function hiddenOutputs(confined) {
+  return (confined.hiddenOutputs ?? []).map(({ note }) => note).join("\n");
 }
 
 /** `shown` with the hints that `input` and everything it printed, `printed`, call for. */
@@ -324,7 +336,8 @@ bash.call = async function (input, context, ...rest) {
     backgrounded = result?.data?.backgroundTaskId !== undefined;
     if (!backgrounded) unwritten(confined, false);
     if (!backgrounded && typeof result?.data?.stdout === "string") {
-      result.data.stdout = hinted(input, result.data.stdout, `${result.data.stdout}\n${result.data.stderr ?? ""}`);
+      const shown = hinted(input, result.data.stdout, `${result.data.stdout}\n${result.data.stderr ?? ""}`);
+      result.data.stdout = [shown, hiddenOutputs(confined)].filter(Boolean).join("\n");
     }
     return result;
   } catch (error) {
@@ -332,7 +345,7 @@ bash.call = async function (input, context, ...rest) {
     const note = unwritten(confined, true);
     return {
       data: {
-        stdout: [hinted(input, [error.stderr, `Exit code ${error.code}`].filter(Boolean).join("\n"), String(error.stderr ?? "")), note]
+        stdout: [hinted(input, [error.stderr, `Exit code ${error.code}`].filter(Boolean).join("\n"), String(error.stderr ?? "")), note, hiddenOutputs(confined)]
           .filter(Boolean)
           .join("\n"),
         stderr: "",

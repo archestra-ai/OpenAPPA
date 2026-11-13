@@ -53,6 +53,14 @@ opt-level = 3
 [profile.release.package.sha2]
 opt-level = 3
 
+# The integration tests install, copy and digest the `appa` they built, many times
+# per run. Full debug info makes that binary over 500 MB; line tables keep
+# backtraces' file:line at a fraction of the size, compile and link time. The test
+# profile inherits this, and `cargo build` and `cargo test` share their compiled
+# dependencies only while the two profiles agree. A debugger loses local variables.
+[profile.dev]
+debug = "line-tables-only"
+
 # A served runtime digests its own executable before it binds, and a debug build is
 # well over a hundred megabytes: through an unoptimized sha2 that is tens of seconds
 # of startup, past the served tests' health deadline. Optimizing the one crate keeps
@@ -74,12 +82,6 @@ opt-level = 3
 
 [profile.dev.package.flate2]
 opt-level = 3
-
-# The integration tests install, copy and digest the `appa` they built, many times
-# per run. Full debug info makes that binary over 500 MB; line tables keep
-# backtraces' file:line at a fraction of the size, compile and link time.
-[profile.test]
-debug = "line-tables-only"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
