@@ -9,7 +9,7 @@
 //!
 //! The wire is `{"version": 1, "kind", "name", "declaration", "artifact"}` for every
 //! kind. HTTP and command implementations answer `{"version": 1, "answer": <object>}`;
-//! modules and the model builtins produce the `<object>` alone. Every answer object is
+//! modules and the models produce the `<object>` alone. Every answer object is
 //! read strictly: an unknown key, a missing key, or a wrong type is no answer.
 
 use std::collections::BTreeMap;
@@ -840,7 +840,7 @@ impl LookupAnswer {
 
 /// One consult rendered for a model: the declaration in the system prompt after a fixed
 /// per-kind preamble, the artifact as the input, and the output schema derived from the
-/// declaration's vocabulary. Both model builtins are built from this one rendering, so a
+/// declaration's vocabulary. Both models are built from this one rendering, so a
 /// component switched between them sees the same question.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelPrompt {

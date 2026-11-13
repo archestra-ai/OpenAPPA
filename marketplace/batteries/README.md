@@ -40,8 +40,8 @@ once the model removes what outside readers may not see. `coding` and
 `monday` add `<battery>.strip-secrets`, which returns a credential read at
 `internal` instead of `self`. The model for a battery sanitizer is configured
 in the deployment, not in the battery: the root binds the ones it runs under
-`[externals.sanitizers]`, for example to `builtin = "llm"` or, where the
-`claude` CLI is installed, to `builtin = "claude-code"`. A battery sanitizer
+`[externals.sanitizers]`, for example to `uses = "llm"` or, where the
+`claude` CLI is installed, to `uses = "claude-code"`. A battery sanitizer
 the root does not bind is left out, and the battery's `[policy.deployment] confined_results` entries that
 only it covers are dropped with it, so the battery decides as it would
 without sanitizers. The Claude Code plugin's default config binds every

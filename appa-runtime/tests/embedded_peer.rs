@@ -694,7 +694,7 @@ timeout_ms = 2000
 max_body_bytes = 65536
 
 [externals.sanitizers.scrub]
-builtin = "redact-email"
+uses = "redact-email"
 "#;
 
 /// A runtime under an unscoped `scrub` output sanitizer, which also serves as a child-return

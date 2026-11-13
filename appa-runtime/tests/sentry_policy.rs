@@ -69,10 +69,10 @@ async fn public_redaction_is_offered_only_on_issue_and_event_reads() {
         &dir,
         r#"
 [externals.sanitizers."sentry.strip-instructions"]
-builtin = "claude-code"
+uses = "claude-code"
 
 [externals.sanitizers."sentry.redact-for-public"]
-builtin = "claude-code"
+uses = "claude-code"
 "#,
     )
     .await;

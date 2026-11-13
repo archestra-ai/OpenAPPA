@@ -21,8 +21,8 @@ one at the repository root:
 - this crate (package and binary `appa`) —
   the native lifecycle/description CLI and everything else: the runtime API and internal `Session` event model,
   the `hooks` dispatcher, the HTTP server, the MCP endpoint, the
-  externals, the builtin modules (`builtins.rs` — stock implementations
-  plus the `--modules-dir` loader over the `appa-builtin` ABI crate at
+  externals, what `uses` selects (`uses.rs` — stock implementations
+  plus the `--modules-dir` loader over the `appa-module` ABI crate at
   the repo root), and the engine boundary (`src/engine.rs`, which
   translates and presents every engine decision; `api/mod.rs` and
   `api/session/` also name `appa-engine`), and `appa replay`

@@ -118,7 +118,7 @@ pub enum RemedyStep {
 /// - `Withhold` also covers failure output ([`crate::admit::ResultAdmission::FailureNoValue`]),
 ///   needs no consult, and cannot fail.
 ///
-/// A reserved builtin sanitizer, as `attest-schema` is, would need the same engine special
+/// A reserved sanitizer, as `attest-schema` is, would need the same engine special
 /// cases under a sanitizer name. The cost of the engine remedy is that policies do not opt in:
 /// every confined tool that declares effects gains a settlement, which the registry's planner
 /// bound counts.
@@ -1477,7 +1477,7 @@ fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn
     }
 }
 
-/// Does `label` cover the trust rank the reserved `attest-schema` builtin, registered with
+/// Does `label` cover the trust rank the reserved `attest-schema` sanitizer, registered with
 /// `transition`, raises a return to? Its precondition is a fork-time fact: the parent's label at
 /// the fork covers this rank, because the answer cannot come back cleaner than the context that
 /// asked. Load validation refuses an audience mandate on the reserved name, so an audience

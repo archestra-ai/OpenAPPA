@@ -1,6 +1,6 @@
-//! The local process a consult runs: a `command` binding's child and the `claude-code`
-//! builtin's CLI. The child's whole process tree ends with the consult, its input and
-//! answer cross bounded pipes, and the tail of its stderr is kept for the record.
+//! The local process a consult runs: a `command` binding's child and the CLI of the
+//! `claude-code` implementation. The child's whole process tree ends with the consult, its
+//! input and answer cross bounded pipes, and the tail of its stderr is kept for the record.
 
 use std::sync::Arc;
 use std::time::Duration;

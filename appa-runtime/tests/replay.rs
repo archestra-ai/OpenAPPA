@@ -300,7 +300,7 @@ on = ["tool_input"]
 audience = { from = ["hr"], to = ["public"] }
 "#;
 
-const REDACTOR_BINDING: &str = "\n[externals.sanitizers.redactor]\nbuiltin = \"redact-email\"\n";
+const REDACTOR_BINDING: &str = "\n[externals.sanitizers.redactor]\nuses = \"redact-email\"\n";
 
 /// A value that must pass the sanitizer: the block offers it, the stand-in returns the
 /// arguments unchanged, the call runs, and the trajectory stays narrowed.

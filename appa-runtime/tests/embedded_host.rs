@@ -425,7 +425,7 @@ name = "hitl"
 attention = ["signoff"]
 
 [externals.authorities.hitl]
-builtin = "hitl"
+uses = "hitl"
 "#;
     let config = || {
         Config::hosted(SIGNOFF, HostDefaults::new(Duration::from_millis(5000), 65_536), |_| {

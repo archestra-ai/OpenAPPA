@@ -23,7 +23,7 @@ fn unloadable() -> String {
     policy_with("[[policy.tool]]\nname = \"notes\"\nrequires = { nonesuch = { contains = [\"x\"] } }\n")
 }
 
-fn unknown_builtin() -> String {
+fn unknown_uses() -> String {
     policy_with(
         r#"[[policy.tool]]
 name = "notes"
@@ -33,7 +33,7 @@ name = "security"
 permits = { attention = ["security-signoff"] }
 
 [externals.authorities.security]
-builtin = "no-such-module"
+uses = "no-such-module"
 "#,
     )
 }
@@ -189,7 +189,7 @@ async fn a_refused_edit_changes_nothing_and_the_gate_keeps_deciding() {
     let registry: fn(&OpenError) -> bool = |error| matches!(error, OpenError::Modules(_));
     for (case, policy, gate) in [
         ("a file the dialect refuses", unloadable(), dialect),
-        ("a builtin the registry does not hold", unknown_builtin(), registry),
+        ("a uses name the registry does not hold", unknown_uses(), registry),
     ] {
         let refusal = deployment
             .reload(&policy)
@@ -209,25 +209,25 @@ async fn a_refused_edit_changes_nothing_and_the_gate_keeps_deciding() {
     }
 }
 
-/// The `notes` tool beside one annotator that names `builtin` on its declaration,
+/// The `notes` tool beside one annotator that names `uses` on its declaration,
 /// over the given `[externals]` entries.
-fn declaring(builtin: &str, externals: &str) -> String {
+fn declaring(uses: &str, externals: &str) -> String {
     policy_with(&format!(
-        "[[policy.tool]]\nname = \"notes\"\n[[policy.annotator]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\n"
+        "[[policy.tool]]\nname = \"notes\"\n[[policy.annotator]]\nname = \"classify\"\nuses = \"{uses}\"\n"
     )) + externals
 }
 
-/// A declared builtin the deployment cannot serve refuses to open, refuses to reload, and
+/// A declared `uses` the deployment cannot serve refuses to open, refuses to reload, and
 /// a refused reload leaves the running deployment serving.
 #[tokio::test]
-async fn a_declared_builtin_the_deployment_cannot_serve_refuses_open_and_reload() {
+async fn a_declared_uses_the_deployment_cannot_serve_refuses_open_and_reload() {
     let bound: fn(&OpenError) -> bool =
-        |error| matches!(error, OpenError::BoundBuiltin { kind: "annotator", name } if name == "classify");
+        |error| matches!(error, OpenError::BoundUses { kind: "annotator", name } if name == "classify");
     let no_profile: fn(&OpenError) -> bool =
         |error| matches!(error, OpenError::LlmNotConfigured { kind: "annotator", name } if name == "classify");
     let cases = vec![
         (
-            "a builtin annotator that is also bound",
+            "an annotator naming uses that is also bound",
             declaring(
                 "claude-code",
                 "[externals.annotators.classify]\nurl = \"https://classify.internal\"\n",

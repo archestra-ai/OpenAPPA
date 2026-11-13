@@ -27,7 +27,7 @@ View the source of the [file-tracker](https://github.com/archestra-ai/OpenAPPA/t
 
 The default config `appa plugin install claude-code` writes binds the file-tracker to `appa file-tracker`, which the runtime executable serves. It also handles tools that the batteries do not name. The SafeBash fallback needs `srt` on `PATH`.
 
-The model for the `coding` battery's sanitizers is configured in the deployment, not in the battery. The default config binds `coding.strip-instructions` to the Claude Code model (`builtin = "claude-code"` under `[externals.sanitizers]`), because a Claude Code session has the `claude` CLI. A root can bind it to `builtin = "llm"` instead. It also binds `coding.strip-secrets`, which a `coding` rule offers on a shell command that names a credential path. While the `file-tracker` battery is included, no `coding` rule decides a shell call, so it is not offered. APPA does not verify what a sanitizer's model removed: binding a sanitizer registers it as trusted.
+The model for the `coding` battery's sanitizers is configured in the deployment, not in the battery. The default config binds `coding.strip-instructions` to the Claude Code model (`uses = "claude-code"` under `[externals.sanitizers]`), because a Claude Code session has the `claude` CLI. A root can bind it to `uses = "llm"` instead. It also binds `coding.strip-secrets`, which a `coding` rule offers on a shell command that names a credential path. While the `file-tracker` battery is included, no `coding` rule decides a shell call, so it is not offered. APPA does not verify what a sanitizer's model removed: binding a sanitizer registers it as trusted.
 
 ## Files
 

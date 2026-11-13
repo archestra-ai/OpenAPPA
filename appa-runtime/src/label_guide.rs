@@ -3,7 +3,7 @@
 //! call's result contributes (`delta.audience`, `delta.trust`) and what the trajectory must
 //! satisfy before the call runs (`requires.audience`, `requires.trust`). Each question's rule
 //! is written here once, with the [framing](FRAMING) and the [call](Call) every Annotator
-//! reads: the `jev` builtin asks the questions with it and their criteria; a model builtin
+//! reads: the `jev` implementation asks the questions with it and their criteria; a model
 //! reads the same text as its prompt, followed by the shape of its answer.
 //!
 //! The criteria order is part of the prompt: reordering it moves answers. Every criteria

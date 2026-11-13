@@ -644,7 +644,7 @@ mod tests {
         max_body_bytes = 4096
 
         [externals.authorities.treasurer]
-        builtin = "hitl"
+        uses = "hitl"
     "#;
 
     /// A root opened as a fork records its origin on its opening record, the one fact a fork

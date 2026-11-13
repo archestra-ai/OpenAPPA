@@ -416,8 +416,8 @@ effects = ["linear.sensitive"]
 # --- sanitizers ---
 
 # The model for each sanitizer is configured in the deployment, not here: the
-# root binds it under `[externals.sanitizers]`, for example `builtin = "llm"`
-# with an `[externals.llm]` profile, `builtin = "claude-code"` where the
+# root binds it under `[externals.sanitizers]`, for example `uses = "llm"`
+# with an `[externals.llm]` profile, `uses = "claude-code"` where the
 # `claude` CLI is installed, or a URL. A sanitizer nothing binds is left out
 # of the composed policy and never offered, and its results stay unconfined.
 

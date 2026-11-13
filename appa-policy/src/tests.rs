@@ -9,7 +9,7 @@ use appa_engine::profile::{BindingMode, ExecutorClass, neutral_starting_label};
 use appa_engine::registry::{LoadError, MAX_CONTEXT_HINT_CHARS, MAX_HINT_CHARS};
 use appa_engine::value::ToolName;
 
-use crate::{AnnotatorBuiltin, Config, ConfigError};
+use crate::{AnnotatorUses, Config, ConfigError};
 
 /// The sources the shipped batteries declare, as a deployment's bindings would supply them.
 fn declared_sources() -> Vec<SourceRegistration> {
@@ -197,11 +197,11 @@ fn every_inline_implementation_site_is_refused() {
         ),
         (
             "authority",
-            "version = 2\n[[authority]]\nname = \"a\"\nimplementation = { builtin = \"approve\" }\n[authority.permits]\ntrust_below = \"trusted\"\n",
+            "version = 2\n[[authority]]\nname = \"a\"\nimplementation = { uses = \"approve\" }\n[authority.permits]\ntrust_below = \"trusted\"\n",
         ),
         (
             "sanitizer",
-            "version = 2\n[[sanitizer]]\nname = \"s\"\non = [\"tool_output\"]\nimplementation = { builtin = \"hosted\" }\n[sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n",
+            "version = 2\n[[sanitizer]]\nname = \"s\"\non = [\"tool_output\"]\nimplementation = { uses = \"hosted\" }\n[sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n",
         ),
         (
             "annotator",
@@ -232,16 +232,16 @@ fn an_inline_binding_on_the_reserved_attest_schema_is_refused() {
 }
 
 #[test]
-fn a_model_builtin_on_the_reserved_attest_schema_is_refused() {
-    for builtin in ["llm", "claude-code"] {
+fn a_model_on_the_reserved_attest_schema_is_refused() {
+    for uses in ["llm", "claude-code"] {
         let policy = format!(
             "version = 2\n\
-             [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\nbuiltin = \"{builtin}\"\n\
+             [[sanitizer]]\nname = \"attest-schema\"\non = [\"tool_output\"]\nuses = \"{uses}\"\n\
              [sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n"
         );
         assert!(
-            matches!(load(&policy), Err(ConfigError::ReservedSanitizerBuiltin { builtin: found }) if found == builtin),
-            "attest-schema accepted builtin {builtin}"
+            matches!(load(&policy), Err(ConfigError::ReservedSanitizerUses { uses: found }) if found == uses),
+            "attest-schema accepted uses = {uses}"
         );
     }
 }
@@ -378,18 +378,18 @@ fn an_audience_source_selector_must_fit_its_level() {
 }
 
 #[test]
-fn an_annotator_carries_the_stock_builtin_on_its_declaration() {
-    let policy = |builtin: &str| {
+fn an_annotator_names_its_uses_on_its_declaration() {
+    let policy = |uses: &str| {
         format!(
-            "version = 2\n[[annotator]]\nname = \"classify\"\nbuiltin = \"{builtin}\"\n\
+            "version = 2\n[[annotator]]\nname = \"classify\"\nuses = \"{uses}\"\n\
              [[annotator]]\nname = \"bound\"\n"
         )
     };
-    for expected in AnnotatorBuiltin::ALL {
-        let config = load(&policy(expected.wire_name())).expect("the stock builtin loads");
+    for expected in AnnotatorUses::ALL {
+        let config = load(&policy(expected.wire_name())).expect("the declared model loads");
         let annotators: Vec<_> = config
             .annotators()
-            .map(|(name, binding)| (name.as_str(), binding.builtin))
+            .map(|(name, binding)| (name.as_str(), binding.uses))
             .collect();
         assert_eq!(
             annotators,
@@ -400,18 +400,18 @@ fn an_annotator_carries_the_stock_builtin_on_its_declaration() {
 
     assert!(matches!(
         load(&policy("no-such")),
-        Err(ConfigError::UnknownAnnotatorBuiltin { name, builtin }) if name == "classify" && builtin == "no-such"
+        Err(ConfigError::UnknownAnnotatorUses { name, uses }) if name == "classify" && uses == "no-such"
     ));
 }
 
-/// Only a runtime built with the `archestra` feature serves that builtin; any other build
-/// refuses the name as it refuses any builtin it does not know.
+/// Only a runtime built with the `archestra` feature serves that implementation; any other build
+/// refuses the name as it refuses any implementation it does not know.
 #[cfg(not(feature = "archestra"))]
 #[test]
-fn the_archestra_builtin_is_unknown_without_its_feature() {
+fn uses_archestra_is_unknown_without_its_feature() {
     assert!(matches!(
-        load("version = 2\n[[annotator]]\nname = \"classify\"\nbuiltin = \"archestra\"\n"),
-        Err(ConfigError::UnknownAnnotatorBuiltin { name, builtin }) if name == "classify" && builtin == "archestra"
+        load("version = 2\n[[annotator]]\nname = \"classify\"\nuses = \"archestra\"\n"),
+        Err(ConfigError::UnknownAnnotatorUses { name, uses }) if name == "classify" && uses == "archestra"
     ));
 }
 

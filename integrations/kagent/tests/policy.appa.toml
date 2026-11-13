@@ -245,7 +245,7 @@ review_timeout_ms = 120000
 max_body_bytes = 65536
 
 [externals.authorities.oncall]
-builtin = "hitl"
+uses = "hitl"
 
 # The same fixed command transport as the chart policy, pointed at the
 # test process on loopback. HTTP 404 and 504 bodies are written back so

@@ -40,4 +40,4 @@ timeout_ms = 2000
 max_body_bytes = 65536
 
 [externals.sanitizers.mask-secrets]
-builtin = "redact-email"
+uses = "redact-email"

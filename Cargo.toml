@@ -3,7 +3,7 @@ resolver = "3"
 members = [
     "appa-example-agent",
     "appa-agent-python",
-    "appa-builtin",
+    "appa-module",
     "appa-engine",
     "appa-file-tracker",
     "appa-package",
@@ -35,7 +35,7 @@ dead_code = "deny"
 # time and size together at no cost to it. The exception is the two crates pinned
 # below, which are the one stretch of the gating path that spends real CPU.
 # `panic` stays at the default unwind: a module crate built in this workspace
-# needs it to contain a panic at its `extern "C"` boundary (see appa-builtin).
+# needs it to contain a panic at its `extern "C"` boundary (see appa-module).
 [profile.release]
 debug-assertions = false
 opt-level = "s"

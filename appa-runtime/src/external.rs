@@ -3,8 +3,8 @@
 //! One envelope ([`Consult`]) reaches every backend; only the carriage differs. A `url`
 //! binding posts it and reads `{"version": 1, "answer": <object>}` back; a `command`
 //! binding pipes it through stdin and reads the same envelope from stdout; a module
-//! receives it across the ABI and returns the bare answer object; the model builtins
-//! render it as a [`ModelPrompt`] and return the structured output; the `jev` builtin asks
+//! receives it across the ABI and returns the bare answer object; the models
+//! render it as a [`ModelPrompt`] and return the structured output; the `jev` implementation asks
 //! TypeSafe's classifier its own questions about the call; `hitl` shows it to a person. Every failure is [`ConsultOutcome::NoAnswer`] — never a denial.
 
 use std::collections::BTreeMap;
@@ -13,10 +13,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::builtins::{LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use crate::config::{
-    AudienceImplementation, CLAUDE_CODE_BUILTIN, Endpoint, EndpointHost, EndpointToken, Externals, Implementation,
-    LLM_BUILTIN, ResolverCommand, Section, Transport,
+    AudienceImplementation, CLAUDE_CODE_USES, Endpoint, EndpointHost, EndpointToken, Externals, Implementation,
+    LLM_USES, ResolverCommand, Section, Transport,
 };
 use crate::consult::{AudienceSourceArtifact, AuthorityAnswer, Consult, ConsultBody, ConsultKind, ModelPrompt};
 use crate::consult_process::{CommandRun, run_command};
@@ -28,8 +27,9 @@ use crate::model::claude_code::ClaudeCodeBackend;
 use crate::model::jev::{JevBackend, JevClients, JevTiming};
 use crate::model::llm::LlmBackend;
 use crate::transcriber::ConsultBackend;
+use crate::uses::{LoadedModule, MODULE_OUTPUT_CEILING, ModuleRegistry, ModulesError, Stock};
 use appa_engine::label::ReaderId;
-use appa_policy::AnnotatorBuiltin;
+use appa_policy::AnnotatorUses;
 use appa_runtime_api::Ruling;
 
 const HITL: &str = "hitl";
@@ -265,21 +265,21 @@ pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIter
 
 /// What every deployment the runtime builds shares: a reload's old and new snapshots, every
 /// pinned view and every inventory session. The `command` gate bounds the processes the
-/// runtime runs at once, each model builtin's gate bounds its consults across the runtime,
+/// runtime runs at once, each model's gate bounds its consults across the runtime,
 /// and the jev clients keep the connections that answer promptly across a reload.
 #[derive(Clone)]
 pub(crate) struct ConsultGates {
     command: Arc<tokio::sync::Semaphore>,
     recorder: Arc<tokio::sync::Semaphore>,
-    /// Each model builtin's gate with the `max_concurrent` it was sized by. Only the serving
+    /// Each model's gate with the `max_concurrent` it was sized by. Only the serving
     /// deployment sizes them; a consult takes its permits from the gate current when it
     /// starts, so a resize reaches every deployment's later consults.
-    models: Arc<Mutex<[ModelGate; AnnotatorBuiltin::ALL.len()]>>,
+    models: Arc<Mutex<[ModelGate; AnnotatorUses::ALL.len()]>>,
     pub(crate) jev: Arc<JevClients>,
 }
 
 struct ModelGate {
-    builtin: AnnotatorBuiltin,
+    uses: AnnotatorUses,
     size: usize,
     gate: Arc<tokio::sync::Semaphore>,
 }
@@ -290,17 +290,15 @@ impl ConsultGates {
     }
 
     fn of(command: usize) -> ConsultGates {
-        let gate = |builtin| {
-            let size = match builtin {
-                AnnotatorBuiltin::ClaudeCode | AnnotatorBuiltin::Llm => {
-                    crate::config::ModelLimits::MODEL_CALL.max_concurrent
-                }
+        let gate = |uses| {
+            let size = match uses {
+                AnnotatorUses::ClaudeCode | AnnotatorUses::Llm => crate::config::ModelLimits::MODEL_CALL.max_concurrent,
                 #[cfg(feature = "archestra")]
-                AnnotatorBuiltin::Archestra => crate::config::ModelLimits::MODEL_CALL.max_concurrent,
-                AnnotatorBuiltin::Jev => crate::config::DEFAULT_JEV_CONCURRENCY,
+                AnnotatorUses::Archestra => crate::config::ModelLimits::MODEL_CALL.max_concurrent,
+                AnnotatorUses::Jev => crate::config::DEFAULT_JEV_CONCURRENCY,
             };
             ModelGate {
-                builtin,
+                uses,
                 size,
                 gate: Arc::new(tokio::sync::Semaphore::new(size)),
             }
@@ -308,42 +306,42 @@ impl ConsultGates {
         ConsultGates {
             command: Arc::new(tokio::sync::Semaphore::new(command)),
             recorder: Arc::new(tokio::sync::Semaphore::new(COMMAND_RECORDER_PERMITS)),
-            models: Arc::new(Mutex::new(AnnotatorBuiltin::ALL.map(gate))),
+            models: Arc::new(Mutex::new(AnnotatorUses::ALL.map(gate))),
             jev: Arc::default(),
         }
     }
 
-    fn models(&self) -> std::sync::MutexGuard<'_, [ModelGate; AnnotatorBuiltin::ALL.len()]> {
+    fn models(&self) -> std::sync::MutexGuard<'_, [ModelGate; AnnotatorUses::ALL.len()]> {
         self.models
             .lock()
             .expect("the model gates mutex is never poisoned: no panic runs while it is held")
     }
 
-    pub(crate) fn model(&self, builtin: AnnotatorBuiltin) -> Arc<tokio::sync::Semaphore> {
+    pub(crate) fn model(&self, uses: AnnotatorUses) -> Arc<tokio::sync::Semaphore> {
         let models = self.models();
         let model = models
             .iter()
-            .find(|model| model.builtin == builtin)
-            .expect("every builtin has a gate");
+            .find(|model| model.uses == uses)
+            .expect("every model has a gate");
         Arc::clone(&model.gate)
     }
 
     /// Size the model gates by the serving deployment's tables. A table the deployment does
     /// not declare leaves its gate as it is: no backend of that deployment consults it.
     pub(crate) fn size_by(&self, externals: &Externals) {
-        for builtin in AnnotatorBuiltin::ALL {
-            if let Some(limits) = externals.model_limits(builtin) {
-                self.resize(builtin, limits.max_concurrent);
+        for uses in AnnotatorUses::ALL {
+            if let Some(limits) = externals.model_limits(uses) {
+                self.resize(uses, limits.max_concurrent);
             }
         }
     }
 
-    pub(crate) fn resize(&self, builtin: AnnotatorBuiltin, max_concurrent: usize) {
+    pub(crate) fn resize(&self, uses: AnnotatorUses, max_concurrent: usize) {
         let mut models = self.models();
         let model = models
             .iter_mut()
-            .find(|model| model.builtin == builtin)
-            .expect("every builtin has a gate");
+            .find(|model| model.uses == uses)
+            .expect("every model has a gate");
         if model.size != max_concurrent {
             model.size = max_concurrent;
             model.gate = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
@@ -353,23 +351,23 @@ impl ConsultGates {
 
 impl ExternalServices {
     #[cfg(test)]
-    pub(crate) fn model_permits(&self, builtin: AnnotatorBuiltin) -> usize {
-        self.gates.model(builtin).available_permits()
+    pub(crate) fn model_permits(&self, uses: AnnotatorUses) -> usize {
+        self.gates.model(uses).available_permits()
     }
 
-    /// Resolves every configured `builtin` reference against the stock
+    /// Resolves every configured `uses` reference against the stock
     /// implementations and the loaded modules. An unknown reference is
     /// a refusal: a deployment never opens with a dangling
     /// implementation name. The registry is borrowed, not consumed: it
     /// loads once at open and outlives every deployment a configuration
     /// reload installs.
     ///
-    /// `annotator_builtins` names every policy `[[annotator]]` that carries a `builtin` on
+    /// `annotator_uses` names every policy `[[annotator]]` that carries a `uses` on
     /// its declaration; the deployment binds every other Annotator in `config.annotators`.
     pub fn new(
         config: Externals,
         registry: &ModuleRegistry,
-        annotator_builtins: BTreeMap<String, AnnotatorBuiltin>,
+        annotator_uses: BTreeMap<String, AnnotatorUses>,
         gates: ConsultGates,
     ) -> Result<ExternalServices, ModulesError> {
         crate::tls::install_crypto_provider();
@@ -414,22 +412,20 @@ impl ExternalServices {
                 let backend = match implementation {
                     Implementation::Transport(transport) => Backend::from(transport),
                     #[cfg(feature = "archestra")]
-                    Implementation::Builtin(builtin)
-                        if section == Section::Sanitizers && builtin == crate::config::ARCHESTRA_BUILTIN =>
+                    Implementation::Uses(uses)
+                        if section == Section::Sanitizers && uses == crate::config::ARCHESTRA_USES =>
                     {
                         // A host-supplied transport: served only where the host supplies it.
                         archestra
                             .clone()
                             .map(|archestra| Backend::Model(PromptModel::Archestra(archestra)))
-                            .ok_or_else(|| ModulesError::UnknownBuiltin {
+                            .ok_or_else(|| ModulesError::UnknownUses {
                                 section: section.name(),
                                 name: name.clone(),
-                                builtin,
+                                uses,
                             })?
                     }
-                    Implementation::Builtin(builtin) => {
-                        builtin_backend(section, &name, builtin, registry, &claude, llm.as_ref())?
-                    }
+                    Implementation::Uses(uses) => uses_backend(section, &name, uses, registry, &claude, llm.as_ref())?,
                 };
                 resolved.insert(name, backend);
             }
@@ -444,21 +440,21 @@ impl ExternalServices {
         backends.insert(ConsultKind::Context, bound(config.context));
         let recorders = config.recorders;
         let mut annotators = bound(config.annotators);
-        for (name, builtin) in annotator_builtins {
-            let backend = match builtin {
-                AnnotatorBuiltin::ClaudeCode => Some(Backend::Model(PromptModel::ClaudeCode(claude.clone()))),
-                AnnotatorBuiltin::Llm => llm.clone().map(|llm| Backend::Model(PromptModel::Llm(llm))),
-                AnnotatorBuiltin::Jev => jev.clone().map(Backend::Jev),
+        for (name, uses) in annotator_uses {
+            let backend = match uses {
+                AnnotatorUses::ClaudeCode => Some(Backend::Model(PromptModel::ClaudeCode(claude.clone()))),
+                AnnotatorUses::Llm => llm.clone().map(|llm| Backend::Model(PromptModel::Llm(llm))),
+                AnnotatorUses::Jev => jev.clone().map(Backend::Jev),
                 // A host-supplied transport, never a binding's: only a declaration names it.
                 #[cfg(feature = "archestra")]
-                AnnotatorBuiltin::Archestra => archestra
+                AnnotatorUses::Archestra => archestra
                     .clone()
                     .map(|archestra| Backend::Model(PromptModel::Archestra(archestra))),
             }
-            .ok_or_else(|| ModulesError::UnknownBuiltin {
+            .ok_or_else(|| ModulesError::UnknownUses {
                 section: Section::Annotators.name(),
                 name: name.clone(),
-                builtin: builtin.wire_name().to_string(),
+                uses: uses.wire_name().to_string(),
             })?;
             annotators.insert(name, backend);
         }
@@ -497,7 +493,7 @@ impl ExternalServices {
             .collect()
     }
 
-    /// Whether this authority is the `hitl` builtin — the one consult a harness with
+    /// Whether this authority is the `hitl` implementation — the one consult a harness with
     /// its own review channel answers itself.
     pub(crate) fn is_hitl(&self, authority: &str) -> bool {
         matches!(
@@ -508,7 +504,7 @@ impl ExternalServices {
         )
     }
 
-    /// Whether this authority is the stock `approve` builtin — the one whose rulings the
+    /// Whether this authority is the `approve` implementation — the one whose rulings the
     /// runtime obtains at the block, without the agent executing the plan.
     pub(crate) fn is_stock_approve(&self, authority: &str) -> bool {
         matches!(
@@ -519,7 +515,7 @@ impl ExternalServices {
         )
     }
 
-    /// Whether any authority is the stock `approve` builtin.
+    /// Whether any authority is the `approve` implementation.
     pub(crate) fn has_stock_approve(&self) -> bool {
         self.backends.get(&ConsultKind::Authority).is_some_and(|table| {
             table
@@ -746,7 +742,7 @@ impl ExternalServices {
             let status =
                 unsafe { (module.answer)(input.as_ptr(), input.len(), output.as_mut_ptr(), capacity, &mut written) };
             match status {
-                appa_builtin::STATUS_OK => {
+                appa_module::STATUS_OK => {
                     // A dishonest length never becomes a slice.
                     if written > capacity {
                         return Err(NoAnswerReason::Malformed);
@@ -754,8 +750,8 @@ impl ExternalServices {
                     output.truncate(written);
                     Ok(output)
                 }
-                appa_builtin::STATUS_PANICKED => Err(NoAnswerReason::ModulePanicked),
-                appa_builtin::STATUS_OUTPUT_TOO_LARGE => Err(NoAnswerReason::Oversized),
+                appa_module::STATUS_PANICKED => Err(NoAnswerReason::ModulePanicked),
+                appa_module::STATUS_OUTPUT_TOO_LARGE => Err(NoAnswerReason::Oversized),
                 _ => Err(NoAnswerReason::ModuleError),
             }
         })
@@ -896,33 +892,33 @@ pub(crate) async fn read_body(
     }
 }
 
-/// Resolve one authority's or sanitizer's `builtin` name: the stock implementations and
+/// Resolve one authority's or sanitizer's `uses` name: the stock implementations and
 /// the model transports by name, then the section's loaded module of that name.
-fn builtin_backend(
+fn uses_backend(
     section: Section,
     name: &str,
-    builtin: String,
+    uses: String,
     registry: &ModuleRegistry,
     claude: &ClaudeCodeBackend,
     llm: Option<&LlmBackend>,
 ) -> Result<Backend, ModulesError> {
     let module = match section {
-        Section::Authorities => registry.authority(&builtin),
-        Section::Sanitizers => registry.sanitizer(&builtin),
+        Section::Authorities => registry.authority(&uses),
+        Section::Sanitizers => registry.sanitizer(&uses),
         Section::Annotators | Section::Audience | Section::Context | Section::Recorders => None,
     };
-    let backend = match (section, builtin.as_str()) {
+    let backend = match (section, uses.as_str()) {
         (Section::Authorities, HITL) => Some(Backend::Hitl),
-        (_, CLAUDE_CODE_BUILTIN) => Some(Backend::Model(PromptModel::ClaudeCode(claude.clone()))),
-        (_, LLM_BUILTIN) => llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm))),
-        _ => Stock::for_section(section, &builtin)
+        (_, CLAUDE_CODE_USES) => Some(Backend::Model(PromptModel::ClaudeCode(claude.clone()))),
+        (_, LLM_USES) => llm.cloned().map(|llm| Backend::Model(PromptModel::Llm(llm))),
+        _ => Stock::for_section(section, &uses)
             .map(Backend::Stock)
             .or_else(|| module.map(|module| Backend::Module(Arc::clone(module)))),
     };
-    backend.ok_or_else(|| ModulesError::UnknownBuiltin {
+    backend.ok_or_else(|| ModulesError::UnknownUses {
         section: section.name(),
         name: name.to_string(),
-        builtin,
+        uses,
     })
 }
 
@@ -1094,18 +1090,10 @@ mod tests {
         services_declaring(config, BTreeMap::new())
     }
 
-    /// Services over `config` with `annotator_builtins` declared on the policy side.
-    fn services_declaring(
-        config: Externals,
-        annotator_builtins: BTreeMap<String, AnnotatorBuiltin>,
-    ) -> ExternalServices {
-        ExternalServices::new(
-            config,
-            &ModuleRegistry::empty(),
-            annotator_builtins,
-            ConsultGates::of(8),
-        )
-        .expect("no builtin references are configured")
+    /// Services over `config` with `annotator_uses` declared on the policy side.
+    fn services_declaring(config: Externals, annotator_uses: BTreeMap<String, AnnotatorUses>) -> ExternalServices {
+        ExternalServices::new(config, &ModuleRegistry::empty(), annotator_uses, ConsultGates::of(8))
+            .expect("no uses references are configured")
     }
 
     fn services(url: Option<String>, timeout_ms: u64, cap: usize) -> ExternalServices {
@@ -1358,7 +1346,7 @@ mod tests {
                 BTreeMap::new(),
                 ConsultGates::of(command_permits),
             )
-            .expect("no builtin references are configured");
+            .expect("no uses references are configured");
             let outcomes = tokio::join!(
                 resolve_command(&services),
                 resolve_command(&services),
@@ -1876,7 +1864,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn the_claude_builtin_serves_every_consult_kind_it_may_bind() {
+    async fn uses_claude_code_serves_every_consult_kind_it_may_bind() {
         let dir = tempfile::tempdir().expect("a fixture directory is created");
         let command = fake_claude(
             dir.path(),
@@ -1885,12 +1873,9 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65_536);
         config.claude_code.command = command;
         for section in [&mut config.authorities, &mut config.sanitizers] {
-            section.insert(
-                "judge".to_string(),
-                Implementation::Builtin(CLAUDE_CODE_BUILTIN.to_string()),
-            );
+            section.insert("judge".to_string(), Implementation::Uses(CLAUDE_CODE_USES.to_string()));
         }
-        let services = services_declaring(config, declared("judge", AnnotatorBuiltin::ClaudeCode));
+        let services = services_declaring(config, declared("judge", AnnotatorUses::ClaudeCode));
         let (answered, transcript) = services
             .consult_transcribed(&authority_consult("judge", serde_json::json!({})), None, None)
             .await;
@@ -1930,7 +1915,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             );
             let mut config = externals(None, 5000, 65_536);
             config.claude_code.command = fake_claude(fixture.path(), &script);
-            let services = services_declaring(config, declared("judge", AnnotatorBuiltin::ClaudeCode));
+            let services = services_declaring(config, declared("judge", AnnotatorUses::ClaudeCode));
             let count = move || std::fs::read(&counter).map_or(0, |bytes| bytes.len());
             (services, count, fixture)
         };
@@ -1961,7 +1946,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     #[tokio::test]
-    async fn the_llm_builtin_serves_every_consult_kind_it_may_bind() {
+    async fn uses_llm_serves_every_consult_kind_it_may_bind() {
         let url = stub(Router::new().route(
             "/v1/messages",
             post(|| async {
@@ -1979,9 +1964,9 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65_536);
         config.llm = Some(profile.clone());
         for section in [&mut config.authorities, &mut config.sanitizers] {
-            section.insert("judge".to_string(), Implementation::Builtin(LLM_BUILTIN.to_string()));
+            section.insert("judge".to_string(), Implementation::Uses(LLM_USES.to_string()));
         }
-        let services = services_declaring(config, declared("judge", AnnotatorBuiltin::Llm));
+        let services = services_declaring(config, declared("judge", AnnotatorUses::Llm));
         let (answered, transcript) = services
             .consult_transcribed(&authority_consult("judge", serde_json::json!({})), None, None)
             .await;
@@ -2010,7 +1995,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
 
     /// Jev classifies a call; it never rules on one or rewrites data.
     #[tokio::test]
-    async fn the_jev_builtin_serves_annotators_only() {
+    async fn uses_jev_serves_annotators_only() {
         for section in [Section::Authorities, Section::Sanitizers] {
             let mut config = externals(None, 2000, 65_536);
             config.jev = Some(jev_profile("https://jev.invalid/v1/systemone".to_string()));
@@ -2020,15 +2005,15 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             }
             .insert(
                 "judge".to_string(),
-                Implementation::Builtin(crate::config::JEV_BUILTIN.to_string()),
+                Implementation::Uses(crate::config::JEV_USES.to_string()),
             );
             match ExternalServices::new(
                 config,
                 &ModuleRegistry::empty(),
-                declared("classify", AnnotatorBuiltin::Jev),
+                declared("classify", AnnotatorUses::Jev),
                 ConsultGates::of(8),
             ) {
-                Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section.name()),
+                Err(ModulesError::UnknownUses { section: refused, .. }) => assert_eq!(refused, section.name()),
                 Err(other) => panic!("{} jev must refuse as unknown, got {other}", section.name()),
                 Ok(_) => panic!("{} jev must refuse", section.name()),
             }
@@ -2036,7 +2021,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     /// No model answers a directory read or an input program's finding. The configuration
-    /// never binds a model backend for either kind, so the test moves the builtin annotators'
+    /// never binds a model backend for either kind, so the test moves the model annotators'
     /// backends under those kinds: each consult is `Unregistered`, and nothing is asked.
     #[tokio::test]
     async fn a_model_backend_asked_what_it_cannot_prompt_is_unregistered() {
@@ -2051,9 +2036,9 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         config.llm = Some(llm_profile(url.clone()));
         config.jev = Some(jev_profile(url));
         #[cfg_attr(not(unix), allow(unused_mut))]
-        let mut builtins = BTreeMap::from([
-            ("llm".to_string(), AnnotatorBuiltin::Llm),
-            ("jev".to_string(), AnnotatorBuiltin::Jev),
+        let mut declared = BTreeMap::from([
+            ("llm".to_string(), AnnotatorUses::Llm),
+            ("jev".to_string(), AnnotatorUses::Jev),
         ]);
         #[cfg(unix)]
         let dir = tempfile::tempdir().expect("a fixture directory is created");
@@ -2062,10 +2047,10 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         #[cfg(unix)]
         {
             config.claude_code.command = fake_claude(dir.path(), &format!("touch {}", ran.display()));
-            builtins.insert("claude".to_string(), AnnotatorBuiltin::ClaudeCode);
+            declared.insert("claude".to_string(), AnnotatorUses::ClaudeCode);
         }
-        let names: Vec<String> = builtins.keys().cloned().collect();
-        let mut services = services_declaring(config, builtins);
+        let names: Vec<String> = declared.keys().cloned().collect();
+        let mut services = services_declaring(config, declared);
 
         let consults: [fn(&str) -> Consult; 2] = [
             |name| Consult::audience_selector(name, "user-group/eng", vec![]),
@@ -2083,7 +2068,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             let models = services
                 .backends
                 .remove(&bound)
-                .expect("the builtin annotators are bound");
+                .expect("the annotators naming uses are bound");
             bound = consult_of("any").kind();
             services.backends.insert(bound, models);
             for name in &names {
@@ -2414,14 +2399,14 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     #[tokio::test]
-    async fn a_stock_builtin_answers_without_any_endpoint() {
+    async fn a_stock_implementation_answers_without_any_endpoint() {
         let mut config = externals(None, 2000, 65536);
         config
             .authorities
-            .insert("auto".to_string(), Implementation::Builtin("approve".to_string()));
+            .insert("auto".to_string(), Implementation::Uses("approve".to_string()));
         config
             .sanitizers
-            .insert("pii".to_string(), Implementation::Builtin("redact-email".to_string()));
+            .insert("pii".to_string(), Implementation::Uses("redact-email".to_string()));
         let services = services_over(config);
         assert_eq!(
             services
@@ -2437,20 +2422,20 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         );
     }
 
-    fn declared(name: &str, builtin: AnnotatorBuiltin) -> BTreeMap<String, AnnotatorBuiltin> {
-        BTreeMap::from([(name.to_string(), builtin)])
+    fn declared(name: &str, uses: AnnotatorUses) -> BTreeMap<String, AnnotatorUses> {
+        BTreeMap::from([(name.to_string(), uses)])
     }
 
     #[tokio::test]
-    async fn a_dangling_builtin_reference_refuses_the_services() {
+    async fn a_dangling_uses_reference_refuses_the_services() {
         let mut config = externals(None, 2000, 65536);
         config
             .authorities
-            .insert("auto".to_string(), Implementation::Builtin("no-such".to_string()));
+            .insert("auto".to_string(), Implementation::Uses("no-such".to_string()));
         match ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new(), ConsultGates::of(8)) {
-            Err(ModulesError::UnknownBuiltin { section, name, builtin }) => {
+            Err(ModulesError::UnknownUses { section, name, uses }) => {
                 assert_eq!(
-                    (section, name.as_str(), builtin.as_str()),
+                    (section, name.as_str(), uses.as_str()),
                     ("authorities", "auto", "no-such")
                 );
             }
@@ -2460,18 +2445,18 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
     }
 
     #[tokio::test]
-    async fn a_builtin_of_the_wrong_kind_is_a_dangling_reference() {
-        for (section, builtin) in [("sanitizers", "approve"), ("authorities", "redact-email")] {
+    async fn a_uses_name_of_the_wrong_kind_is_a_dangling_reference() {
+        for (section, uses) in [("sanitizers", "approve"), ("authorities", "redact-email")] {
             let mut config = externals(None, 2000, 65536);
             let table = match section {
                 "sanitizers" => &mut config.sanitizers,
                 _ => &mut config.authorities,
             };
-            table.insert("x".to_string(), Implementation::Builtin(builtin.to_string()));
+            table.insert("x".to_string(), Implementation::Uses(uses.to_string()));
             match ExternalServices::new(config, &ModuleRegistry::empty(), BTreeMap::new(), ConsultGates::of(8)) {
-                Err(ModulesError::UnknownBuiltin { section: refused, .. }) => assert_eq!(refused, section),
-                Err(other) => panic!("{section}/{builtin} must refuse as unknown, got {other}"),
-                Ok(_) => panic!("{section}/{builtin} must refuse"),
+                Err(ModulesError::UnknownUses { section: refused, .. }) => assert_eq!(refused, section),
+                Err(other) => panic!("{section}/{uses} must refuse as unknown, got {other}"),
+                Ok(_) => panic!("{section}/{uses} must refuse"),
             }
         }
     }
@@ -2541,11 +2526,11 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let filename = format!("libmodule.{}", std::env::consts::DLL_EXTENSION);
         std::fs::copy(&artifact, dir.path().join(filename)).expect("the module copies");
-        let registry = crate::builtins::load(Some(dir.path())).expect("the fixture module loads");
+        let registry = crate::uses::load(Some(dir.path())).expect("the fixture module loads");
         let mut config = externals(None, 2000, max_body_bytes);
         config
             .authorities
-            .insert("auto".to_string(), Implementation::Builtin(implementation.to_string()));
+            .insert("auto".to_string(), Implementation::Uses(implementation.to_string()));
         let services = ExternalServices::new(config, &registry, BTreeMap::new(), ConsultGates::of(8))
             .expect("the module reference resolves");
         (services, dir)
@@ -2772,7 +2757,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let mut config = externals(None, 2000, 65536);
         config
             .sanitizers
-            .insert("pii".to_string(), Implementation::Builtin("redact-email".to_string()));
+            .insert("pii".to_string(), Implementation::Uses("redact-email".to_string()));
         let mut services = services_over(config);
         services.stand_in_for_remedies(["auto".to_string()], []);
         let (stock, transcript) = services

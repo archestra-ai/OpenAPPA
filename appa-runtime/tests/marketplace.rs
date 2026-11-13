@@ -319,10 +319,10 @@ fn a_battery_that_validates_loads() {
             yes,
             body(
                 &format!("{tool}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n"),
-                "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n",
+                "[externals.sanitizers.mask]\nuses = \"redact-secrets\"\n",
             ),
         ),
-        // A model sanitizer names its builtin on its declaration, as an
+        // A model sanitizer names its `uses` on its declaration, as an
         // Annotator does, and takes no binding; the root picks the model.
         (
             "a model sanitizer named on its declaration",
@@ -330,7 +330,7 @@ fn a_battery_that_validates_loads() {
             yes,
             body(
                 &format!(
-                    "{tool}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\nbuiltin = \"claude-code\"\n[policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n"
+                    "{tool}\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\nuses = \"claude-code\"\n[policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n"
                 ),
                 "",
             ),
@@ -345,16 +345,16 @@ fn a_battery_that_validates_loads() {
                 &format!(
                     "{tool}\n[[policy.authority]]\nname = \"nod\"\n[policy.authority.permits]\nattention = [\"hitl\"]\n"
                 ),
-                "[externals.authorities.nod]\nbuiltin = \"approve\"\n",
+                "[externals.authorities.nod]\nuses = \"approve\"\n",
             ),
         ),
         // Refused by both, each for its own reason: neither crate reads the
         // other, so agreeing here is the thing worth holding.
         (
-            "a builtin binding",
+            "a uses binding",
             no,
             no,
-            body(tool, "[externals.audience.probe]\nbuiltin = \"llm\"\n"),
+            body(tool, "[externals.audience.probe]\nuses = \"llm\"\n"),
         ),
         (
             "a jev profile naming a credential this package owns",
@@ -530,7 +530,7 @@ fn probe_audience(name: &str) -> String {
 }
 
 /// The external a targeted probe's base binds: its base runs no helper.
-const PROBE_BASE_EXTERNAL: &str = "[externals.sanitizers.mask]\nbuiltin = \"redact-secrets\"\n";
+const PROBE_BASE_EXTERNAL: &str = "[externals.sanitizers.mask]\nuses = \"redact-secrets\"\n";
 
 /// A targeted battery on disk whose multi-user target policy binds `multi_user_external`.
 /// The base and each target policy carry a rule of their own, so the composed rule
@@ -675,7 +675,7 @@ fn an_included_battery_loads_its_policy_for_the_deployment_target() {
         let base_external = match manifest_targets {
             "" => probe_audience("probe"),
             _ => "[[policy.sanitizer]]\nname = \"probe\"\non = [\"tool_output\"]\n\n\
-                  [externals.sanitizers.probe]\nbuiltin = \"redact-secrets\"\n"
+                  [externals.sanitizers.probe]\nuses = \"redact-secrets\"\n"
                 .to_owned(),
         };
         std::fs::write(
@@ -789,7 +789,7 @@ fn every_field_and_binding_a_package_may_carry_loads() {
     for stock in appa_package::BINDABLE_STOCK_SANITIZERS {
         let fragment = format!(
             "[policy]\nversion = 2\n\n[[policy.sanitizer]]\nname = \"probe\"\non = [\"tool_output\"]\n\n\
-             [externals.sanitizers.probe]\nbuiltin = \"{stock}\"\n"
+             [externals.sanitizers.probe]\nuses = \"{stock}\"\n"
         );
         assert!(
             probe_loads(&fragment, false),

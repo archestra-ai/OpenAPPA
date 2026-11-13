@@ -1,13 +1,14 @@
-//! Builtin implementations: the stock answers and the module loader.
+//! What a `uses` name selects: the stock implementations and the module loader.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::config::{CLAUDE_CODE_BUILTIN, LLM_BUILTIN, Section};
+use crate::config::Section;
 use crate::consult::{AuthorityAnswer, Consult, ConsultBody};
 use crate::secrets::redact_secrets;
-use appa_builtin::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
+use appa_module::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
+use appa_policy::AnnotatorUses;
 use appa_runtime_api::Ruling;
 
 /// The output-buffer bound for one module answer: the configured
@@ -15,15 +16,14 @@ use appa_runtime_api::Ruling;
 /// only — the HTTP path's cap behavior is untouched.
 pub(crate) const MODULE_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 
-const REFUSED_MODULE_NAMES: [&str; 7] = [
-    "hitl",
-    "attest-schema",
-    "approve",
-    "redact-email",
-    "redact-secrets",
-    CLAUDE_CODE_BUILTIN,
-    LLM_BUILTIN,
-];
+/// Whether a module may not claim `name`: `uses` resolves `hitl`, the stock implementations
+/// and every model before any module (`external::uses_backend`), and `attest-schema` is the
+/// engine's reserved sanitizer. The models come from [`AnnotatorUses::ALL`], so a model added
+/// there is reserved with it.
+fn reserved_module_name(name: &str) -> bool {
+    ["hitl", "attest-schema", "approve", "redact-email", "redact-secrets"].contains(&name)
+        || AnnotatorUses::ALL.iter().any(|model| model.wire_name() == name)
+}
 
 /// The implementation-name grammar: 1..=64 bytes of ASCII lowercase
 /// kebab (`^[a-z0-9][a-z0-9-]*$`), matched exactly, never normalized.
@@ -186,13 +186,11 @@ pub(crate) enum ModulesError {
     InvalidDescriptor { path: String, detail: String },
     #[error("the module {path} claims the name {name:?}, which is already provided")]
     NameTaken { path: String, name: String },
-    #[error(
-        "the {section} entry {name:?} names the builtin {builtin:?}, which is neither compiled in nor loaded for that kind"
-    )]
-    UnknownBuiltin {
+    #[error("the {section} entry {name:?} uses {uses:?}, which is neither compiled in nor loaded for that kind")]
+    UnknownUses {
         section: &'static str,
         name: String,
-        builtin: String,
+        uses: String,
     },
     #[error("{0}")]
     LlmClient(String),
@@ -246,7 +244,7 @@ pub(crate) fn load(dir: Option<&Path>) -> Result<ModuleRegistry, ModulesError> {
             ModuleKind::Sanitizer => &mut registry.sanitizers,
         };
         table.insert(name, Arc::new(module));
-        tracing::debug!(path = %path.display(), "builtin module loaded");
+        tracing::debug!(path = %path.display(), "module loaded");
     }
     Ok(registry)
 }
@@ -295,7 +293,7 @@ fn load_one(path: &Path) -> Result<(String, ModuleKind, LoadedModule), ModulesEr
         path: display.clone(),
         detail,
     })?;
-    if REFUSED_MODULE_NAMES.contains(&name.as_str()) {
+    if reserved_module_name(&name) {
         return Err(ModulesError::NameTaken { path: display, name });
     }
 
@@ -375,6 +373,27 @@ mod tests {
             assert!(!valid_implementation_name(name), "{name:?} is invalid");
         }
         assert!(valid_implementation_name(&"a".repeat(64)));
+    }
+
+    /// `jev` and `archestra` were once missing from a hand-kept list, so a module could take
+    /// the name `uses = "jev"` resolves to.
+    #[test]
+    fn a_module_cannot_claim_a_name_uses_resolves_first() {
+        for name in [
+            "hitl",
+            "attest-schema",
+            "approve",
+            "redact-email",
+            "redact-secrets",
+            "claude-code",
+            "llm",
+            "jev",
+        ] {
+            assert!(reserved_module_name(name), "{name:?} is reserved");
+        }
+        #[cfg(feature = "archestra")]
+        assert!(reserved_module_name("archestra"));
+        assert!(!reserved_module_name("fixture-auth"));
     }
 
     #[test]
