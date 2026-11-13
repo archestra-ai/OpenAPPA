@@ -329,6 +329,23 @@ session performing this setup runs the first two and prints the third.
 running session cannot be pointed at a different runtime. To move
 between the installed and the dev runtime, start a new session.
 
+Every deployment on a machine shares the endpoint `http://127.0.0.1:8787`,
+and a session uses whichever runtime answers it. To test a second
+deployment beside the installed one, install a debug build with its own
+directories, its own Claude profile and its own endpoint. Run every
+command of that deployment with the same variables:
+
+```sh
+export HOME=/tmp/second/home APPA_CONFIG_DIR=/tmp/second/config APPA_DATA_DIR=/tmp/second/data
+export APPA_ENDPOINT=http://127.0.0.1:8790
+target/debug/appa plugin install claude-code
+```
+
+Its hook entries, MCP server and status line then name port 8790, and
+`appa runtime stop`, `appa yell`, `appa ui` and later battery installs
+reach that port too. The deployment on 8787 keeps running untouched. A
+release build ignores `APPA_ENDPOINT`.
+
 ## Harness conformance check
 
 `live-gate-check.py` runs two real headless `claude` sessions against a

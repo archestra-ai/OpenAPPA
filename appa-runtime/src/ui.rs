@@ -30,7 +30,7 @@ pub struct Args {
     /// The one battery whose token the page asks for.
     #[arg(long, required = true)]
     battery: Vec<String>,
-    #[arg(long, env = "APPA_RUNTIME_URL", default_value = crate::runtime_url::DEFAULT_RUNTIME_URL)]
+    #[arg(long, env = "APPA_RUNTIME_URL", default_value_t = crate::runtime_url::deployment_url())]
     runtime_url: String,
     /// Print the browser URL without opening the browser.
     #[arg(long)]
@@ -756,8 +756,7 @@ pub fn describe_readiness(config: &Path, dirs: &[PathBuf]) -> Result<String, Str
         battery: vec![],
         no_open: true,
         port: None,
-        runtime_url: std::env::var("APPA_RUNTIME_URL")
-            .unwrap_or_else(|_| crate::runtime_url::DEFAULT_RUNTIME_URL.into()),
+        runtime_url: std::env::var("APPA_RUNTIME_URL").unwrap_or_else(|_| crate::runtime_url::deployment_url()),
     };
     let local = Local::new(&options)?;
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
@@ -785,8 +784,7 @@ pub fn status(args: StatusArgs) -> ExitCode {
         config: args.config,
         batteries_dir: args.batteries_dir,
         battery: args.battery,
-        runtime_url: std::env::var("APPA_RUNTIME_URL")
-            .unwrap_or_else(|_| crate::runtime_url::DEFAULT_RUNTIME_URL.into()),
+        runtime_url: std::env::var("APPA_RUNTIME_URL").unwrap_or_else(|_| crate::runtime_url::deployment_url()),
         no_open: true,
         port: None,
     };

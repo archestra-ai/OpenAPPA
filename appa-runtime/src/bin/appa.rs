@@ -133,7 +133,7 @@ enum Command {
                             either way.")]
     Yell {
         /// The runtime that builds the report. Loopback only.
-        #[arg(long, env = "APPA_RUNTIME_URL", default_value = appa_runtime::runtime_url::DEFAULT_RUNTIME_URL)]
+        #[arg(long, env = "APPA_RUNTIME_URL", default_value_t = appa_runtime::runtime_url::deployment_url())]
         url: String,
 
         /// Answer both questions with yes: pseudonymize the report, and send it.

@@ -5,10 +5,22 @@
 //! launch like `APPA_GATE`, and it means both "post here" and "the runtime here
 //! is the user's own to restart". Neither is read from a shell, so the
 //! precedence lives here rather than in a `${VAR:-default}` expansion.
+//!
+//! Every Claude Code deployment on a machine shares one fixed endpoint, so a
+//! session uses whichever runtime answers it. A debug build reads
+//! `APPA_ENDPOINT` as that endpoint instead, so a test can run a second
+//! deployment beside the installed one: its install, its hooks and every
+//! command run with the same variable reach that deployment's runtime only.
 
 use clap::Args;
 
-pub const DEFAULT_RUNTIME_URL: &str = "http://127.0.0.1:8787";
+const DEFAULT_RUNTIME_URL: &str = "http://127.0.0.1:8787";
+
+/// The endpoint of the deployment this process belongs to: the fixed address,
+/// or `APPA_ENDPOINT` in a debug build.
+pub fn deployment_url() -> String {
+    crate::installation::archive::debug_override("APPA_ENDPOINT").unwrap_or_else(|| DEFAULT_RUNTIME_URL.to_owned())
+}
 
 #[derive(Args, Clone)]
 pub struct RuntimeUrl {
@@ -41,7 +53,7 @@ impl RuntimeUrl {
                 user_owned: false,
             },
             (None, None) => RuntimeTarget {
-                url: DEFAULT_RUNTIME_URL.to_owned(),
+                url: deployment_url(),
                 user_owned: false,
             },
         }
@@ -71,7 +83,7 @@ mod tests {
         assert!(!deployment.user_owned);
 
         let default = RuntimeUrl::of(None, None).resolve();
-        assert_eq!(default.url, DEFAULT_RUNTIME_URL);
+        assert_eq!(default.url, deployment_url());
         assert!(!default.user_owned);
     }
 }
