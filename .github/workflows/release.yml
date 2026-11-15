@@ -522,7 +522,10 @@ jobs:
     if: ${{ !cancelled() && !failure() && needs.attest-release-images.result == 'success' }}
     permissions:
       actions: read # Required to download the chart artifact.
-    uses: archestra-ai/.github/.github/workflows/release-publish.yml@add9951c121764e9d62f71591ab694b257c14077 # v1.21.0
+      id-token: write # sign the image contents attestations (release-publish.yml)
+      attestations: write # store them
+      packages: read # pull the staged images to scan them
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@7e99001200cbd9510a90930f78fd79d6b79cb94c # v1.28.0
     with:
       # Holds the archestra-releaser App's key; main only.
       environment: releaser
@@ -816,7 +819,10 @@ jobs:
     needs: publisher-smoke
     permissions:
       actions: read # Required to download the chart artifact.
-    uses: archestra-ai/.github/.github/workflows/release-publish.yml@add9951c121764e9d62f71591ab694b257c14077 # v1.21.0
+      id-token: write # sign the image contents attestations (release-publish.yml)
+      attestations: write # store them
+      packages: read # pull the staged images to scan them
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@7e99001200cbd9510a90930f78fd79d6b79cb94c # v1.28.0
     with:
       # Holds the archestra-releaser App's key; main only.
       environment: releaser
