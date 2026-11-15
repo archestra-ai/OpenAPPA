@@ -17,7 +17,7 @@ Install kagent and appa first by following the public
 chart:
 
 ```sh
-APPA_VERSION=0.42.0 # x-release-please-version
+APPA_VERSION=0.43.0 # x-release-please-version
 helm upgrade --install appa-kagent-demo \
   oci://ghcr.io/archestra-ai/charts/appa-kagent-demo \
   --version "$APPA_VERSION" -n kagent \
