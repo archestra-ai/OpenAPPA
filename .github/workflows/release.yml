@@ -246,7 +246,7 @@ jobs:
           find staged -type f \( -name '*.pyc' -o -name '*.pyo' -o -name appa-package.toml \) -delete
           tar -C staged -czf "dist/appa-batteries-${VERSION}.tar.gz" .
           # The catalog is derived from this commit's packages, not committed
-          # beside them. publish-release reads it back out of this archive, so
+          # beside them. prepare-release reads it back out of this archive, so
           # the descriptor's catalog digest is the digest of what ships.
           cargo run --locked --quiet -p appa-package --example marketplace -- marketplace > catalog.toml
           mv catalog.toml marketplace/marketplace.toml
@@ -518,8 +518,10 @@ jobs:
   # approval; the attestation of the earlier attempt still counts).
   publish-release-images:
     name: Publish images and charts through release-publisher
-    needs: [release-please, attest-release-images]
-    if: ${{ !cancelled() && !failure() && needs.attest-release-images.result == 'success' }}
+    # The release files are kept before the request leaves, so the finalize
+    # workflow finds them however soon the release is approved.
+    needs: [release-please, attest-release-images, prepare-release]
+    if: ${{ !cancelled() && !failure() && needs.attest-release-images.result == 'success' && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
     permissions:
       actions: read # Required to download the chart artifact.
       id-token: write # sign the image contents attestations (release-publish.yml)
@@ -534,27 +536,29 @@ jobs:
       images: ${{ needs.attest-release-images.outputs.images }}
       latest: ${{ needs.attest-release-images.outputs.latest }}
       chart-artifact: release-charts
+      # Hand the request off: the release waits for its approval in the
+      # publisher, and release-finalize.yml publishes the GitHub release once
+      # the publisher run succeeds (Release Gate dispatches it).
+      wait: false
     secrets:
       APP_ID: ${{ secrets.APP_ID }}
       APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
 
-  publish-release:
-    name: Publish GitHub release
-    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.release-please.outputs.registry_only != 'true' && needs.build-binaries.result == 'success' && needs.publish-release-images.result == 'success' }}
+  prepare-release:
+    name: Prepare GitHub release files
+    if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.release-please.outputs.registry_only != 'true' && needs.build-binaries.result == 'success' }}
     needs:
       - release-please
       - batteries-artifact
       - build-binaries
       - publish-oci-images
       - package-charts
-      # Images and charts are public before the release that names them.
-      - publish-release-images
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       actions: read # Required to download archives from the reusable build jobs.
       attestations: write # Required to record build provenance for the release assets.
-      contents: write # Required to upload assets and publish the draft release.
+      contents: read # Required to check out the release source.
       id-token: write # Required to sign the build provenance.
     steps:
       - name: Checkout release source
@@ -650,78 +654,21 @@ jobs:
           # was the only one they could not verify.
           sha256sum "${expected_archives[@]}" appa-install.sh appa-generation.json > SHA256SUMS
 
-      - name: Refuse an already-published release
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-        run: |
-          is_draft=$(gh release view "$TAG_NAME" --json isDraft --jq '.isDraft')
-          # Publishing is the whole point of this job. A release that is already
-          # public cannot be published again, and skipping both remaining steps
-          # would report success for a run that shipped nothing -- the worst
-          # possible answer for a workflow whose recovery story is "dispatch it
-          # again".
-          if [ "$is_draft" != "true" ]; then
-            echo "::error::${TAG_NAME} is already published; nothing was uploaded"
-            exit 1
-          fi
-
       - name: Attest release asset provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/*
 
-      - name: Upload release assets
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release upload "$TAG_NAME" dist/* --clobber
-
-      - name: Publish release
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          TAG_NAME: ${{ needs.release-please.outputs.tag_name }}
-        run: |
-          gh release edit "$TAG_NAME" --draft=false
-          echo "Published release $TAG_NAME."
-
-  recheck-release-prs:
-    name: Re-check open release PRs
-    # The next release PR waits for this release (Previous Release Published).
-    # Re-check it now instead of at that workflow's next scheduled run: the
-    # release event this run's GITHUB_TOKEN publish caused starts no workflow,
-    # a workflow_dispatch does.
-    needs: [publish-release]
-    if: ${{ !cancelled() && !failure() && needs.publish-release.result == 'success' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      actions: write # Start the Previous Release Published workflow.
-    steps:
-      - name: Start Previous Release Published
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: gh workflow run previous-release-published.yml --ref main
-
-  update-archestra:
-    name: Propose Archestra runtime update
-    needs: [release-please, publish-release]
-    if: ${{ !cancelled() && !failure() && needs.publish-release.result == 'success' }}
-    permissions:
-      contents: read
-      actions: read # Allow the updater to download its prepared Cargo bundle.
-    uses: $/.github/workflows/update-archestra.yml
-    with:
-      release_tag: ${{ needs.release-please.outputs.tag_name }}
-      source_commit: ${{ needs.release-please.outputs.source_commit }}
-    # Empty here: the key lives only in the archestra-update environment,
-    # which the called job names and GitHub resolves the name from.
-    secrets:
-      APPA_ARCHESTRA_UPDATER_PRIVATE_KEY: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}
+      # release-finalize.yml uploads these to the release and publishes it
+      # once the publisher run succeeds. Images and charts are public before
+      # the release that names them.
+      - name: Keep the release files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-files
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 35
 
   # A dry run of the release-publisher path that writes no release name: stage a
   # published version's images in ghcr.io/archestra-ai/ci, package both charts as

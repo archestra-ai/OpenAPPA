@@ -1,0 +1,108 @@
+name: Release Finalize
+run-name: ${{ inputs.request_id && format('Finalize release request {0}', inputs.request_id) || 'Finalize approved releases' }}
+
+# release.yml hands each release's request to release-publisher and ends
+# (publish-release-images, `wait: false`); the release then waits for its
+# second-person approval in the publisher, for up to 30 days. This workflow
+# uploads the release files and publishes the GitHub release once the publisher
+# run has succeeded (archestra-ai/.github release-finalize.yml):
+#
+# - Release Gate (infra gcp/cloud-run/release-gate) dispatches it with
+#   `request_id` when that request's publisher run succeeds.
+# - The schedule sweeps draft releases and dispatches it for each one whose
+#   newest publisher run succeeded, in case Release Gate missed it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: "<release run id>-<attempt> whose publisher run succeeded"
+        type: string
+        required: true
+  schedule:
+    - cron: "17,47 * * * *"
+
+permissions: {}
+
+jobs:
+  finalize:
+    name: Finalize
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: write # Read draft releases, upload the release files and publish the release.
+      actions: write # Read the release run; the sweep dispatches this workflow.
+      attestations: read # Verify the published digests' attestations.
+    uses: archestra-ai/.github/.github/workflows/release-finalize.yml@664e9596c6ff346277291e65d040515b2dae1c44 # v1.30.0
+    with:
+      # Holds the archestra-releaser App's key; main only.
+      environment: releaser
+      project: openappa
+      release-workflow: .github/workflows/release.yml
+      finalize-workflow: release-finalize.yml
+      request-id: ${{ inputs.request_id || '' }}
+      image-tag: v{version}
+      chart-repositories: |
+        appa-runtime oci://ghcr.io/archestra-ai/charts
+        appa-kagent-demo oci://ghcr.io/archestra-ai/charts
+      release-artifacts: release-files
+    secrets:
+      APP_ID: ${{ secrets.APP_ID }}
+      APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+
+  release-source:
+    name: Resolve the release commit
+    needs: finalize
+    if: ${{ needs.finalize.outputs.published == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read # Read the release tag.
+    outputs:
+      source_commit: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Read the tag's commit
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ needs.finalize.outputs.tag-name }}
+        run: |
+          set -euo pipefail
+          sha=$(gh api "repos/${GH_REPO}/commits/${TAG_NAME}" --jq .sha)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::No commit for $TAG_NAME"; exit 1; }
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+  recheck-release-prs:
+    name: Re-check open release PRs
+    # The next release PR waits for this release (Previous Release Published).
+    # Re-check it now instead of at that workflow's next scheduled run: the
+    # release event this run's GITHUB_TOKEN publish caused starts no workflow,
+    # a workflow_dispatch does.
+    needs: finalize
+    if: ${{ needs.finalize.outputs.published == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write # Start the Previous Release Published workflow.
+    steps:
+      - name: Start Previous Release Published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run previous-release-published.yml --ref main
+
+  update-archestra:
+    name: Propose Archestra runtime update
+    needs: [finalize, release-source]
+    if: ${{ needs.finalize.outputs.published == 'true' }}
+    permissions:
+      contents: read
+      actions: read # Allow the updater to download its prepared Cargo bundle.
+    uses: $/.github/workflows/update-archestra.yml
+    with:
+      release_tag: ${{ needs.finalize.outputs.tag-name }}
+      source_commit: ${{ needs.release-source.outputs.source_commit }}
+    # Empty here: the key lives only in the archestra-update environment,
+    # which the called job names and GitHub resolves the name from.
+    secrets:
+      APPA_ARCHESTRA_UPDATER_PRIVATE_KEY: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}
