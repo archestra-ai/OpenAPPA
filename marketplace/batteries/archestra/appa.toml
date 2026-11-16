@@ -83,10 +83,12 @@ name = "mcp/archestra/run_command"
 description = "Runs one shell command in the conversation's sandbox and returns its output."
 annotator = "archestra.run-command"
 
-# --- guardrails: the policy, its validations, yells and helper consults are
-# the organization's. A preview or a validation saves nothing and sends
-# nothing. A publish, a repository connection, a sync or a credential
-# binding changes the guardrails of every session ---
+# --- guardrails: the policy, its validations, yells, helper consults and
+# decided operations are the organization's. A preview or a validation saves
+# nothing and sends nothing. A publish, a repository connection, a sync or a
+# credential binding changes the guardrails of every session. A tuner
+# suggestion reaches the admins' inbox, and its policy change becomes the
+# guardrails of every session once an admin applies it ---
 
 [[policy.tool]]
 name = "mcp/archestra/get_guardrails_policy"
@@ -137,6 +139,10 @@ name = "mcp/archestra/list_openappa_consults"
 delta = { audience = ["internal"] }
 
 [[policy.tool]]
+name = "mcp/archestra/list_openappa_operations"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
 name = "mcp/archestra/resolve_openappa_yell"
 delta = {}
 
@@ -169,6 +175,11 @@ requires = { trust = "trusted" }
 name = "mcp/archestra/bind_guardrails_credential"
 delta = {}
 requires = { trust = "trusted" }
+
+[[policy.tool]]
+name = "mcp/archestra/propose_tuner_suggestion"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
 # --- credentials: metadata only, never a secret. A setup request shows the
 # user a card. A transfer can carry a secret into a run's workspace; a

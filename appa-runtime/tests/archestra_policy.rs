@@ -221,6 +221,7 @@ const TABLE: &[Class] = &[
         calls: &[
             ("get_openappa_yell", r#"{"id": "y"}"#),
             ("list_openappa_consults", r#"{"sessionId": "s"}"#),
+            ("list_openappa_operations", r#"{"decision": "deny_call"}"#),
             ("preview_guardrails_policy_change", r#"{"edits": []}"#),
             ("read_file", r#"{"id": "f"}"#),
             ("get_agent", r#"{"id": "a"}"#),
@@ -279,6 +280,10 @@ const TABLE: &[Class] = &[
             ("create_schedule_trigger", r#"{"message_template": "m"}"#),
             ("publish_app", r#"{"appId": "a", "scope": "org"}"#),
             ("post_run_message", r#"{"run_id": "r", "text": "done"}"#),
+            (
+                "propose_tuner_suggestion",
+                r#"{"fingerprint": "f", "rationale": "r", "policy_change": {"expected_revision": 1, "edits": []}}"#,
+            ),
             ("create_agent", ORGANIZATION),
             (
                 "create_plugin",
