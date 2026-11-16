@@ -433,8 +433,8 @@ jobs:
   # under their public names and the charts by file name, in this run, then ask
   # archestra-ai/release-publisher to publish exactly those; it verifies the
   # attestations (signer release.yml, main, this run) first.
-  attest-release-images:
-    name: Attest images and charts
+  release-subjects:
+    name: Collect release subjects
     if: ${{ !cancelled() && !failure() && needs.release-please.outputs.should_publish == 'true' && needs.package-charts.result == 'success' }}
     needs:
       - release-please
@@ -444,11 +444,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       actions: read # Required to download the chart artifact.
-      attestations: write # Required to store the build provenance attestation.
       contents: read # Required to check out the subjects script and list releases.
-      id-token: write # Required to sign the build provenance attestation.
     outputs:
       images: ${{ steps.subjects.outputs.images }}
+      subjects: ${{ steps.subjects.outputs.subjects }}
       latest: ${{ steps.latest.outputs.channels }}
     steps:
       - name: Checkout project
@@ -480,11 +479,11 @@ jobs:
               "golang-adk": $go, "appa-demo-tools": $tools, "appa-demo-mocks": $mocks}')
           python3 scripts/appa-release-subjects.py "$VERSION" "$digests" release-charts
           echo "images=$(jq -c . release-images.json)" >> "$GITHUB_OUTPUT"
-
-      - name: Attest release images and charts
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-checksums: release-subjects.txt
+          {
+            echo "subjects<<SUBJECTS"
+            cat release-subjects.txt
+            echo "SUBJECTS"
+          } >> "$GITHUB_OUTPUT"
 
       # :latest follows the newest stable release. A draft is
       # not yet listed, so this release is newer unless a later one exists.
@@ -516,12 +515,29 @@ jobs:
   # Waits for the publisher, a stable release's approval included, up to 360
   # minutes. An expired approval: Re-run failed jobs (a new request and
   # approval; the attestation of the earlier attempt still counts).
+  # Signs in a job of its own that runs no build step (SLSA Build L3): none of
+  # the jobs that build or assemble the release can sign its provenance.
+  attest-release:
+    name: Attest release
+    needs: [release-subjects, prepare-release]
+    if: ${{ !cancelled() && !failure() && needs.release-subjects.result == 'success' && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
+    permissions:
+      attestations: write # Store the build provenance attestation.
+      id-token: write # Sign the build provenance attestation.
+    uses: archestra-ai/.github/.github/workflows/attest-provenance.yml@SHARED_SHA # SHARED_VERSION
+    with:
+      # Images and charts, then the GitHub release files (none for
+      # publish_registry_only).
+      subjects: |
+        ${{ needs.release-subjects.outputs.subjects }}
+        ${{ needs.prepare-release.outputs.checksums }}
+
   publish-release-images:
     name: Publish images and charts through release-publisher
     # The release files are kept before the request leaves, so the finalize
     # workflow finds them however soon the release is approved.
-    needs: [release-please, attest-release-images, prepare-release]
-    if: ${{ !cancelled() && !failure() && needs.attest-release-images.result == 'success' && (needs.prepare-release.result == 'success' || needs.prepare-release.result == 'skipped') }}
+    needs: [release-please, release-subjects, prepare-release, attest-release]
+    if: ${{ !cancelled() && !failure() && needs.attest-release.result == 'success' }}
     permissions:
       actions: read # Required to download the chart artifact.
       id-token: write # sign the image contents attestations (release-publish.yml)
@@ -533,8 +549,8 @@ jobs:
       environment: releaser
       project: openappa
       version: ${{ needs.release-please.outputs.version }}
-      images: ${{ needs.attest-release-images.outputs.images }}
-      latest: ${{ needs.attest-release-images.outputs.latest }}
+      images: ${{ needs.release-subjects.outputs.images }}
+      latest: ${{ needs.release-subjects.outputs.latest }}
       chart-artifact: release-charts
       # Hand the request off: the release waits for its approval in the
       # publisher, and release-finalize.yml publishes the GitHub release once
@@ -557,9 +573,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       actions: read # Required to download archives from the reusable build jobs.
-      attestations: write # Required to record build provenance for the release assets.
       contents: read # Required to check out the release source.
-      id-token: write # Required to sign the build provenance.
+    outputs:
+      checksums: ${{ steps.checksums.outputs.checksums }}
     steps:
       - name: Checkout release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -654,14 +670,18 @@ jobs:
           # was the only one they could not verify.
           sha256sum "${expected_archives[@]}" appa-install.sh appa-generation.json > SHA256SUMS
 
-      - name: Attest release asset provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: dist/*
+      # attest-release signs these: this job assembles the release files and
+      # holds no signing identity.
+      - name: Record the release file checksums
+        id: checksums
+        run: |
+          set -euo pipefail
+          {
+            echo "checksums<<CHECKSUMS"
+            (cd dist && sha256sum -- *)
+            echo "CHECKSUMS"
+          } >> "$GITHUB_OUTPUT"
 
-      # release-finalize.yml uploads these to the release and publishes it
-      # once the publisher run succeeds. Images and charts are public before
-      # the release that names them.
       - name: Keep the release files
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

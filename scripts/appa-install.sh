@@ -159,16 +159,26 @@ actual=$(digest "$work/$archive")
 
 # The checksum proves the download arrived intact; provenance proves OpenAPPA's
 # release workflow, on main and on a GitHub-hosted runner, built these bytes.
+# Releases sign it in the shared archestra-ai/.github attest-provenance.yml, a
+# job no build step runs in; releases before that signed in release.yml itself.
 # Without gh (or signed out) `auto` installs on the checksum alone. A failed
 # check is never skipped.
 if [ "$provenance" != skip ]; then
   if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     step "$(printf 'Verifying the build provenance of %s' "$archive")"
-    if ! gh attestation verify "$work/$archive" \
-      --repo "$provenance_repository" \
-      --signer-workflow "$provenance_repository/.github/workflows/release.yml" \
-      --source-ref refs/heads/main \
-      --deny-self-hosted-runners >/dev/null 2>"$work/provenance.err"; then
+    verified=
+    for signer in archestra-ai/.github/.github/workflows/attest-provenance.yml \
+      "$provenance_repository/.github/workflows/release.yml"; do
+      if gh attestation verify "$work/$archive" \
+        --repo "$provenance_repository" \
+        --signer-workflow "$signer" \
+        --source-ref refs/heads/main \
+        --deny-self-hosted-runners >/dev/null 2>>"$work/provenance.err"; then
+        verified=1
+        break
+      fi
+    done
+    if [ -z "$verified" ]; then
       cat "$work/provenance.err" >&2
       fail "$archive has no build provenance from OpenAPPA's release workflow; APPA_VERIFY_PROVENANCE=skip installs on the checksum alone"
     fi
