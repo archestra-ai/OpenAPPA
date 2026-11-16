@@ -94,7 +94,9 @@ done
 origin=http://127.0.0.1:$(cat "$work/port")
 
 # A stub gh: signed out unless FAKE_GH_AUTH=ok, and `attestation verify`
-# succeeds only when FAKE_GH_VERIFY=ok. It records its arguments. Every case
+# succeeds only when FAKE_GH_VERIFY=ok (or, =release-yml, only for provenance
+# signed in release.yml, as releases before the shared workflow were). It
+# records its arguments. Every case
 # runs with it first on PATH, so a real, signed-in gh on this machine never
 # checks the stub release.
 mkdir "$work/bin"
@@ -103,7 +105,11 @@ cat > "$work/bin/gh" <<'GH'
 printf '%s\n' "$*" >> "$FAKE_GH_LOG"
 case $1 in
   auth) [ "${FAKE_GH_AUTH:-}" = ok ] ;;
-  attestation) [ "${FAKE_GH_VERIFY:-}" = ok ] || { echo "no attestations found" >&2; exit 1; } ;;
+  attestation)
+    case "${FAKE_GH_VERIFY:-}:$*" in
+      ok:*|release-yml:*"--signer-workflow archestra-ai/OpenAPPA/.github/workflows/release.yml "*) ;;
+      *) echo "no attestations found" >&2; exit 1 ;;
+    esac ;;
   *) exit 2 ;;
 esac
 GH
@@ -161,12 +167,16 @@ expect_installed pinned-version APPA_VERSION="$tag"
 # refuses the install.
 : > "$FAKE_GH_LOG"
 expect_installed provenance-verified FAKE_GH_AUTH=ok FAKE_GH_VERIFY=ok
-if grep -q -- '--repo archestra-ai/OpenAPPA --signer-workflow archestra-ai/OpenAPPA/.github/workflows/release.yml --source-ref refs/heads/main --deny-self-hosted-runners' "$FAKE_GH_LOG"; then
+if grep -q -- '--repo archestra-ai/OpenAPPA --signer-workflow archestra-ai/.github/.github/workflows/attest-provenance.yml --source-ref refs/heads/main --deny-self-hosted-runners' "$FAKE_GH_LOG" &&
+  ! grep -q -- 'OpenAPPA/.github/workflows/release.yml' "$FAKE_GH_LOG"; then
   report PASS provenance-arguments
 else
   cat "$FAKE_GH_LOG" >&2
   report FAIL provenance-arguments
 fi
+
+# A release from before the shared workflow: its provenance is release.yml's.
+expect_installed provenance-release-yml FAKE_GH_AUTH=ok FAKE_GH_VERIFY=release-yml
 expect_installed provenance-signed-out
 expect_installed provenance-skipped FAKE_GH_AUTH=ok APPA_VERIFY_PROVENANCE=skip
 expect_refused provenance-missing APPA_REPOSITORY_URL="$origin/good" FAKE_GH_AUTH=ok
