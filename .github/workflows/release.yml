@@ -524,7 +524,7 @@ jobs:
     permissions:
       attestations: write # Store the build provenance attestation.
       id-token: write # Sign the build provenance attestation.
-    uses: archestra-ai/.github/.github/workflows/attest-provenance.yml@SHARED_SHA # SHARED_VERSION
+    uses: archestra-ai/.github/.github/workflows/attest-provenance.yml@0bd6a54bf206174fd0cebc3222def111651e91bb # v1.31.1
     with:
       # Images and charts, then the GitHub release files (none for
       # publish_registry_only).
