@@ -671,14 +671,15 @@ jobs:
           sha256sum "${expected_archives[@]}" appa-install.sh appa-generation.json > SHA256SUMS
 
       # attest-release signs these: this job assembles the release files and
-      # holds no signing identity.
+      # holds no signing identity. The charts are release-subjects' subjects
+      # already (the same names and bytes), and a subject named twice fails.
       - name: Record the release file checksums
         id: checksums
         run: |
           set -euo pipefail
           {
             echo "checksums<<CHECKSUMS"
-            (cd dist && sha256sum -- *)
+            (cd dist && find . -maxdepth 1 -type f ! -name '*.tgz' -printf '%P\0' | sort -z | xargs -0 sha256sum --)
             echo "CHECKSUMS"
           } >> "$GITHUB_OUTPUT"
 
