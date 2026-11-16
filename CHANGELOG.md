@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.43.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.43.0...v0.43.1) (2026-11-16)
+
+
+### Dependencies
+
+* bump helm/kind-action from 1.15.1 to 1.15.2 ([#869](https://github.com/archestra-ai/OpenAPPA/issues/869)) ([3bd4f8d](https://github.com/archestra-ai/OpenAPPA/commit/3bd4f8d28d2114a3930de31fdcd68f26c478dba6))
+
 ## [0.43.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.42.0...v0.43.0) (2026-11-15)
 
 
