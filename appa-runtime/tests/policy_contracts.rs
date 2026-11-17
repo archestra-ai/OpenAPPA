@@ -351,6 +351,25 @@ fn a_diff_names_what_changed_and_flags_predicates_and_routing() {
     assert_eq!(rebound[0].changes[0].kind, ChangeKind::Bindings);
 }
 
+/// Two readers and one reader whose name spells both are different requirements, whatever
+/// their rendering: swapping one for the other is no tightening.
+#[test]
+fn requirements_compare_as_values_not_as_their_spelling() {
+    let audience = |readers: &str| {
+        edited(&[(
+            RUN_FLOOR,
+            &format!(
+                "name = \"mcp/shell/run\"\nrequires = {{ trust = \"vendor\", audience = {{ contains = [{readers}] }} }}"
+            ),
+        )])
+    };
+    let two = compiled(&audience("\"alice@example.com\", \"bob@example.com\""));
+    let one = compiled(&audience("\"alice@example.com,bob@example.com\""));
+    let diff = two.diff(&one);
+    let directions: Vec<(&str, Direction)> = diff.iter().map(|tool| (tool.tool.as_str(), tool.direction)).collect();
+    assert_eq!(directions, [("mcp/shell/run", Direction::Mixed)], "{diff:#?}");
+}
+
 fn label(trust: &str, audience: &[&[&str]]) -> DecisionLabel {
     DecisionLabel {
         trust: trust.to_string(),

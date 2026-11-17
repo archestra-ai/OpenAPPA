@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::contract::{AudienceRequirement, HistoryRequirement, LabelRequirements, RecipientSpec, ToolDeclaration};
+use crate::fact::EffectKind;
 use crate::label::{DeclaredAudience, Trust};
 use crate::registry::{Registry, ToolMatcher, TrustChain, WILDCARD_SPELLING};
 use crate::value::ToolName;
@@ -134,13 +135,20 @@ impl Changes {
 struct Pair<'a> {
     before: &'a Registry,
     after: &'a Registry,
+    before_names: Names<'a>,
+    after_names: Names<'a>,
 }
 
 /// Every tool whose contracts differ between `before` and `after`, in name order, with the
 /// `*` entry first when the wildcard or anything policy-wide differs. `outside` names the
 /// policy-wide differences the registries do not hold, which the host found itself.
 pub fn diff_contracts(before: &Registry, after: &Registry, outside: &[ChangeKind]) -> Vec<ToolContractDiff> {
-    let pair = Pair { before, after };
+    let pair = Pair {
+        before,
+        after,
+        before_names: Names::of(before),
+        after_names: Names::of(after),
+    };
     let mut tools: BTreeMap<String, Changes> = BTreeMap::new();
     let everything = tools.entry(WILDCARD_SPELLING.to_string()).or_default();
     pair.policy_wide(everything);
@@ -229,10 +237,20 @@ impl Pair<'_> {
         changes: &mut Changes,
     ) {
         let (other, direction, before, after) = match coverage {
-            Gained => (self.before, Direction::Loosen, None, Some(name.as_str().to_string())),
-            Lost => (self.after, Direction::Tighten, Some(name.as_str().to_string()), None),
+            Gained => (
+                &self.before_names,
+                Direction::Loosen,
+                None,
+                Some(name.as_str().to_string()),
+            ),
+            Lost => (
+                &self.after_names,
+                Direction::Tighten,
+                Some(name.as_str().to_string()),
+                None,
+            ),
         };
-        let direction = match covers(other, name) {
+        let direction = match other.covers(name) {
             true => Direction::Unknown,
             false => direction,
         };
@@ -288,23 +306,23 @@ impl Pair<'_> {
                     ChangeKind::Prior,
                     &history(&was.requires.history, HistoryKind::Prior),
                     &history(&now.requires.history, HistoryKind::Prior),
+                    |effect| effect.as_str().to_string(),
                     changes,
                 );
                 set_changes(
                     ChangeKind::NoPrior,
                     &history(&was.requires.history, HistoryKind::NoPrior),
                     &history(&now.requires.history, HistoryKind::NoPrior),
+                    |effect| effect.as_str().to_string(),
                     changes,
                 );
-                let marks = |annotation: &crate::contract::ToolAnnotation| -> Vec<String> {
-                    annotation
-                        .requires
-                        .attention
-                        .iter()
-                        .map(|mark| mark.as_str().to_string())
-                        .collect()
-                };
-                set_changes(ChangeKind::Attention, &marks(was), &marks(now), changes);
+                set_changes(
+                    ChangeKind::Attention,
+                    &was.requires.attention,
+                    &now.requires.attention,
+                    |mark| mark.as_str().to_string(),
+                    changes,
+                );
                 if was.delta != now.delta {
                     changes.unknown(ChangeKind::Delta);
                 }
@@ -357,10 +375,13 @@ impl Pair<'_> {
 
     fn label_requirements(&self, before: &LabelRequirements, after: &LabelRequirements, changes: &mut Changes) {
         self.trust_floor(before.trust_floor, after.trust_floor, changes);
-        let recipients = |requirements: &LabelRequirements| -> Vec<String> {
-            requirements.audience.iter().map(requirement_spelling).collect()
-        };
-        set_changes(ChangeKind::Includes, &recipients(before), &recipients(after), changes);
+        set_changes(
+            ChangeKind::Includes,
+            &before.audience,
+            &after.audience,
+            requirement_spelling,
+            changes,
+        );
     }
 
     /// Ranks compare only within one chain. Across two chains a floor that keeps its name is
@@ -437,25 +458,60 @@ impl Pair<'_> {
     }
 }
 
-/// Whether anything in `registry` would take a call to `name`: the wildcard, or a contract or
-/// provider-run rule whose name overlaps it.
-fn covers(registry: &Registry, name: &ToolName) -> bool {
-    registry.wildcard.is_some()
-        || registry
-            .tools
-            .keys()
-            .chain(registry.provider_run.keys())
-            .any(|rule| rule.matches_name(name) || name.matches_name(rule))
+/// The names one registry's rules are written under, indexed so that whether a name overlaps
+/// any of them is a lookup. The index may overstate an overlap, which only leaves a
+/// direction unknown; it never misses one.
+struct Names<'a> {
+    wildcard: bool,
+    rules: BTreeSet<&'a ToolName>,
+    /// The leaf of every `mcp/<server>/<leaf>` rule, selectors included.
+    leaves: BTreeSet<&'a str>,
+}
+
+impl<'a> Names<'a> {
+    fn of(registry: &'a Registry) -> Names<'a> {
+        let rules: BTreeSet<&ToolName> = registry.tools.keys().chain(registry.provider_run.keys()).collect();
+        Names {
+            wildcard: registry.wildcard.is_some(),
+            leaves: rules.iter().filter_map(|rule| mcp_leaf(rule)).collect(),
+            rules,
+        }
+    }
+
+    /// Whether any rule would take a call `name` takes: the wildcard, the same name, a
+    /// selector over its leaf, or, for a selector, any rule under its leaf.
+    fn covers(&self, name: &ToolName) -> bool {
+        self.wildcard
+            || self.rules.contains(name)
+            || mcp_leaf(name).is_some_and(|leaf| match name.is_name_selector() {
+                true => self.leaves.contains(leaf),
+                false => self.rules.contains(&ToolName::new(format!("mcp/*/{leaf}"))),
+            })
+    }
+}
+
+fn mcp_leaf(name: &ToolName) -> Option<&str> {
+    name.as_str()
+        .strip_prefix("mcp/")
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, leaf)| leaf)
 }
 
 /// Each requirement only one side writes: one the newer contract adds tightens, one it
-/// drops loosens. A requirement both write is unchanged.
-fn set_changes(kind: ChangeKind, before: &[String], after: &[String], changes: &mut Changes) {
+/// drops loosens. A requirement both write is unchanged. Requirements compare as values;
+/// `spell` only renders the ones that differ.
+fn set_changes<T: PartialEq>(
+    kind: ChangeKind,
+    before: &[T],
+    after: &[T],
+    spell: impl Fn(&T) -> String,
+    changes: &mut Changes,
+) {
     for added in after.iter().filter(|entry| !before.contains(entry)) {
-        changes.push(kind, Direction::Tighten, None, Some(added.clone()));
+        changes.push(kind, Direction::Tighten, None, Some(spell(added)));
     }
     for dropped in before.iter().filter(|entry| !after.contains(entry)) {
-        changes.push(kind, Direction::Loosen, Some(dropped.clone()), None);
+        changes.push(kind, Direction::Loosen, Some(spell(dropped)), None);
     }
 }
 
@@ -465,12 +521,12 @@ enum HistoryKind {
     NoPrior,
 }
 
-fn history(requirements: &[HistoryRequirement], kind: HistoryKind) -> Vec<String> {
+fn history(requirements: &[HistoryRequirement], kind: HistoryKind) -> Vec<&EffectKind> {
     requirements
         .iter()
         .filter_map(|requirement| match (requirement, kind) {
             (HistoryRequirement::Prior(effect), HistoryKind::Prior)
-            | (HistoryRequirement::NoPrior(effect), HistoryKind::NoPrior) => Some(effect.as_str().to_string()),
+            | (HistoryRequirement::NoPrior(effect), HistoryKind::NoPrior) => Some(effect),
             (HistoryRequirement::Prior(_), HistoryKind::NoPrior)
             | (HistoryRequirement::NoPrior(_), HistoryKind::Prior) => None,
         })
