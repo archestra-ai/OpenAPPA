@@ -64,7 +64,7 @@ jobs:
       # Authenticates as the read-only secrets account. The GCS upload below
       # authenticates again as appa-demo-image-push, which replaces it.
       - name: Authenticate to read the canary key
-        uses: archestra-ai/.github/actions/google-auth@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
+        uses: archestra-ai/.github/actions/google-auth@dece2adc8ef7600e4654648e045e7d85ddf3338d # v1.23.0
         with:
           service_account: ci-appa-canary@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
@@ -117,7 +117,7 @@ jobs:
 
       - name: Authenticate to Google Cloud
         if: ${{ always() && vars.APPA_CANARY_GCS_BUCKET != '' && steps.rundir.outputs.dir != '' }}
-        uses: archestra-ai/.github/actions/google-auth@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
+        uses: archestra-ai/.github/actions/google-auth@dece2adc8ef7600e4654648e045e7d85ddf3338d # v1.23.0
         with:
           service_account: appa-demo-image-push@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
