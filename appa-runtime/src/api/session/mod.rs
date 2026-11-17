@@ -264,6 +264,9 @@ impl Session {
     /// by id, so it never holds a stop. A stop judges and closes the same `closing` list, so
     /// a call opened after it was read is neither waited for nor closed.
     fn unanswered(&self, closing: &[OpenDispatch], answered: &BTreeSet<String>) -> Result<Vec<String>, EventError> {
+        if closing.is_empty() {
+            return Ok(Vec::new());
+        }
         self.with_view(|context| {
             Ok(context
                 .log
