@@ -49,10 +49,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
-    Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, LaunchStart, LaunchToken, OfferedInputSanitizer,
-    OfferedRemedy, OfferedReturn, OpenCalls, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey,
-    ProposedCall, RefusalClass, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding, SpawnKind,
-    SpawnRef, StartKind, ToolOutcome, TrajectoryId,
+    Actor, AdapterName, CanonicalTool, DecisionGap, DecisionLabel, DecisionNarrowing, HookDecision, HookEvent,
+    LaunchStart, LaunchToken, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, OutcomeBody,
+    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, Review, ReviewChannel,
+    ReviewScopeItem, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -1333,6 +1333,14 @@ pub struct WireDecision {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running: Option<Vec<String>>,
+    /// A denial's requirement gaps; absent from a decision stored before they were recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gaps: Option<Vec<DecisionGap>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub narrowing: Option<DecisionNarrowing>,
+    /// The trajectory label a proposed call was checked at, when the engine checked one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<DecisionLabel>,
 }
 
 impl WireDecision {
@@ -1351,7 +1359,15 @@ impl WireDecision {
             class: None,
             detail: None,
             running: None,
+            gaps: None,
+            narrowing: None,
+            label: None,
         }
+    }
+
+    /// This decision carrying the label its call was checked at.
+    pub fn labelled(self, label: Option<DecisionLabel>) -> Self {
+        Self { label, ..self }
     }
 
     pub fn of(decision: &HookDecision) -> Self {
@@ -1366,8 +1382,12 @@ impl WireDecision {
                 feedback,
                 offers,
                 review,
+                gaps,
+                narrowing,
             } => Self {
                 feedback: Some(feedback.clone()),
+                gaps: Some(gaps.clone()),
+                narrowing: narrowing.clone(),
                 offers: Some(
                     offers
                         .iter()
@@ -1484,6 +1504,8 @@ impl WireDecision {
                         scope: entry.scope,
                     })
                     .collect(),
+                gaps: self.gaps.unwrap_or_default(),
+                narrowing: self.narrowing,
             },
             DecisionName::Block => HookDecision::Block {
                 reason: required("reason", self.reason)?,
@@ -1541,6 +1563,8 @@ mod tests {
             feedback: "no".to_string(),
             offers: Vec::new(),
             review: vec![review],
+            gaps: Vec::new(),
+            narrowing: None,
         }
     }
 
@@ -1572,6 +1596,43 @@ mod tests {
             stored.into_decision().expect("parses"),
             denied_with(review_with(None, None))
         );
+    }
+
+    /// A denial records its gaps even when it has none, so a decision stored before gaps were
+    /// recorded is the only one that lacks the field.
+    #[test]
+    fn a_denial_without_gaps_says_so_and_a_stored_one_without_the_field_reads_as_none() {
+        let wire = serde_json::to_value(WireDecision::of(&denied_with(review_with(None, None)))).expect("serializes");
+        assert_eq!(wire["gaps"], serde_json::json!([]));
+        assert!(wire.get("narrowing").is_none() && wire.get("label").is_none());
+        let stored: WireDecision =
+            serde_json::from_str(r#"{"protocol":1,"decision":"deny_call","feedback":"no"}"#).expect("an old row reads");
+        assert!(stored.gaps.is_none() && stored.label.is_none());
+        let HookDecision::DenyCall { gaps, narrowing, .. } = stored.into_decision().expect("parses") else {
+            panic!("a denial reads as a denial");
+        };
+        assert!(gaps.is_empty() && narrowing.is_none());
+    }
+
+    #[test]
+    fn a_label_rides_beside_any_decision_and_the_gap_kinds_are_snake_case() {
+        let label = DecisionLabel {
+            trust: "trusted".to_string(),
+            audience: vec![vec!["internal".to_string()]],
+        };
+        let allowed = WireDecision::of(&HookDecision::AllowCall { spawn: None }).labelled(Some(label.clone()));
+        let json = serde_json::to_value(&allowed).expect("serializes");
+        assert_eq!(
+            json["label"],
+            serde_json::json!({"trust": "trusted", "audience": [["internal"]]})
+        );
+        let back: WireDecision = serde_json::from_value(json).expect("reads");
+        assert_eq!(back.label, Some(label));
+        let gap = serde_json::to_value(DecisionGap::NoPrior {
+            effect: "network".to_string(),
+        })
+        .expect("serializes");
+        assert_eq!(gap, serde_json::json!({"kind": "no_prior", "effect": "network"}));
     }
 
     #[test]
@@ -2899,6 +2960,34 @@ mod tests {
                     hint: None,
                     scope: None,
                 }],
+                gaps: vec![
+                    DecisionGap::TrustFloor {
+                        required: "trusted".to_string(),
+                        actual: "untrusted".to_string(),
+                    },
+                    DecisionGap::Includes {
+                        required: vec!["internal".to_string(), "bob@example.com".to_string()],
+                    },
+                    DecisionGap::Prior {
+                        effect: "reviewed".to_string(),
+                    },
+                    DecisionGap::NoPrior {
+                        effect: "network".to_string(),
+                    },
+                    DecisionGap::Attention {
+                        mark: "human-approval".to_string(),
+                    },
+                ],
+                narrowing: Some(DecisionNarrowing {
+                    from: DecisionLabel {
+                        trust: "trusted".to_string(),
+                        audience: Vec::new(),
+                    },
+                    to: DecisionLabel {
+                        trust: "untrusted".to_string(),
+                        audience: vec![vec!["internal".to_string()], Vec::new()],
+                    },
+                }),
             },
             HookDecision::Block {
                 reason: "r".to_string(),
@@ -2932,6 +3021,8 @@ mod tests {
                 input_sanitizer: None,
             }],
             review: Vec::new(),
+            gaps: Vec::new(),
+            narrowing: None,
         }))
         .expect("serializes");
         assert_eq!(offers["offers"][0]["returns"], "as_spoken");

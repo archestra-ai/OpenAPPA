@@ -227,12 +227,18 @@ pub(crate) enum ToolCallDecision {
         /// the wire type and carries no id — but the hook dispatcher needs it to tie a
         /// recorded event to the fact the same call produced.
         dispatch: appa_engine::value::DispatchId,
+        /// The trajectory label the release was checked at, when this proposal checked it.
+        label: Option<appa_runtime_api::DecisionLabel>,
     },
     Deny {
         feedback: String,
         offers: Vec<OfferedRemedy>,
         display: Vec<RemedyDisplay>,
         review: Vec<appa_runtime_api::Review>,
+        gaps: Vec<appa_runtime_api::DecisionGap>,
+        narrowing: Option<appa_runtime_api::DecisionNarrowing>,
+        /// The trajectory label the block was checked at, when a check made it.
+        label: Option<appa_runtime_api::DecisionLabel>,
     },
 }
 
@@ -318,6 +324,8 @@ impl Default for EmbeddedPresentationOptions {
 pub struct EmbeddedHookOutcome {
     pub decision: appa_runtime_api::HookDecision,
     pub presentation: Option<RemedyPresentation>,
+    /// The trajectory label a proposed call was checked at; `None` when no check decided it.
+    pub label: Option<appa_runtime_api::DecisionLabel>,
 }
 
 /// Explains why a remedy call was refused execution.
@@ -4506,7 +4514,7 @@ fn bare_tool_name(authored: &str) -> &str {
     authored.split('(').next().unwrap_or(authored)
 }
 
-fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Config, OpenError> {
+pub(crate) fn compile_policy(config: &Config, naming: ToolNaming) -> Result<appa_policy::Config, OpenError> {
     let policy = resolve_served_policy(
         config.policy_file().value(),
         naming,

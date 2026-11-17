@@ -82,7 +82,10 @@ use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AnswerDelta, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration,
     ContextArtifact, HistoryEntry, ReviewedNarrowing, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
-use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling, SpawnKind};
+use appa_runtime_api::{
+    DecisionGap, DecisionLabel, DecisionNarrowing, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling,
+    SpawnKind,
+};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -104,6 +107,9 @@ pub struct ReleasedCall {
     /// the runtime keeps it so a diagnostic can tie a hook to the dispatch it produced.
     /// It never reaches an adapter: `HookDecision` is the wire type and carries no id.
     pub dispatch: EngineDispatchId,
+    /// The trajectory label the release was checked at. `None` for a repeat answered from
+    /// the record, which this check did not decide.
+    pub label: Option<DecisionLabel>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,6 +120,11 @@ pub struct Feedback {
     /// Every authority an offered plan would consult, with the review a person would read.
     /// The engine lists them all; the session keeps the ones whose backend is a person.
     pub review: Vec<PendingReview>,
+    /// The requirements the checked label misses, as `text` names them.
+    pub gaps: Vec<DecisionGap>,
+    pub narrowing: Option<DecisionNarrowing>,
+    /// The trajectory label the block was checked at; `None` for a denial no check made.
+    pub label: Option<DecisionLabel>,
 }
 
 /// One authority an offered plan consults, and the review as a person reads it — the
@@ -1384,26 +1395,15 @@ impl RuntimeEngine {
 
     /// The label by name: each dimension as chain names and reader ids.
     pub(crate) fn render_label(&self, label: &Label) -> Option<AuditLabel> {
-        let chain = self.engine.registry().trust_chain();
-        let trust = if label.trust == Trust::new(u8::MAX) {
-            chain
-                .name_of(Trust::new((chain.len() - 1) as u8))
-                .expect("a validated chain names its top rank")
-                .to_string()
-        } else {
-            match chain.name_of(label.trust) {
-                Some(name) => name.to_string(),
-                None => {
-                    tracing::warn!(
-                        rank = label.trust.rank(),
-                        "render refused: the trust bound has no chain name"
-                    );
-                    return None;
-                }
-            }
+        let Some(trust) = trust_name(self.engine.registry().trust_chain(), label.trust) else {
+            tracing::warn!(
+                rank = label.trust.rank(),
+                "render refused: the trust bound has no chain name"
+            );
+            return None;
         };
         Some(AuditLabel {
-            trust: terminal_safe(&trust),
+            trust: terminal_safe(trust),
             audience: terminal_safe(&audience_wire(&label.audience)),
         })
     }
@@ -1801,7 +1801,7 @@ impl RuntimeEngine {
             } => {
                 if let Some(release) = releases.into_iter().next() {
                     Next::ModelResponse {
-                        invocations: vec![released(batch, &release)],
+                        invocations: vec![released(batch, &release, None)],
                         feedback: Vec::new(),
                     }
                 } else if let Some(settled) = settled.into_iter().next() {
@@ -1814,7 +1814,7 @@ impl RuntimeEngine {
                         fork: (!matches!(self.engine.fork_status(view, &fork), ForkStatus::Unprepared)).then_some(fork),
                     };
                     Next::ModelResponse {
-                        invocations: vec![released(batch, &release)],
+                        invocations: vec![released(batch, &release, None)],
                         feedback: Vec::new(),
                     }
                 } else if let Some(block) = blocked.into_iter().next() {
@@ -1854,7 +1854,7 @@ impl RuntimeEngine {
             } => {
                 if let Some(release) = releases.into_iter().next() {
                     return Ok(Next::ModelResponse {
-                        invocations: vec![released(batch, &release)],
+                        invocations: vec![released(batch, &release, Some(self.decision_label(&bounds.label)))],
                         feedback: Vec::new(),
                     });
                 }
@@ -1923,12 +1923,29 @@ impl RuntimeEngine {
             presentation,
         );
         let review = self.pending_reviews(block, &offers);
+        let chain = registry.trust_chain();
         Feedback {
             text: rendered.text,
             offers: self.offered_remedies(block, offers.into_iter().map(|(offer, _)| offer).collect()),
             display: Some(rendered.display),
             review,
+            gaps: block
+                .block
+                .raw
+                .requirement_gaps
+                .iter()
+                .map(|gap| decision_gap(gap, chain))
+                .collect(),
+            narrowing: block.block.raw.narrowing.as_ref().map(|narrowing| DecisionNarrowing {
+                from: decision_label(&narrowing.from, chain),
+                to: decision_label(&narrowing.to, chain),
+            }),
+            label: Some(decision_label(&bounds.label, chain)),
         }
+    }
+
+    fn decision_label(&self, label: &Label) -> DecisionLabel {
+        decision_label(label, self.engine.registry().trust_chain())
     }
 
     fn offered_remedies(&self, block: &CoreBlocked, offers: Vec<OfferId>) -> Vec<OfferedRemedy> {
@@ -2384,6 +2401,7 @@ impl RuntimeEngine {
             offers,
             display,
             review,
+            ..
         } = self.block_delivery(block, bounds, presentation);
         let feedback = match denied_by {
             Some(authority) => format!("[appa] authority {} denied this plan.\n{text}", authority.as_str()),
@@ -3639,6 +3657,9 @@ fn deny_next(text: String) -> Next {
             offers: Vec::new(),
             display: None,
             review: Vec::new(),
+            gaps: Vec::new(),
+            narrowing: None,
+            label: None,
         }],
     }
 }
@@ -3830,12 +3851,13 @@ pub(crate) fn minted_offers(log: &Log, trajectory: &TrajectoryId) -> Vec<OfferId
         .collect()
 }
 
-fn released(batch: &ProposalBatchId, release: &Released) -> ReleasedCall {
+fn released(batch: &ProposalBatchId, release: &Released, label: Option<DecisionLabel>) -> ReleasedCall {
     ReleasedCall {
         tool: release.call.tool().as_str().to_string(),
         bytes: release.call.canonical_arguments().canonical_bytes().to_vec(),
         fork: release.fork.as_ref().map(|fork| fork_binding(batch, fork)),
         dispatch: release.dispatch.clone(),
+        label,
     }
 }
 
@@ -4079,6 +4101,52 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 
 fn effect_names(effects: &EffectSet) -> Vec<String> {
     effects.iter().map(|effect| terminal_safe(effect.as_str())).collect()
+}
+
+/// The name of a trust rank; top trust, the fold identity above the chain, is its top rank.
+fn trust_name(chain: &TrustChain, trust: Trust) -> Option<&str> {
+    match trust == Trust::new(u8::MAX) {
+        true => chain.names().last(),
+        false => chain.name_of(trust),
+    }
+}
+
+/// A rank no chain name reads is spelled by its index, so a record never drops it.
+fn trust_spelling(chain: &TrustChain, trust: Trust) -> String {
+    trust_name(chain, trust).map_or_else(|| format!("rank {}", trust.rank()), str::to_string)
+}
+
+/// A label by name, losslessly: each union clause in the policy's audience-list grammar.
+pub(crate) fn decision_label(label: &Label, chain: &TrustChain) -> DecisionLabel {
+    DecisionLabel {
+        trust: trust_spelling(chain, label.trust),
+        audience: label.audience.clauses().map(crate::consult::clause_entries).collect(),
+    }
+}
+
+pub(crate) fn decision_gap(gap: &appa_engine::check::Gap, chain: &TrustChain) -> DecisionGap {
+    use appa_engine::check::Gap;
+    match gap {
+        Gap::TrustFloor { required, actual } => DecisionGap::TrustFloor {
+            required: trust_spelling(chain, *required),
+            actual: trust_spelling(chain, *actual),
+        },
+        Gap::Includes { recipients } => DecisionGap::Includes {
+            required: match recipients {
+                DeclaredAudience::Public => vec!["public".to_string()],
+                DeclaredAudience::Union(clause) => crate::consult::clause_entries(clause),
+            },
+        },
+        Gap::Prior(effect) => DecisionGap::Prior {
+            effect: effect.as_str().to_string(),
+        },
+        Gap::NoPrior(effect) => DecisionGap::NoPrior {
+            effect: effect.as_str().to_string(),
+        },
+        Gap::Attention(mark) => DecisionGap::Attention {
+            mark: mark.as_str().to_string(),
+        },
+    }
 }
 
 fn audience_wire(audience: &Audience) -> String {

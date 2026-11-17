@@ -1214,17 +1214,17 @@ pub enum ToolKind {
 pub struct Registry {
     trust_chain: TrustChain,
     audience_vocabulary: AudienceVocabulary,
-    tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>>,
+    pub(crate) tools: BTreeMap<ToolName, Vec<(ToolMatcher, ToolDeclaration)>>,
     /// Declaration order is significant when precise and server-independent
     /// names overlap. Entries point into the immutable per-name variant lists.
     tool_order: Vec<(ToolName, usize)>,
     /// Only leaves with a server-independent rule need cross-name lookup.
-    mcp_order: BTreeMap<String, Vec<(ToolName, usize)>>,
-    provider_run: BTreeMap<ToolName, ToolAnnotation>,
+    pub(crate) mcp_order: BTreeMap<String, Vec<(ToolName, usize)>>,
+    pub(crate) provider_run: BTreeMap<ToolName, ToolAnnotation>,
     /// The wildcard declaration, when the policy writes one: the Annotated declaration every
     /// tool call without a matching explicit contract resolves to. In no tool-name listing; the
     /// policy identity carries it through the declared configuration.
-    wildcard: Option<ToolDeclaration>,
+    pub(crate) wildcard: Option<ToolDeclaration>,
     /// The recorder each declaration names: by base name and ordinal within `tools`, and the
     /// wildcard's apart.
     recorders: BTreeMap<(ToolName, usize), crate::names::RecorderName>,

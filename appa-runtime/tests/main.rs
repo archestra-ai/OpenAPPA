@@ -55,6 +55,7 @@ mod monday_policy;
 mod notion_policy;
 mod pagerduty_policy;
 mod peer_messages;
+mod policy_contracts;
 mod policy_revisions;
 mod posthog_policy;
 mod protected_resume;

@@ -126,6 +126,9 @@ impl Session {
                 offers,
                 display,
                 review,
+                gaps,
+                narrowing,
+                label,
             } = &decision
             else {
                 return Ok(decision);
@@ -136,6 +139,9 @@ impl Session {
                 offers: offers.clone(),
                 display: display.clone(),
                 review: review.clone(),
+                gaps: gaps.clone(),
+                narrowing: narrowing.clone(),
+                label: label.clone(),
             };
             let offers = offers.clone();
             let claim = AheadClaim {
@@ -314,6 +320,7 @@ impl Session {
                     Ok(ToolCallDecision::Allow {
                         spawn: released.fork.clone(),
                         dispatch: released.dispatch.clone(),
+                        label: released.label.clone(),
                     })
                 }
                 ([], feedback) if !feedback.is_empty() => {
@@ -323,6 +330,9 @@ impl Session {
                         offers: feedback.iter().flat_map(|entry| entry.offers.clone()).collect(),
                         display: feedback.iter().filter_map(|entry| entry.display.clone()).collect(),
                         review: join_review(feedback, &self.deployment().externals),
+                        gaps: feedback.iter().flat_map(|entry| entry.gaps.clone()).collect(),
+                        narrowing: feedback.iter().find_map(|entry| entry.narrowing.clone()),
+                        label: feedback.iter().find_map(|entry| entry.label.clone()),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),

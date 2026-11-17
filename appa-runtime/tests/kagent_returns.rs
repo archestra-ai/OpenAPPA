@@ -129,6 +129,13 @@ fn decision(name: &str) -> serde_json::Value {
     serde_json::json!({"protocol": appa_runtime_api::PROTOCOL, "decision": name})
 }
 
+/// A released call, with the label the check evaluated it at: nothing has narrowed it.
+fn allowed() -> serde_json::Value {
+    let mut allowed = decision("allow_call");
+    allowed["label"] = serde_json::json!({"trust": "trusted", "audience": []});
+    allowed
+}
+
 fn ack() -> serde_json::Value {
     decision("ack")
 }
@@ -368,7 +375,7 @@ async fn a_spawn_is_identified_from_the_raw_spelling_and_never_read_off_the_wire
     claimed["spawn"] = serde_json::json!(true);
     assert_eq!(
         answered(&runtime, claimed).await,
-        decision("allow_call"),
+        allowed(),
         "an ordinary call releases with no fork, whatever the wire claims"
     );
 
@@ -430,7 +437,7 @@ async fn a_return_declared_as_spoken_crosses_at_the_child_end_and_the_spawn_resu
     );
     assert_eq!(
         answered(&runtime, child_call()).await,
-        decision("allow_call"),
+        allowed(),
         "the child works under the fork"
     );
     assert_eq!(answered(&runtime, child_result()).await, ack());
