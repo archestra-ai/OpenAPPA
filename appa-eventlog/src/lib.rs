@@ -168,8 +168,30 @@ pub struct PolicyHead {
 }
 
 /// The records of one read, and the position they were read at.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Log {
+    data: std::sync::Arc<LogData>,
+    lineage: Option<LogLineage>,
+}
+
+/// An append-only SQLite cache generation, invalidated when another writer can alter a prefix.
+#[derive(Debug, Clone, Default)]
+pub struct LogLineage(std::sync::Arc<()>);
+
+impl PartialEq for LogLineage {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl PartialEq for Log {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LogData {
     root: TrajectoryId,
     /// The deployment the family follows, as its opening named it.
     deployment: DeploymentName,
@@ -179,6 +201,8 @@ pub struct Log {
     batch_ends: Vec<usize>,
     /// The policy revision each batch's first record carries; `None` for a host-only batch.
     stamps: Vec<Option<PolicyRevision>>,
+    revisions: std::collections::BTreeSet<PolicyRevision>,
+    stamp: Option<PolicyRevision>,
     basis: u64,
     policy_file: Vec<u8>,
     host: Vec<HostRecord>,
@@ -385,33 +409,37 @@ pub struct CallBinding<'a> {
 }
 
 impl Log {
+    pub fn lineage(&self) -> Option<&LogLineage> {
+        self.lineage.as_ref()
+    }
+
     pub fn root(&self) -> &TrajectoryId {
-        &self.root
+        &self.data.root
     }
 
     pub fn facts(&self) -> &[Fact] {
-        &self.facts
+        &self.data.facts
     }
 
     /// The count of accepted batches this read stands at — the compare-and-swap position,
     /// never a count of facts.
     pub fn basis(&self) -> u64 {
-        self.basis
+        self.data.basis
     }
 
     /// The deployment this family follows, as its opening named it.
     pub fn deployment(&self) -> &DeploymentName {
-        &self.deployment
+        &self.data.deployment
     }
 
     /// The policy revision of the latest stamped batch.
     pub fn stamp(&self) -> Option<PolicyRevision> {
-        self.stamps.iter().rev().find_map(|stamp| *stamp)
+        self.data.stamp
     }
 
     /// Every policy revision a batch of this log is stamped with.
     pub fn revisions(&self) -> std::collections::BTreeSet<PolicyRevision> {
-        self.stamps.iter().flatten().copied().collect()
+        self.data.revisions.clone()
     }
 
     /// Every batch, with the revision its first record carries.
@@ -426,16 +454,16 @@ impl Log {
     pub fn stamped_after(&self, basis: u64) -> Option<Vec<StampedBatch<'_>>> {
         let first = usize::try_from(basis)
             .ok()
-            .filter(|first| *first <= self.batch_ends.len())?;
+            .filter(|first| *first <= self.data.batch_ends.len())?;
         let mut start = match first {
             0 => 0,
-            first => self.batch_ends[first - 1],
+            first => self.data.batch_ends[first - 1],
         };
-        let mut batches = Vec::with_capacity(self.batch_ends.len() - first);
-        for (end, stamp) in self.batch_ends[first..].iter().zip(&self.stamps[first..]) {
+        let mut batches = Vec::with_capacity(self.data.batch_ends.len() - first);
+        for (end, stamp) in self.data.batch_ends[first..].iter().zip(&self.data.stamps[first..]) {
             batches.push(StampedBatch {
                 revision: *stamp,
-                facts: &self.facts[start..*end],
+                facts: &self.data.facts[start..*end],
             });
             start = *end;
         }
@@ -445,19 +473,19 @@ impl Log {
     /// The policy file the family opened under, byte for byte: what the family's opening revision
     /// compiled with the family's inventory.
     pub fn policy_file(&self) -> &[u8] {
-        &self.policy_file
+        &self.data.policy_file
     }
 
     /// Host observations in append order. Consumers validate them under the
     /// opening configuration; no later observation changes earlier engine facts.
     pub fn host_records(&self) -> &[HostRecord] {
-        &self.host
+        &self.data.host
     }
 
     /// Host call identities in append order. A binding remains after its
     /// dispatch closes so reuse of one host id can be refused after restart.
     pub fn call_bindings(&self) -> impl Iterator<Item = CallBinding<'_>> {
-        self.host.iter().filter_map(|record| match &record.observation {
+        self.data.host.iter().filter_map(|record| match &record.observation {
             HostObservation::CallBound {
                 trajectory,
                 call_id,
@@ -478,20 +506,25 @@ impl Log {
     /// the record. The latest record wins: a call id denied again after the state moved
     /// names the denial that still stands.
     pub fn denied_call_batch(&self, trajectory: &TrajectoryId, call_id: &str) -> Option<&str> {
-        self.host.iter().rev().find_map(|record| match &record.observation {
-            HostObservation::CallDenied {
-                trajectory: owner,
-                call_id: id,
-                batch,
-                ..
-            } if owner == trajectory && id == call_id => Some(batch.as_str()),
-            _ => None,
-        })
+        self.data
+            .host
+            .iter()
+            .rev()
+            .find_map(|record| match &record.observation {
+                HostObservation::CallDenied {
+                    trajectory: owner,
+                    call_id: id,
+                    batch,
+                    ..
+                } if owner == trajectory && id == call_id => Some(batch.as_str()),
+                _ => None,
+            })
     }
 
     /// The bound calls the host reported finished, as (trajectory, call id).
     pub fn settled_calls(&self) -> std::collections::BTreeSet<(&TrajectoryId, &str)> {
-        self.host
+        self.data
+            .host
             .iter()
             .filter_map(|record| match &record.observation {
                 HostObservation::CallSettled { trajectory, call_id } => Some((trajectory, call_id.as_str())),
@@ -766,7 +799,7 @@ impl Step<'_> {
             bytes: encode(&[], Some(observation)),
             key: observation.key(),
             fence: Some(Fence {
-                deployment: &based_on.deployment,
+                deployment: based_on.deployment(),
                 revision,
             }),
         };
@@ -790,22 +823,22 @@ impl Step<'_> {
         batch: Batch<'_>,
         hold: Option<&embedded::EmbeddedAppendHold<'_>>,
     ) -> Result<(), AppendError> {
-        assert_eq!(based_on.root, self.root, "a step appends only to the log it read");
+        assert_eq!(based_on.root(), &self.root, "a step appends only to the log it read");
         match self.backend {
             StepBackend::Sqlite(_) => match hold {
-                None => self.store.append_at(&based_on.root, based_on.basis, batch),
+                None => self.store.append_at(based_on.root(), based_on.basis(), batch),
                 Some(hold) => match &self.store.store {
                     Store::Sqlite(sqlite) => {
                         sqlite
                             .appender()
-                            .append_holding_read(&based_on.root, based_on.basis, &batch, hold)
+                            .append_holding_read(based_on.root(), based_on.basis(), &batch, hold)
                     }
                     #[cfg(feature = "postgres")]
                     Store::Postgres(_) => unreachable!("a SQLite step belongs to a SQLite store"),
                 },
             },
             #[cfg(feature = "postgres")]
-            StepBackend::Postgres(step) => step.append(based_on.basis, batch, hold),
+            StepBackend::Postgres(step) => step.append(based_on.basis(), batch, hold),
         }
     }
 }
@@ -839,7 +872,7 @@ impl<'a> Batch<'a> {
             bytes: encode(facts, observation),
             key: observation.and_then(HostObservation::key),
             fence: stamp.map(|revision| Fence {
-                deployment: &based_on.deployment,
+                deployment: based_on.deployment(),
                 revision,
             }),
         })
@@ -1083,15 +1116,19 @@ impl LogStore {
         facts: &[Fact],
         observation: Option<&HostObservation>,
     ) -> Result<(), AppendError> {
-        self.append_at(&based_on.root, based_on.basis, Batch::of(based_on, facts, observation)?)
+        self.append_at(
+            based_on.root(),
+            based_on.basis(),
+            Batch::of(based_on, facts, observation)?,
+        )
     }
 
     /// Append one host observation alone. It decides nothing, so no revision stamps it and a
     /// published revision does not refuse it; a stale read writes nothing, just as append.
     pub fn append_host(&self, based_on: &Log, observation: &HostObservation) -> Result<(), AppendError> {
         self.append_at(
-            &based_on.root,
-            based_on.basis,
+            based_on.root(),
+            based_on.basis(),
             Batch::of(based_on, &[], Some(observation))?,
         )
     }
@@ -1419,10 +1456,10 @@ impl LogStore {
             Store::Sqlite(sqlite) => {
                 sqlite
                     .appender()
-                    .append_holding_read(&based_on.root, based_on.basis, &batch, hold)
+                    .append_holding_read(based_on.root(), based_on.basis(), &batch, hold)
             }
             #[cfg(feature = "postgres")]
-            Store::Postgres(pg) => pg.append_holding_read(&based_on.root, based_on.basis, batch, hold),
+            Store::Postgres(pg) => pg.append_holding_read(based_on.root(), based_on.basis(), batch, hold),
         }
     }
 
@@ -1736,7 +1773,7 @@ mod tests {
     impl LogStore {
         pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
             match &self.store {
-                Store::Sqlite(sqlite) => sqlite.connection(),
+                Store::Sqlite(sqlite) => sqlite.testing_connection(),
                 #[cfg(feature = "postgres")]
                 Store::Postgres(_) => panic!("SQLite-only operation"),
             }
@@ -1973,6 +2010,84 @@ mod tests {
         assert!(matches!(log.facts(), [Fact::TrajectoryOpened(_)]));
         assert_eq!(log.deployment(), &deployment());
         assert_eq!(log.stamp(), Some(PolicyRevision::FIRST));
+    }
+
+    #[test]
+    fn sqlite_reuses_an_unchanged_snapshot_and_advances_after_commit() {
+        let store = opened();
+        let prior = store.log(&root()).unwrap();
+        let same = store.log(&root()).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&prior.data, &same.data));
+
+        let observation = observed(root().as_str(), "demo");
+        store.append_host(&prior, &observation).unwrap();
+        let next = store.log(&root()).unwrap();
+        assert_eq!(next.lineage(), prior.lineage());
+        assert_eq!(next.basis(), prior.basis() + 1);
+        assert!(prior.host_records().is_empty(), "old readers keep their snapshot");
+        assert_eq!(next.host_records()[0].observation, observation);
+        assert_eq!(next.stamp(), prior.stamp());
+        assert!(matches!(
+            store.append_host(&prior, &observation),
+            Err(AppendError::Conflict { .. })
+        ));
+    }
+
+    #[test]
+    fn a_foreign_commit_invalidates_the_sqlite_prefix_even_with_the_same_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("appa.db");
+        let store = LogStore::open(Backend::Sqlite { path: path.clone() }).unwrap();
+        create(&store, opening(&root())).unwrap();
+        let foreign = LogStore::open(Backend::Sqlite { path }).unwrap();
+
+        let initial = store.log(&root()).unwrap();
+        foreign
+            .append_host(&initial, &observed(root().as_str(), "old"))
+            .unwrap();
+        let appended = store.log(&root()).unwrap();
+        assert_eq!(appended.basis(), initial.basis() + 1);
+        assert_ne!(appended.lineage(), initial.lineage());
+
+        store
+            .append_host(&appended, &observed(root().as_str(), "tail"))
+            .unwrap();
+        let warm = store.log(&root()).unwrap();
+        assert_eq!(warm.lineage(), appended.lineage());
+        assert_eq!(warm.basis(), 3);
+        foreign
+            .lock()
+            .execute("UPDATE logs SET facts = ?1 WHERE seq = 1", [b"bad".as_slice()])
+            .unwrap();
+        assert!(matches!(store.log(&root()), Err(ReadError::Undecodable { seq: 1, .. })));
+    }
+
+    #[test]
+    fn sqlite_reads_cold_when_the_schema_has_triggers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("appa.db");
+        let store = LogStore::open(Backend::Sqlite { path: path.clone() }).unwrap();
+        create(&store, opening(&root())).unwrap();
+        let foreign = rusqlite::Connection::open(path).unwrap();
+
+        let initial = store.log(&root()).unwrap();
+        store
+            .append_host(&initial, &observed(root().as_str(), "prior"))
+            .unwrap();
+        let before_trigger = store.log(&root()).unwrap();
+        foreign
+            .execute_batch(
+                "CREATE TRIGGER change_prior_batch AFTER INSERT ON logs WHEN NEW.seq = 3
+             BEGIN UPDATE logs SET facts = X'626164' WHERE root = NEW.root AND seq = 1; END;",
+            )
+            .unwrap();
+        store
+            .append_host(&before_trigger, &observed(root().as_str(), "tail"))
+            .unwrap();
+        let warm = store.log(&root()).unwrap();
+        assert_ne!(store.log(&root()).unwrap().lineage(), warm.lineage());
+        store.append_host(&warm, &observed(root().as_str(), "trigger")).unwrap();
+        assert!(matches!(store.log(&root()), Err(ReadError::Undecodable { seq: 1, .. })));
     }
 
     /// A root whose opening names no deployment was opened before policy revisions: its read is
@@ -2442,6 +2557,26 @@ mod tests {
             .expect("the middle row deletes");
         let error = store.log(&root()).expect_err("a gapped log does not read");
         assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage, "{error:?}");
+    }
+
+    #[test]
+    fn a_log_with_a_malformed_position_refuses_the_read() {
+        let store = opened();
+        for position in ["-1", "-1e30"] {
+            let connection = store.lock();
+            connection
+                .execute(
+                    &format!("INSERT INTO logs SELECT root, {position}, facts FROM logs WHERE seq = 0"),
+                    [],
+                )
+                .unwrap();
+            drop(connection);
+            let error = store
+                .log(&root())
+                .expect_err("an invalid sequence position cannot be skipped");
+            assert_eq!(StoreErrorClass::from(&error), StoreErrorClass::Storage);
+            store.lock().execute("DELETE FROM logs WHERE seq < 0", []).unwrap();
+        }
     }
 
     /// The position is one past the highest stored `seq`, not the row count, so the two

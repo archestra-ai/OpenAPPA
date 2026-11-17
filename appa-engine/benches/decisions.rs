@@ -14,7 +14,9 @@ use appa_engine::fact::EffectSet;
 use appa_engine::label::{Audience, Label, Trust};
 use appa_engine::names::AuthorityName;
 use appa_engine::params::ToolParameters;
-use appa_engine::profile::{BindingMode, DeploymentPolicy, ExecutorClass, PolicyFileKey, ProfileDeclaration};
+use appa_engine::profile::{
+    BindingMode, DeploymentName, DeploymentPolicy, ExecutorClass, PolicyFileKey, PolicyRevision, ProfileDeclaration,
+};
 use appa_engine::registry::{PlannerCap, RegistryConfig, TrustChain};
 use appa_engine::transition::{
     EngineDecision, EngineEvent, EngineView, FollowUp, OfferExecution, OfferOutcome, OutcomeBody, ProposalBatch,
@@ -101,6 +103,7 @@ fn engine() -> Engine {
         },
     })
     .expect("the bench policy opens")
+    .at(DeploymentName::new("bench"), PolicyRevision::FIRST)
 }
 
 fn starting_label() -> Label {

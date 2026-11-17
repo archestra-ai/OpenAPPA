@@ -2,6 +2,7 @@
 //! of [`Backend::Memory`](crate::Backend::Memory). This module owns the schema, its version
 //! stamp, and every statement either runs.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
@@ -20,7 +21,7 @@ use crate::embedded::{
 };
 #[cfg(feature = "fault-injection")]
 use crate::encoding::encode;
-use crate::encoding::{contiguous, decoded, opening_key};
+use crate::encoding::{contiguous_from, decoded, extend, opening_key};
 use crate::held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage, NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, LeaseOwner, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
@@ -29,7 +30,8 @@ use crate::receipts::{
     resolve_result_claim, resolve_result_completion,
 };
 use crate::{
-    AppendError, Batch, CreateError, DeploymentName, Fence, Log, OpenError, PolicyHead, PublishError, ReadError,
+    AppendError, Batch, CreateError, DeploymentName, Fence, Log, LogLineage, OpenError, PolicyHead, PublishError,
+    ReadError,
 };
 
 const SCHEMA_VERSION: i64 = 9;
@@ -136,7 +138,71 @@ const EMBEDDED_SCHEMA: &str = "CREATE TABLE embedded_peer_messages (
      CREATE UNIQUE INDEX embedded_peer_read_call ON embedded_peer_messages (root, recipient, read_call_id)
      WHERE read_call_id IS NOT NULL;";
 
-pub(crate) struct Sqlite(Mutex<Connection>);
+pub(crate) struct Sqlite {
+    connection: Mutex<Connection>,
+    logs: Mutex<LogCache>,
+}
+
+// Bound both the number of roots and their retained data. The weight includes encoded
+// bytes (for the decoded strings and containers) plus the inline decoded records.
+const CACHED_ROOTS: usize = 128;
+const CACHE_WEIGHT: usize = 32 * 1024 * 1024;
+
+#[derive(Default)]
+struct LogCache {
+    data_version: Option<i64>,
+    has_triggers: bool,
+    lineage: LogLineage,
+    entries: VecDeque<CachedLog>,
+    weight: usize,
+}
+
+struct CachedLog {
+    log: Log,
+    bytes: usize,
+    tail: Vec<u8>,
+}
+
+impl CachedLog {
+    fn weight(&self) -> usize {
+        self.bytes
+            + self.tail.len()
+            + self.log.policy_file().len()
+            + std::mem::size_of_val(self.log.facts())
+            + std::mem::size_of_val(self.log.host_records())
+            + self.log.basis() as usize * (size_of::<usize>() + size_of::<Option<PolicyRevision>>())
+    }
+}
+
+impl LogCache {
+    fn take(&mut self, root: &TrajectoryId) -> Option<CachedLog> {
+        let index = self.entries.iter().position(|entry| entry.log.root() == root)?;
+        let entry = self.entries.remove(index)?;
+        self.weight -= entry.weight();
+        Some(entry)
+    }
+
+    fn keep(&mut self, entry: CachedLog) {
+        let weight = entry.weight();
+        if weight > CACHE_WEIGHT {
+            return;
+        }
+        if self
+            .entries
+            .iter()
+            .any(|cached| cached.log.root() == entry.log.root() && cached.log.basis() >= entry.log.basis())
+        {
+            return;
+        }
+        self.take(entry.log.root());
+        while self.entries.len() >= CACHED_ROOTS || self.weight + weight > CACHE_WEIGHT {
+            let oldest = self.entries.pop_front().expect("a cache over its limit holds an entry");
+            self.weight -= oldest.weight();
+        }
+        self.weight += weight;
+        self.entries.push_back(entry);
+    }
+}
 
 impl Sqlite {
     /// Open the file, refusing one that is damaged, then install or check the schema.
@@ -260,13 +326,28 @@ impl Sqlite {
             });
         }
         transaction.commit()?;
-        Ok(Self(Mutex::new(connection)))
+        Ok(Self {
+            connection: Mutex::new(connection),
+            logs: Mutex::default(),
+        })
     }
 
     pub(crate) fn connection(&self) -> MutexGuard<'_, Connection> {
-        self.0
+        self.connection
             .lock()
             .expect("the log store mutex is never poisoned: no panics under the lock")
+    }
+
+    fn logs(&self) -> MutexGuard<'_, LogCache> {
+        self.logs.lock().expect("the log cache mutex is never poisoned")
+    }
+
+    /// Tests using this connection may do in-place mutations just as a foreign writer can.
+    #[cfg(any(test, feature = "fault-injection"))]
+    pub(crate) fn testing_connection(&self) -> MutexGuard<'_, Connection> {
+        let connection = self.connection();
+        *self.logs() = LogCache::default();
+        connection
     }
 
     /// Store a root's opening batch and the policy file it opens under, in one transaction, fenced
@@ -402,32 +483,95 @@ impl Sqlite {
     }
 
     pub(crate) fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
-        let (batches, policy_file) = {
-            let connection = self.connection();
-            let mut statement = connection.prepare("SELECT seq, facts FROM logs WHERE root = ?1 ORDER BY seq ASC")?;
-            let rows = statement
-                .query_map(params![root.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-            let batches = contiguous(rows).map_err(|gap| {
-                ReadError::Storage(rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
-                    Some(gap.to_string()),
-                ))
+        let mut connection = self.connection();
+        let transaction = connection.transaction()?;
+        // Read the version, tail and suffix in one SQLite snapshot. Our connection only
+        // appends to the log and inserts policy files. A commit by another connection
+        // could have rewritten any prefix or policy file, so discard all cached prefixes.
+        let version = transaction.pragma_query_value(None, "data_version", |row| row.get(0))?;
+        let mut cache = self.logs();
+        if cache.data_version != Some(version) {
+            // Triggers run on our own connection and can rewrite an accepted batch
+            // without changing data_version. Such databases always read and replay cold.
+            let has_triggers = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type = 'trigger')",
+                [],
+                |row| row.get(0),
+            )?;
+            *cache = LogCache {
+                data_version: Some(version),
+                has_triggers,
+                ..LogCache::default()
+            };
+        }
+
+        let mut prefix = cache.take(root);
+        let first = prefix.as_ref().map_or(0, |entry| entry.log.basis() - 1);
+        let mut batches = log_rows(&transaction, root, first)?;
+        if let Some(entry) = &prefix
+            && batches.first() != Some(&entry.tail)
+        {
+            prefix = None;
+            *cache = LogCache {
+                data_version: Some(version),
+                has_triggers: cache.has_triggers,
+                ..LogCache::default()
+            };
+            batches = log_rows(&transaction, root, 0)?;
+        }
+
+        if let Some(mut entry) = prefix {
+            transaction.commit()?;
+            let new = batches.split_off(1);
+            let decoded_batches = new.len();
+            if let Some(last) = new.last() {
+                entry.bytes += new.iter().map(Vec::len).sum::<usize>();
+                entry.tail.clone_from(last);
+                extend(&mut entry.log, new)?;
+            }
+            let log = entry.log.clone();
+            cache.keep(entry);
+            drop(cache);
+            drop(connection);
+            tracing::trace!(decoded_batches, cache_hit = true, "read SQLite log");
+            return Ok(log);
+        }
+
+        let key = opening_key(root, &batches)?;
+        let policy_file = transaction
+            .query_row(
+                "SELECT bytes FROM policy_files WHERE key = ?1",
+                params![key.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| ReadError::PolicyFileMissing {
+                key: key.as_str().to_string(),
             })?;
-            let key = opening_key(root, &batches)?;
-            let policy_file = connection
-                .query_row(
-                    "SELECT bytes FROM policy_files WHERE key = ?1",
-                    params![key.as_str()],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or_else(|| ReadError::PolicyFileMissing {
-                    key: key.as_str().to_string(),
-                })?;
-            (batches, policy_file)
-        };
-        decoded(root, batches, policy_file)
+        transaction.commit()?;
+        let lineage = (!cache.has_triggers).then(|| cache.lineage.clone());
+        drop(cache);
+        drop(connection);
+
+        // Cold reads can decode many megabytes. Other roots can use the database
+        // while this one decodes, and a racing reader may cache a newer snapshot.
+        let decoded_batches = batches.len();
+        let bytes = batches.iter().map(Vec::len).sum();
+        let tail = batches.last().expect("a log with an opening has a tail").clone();
+        let mut log = decoded(root, batches, policy_file)?;
+        log.lineage = Some(lineage.clone().unwrap_or_default());
+        if let Some(lineage) = lineage {
+            let mut cache = self.logs();
+            if cache.lineage == lineage {
+                cache.keep(CachedLog {
+                    log: log.clone(),
+                    bytes,
+                    tail,
+                });
+            }
+        }
+        tracing::trace!(decoded_batches, cache_hit = false, "read SQLite log");
+        Ok(log)
     }
 
     pub(crate) fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {
@@ -1359,20 +1503,20 @@ fn publish_in(
 #[cfg(feature = "fault-injection")]
 impl Sqlite {
     pub(crate) fn forget_policy_files(&self) {
-        self.connection()
+        self.testing_connection()
             .execute("DELETE FROM policy_files", [])
             .expect("the damage lands");
     }
 
     pub(crate) fn corrupt_policy_files(&self, bytes: &[u8]) {
-        self.connection()
+        self.testing_connection()
             .execute("UPDATE policy_files SET bytes = ?1", params![bytes])
             .expect("the damage lands");
     }
 
     /// How many batches now hold `bytes`: one where the batch exists.
     pub(crate) fn corrupt_batch(&self, root: &TrajectoryId, seq: u64, bytes: &[u8]) -> usize {
-        self.connection()
+        self.testing_connection()
             .execute(
                 "UPDATE logs SET facts = ?3 WHERE root = ?1 AND seq = ?2",
                 params![root.as_str(), seq as i64, bytes],
@@ -1471,6 +1615,34 @@ fn stored_key(key: String) -> Result<appa_engine::profile::PolicyFileKey, ReadEr
     serde_json::from_value(serde_json::Value::String(key.clone())).map_err(|error| ReadError::UndecodableKey {
         key,
         detail: error.to_string(),
+    })
+}
+
+/// Read only the tail of a held prefix and any batches that follow it.
+fn log_rows(connection: &Connection, root: &TrajectoryId, first: u64) -> Result<Vec<Vec<u8>>, ReadError> {
+    let (query, start) = if first == 0 {
+        // Check every position on a cold read, even values SQLite accepted with the wrong type.
+        ("SELECT seq, facts FROM logs WHERE root = ?1 ORDER BY seq ASC", None)
+    } else {
+        (
+            "SELECT seq, facts FROM logs WHERE root = ?1 AND seq >= ?2 ORDER BY seq ASC",
+            Some(first as i64),
+        )
+    };
+    let mut statement = connection.prepare(query)?;
+    let mut cursor = match start {
+        Some(start) => statement.query(params![root.as_str(), start])?,
+        None => statement.query([root.as_str()])?,
+    };
+    let mut rows = Vec::new();
+    while let Some(row) = cursor.next()? {
+        rows.push((row.get(0)?, row.get(1)?));
+    }
+    contiguous_from(first, rows).map_err(|gap| {
+        ReadError::Storage(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CORRUPT),
+            Some(gap.to_string()),
+        ))
     })
 }
 

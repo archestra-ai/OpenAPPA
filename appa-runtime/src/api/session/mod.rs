@@ -245,20 +245,6 @@ impl Session {
         self.with_view(|context| Ok(context.view.principal().cloned()))
     }
 
-    /// The calls this trajectory carries: its open dispatches. A trajectory
-    /// that has ended or never opened carries none, so a turn end that
-    /// names one is a no-op rather than a refusal — a turn ends for reasons
-    /// the engine does not model.
-    ///
-    fn carried_calls(&self) -> Result<Vec<OpenDispatch>, EventError> {
-        self.with_view(
-            |context| match context.engine().liveness(context.view, &self.trajectory) {
-                Liveness::Ended | Liveness::Unopened => Ok(Vec::new()),
-                Liveness::Live => Ok(context.open_dispatches()),
-            },
-        )
-    }
-
     /// The host call ids of the calls in `closing` that `answered` does not name: calls a
     /// stop would close while they still run. A call with no host call id is never reported
     /// by id, so it never holds a stop. A stop judges and closes the same `closing` list, so
@@ -301,21 +287,6 @@ impl Session {
                         open,
                     )
                 })
-                .collect())
-        })
-    }
-
-    /// The carried calls a report can name: all of them under a call id, and without one every
-    /// call but an identified spawn.
-    fn report_calls(&self, call_id: Option<&str>) -> Result<Vec<OpenDispatch>, EventError> {
-        let open = self.carried_calls()?;
-        if call_id.is_some() || open.is_empty() {
-            return Ok(open);
-        }
-        self.with_view(|context| {
-            Ok(open
-                .into_iter()
-                .filter(|open| !context.identified_spawn(open))
                 .collect())
         })
     }
