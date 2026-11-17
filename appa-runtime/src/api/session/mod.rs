@@ -17,6 +17,7 @@ use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_engine::label::ReaderId;
 use appa_engine::names::ContextProviderName;
 use appa_engine::transition::ProposalBatchId;
+use appa_runtime_api::OpenCalls;
 
 use super::host::AheadState;
 use super::{
@@ -236,6 +237,29 @@ impl Session {
                 Liveness::Live => Ok(context.open_dispatches()),
             },
         )
+    }
+
+    /// The host call ids of the carried calls a stop must wait for under `open_calls`: under
+    /// [`OpenCalls::Hold`], each carried call whose call id the stopping step did not answer
+    /// is still running. A call with no host call id is never reported by id, so it never
+    /// holds a stop. [`OpenCalls::Abandon`] waits for none.
+    pub(crate) fn running_at_stop(&self, open_calls: &OpenCalls) -> Result<Vec<String>, EventError> {
+        let OpenCalls::Hold { answered } = open_calls else {
+            return Ok(Vec::new());
+        };
+        let carried = self.carried_calls()?;
+        self.with_view(|context| {
+            Ok(context
+                .log
+                .call_bindings()
+                .filter(|binding| {
+                    *binding.trajectory == self.trajectory
+                        && !answered.contains(binding.call_id)
+                        && carried.iter().any(|open| open.id == *binding.dispatch)
+                })
+                .map(|binding| binding.call_id.to_string())
+                .collect())
+        })
     }
 
     /// The calls a turn end closes: every carried call but a spawn whose child runs on past

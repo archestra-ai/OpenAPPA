@@ -762,7 +762,8 @@ impl TryFrom<&HookDecision> for StoredOutcome {
             | HookDecision::ChildReturn { .. }
             | HookDecision::DenyCall { .. }
             | HookDecision::Block { .. }
-            | HookDecision::Refuse { .. } => Err(refused("this read did not admit the stored message")),
+            | HookDecision::Refuse { .. }
+            | HookDecision::Held { .. } => Err(refused("this read did not admit the stored message")),
         }
     }
 }

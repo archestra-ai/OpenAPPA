@@ -622,6 +622,7 @@ async fn a_noop_arrival_returns_the_body_and_a_narrowing_read_folds_only_the_chi
             root: family(),
             child: child(),
             value: Some("done".to_string()),
+            open_calls: appa_runtime_api::OpenCalls::Abandon,
         },
     )
     .await;

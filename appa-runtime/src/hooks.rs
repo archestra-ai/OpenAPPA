@@ -4,7 +4,7 @@
 use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
-    Accepted, Actor, Adapter, HookDecision, HookEvent, LaunchStart, ParseRefusal, PeerAddress, PeerFrame,
+    Accepted, Actor, Adapter, HookDecision, HookEvent, LaunchStart, OpenCalls, ParseRefusal, PeerAddress, PeerFrame,
     PrincipalSource, PromptKey, ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind, ToolOutcome,
     TrajectoryId, WireDecision, WireEvent,
 };
@@ -166,7 +166,10 @@ fn continued(
             peer,
             title,
         },
-        HookEvent::TurnEnd { actor: who } => HookEvent::TurnEnd { actor: actor(who) },
+        HookEvent::TurnEnd { actor: who, open_calls } => HookEvent::TurnEnd {
+            actor: actor(who),
+            open_calls,
+        },
         HookEvent::ToolCall {
             actor: who,
             call,
@@ -222,14 +225,25 @@ fn continued(
             child: id(child),
             spawn,
         },
-        HookEvent::ChildTurnEnd { root, child } => HookEvent::ChildTurnEnd {
+        HookEvent::ChildTurnEnd {
+            root,
+            child,
+            open_calls,
+        } => HookEvent::ChildTurnEnd {
             root: id(root),
             child: id(child),
+            open_calls,
         },
-        HookEvent::ChildEnd { root, child, value } => HookEvent::ChildEnd {
+        HookEvent::ChildEnd {
+            root,
+            child,
+            value,
+            open_calls,
+        } => HookEvent::ChildEnd {
             root: id(root),
             child: id(child),
             value,
+            open_calls,
         },
         HookEvent::ChildReturn { root, child, value } => HookEvent::ChildReturn {
             root: id(root),
@@ -381,7 +395,7 @@ fn hook_root(event: &HookEvent) -> &TrajectoryId {
         | HookEvent::ChildTurnEnd { root, .. }
         | HookEvent::ChildReturn { root, .. } => root,
         HookEvent::Prompt { actor, .. }
-        | HookEvent::TurnEnd { actor }
+        | HookEvent::TurnEnd { actor, .. }
         | HookEvent::ToolCall { actor, .. }
         | HookEvent::SpawnResume { actor, .. }
         | HookEvent::ToolResult { actor, .. }
@@ -559,6 +573,7 @@ fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<Stri
         ),
         HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } => (HookOutcome::Blocked, Vec::new()),
         HookDecision::Refuse { .. } => (HookOutcome::Refused, Vec::new()),
+        HookDecision::Held { .. } => (HookOutcome::Held, Vec::new()),
     }
 }
 
@@ -596,7 +611,7 @@ async fn dispatch_event(
             peer,
             title,
         } => dispatcher.prompt(actor, text, settles, peer, title),
-        HookEvent::TurnEnd { actor } => dispatcher.turn_end(actor).await,
+        HookEvent::TurnEnd { actor, open_calls } => dispatcher.turn_end(actor, open_calls).await,
         HookEvent::ToolCall {
             actor,
             call,
@@ -625,8 +640,17 @@ async fn dispatch_event(
                 .await
         }
         HookEvent::ChildStart { root, child, spawn } => dispatcher.child_start(root, child, spawn),
-        HookEvent::ChildEnd { root, child, value } => dispatcher.child_end(root, child, value).await,
-        HookEvent::ChildTurnEnd { root, child } => dispatcher.child_turn_end(root, child).await,
+        HookEvent::ChildEnd {
+            root,
+            child,
+            value,
+            open_calls,
+        } => dispatcher.child_end(root, child, value, open_calls).await,
+        HookEvent::ChildTurnEnd {
+            root,
+            child,
+            open_calls,
+        } => dispatcher.child_turn_end(root, child, open_calls).await,
         HookEvent::ChildReturn { root, child, value } => dispatcher.child_return(root, child, value).await,
     }
 }
@@ -748,17 +772,23 @@ impl Dispatcher<'_> {
     /// both mean "do not end the turn" on this hook, which would hold the harness in a turn
     /// it has finished; a close that failed leaves the call open and the next proposal
     /// refuses on its own.
-    async fn turn_end(&mut self, actor: Actor) -> HookDecision {
-        if let Err(error) = on_actor(
-            self.runtime,
-            &actor,
-            MissingStart::Refuse,
-            self.options,
-            |session| async move { session.on_turn_end().await },
-        )
+    async fn turn_end(&mut self, actor: Actor, open_calls: OpenCalls) -> HookDecision {
+        match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
+            let open_calls = open_calls.clone();
+            async move {
+                match session.running_at_stop(&open_calls)? {
+                    running if !running.is_empty() => Ok(Stop::Held(running)),
+                    _ => session.on_turn_end().await.map(Stop::Taken),
+                }
+            }
+        })
         .await
         {
-            tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
+            Ok(Stop::Held(running)) => return HookDecision::Held { running },
+            Ok(Stop::Taken(())) => {}
+            Err(error) => {
+                tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
+            }
         }
         if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
             tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
@@ -971,18 +1001,27 @@ impl Dispatcher<'_> {
         }
     }
 
-    async fn child_turn_end(&mut self, root: TrajectoryId, child: TrajectoryId) -> HookDecision {
+    async fn child_turn_end(&mut self, root: TrajectoryId, child: TrajectoryId, open_calls: OpenCalls) -> HookDecision {
         match on_child(
             self.runtime,
             &root,
             &child,
             MissingStart::Refuse,
             self.options,
-            |session| async move { session.on_child_turn_end().await },
+            |session| {
+                let open_calls = open_calls.clone();
+                async move {
+                    match session.running_at_stop(&open_calls)? {
+                        running if !running.is_empty() => Ok(Stop::Held(running)),
+                        _ => session.on_child_turn_end().await.map(Stop::Taken),
+                    }
+                }
+            },
         )
         .await
         {
-            Ok(decision) => {
+            Ok(Stop::Held(running)) => HookDecision::Held { running },
+            Ok(Stop::Taken(decision)) => {
                 let actor = Actor {
                     root,
                     child: Some(child),
@@ -999,7 +1038,13 @@ impl Dispatcher<'_> {
     /// The subagent's return is checked here and blocked when it may not cross; a block
     /// keeps the subagent running until it returns what may. A child the family never saw
     /// start is blocked too: its return has no fork to cross on.
-    async fn child_end(&mut self, root: TrajectoryId, child: TrajectoryId, value: Option<String>) -> HookDecision {
+    async fn child_end(
+        &mut self,
+        root: TrajectoryId,
+        child: TrajectoryId,
+        value: Option<String>,
+        open_calls: OpenCalls,
+    ) -> HookDecision {
         let said = value.clone();
         match on_child(
             self.runtime,
@@ -1009,12 +1054,19 @@ impl Dispatcher<'_> {
             self.options,
             |session| {
                 let value = value.clone();
-                async move { session.on_child_end(value).await }
+                let open_calls = open_calls.clone();
+                async move {
+                    match session.running_at_stop(&open_calls)? {
+                        running if !running.is_empty() => Ok(Stop::Held(running)),
+                        _ => session.on_child_end(value).await.map(Stop::Taken),
+                    }
+                }
             },
         )
         .await
         {
-            Ok(decision) => {
+            Ok(Stop::Held(running)) => HookDecision::Held { running },
+            Ok(Stop::Taken(decision)) => {
                 // The child is finished unless it is being asked to return something
                 // else, so what it still stands behind ends here: its vouches must not
                 // outlive its return, and its parent's turn end is not its own.
@@ -1056,6 +1108,12 @@ impl Dispatcher<'_> {
             Err(error) => fold(error, Refusal::Block),
         }
     }
+}
+
+/// Whether a stop was taken, or held on the calls still running at it.
+enum Stop<T> {
+    Taken(T),
+    Held(Vec<String>),
 }
 
 fn outcome_decision(
@@ -1750,7 +1808,14 @@ mod tests {
         .await;
 
         assert_eq!(
-            handle(&runtime, HookEvent::TurnEnd { actor: actor.clone() }).await,
+            handle(
+                &runtime,
+                HookEvent::TurnEnd {
+                    actor: actor.clone(),
+                    open_calls: appa_runtime_api::OpenCalls::Abandon
+                }
+            )
+            .await,
             HookDecision::Ack
         );
         handle(
@@ -1794,6 +1859,7 @@ mod tests {
                 root: root.clone(),
                 child: child.clone(),
                 value: Some("found it".to_string()),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
             },
         )
         .await;
@@ -1817,6 +1883,169 @@ mod tests {
             "the return replays through the spawn's result"
         );
         assert_eq!(runtime.open_dispatches(&root, &root).len(), 1, "the spawn closed");
+    }
+
+    fn bash(command: &str) -> crate::api::ProposedCall {
+        crate::api::ProposedCall {
+            tool: "host/claude-code/Bash".to_string(),
+            arguments: crate::api::raw(serde_json::json!({ "command": command })),
+            cwd: None,
+        }
+    }
+
+    fn held_answering(ids: &[&str]) -> appa_runtime_api::OpenCalls {
+        appa_runtime_api::OpenCalls::Hold {
+            answered: ids.iter().map(|id| id.to_string()).collect(),
+        }
+    }
+
+    /// An inference proxy sees a side request in a subagent's session (a progress label)
+    /// while the subagent's command still runs, and reads its text-only answer as the
+    /// subagent's stop. That step carries no result for the running command, so the stop is
+    /// held: the command stays open, its real result is admitted when it arrives, and the
+    /// subagent's next stop crosses as usual.
+    #[tokio::test]
+    async fn a_stop_that_leaves_a_call_unanswered_is_held_and_the_call_stays_reportable() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        let child = TrajectoryId("cc:s1:a1".to_string());
+        let child_actor = Actor {
+            root: root.clone(),
+            child: Some(child.clone()),
+        };
+        let binding = declared_spawn(&runtime, &root).await;
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: child.clone(),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+        let released = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: child_actor.clone(),
+                call: bash("pytest"),
+                call_id: Some("toolu-pytest".to_string()),
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+        .await;
+        assert_eq!(released, HookDecision::AllowCall { spawn: None });
+
+        let label = handle(
+            &runtime,
+            HookEvent::ChildEnd {
+                root: root.clone(),
+                child: child.clone(),
+                value: Some("Running auth module tests".to_string()),
+                open_calls: held_answering(&[]),
+            },
+        )
+        .await;
+        assert_eq!(
+            label,
+            HookDecision::Held {
+                running: vec!["toolu-pytest".to_string()]
+            }
+        );
+        assert_eq!(
+            runtime.open_dispatches(&root, &child).len(),
+            1,
+            "the command stays open"
+        );
+
+        let result = handle(
+            &runtime,
+            HookEvent::ToolResult {
+                actor: child_actor.clone(),
+                call: bash("pytest"),
+                call_id: Some("toolu-pytest".to_string()),
+                outcome: appa_runtime_api::ToolOutcome::Success {
+                    body: appa_runtime_api::OutcomeBody::Available("3 passed".to_string()),
+                },
+            },
+        )
+        .await;
+        assert_eq!(result, HookDecision::Ack, "the real result is admitted");
+
+        let end = handle(
+            &runtime,
+            HookEvent::ChildEnd {
+                root,
+                child,
+                value: Some("all tests pass".to_string()),
+                open_calls: held_answering(&["toolu-pytest"]),
+            },
+        )
+        .await;
+        assert_eq!(end, HookDecision::Ack, "the subagent's real stop crosses");
+    }
+
+    /// Under a hold, a turn end waits for a call the stopping step did not answer, and
+    /// closes as unreported a call it answered that no outcome reported, exactly as an
+    /// abandoning turn end does.
+    #[tokio::test]
+    async fn a_held_turn_end_waits_only_for_unanswered_calls() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let released = handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: actor.clone(),
+                call: bash("sleep 30"),
+                call_id: Some("toolu-sleep".to_string()),
+                spawn: None,
+                prompt: None,
+                ruling: None,
+            },
+        )
+        .await;
+        assert_eq!(released, HookDecision::AllowCall { spawn: None });
+
+        let side = handle(
+            &runtime,
+            HookEvent::TurnEnd {
+                actor: actor.clone(),
+                open_calls: held_answering(&["toolu-earlier"]),
+            },
+        )
+        .await;
+        assert_eq!(
+            side,
+            HookDecision::Held {
+                running: vec!["toolu-sleep".to_string()]
+            }
+        );
+        assert_eq!(
+            runtime.open_dispatches(&root, &root).len(),
+            1,
+            "the held stop closed nothing"
+        );
+
+        let end = handle(
+            &runtime,
+            HookEvent::TurnEnd {
+                actor,
+                open_calls: held_answering(&["toolu-sleep"]),
+            },
+        )
+        .await;
+        assert_eq!(end, HookDecision::Ack);
+        assert!(
+            runtime.open_dispatches(&root, &root).is_empty(),
+            "an answered call no outcome reported closes as unreported"
+        );
     }
 
     /// The user typed while the command ran: Claude Code queues the message
@@ -2438,6 +2667,7 @@ mod tests {
                     root,
                     child,
                     value: Some("the report, nothing sensitive".to_string()),
+                    open_calls: appa_runtime_api::OpenCalls::Abandon,
                 },
             )
             .await,
@@ -2532,6 +2762,7 @@ mod tests {
                     root: root.clone(),
                     child: child.clone(),
                     value,
+                    open_calls: appa_runtime_api::OpenCalls::Abandon,
                 },
             )
             .await;
@@ -2554,6 +2785,7 @@ mod tests {
                 root: root.clone(),
                 child: appa_runtime_api::TrajectoryId("cc:s1:nobody".to_string()),
                 value: Some("a return from nowhere".to_string()),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
             },
         )
         .await;
@@ -2597,6 +2829,7 @@ mod tests {
                 root,
                 child,
                 value: Some("the report".to_string()),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
             },
         )
         .await;
@@ -2694,6 +2927,7 @@ mod tests {
                 root: root.clone(),
                 child: appa_runtime_api::TrajectoryId("cc:s1:a1".to_string()),
                 value: Some("late".to_string()),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
             },
         )
         .await;
@@ -3079,7 +3313,14 @@ mod tests {
             root: TrajectoryId("cc:s1".to_string()),
             child: None,
         };
-        crate::hooks::handle(&runtime, HookEvent::TurnEnd { actor }).await;
+        crate::hooks::handle(
+            &runtime,
+            HookEvent::TurnEnd {
+                actor,
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
+            },
+        )
+        .await;
         assert_eq!(
             runtime.take_vouched(&ticket("the hook blocked", true)),
             Err(crate::api::Unvouched::Nobody)
