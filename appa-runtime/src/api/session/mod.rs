@@ -17,7 +17,7 @@ use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_engine::label::ReaderId;
 use appa_engine::names::ContextProviderName;
 use appa_engine::transition::ProposalBatchId;
-use appa_runtime_api::OpenCalls;
+use std::collections::BTreeSet;
 
 use super::host::AheadState;
 use super::{
@@ -38,6 +38,13 @@ use remedy::*;
 use result::*;
 
 pub(crate) use child::LateOpen;
+
+/// Whether a stop was taken, or held on the host call ids of calls still running at it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Stop<T> {
+    Taken(T),
+    Held(Vec<String>),
+}
 #[cfg(feature = "daemon")]
 pub(super) use consult::gather_context;
 pub(super) use drive::RESOLUTION_ROUNDS;
@@ -189,7 +196,20 @@ impl Session {
     /// Not an engine event when nothing is carried, which is every
     /// ordinary turn: the view is read, no fact is appended.
     pub async fn on_turn_end(&self) -> Result<(), EventError> {
+        self.close_turn(self.turn_calls()?).await
+    }
+
+    /// [`Session::on_turn_end`] for a harness that reports outcomes by call id after the
+    /// stop: held while a call the turn end would close is not in `answered`.
+    pub(crate) async fn on_turn_end_holding(&self, answered: &BTreeSet<String>) -> Result<Stop<()>, EventError> {
         let open = self.turn_calls()?;
+        match self.unanswered(&open, answered)?.as_slice() {
+            [] => self.close_turn(open).await.map(Stop::Taken),
+            running => Ok(Stop::Held(running.to_vec())),
+        }
+    }
+
+    async fn close_turn(&self, open: Vec<OpenDispatch>) -> Result<(), EventError> {
         if open.is_empty() {
             tracing::debug!(trajectory = %self.trajectory.0, "no call outstanding");
             return Ok(());
@@ -239,15 +259,11 @@ impl Session {
         )
     }
 
-    /// The host call ids of the carried calls a stop must wait for under `open_calls`: under
-    /// [`OpenCalls::Hold`], each carried call whose call id the stopping step did not answer
-    /// is still running. A call with no host call id is never reported by id, so it never
-    /// holds a stop. [`OpenCalls::Abandon`] waits for none.
-    pub(crate) fn running_at_stop(&self, open_calls: &OpenCalls) -> Result<Vec<String>, EventError> {
-        let OpenCalls::Hold { answered } = open_calls else {
-            return Ok(Vec::new());
-        };
-        let carried = self.carried_calls()?;
+    /// The host call ids of the calls in `closing` that `answered` does not name: calls a
+    /// stop would close while they still run. A call with no host call id is never reported
+    /// by id, so it never holds a stop. A stop judges and closes the same `closing` list, so
+    /// a call opened after it was read is neither waited for nor closed.
+    fn unanswered(&self, closing: &[OpenDispatch], answered: &BTreeSet<String>) -> Result<Vec<String>, EventError> {
         self.with_view(|context| {
             Ok(context
                 .log
@@ -255,7 +271,7 @@ impl Session {
                 .filter(|binding| {
                     *binding.trajectory == self.trajectory
                         && !answered.contains(binding.call_id)
-                        && carried.iter().any(|open| open.id == *binding.dispatch)
+                        && closing.iter().any(|open| open.id == *binding.dispatch)
                 })
                 .map(|binding| binding.call_id.to_string())
                 .collect())

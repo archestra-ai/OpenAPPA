@@ -12,7 +12,7 @@ use appa_runtime_api::{
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
 use crate::api::{
     ChildReturnDecision, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen, LaunchedStart,
-    OfferId, RemedyPresentation, Runtime, Session, SpawnResultDecision, ToolCallDecision, ToolResultDecision,
+    OfferId, RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision, ToolResultDecision,
     is_control_tool,
 };
 use appa_eventlog::EndKind;
@@ -776,9 +776,9 @@ impl Dispatcher<'_> {
         match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
             let open_calls = open_calls.clone();
             async move {
-                match session.running_at_stop(&open_calls)? {
-                    running if !running.is_empty() => Ok(Stop::Held(running)),
-                    _ => session.on_turn_end().await.map(Stop::Taken),
+                match &open_calls {
+                    OpenCalls::Abandon => session.on_turn_end().await.map(Stop::Taken),
+                    OpenCalls::Hold { answered } => session.on_turn_end_holding(answered).await,
                 }
             }
         })
@@ -1011,9 +1011,9 @@ impl Dispatcher<'_> {
             |session| {
                 let open_calls = open_calls.clone();
                 async move {
-                    match session.running_at_stop(&open_calls)? {
-                        running if !running.is_empty() => Ok(Stop::Held(running)),
-                        _ => session.on_child_turn_end().await.map(Stop::Taken),
+                    match &open_calls {
+                        OpenCalls::Abandon => session.on_child_turn_end().await.map(Stop::Taken),
+                        OpenCalls::Hold { answered } => session.on_child_turn_end_holding(answered).await,
                     }
                 }
             },
@@ -1056,9 +1056,9 @@ impl Dispatcher<'_> {
                 let value = value.clone();
                 let open_calls = open_calls.clone();
                 async move {
-                    match session.running_at_stop(&open_calls)? {
-                        running if !running.is_empty() => Ok(Stop::Held(running)),
-                        _ => session.on_child_end(value).await.map(Stop::Taken),
+                    match &open_calls {
+                        OpenCalls::Abandon => session.on_child_end(value).await.map(Stop::Taken),
+                        OpenCalls::Hold { answered } => session.on_child_end_holding(value, answered).await,
                     }
                 }
             },
@@ -1108,12 +1108,6 @@ impl Dispatcher<'_> {
             Err(error) => fold(error, Refusal::Block),
         }
     }
-}
-
-/// Whether a stop was taken, or held on the calls still running at it.
-enum Stop<T> {
-    Taken(T),
-    Held(Vec<String>),
 }
 
 fn outcome_decision(
@@ -1985,6 +1979,58 @@ mod tests {
         )
         .await;
         assert_eq!(end, HookDecision::Ack, "the subagent's real stop crosses");
+    }
+
+    /// A turn end never closes a spawn whose subagent runs on past it, so that spawn never
+    /// holds the turn end either, answered or not.
+    #[tokio::test]
+    async fn a_running_subagents_spawn_does_not_hold_its_parents_turn_end() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let root = TrajectoryId("cc:s1".to_string());
+        let actor = Actor {
+            root: root.clone(),
+            child: None,
+        };
+        let spawn = || HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: spawn_call(),
+            call_id: Some("toolu-spawn".to_string()),
+            spawn: Some(appa_runtime_api::SpawnKind::Single),
+            prompt: None,
+            ruling: None,
+        };
+        let HookDecision::DenyCall { offers, .. } = handle(&runtime, spawn()).await else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(&runtime, &root, &offers).await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = handle(&runtime, spawn()).await else {
+            panic!("the declared spawn releases with its binding");
+        };
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: TrajectoryId("cc:s1:a1".to_string()),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+
+        let end = handle(
+            &runtime,
+            HookEvent::TurnEnd {
+                actor,
+                open_calls: held_answering(&[]),
+            },
+        )
+        .await;
+        assert_eq!(end, HookDecision::Ack);
+        assert_eq!(
+            runtime.open_dispatches(&root, &root).len(),
+            1,
+            "the running subagent's spawn stays open"
+        );
     }
 
     /// Under a hold, a turn end waits for a call the stopping step did not answer, and

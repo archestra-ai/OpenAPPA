@@ -29,7 +29,7 @@ pub use appa_runtime_api::{
 };
 pub use embedded::{EmbeddedPeerArrival, EmbeddedPeerError, EmbeddedPeerId, EmbeddedPeerNotice};
 pub(crate) use launch::LaunchedStart;
-pub(crate) use session::{LateOpen, Session, is_control_tool};
+pub(crate) use session::{LateOpen, Session, Stop, is_control_tool};
 
 /// Why a host could not read a root's current status.
 #[derive(Debug, thiserror::Error)]
