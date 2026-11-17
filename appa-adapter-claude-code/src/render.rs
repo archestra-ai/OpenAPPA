@@ -95,7 +95,8 @@ fn structured_return(event: &HookEvent, decision: &HookDecision) -> serde_json::
 
 fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
     match decision {
-        HookDecision::Ack => serde_json::json!({}),
+        // This harness reports no outcome after a stop, so it never holds one.
+        HookDecision::Ack | HookDecision::Held { .. } => serde_json::json!({}),
         HookDecision::AllowCall { .. } => allow("appa: the call is released"),
         HookDecision::PassControl => allow("appa: the runtime's own control tool"),
         HookDecision::DenyCall { feedback, .. } => deny(feedback),
@@ -560,6 +561,7 @@ mod tests {
             root: root(),
             child: TrajectoryId("cc:s1:a1".to_string()),
             value: Some("the secret summary".to_string()),
+            open_calls: appa_runtime_api::OpenCalls::Abandon,
         };
         assert_eq!(render(&event, &HookDecision::Ack), serde_json::json!({}));
         assert_eq!(
@@ -809,6 +811,7 @@ mod tests {
                     root: root(),
                     child: TrajectoryId("cc:s1:a1".to_string()),
                     value: Some("the child's return".to_string()),
+                    open_calls: appa_runtime_api::OpenCalls::Abandon,
                 },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",
@@ -821,6 +824,7 @@ mod tests {
                         root: root(),
                         child: None,
                     },
+                    open_calls: appa_runtime_api::OpenCalls::Abandon,
                 },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",

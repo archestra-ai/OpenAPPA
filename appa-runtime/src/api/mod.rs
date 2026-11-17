@@ -29,7 +29,7 @@ pub use appa_runtime_api::{
 };
 pub use embedded::{EmbeddedPeerArrival, EmbeddedPeerError, EmbeddedPeerId, EmbeddedPeerNotice};
 pub(crate) use launch::LaunchedStart;
-pub(crate) use session::{LateOpen, Session, is_control_tool};
+pub(crate) use session::{LateOpen, Session, Stop, is_control_tool};
 
 /// Why a host could not read a root's current status.
 #[derive(Debug, thiserror::Error)]
@@ -6487,7 +6487,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let quoted = PermitKey::offer(&OfferId("0ffe000000000001".to_string()));
 
         runtime.vouch(&quoted, &child, Some(appa_runtime_api::Ruling::Approve));
-        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: parent.clone() }).await;
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::TurnEnd {
+                actor: parent.clone(),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
+            },
+        )
+        .await;
         assert_eq!(
             runtime.take_vouched(&quoted),
             Ok((child.clone(), Some(appa_runtime_api::Ruling::Approve))),
@@ -6503,7 +6510,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
 
         runtime.vouch(&quoted, &parent, None);
-        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: child.clone() }).await;
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::TurnEnd {
+                actor: child.clone(),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
+            },
+        )
+        .await;
         assert_eq!(
             runtime.take_vouched(&quoted),
             Ok((parent, None)),
@@ -6547,7 +6561,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
 
         runtime.vouch(&quoted, &actor, None);
-        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: actor.clone() }).await;
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::TurnEnd {
+                actor: actor.clone(),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
+            },
+        )
+        .await;
         assert_eq!(
             runtime.take_vouched(&quoted),
             Err(Unvouched::Nobody),
@@ -6594,7 +6615,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         );
 
         // Once one of them is gone the key identifies a caller again.
-        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: other }).await;
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::TurnEnd {
+                actor: other,
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
+            },
+        )
+        .await;
         assert_eq!(runtime.take_vouched(&key), Ok((one, None)));
     }
 
@@ -6637,6 +6665,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             &runtime,
             appa_runtime_api::HookEvent::TurnEnd {
                 actor: actors[1].clone(),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
             },
         )
         .await;
@@ -7096,7 +7125,14 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         assert_eq!(runtime.take_vouched(&key), Err(Unvouched::Nobody));
 
         runtime.vouch(&key, &actor, None);
-        crate::hooks::handle(&runtime, appa_runtime_api::HookEvent::TurnEnd { actor: actor.clone() }).await;
+        crate::hooks::handle(
+            &runtime,
+            appa_runtime_api::HookEvent::TurnEnd {
+                actor: actor.clone(),
+                open_calls: appa_runtime_api::OpenCalls::Abandon,
+            },
+        )
+        .await;
         assert_eq!(runtime.take_vouched(&key), Err(Unvouched::Nobody));
     }
 

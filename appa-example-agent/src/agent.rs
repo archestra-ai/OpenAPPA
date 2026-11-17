@@ -7,8 +7,8 @@ use std::sync::Arc;
 use appa_runtime::api::{EmbeddedPresentationOptions, RemedyAttempt, RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, SpawnBinding, SpawnKind,
-    SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OpenCalls, OutcomeBody, ProposedCall, SpawnBinding,
+    SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use serde_json::value::RawValue;
 use thiserror::Error;
@@ -581,6 +581,7 @@ impl Run<'_> {
             root: self.root.clone(),
             child: child.id.clone(),
             value: said.clone(),
+            open_calls: OpenCalls::Abandon,
         };
         let (outcome, reply) = match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::Ack | HookDecision::Context { .. } => (spawn_closed(), self.returned(parent, said).await),
@@ -591,6 +592,7 @@ impl Run<'_> {
                     root: self.root.clone(),
                     child: child.id.clone(),
                     value: Some(value.clone()),
+                    open_calls: OpenCalls::Abandon,
                 };
                 match hooks::handle(&self.agent.runtime, echoed).await {
                     HookDecision::Ack => (spawn_closed(), self.returned(parent, Some(value)).await),

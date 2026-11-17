@@ -531,6 +531,23 @@ pub enum ReviewNarrowing {
     Unjudged,
 }
 
+/// What a stop (a turn end or a child's end) does with a call still open
+/// at it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenCalls {
+    /// The harness reports no outcome after its stop, as a hook harness
+    /// does: each call still open closes as unreported.
+    Abandon,
+    /// The harness reports every outcome under its call id on the actor's
+    /// next step, as an inference proxy does. `answered` names the calls
+    /// whose results the stopping step carried. An open call with a call id
+    /// outside `answered` is still running, so the stop is held; any other
+    /// open call closes as unreported.
+    Hold {
+        answered: std::collections::BTreeSet<String>,
+    },
+}
+
 /// One hook event in the runtime's vocabulary. The adapter maps each
 /// of its harness's hooks onto exactly one variant — or onto no event
 /// at all for hooks the deployment does not gate.
@@ -562,13 +579,18 @@ pub enum HookEvent {
         /// The title the host shows for this session.
         title: Option<SessionTitle>,
     },
-    /// The actor finished a turn. A dispatch still open names a call the
-    /// harness never ran, except an identified spawn whose subagent is still
-    /// running: a background subagent works past its parent's turn.
-    TurnEnd { actor: Actor },
+    /// The actor finished a turn. Under [`OpenCalls::Abandon`] a dispatch
+    /// still open names a call the harness never ran, except an identified
+    /// spawn whose subagent is still running: a background subagent works
+    /// past its parent's turn.
+    TurnEnd { actor: Actor, open_calls: OpenCalls },
     /// A child finished without output. Close a no-return child permanently;
     /// retain a child with a crossing return contract for subsequent turns.
-    ChildTurnEnd { root: TrajectoryId, child: TrajectoryId },
+    ChildTurnEnd {
+        root: TrajectoryId,
+        child: TrajectoryId,
+        open_calls: OpenCalls,
+    },
     ToolCall {
         actor: Actor,
         call: ProposedCall,
@@ -607,6 +629,7 @@ pub enum HookEvent {
         root: TrajectoryId,
         child: TrajectoryId,
         value: Option<String>,
+        open_calls: OpenCalls,
     },
     /// A child's return that does not end it: the value crosses exactly as
     /// a stop's would, and the child keeps running.
@@ -731,6 +754,13 @@ pub enum HookDecision {
     Refuse {
         class: RefusalClass,
         detail: String,
+    },
+    /// The stop is not taken: the calls `running` names are still running
+    /// under [`OpenCalls::Hold`]. Nothing was recorded and nothing crossed.
+    /// The harness delivers the step's response as it is; the actor's
+    /// next stop after those calls report is judged as usual.
+    Held {
+        running: Vec<String>,
     },
 }
 
