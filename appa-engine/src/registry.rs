@@ -1227,8 +1227,8 @@ pub struct Registry {
     pub(crate) wildcard: Option<ToolDeclaration>,
     /// The recorder each declaration names: by base name and ordinal within `tools`, and the
     /// wildcard's apart.
-    recorders: BTreeMap<(ToolName, usize), crate::names::RecorderName>,
-    wildcard_recorder: Option<crate::names::RecorderName>,
+    pub(crate) recorders: BTreeMap<(ToolName, usize), crate::names::RecorderName>,
+    pub(crate) wildcard_recorder: Option<crate::names::RecorderName>,
     annotators: BTreeMap<AnnotatorName, AnnotatorMandate>,
     authorities: Vec<Authority>,
     attention_marks: BTreeSet<MarkName>,

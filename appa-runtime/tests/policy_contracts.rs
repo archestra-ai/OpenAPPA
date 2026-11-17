@@ -41,6 +41,7 @@ parameters = { type = "object", properties = { to = { type = "string" } }, requi
 name = "mcp/deploy/apply"
 requires = { effects = { contains = ["backup.completed"] } }
 delta = {}
+recorder = "tracker"
 
 [[policy.tool]]
 name = "mcp/web/fetch"
@@ -66,6 +67,9 @@ max_body_bytes = 65536
 
 [externals.annotators.classifier]
 url = "https://classifier.example/annotate"
+
+[externals.recorders.tracker]
+url = "https://tracker.example/record"
 
 [externals.authorities.release-manager]
 builtin = "hitl"
@@ -214,6 +218,11 @@ const CASES: &[Case] = &[
         name: "a changed delta",
         edits: &[("delta = { trust = \"untrusted\" }", "delta = { trust = \"vendor\" }")],
         expected: &[("mcp/web/fetch", Direction::Unknown)],
+    },
+    Case {
+        name: "a dropped recorder",
+        edits: &[("recorder = \"tracker\"\n", "")],
+        expected: &[("mcp/deploy/apply", Direction::Unknown)],
     },
     Case {
         name: "an argument predicate",

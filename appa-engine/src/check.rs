@@ -132,17 +132,30 @@ pub(crate) fn check_contract(
     committed: &std::collections::BTreeSet<EffectKind>,
     context: &MembershipContext<'_>,
 ) -> ContractVerdict {
-    let evaluated = evaluate_state(
-        annotation,
-        current,
-        &|kind| committed.contains(kind),
-        &|_| false,
-        CallReads::Resolved(call),
-        &CallStage::default(),
-        context,
-    );
-    match (evaluated, annotator) {
-        (Err(needed), _) => ContractVerdict::NeedsMembership { atoms: needed.needed },
+    let evaluate = |annotation: &ToolAnnotation| {
+        evaluate_state(
+            annotation,
+            current,
+            &|kind| committed.contains(kind),
+            &|_| false,
+            CallReads::Resolved(call),
+            &CallStage::default(),
+            context,
+        )
+    };
+    match (evaluate(annotation), annotator) {
+        // No membership answer meets a requirement that names no audience: those gaps are
+        // final whatever the members are.
+        (Err(needed), _) => {
+            let mut unaudienced = annotation.clone();
+            unaudienced.requires.label.audience.clear();
+            match evaluate(&unaudienced) {
+                Ok(block) if !block.requirement_gaps.is_empty() => ContractVerdict::Deny {
+                    gaps: block.requirement_gaps,
+                },
+                Ok(_) | Err(_) => ContractVerdict::NeedsMembership { atoms: needed.needed },
+            }
+        }
         (Ok(block), _) if !block.requirement_gaps.is_empty() => ContractVerdict::Deny {
             gaps: block.requirement_gaps,
         },

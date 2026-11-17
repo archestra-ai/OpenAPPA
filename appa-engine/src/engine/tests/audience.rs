@@ -2029,3 +2029,49 @@ fn a_mandate_placeholder_admits_the_collection_each_call_spells() {
     assert!(parameters.validate(&serde_json::json!({})).is_err());
     assert!(parameters.validate(&serde_json::json!({ "channel": 1 })).is_err());
 }
+
+/// A contract check that cannot compare audiences without a group's members still denies a
+/// call whose missed requirement names no audience: no member list meets a trust floor.
+#[test]
+fn a_contract_check_denies_on_a_missed_floor_before_asking_for_members() {
+    let mut send = plain_tool("send");
+    send.parameters = crate::params::test_string_argument_schema("to");
+    send.requires = Requires {
+        label: LabelRequirements {
+            trust_floor: Some(TRUSTED),
+            audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+        },
+        ..Requires::default()
+    };
+    let e = open_engine_at(
+        RegistryConfig {
+            recorders: Default::default(),
+            audience: slack_groups(&["team"]),
+            ..test_config(vec![send])
+        },
+        internal_session(),
+    );
+    let check = |trust| {
+        e.check_contract(
+            ToolName::new("send"),
+            br#"{"to":"bob@example.com"}"#,
+            &Label::new(trust, Audience::of_declared(&group_audience("team"))),
+            &std::collections::BTreeSet::new(),
+        )
+    };
+    assert_eq!(
+        check(SUSPICIOUS),
+        Ok(crate::check::ContractVerdict::Deny {
+            gaps: vec![crate::check::Gap::TrustFloor {
+                required: TRUSTED,
+                actual: SUSPICIOUS,
+            }],
+        })
+    );
+    assert_eq!(
+        check(TRUSTED),
+        Ok(crate::check::ContractVerdict::NeedsMembership {
+            atoms: vec![group_atom("team")],
+        })
+    );
+}

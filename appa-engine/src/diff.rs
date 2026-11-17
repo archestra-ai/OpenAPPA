@@ -9,7 +9,7 @@
 //! refused before and is judged now, so it loosens; one that loses its contract to nothing
 //! is refused now, so it tightens. Every other difference is `unknown`: argument predicates,
 //! Annotator routing and mandates, `delta`, `forwards`, `emits`, parameters, tags,
-//! descriptions, the order overlapping names are tried in, provider-run tools, and the
+//! descriptions, recorders, the order overlapping names are tried in, provider-run tools, and the
 //! policy-wide trust chain, authorities, sanitizers, audience configuration and deployment
 //! profile. A policy-wide difference is reported on the `*` entry.
 
@@ -20,6 +20,7 @@ use serde::Serialize;
 use crate::contract::{AudienceRequirement, HistoryRequirement, LabelRequirements, RecipientSpec, ToolDeclaration};
 use crate::fact::EffectKind;
 use crate::label::{DeclaredAudience, Trust};
+use crate::names::RecorderName;
 use crate::registry::{Registry, ToolMatcher, TrustChain, WILDCARD_SPELLING};
 use crate::value::ToolName;
 
@@ -71,6 +72,8 @@ pub enum ChangeKind {
     /// How the deployment binds an external component the policy names: an Annotator's,
     /// authority's or sanitizer's implementation, or an audience source.
     Bindings,
+    /// The recorder a contract names, which keeps a written value's label.
+    Recorder,
 }
 
 /// One difference, with the value before and after where it has a spelling.
@@ -160,7 +163,7 @@ pub fn diff_contracts(before: &Registry, after: &Registry, outside: &[ChangeKind
     for name in names {
         let changes = tools.entry(name.as_str().to_string()).or_default();
         match (before.tools.get(name), after.tools.get(name)) {
-            (Some(was), Some(now)) => pair.variants(was, now, changes),
+            (Some(was), Some(now)) => pair.variants(name, was, now, changes),
             (None, Some(now)) => pair.coverage(name, now, Gained, changes),
             (Some(was), None) => pair.coverage(name, was, Lost, changes),
             (None, None) => {}
@@ -210,7 +213,14 @@ impl Pair<'_> {
     /// stood, losing it leaves those names refused.
     fn wildcard(&self, changes: &mut Changes) {
         match (&self.before.wildcard, &self.after.wildcard) {
-            (Some(was), Some(now)) => self.declaration(was, now, changes),
+            (Some(was), Some(now)) => {
+                self.declaration(was, now, changes);
+                recorder(
+                    self.before.wildcard_recorder.as_ref(),
+                    self.after.wildcard_recorder.as_ref(),
+                    changes,
+                );
+            }
             (None, Some(_)) => changes.push(
                 ChangeKind::Contract,
                 Direction::Loosen,
@@ -273,6 +283,7 @@ impl Pair<'_> {
     /// are the same, since then every call selects the same position on both sides.
     fn variants(
         &self,
+        name: &ToolName,
         before: &[(ToolMatcher, ToolDeclaration)],
         after: &[(ToolMatcher, ToolDeclaration)],
         changes: &mut Changes,
@@ -284,8 +295,10 @@ impl Pair<'_> {
             changes.unknown(ChangeKind::ArgumentPredicates);
             return;
         }
-        for ((_, was), (_, now)) in before.iter().zip(after) {
+        for (ordinal, ((_, was), (_, now))) in before.iter().zip(after).enumerate() {
             self.declaration(was, now, changes);
+            let key = (name.clone(), ordinal);
+            recorder(self.before.recorders.get(&key), self.after.recorders.get(&key), changes);
         }
     }
 
@@ -495,6 +508,19 @@ fn mcp_leaf(name: &ToolName) -> Option<&str> {
         .strip_prefix("mcp/")
         .and_then(|rest| rest.split_once('/'))
         .map(|(_, leaf)| leaf)
+}
+
+/// A recorder carries a written value's label into later trajectories, so which one a
+/// contract names moves calls those trajectories make in no direction this comparison knows.
+fn recorder(before: Option<&RecorderName>, after: Option<&RecorderName>, changes: &mut Changes) {
+    if before != after {
+        changes.push(
+            ChangeKind::Recorder,
+            Direction::Unknown,
+            before.map(|name| name.as_str().to_string()),
+            after.map(|name| name.as_str().to_string()),
+        );
+    }
 }
 
 /// Each requirement only one side writes: one the newer contract adds tightens, one it
