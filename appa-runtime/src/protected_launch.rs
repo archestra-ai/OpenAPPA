@@ -109,9 +109,10 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
 /// content, out of the file-tracker's sight. The policy blocks them at the hook as well.
 const UNMEDIATED_TOOLS: &str = "PowerShell,Monitor,Grep,NotebookEdit";
 
-/// The Claude Code releases whose internals the preload has been checked against. A release
-/// outside this list runs SafeBash, even when the self-test would pass.
-const NATIVE_BASH_RELEASES: &[&str] = &["2.1.266", "2.1.319"];
+/// The Claude Code releases known to pass the preload's self-test and still run a Bash call
+/// outside the confinement it checks. A release in this list runs SafeBash without a
+/// self-test; every other release runs native Bash exactly when its self-test passes.
+const BROKEN_RELEASES: &[&str] = &[];
 
 /// How long the preload's self-test may take before the session falls back to SafeBash.
 const SELF_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -203,8 +204,8 @@ fn executable() -> String {
     std::env::current_exe().map_or_else(|_| "appa".into(), |path| path.display().to_string())
 }
 
-/// Native Bash when this Claude Code release is one the preload was checked against and the
-/// preload's self-test passes on it; SafeBash otherwise, saying why.
+/// Native Bash when the preload's self-test passes on this Claude Code build and the release
+/// is not one known to fool it; SafeBash otherwise, saying why.
 fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Shell {
     match native(settings, data_dir, token) {
         Ok(shell) => shell,
@@ -226,10 +227,9 @@ fn native(settings: &Path, data_dir: &Path, token: &Uuid) -> Result<Shell, Strin
         .next()
         .unwrap_or_default()
         .to_string();
-    if !NATIVE_BASH_RELEASES.contains(&release.as_str()) {
+    if BROKEN_RELEASES.contains(&release.as_str()) {
         return Err(format!(
-            "Claude Code {release} is not a release the Bash preload was checked against ({})",
-            NATIVE_BASH_RELEASES.join(", ")
+            "Claude Code {release} runs Bash calls outside the confinement the preload's self-test checks"
         ));
     }
     let preload = data_dir.join("claude-bash.js");

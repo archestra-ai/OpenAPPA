@@ -127,6 +127,8 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'appa-runtime/**'
               - 'appa-runtime-api/**'
+              - 'appa-file-tracker/**'
+              - 'scripts/claude-bash-selftest.sh'
               - 'appa-engine/**'
               - 'appa-eventlog/**'
               - 'appa-policy/**'
@@ -401,6 +403,18 @@ jobs:
 
       - name: Exercise the real harness with deterministic inference
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
+
+      # clappa gives Claude Code native Bash only where this self-test passes.
+      # Claude Code's Linux sandbox needs bubblewrap and socat, and Ubuntu's
+      # AppArmor default refuses bubblewrap the user namespace it needs.
+      - name: Install Claude Code's sandbox
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Self-test the Bash preload on the pinned Claude Code
+        run: scripts/claude-bash-selftest.sh target/debug/appa
 
   battery-checks:
     name: Battery Checks
