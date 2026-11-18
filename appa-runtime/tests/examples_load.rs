@@ -610,14 +610,29 @@ async fn the_coding_battery_judges_relative_credentials_and_offers_review_for_pu
         );
     }
 
-    for path in ["./README.md", "../src/main.rs", "src/.gitignore/../main.rs"] {
+    for path in [
+        "./README.md",
+        "../src/main.rs",
+        "src/.gitignore/../main.rs",
+        "platform/.env.example",
+        ".env.local.sample",
+        "src/clients/bedrock-credentials.ts",
+        "schemas/secrets.schema.json",
+    ] {
         let ordinary = call("host/claude-code/Read", "file_path", path);
         assert_eq!(
             propose(&runtime, ordinary.clone()).await,
             HookDecision::AllowCall { spawn: None },
-            "`{path}` is an ordinary read: a dot in a relative path is not a hidden name"
+            "`{path}` is an ordinary read: a hidden-looking name, an env template, or code named for credentials holds none"
         );
         ran(&runtime, ordinary).await;
+    }
+    for path in ["deploy/secrets.yaml", "config/credentials.json", "platform/.env.local"] {
+        let held = propose(&runtime, call("host/claude-code/Read", "file_path", path)).await;
+        assert!(
+            matches!(held, HookDecision::DenyCall { .. }),
+            "`{path}` holds credentials and narrows to `self`, got {held:?}"
+        );
     }
 
     let read = call("host/claude-code/Read", "file_path", ".env");
@@ -908,6 +923,13 @@ async fn the_coding_battery_covers_grep_write_and_edit_of_the_requesters_secrets
         "a search over ordinary paths keeps the session's label"
     );
     ran(&runtime, ordinary).await;
+    let code = call("host/claude-code/Grep", "path", "backend/src/secrets-manager.ts");
+    assert_eq!(
+        propose(&runtime, code.clone()).await,
+        HookDecision::AllowCall { spawn: None },
+        "a search inside source named for secrets keeps the session's label"
+    );
+    ran(&runtime, code).await;
     let inside = call("host/claude-code/Grep", "path", "/home/me/.aws/credentials");
     let narrowing = propose(&runtime, inside).await;
     let HookDecision::DenyCall { offers, review, .. } = narrowing else {
