@@ -136,6 +136,9 @@ pub(super) enum Fit {
     Live(OfferId),
     /// The fitting offer no longer stands: a fresh decision offers it again.
     Stale,
+    /// The fitting offer was executed or refused, as another delivery of the call leaves it.
+    Ended,
+    /// No offer of the block declares the route the arguments ask for.
     Unfit,
 }
 
@@ -404,7 +407,7 @@ impl Decided<'_> {
                 arguments: declared.arguments.clone(),
             },
             Fit::Stale => Judgment::Stale,
-            Fit::Unfit => Judgment::Settled(AheadOutcome::Unfit),
+            Fit::Ended | Fit::Unfit => Judgment::Settled(AheadOutcome::Unfit),
         })
     }
 
@@ -439,6 +442,7 @@ impl Decided<'_> {
             {
                 Fit::Stale
             }
+            None if !fitting.is_empty() => Fit::Ended,
             None => Fit::Unfit,
         }
     }

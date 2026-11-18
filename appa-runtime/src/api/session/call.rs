@@ -147,8 +147,15 @@ impl Session {
     /// written where it commits, the first one wins, and a retry of the call reads it back.
     ///
     /// A blocked single spawn that took no declaration ahead applies the return its proposal
-    /// declares, if it declares one ([`Session::apply_declared`]).
+    /// declares, if it declares one ([`Session::apply_declared`]). A deployment that does not
+    /// control subagent context refuses such a proposal before it is decided, as it refuses a
+    /// declaration made ahead.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
+        if proposal.declares.is_some()
+            && !self.with_view(|context| Ok(context.engine().registry().profile().context_control()))?
+        {
+            return Err(EventError::DeclaresUncontrolled);
+        }
         let invocation = appa_eventlog::InvocationNonce(rand::random());
         let (mut decision, took) = self.propose_resolving(&proposal, Some(invocation)).await?;
         let (Some(spawn), ToolCallDecision::Deny { .. }) = (proposal.spawn, &decision) else {
@@ -196,18 +203,23 @@ impl Session {
                 }
             }
         }
-        Err(EventError::Contended {
-            attempts: DECLARATION_ROUNDS,
-        })
+        // A release the last round's proposal committed is its answer, not contention.
+        match decision {
+            ToolCallDecision::Deny { .. } => Err(EventError::Contended {
+                attempts: DECLARATION_ROUNDS,
+            }),
+            released => Ok(released),
+        }
     }
 
     /// Apply the return a blocked single spawn's proposal declares through its block's own
     /// declaration plan, one that asks no authority, and propose the call again, so it meets
     /// only what else blocks it. The decision returned is the last proposal's. A block that
     /// offers no declaration plan is planned on a declaration that already stands for this
-    /// call, as a retry of the call finds, and stands as it is. A block whose declaration plans
-    /// do not fit the arguments says so. Nothing is recorded beside the engine's own facts: a
-    /// retry reads what stands in the log.
+    /// call, as a retry of the call finds, and stands as it is. A fitting plan that no longer
+    /// stands, gone stale or taken by another delivery of the call, sends the call to be
+    /// proposed again. A block none of whose declaration plans fits the arguments says so.
+    /// Nothing is recorded beside the engine's own facts: a retry reads what stands in the log.
     async fn apply_declared(
         &self,
         proposal: &Proposal,
@@ -219,25 +231,22 @@ impl Session {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
                 return Ok(decision);
             };
+            if !offers.iter().any(|offer| offer.returns.is_some()) {
+                return Ok(decision);
+            }
             let fit = self.with_view(|context| {
-                Ok(match offers.iter().any(|offer| offer.returns.is_some()) {
-                    false => None,
-                    // Arguments the policy does not accept here are refused by every application.
-                    true if context
-                        .engine()
-                        .declare_ahead(context.view, &self.trajectory, declares)
-                        .is_err() =>
-                    {
-                        Some(Fit::Unfit)
-                    }
-                    true => Some(context.fitting_offer(offers, declares)),
-                })
+                // Arguments the policy does not accept here are refused by every application.
+                Ok(
+                    match context.engine().declare_ahead(context.view, &self.trajectory, declares) {
+                        Err(_) => Fit::Unfit,
+                        Ok(_) => context.fitting_offer(offers, declares),
+                    },
+                )
             })?;
             let live = match fit {
-                None => return Ok(decision),
-                Some(Fit::Unfit) => return Ok(noted(&decision, UNFIT_DECLARED)),
-                Some(Fit::Stale) => None,
-                Some(Fit::Live(offer)) => Some(offer),
+                Fit::Unfit => return Ok(noted(&decision, UNFIT_DECLARED)),
+                Fit::Stale | Fit::Ended => None,
+                Fit::Live(offer) => Some(offer),
             };
             // The decision of the last round's proposal is judged above before the rounds end,
             // so a release that proposal committed is never answered as contention.

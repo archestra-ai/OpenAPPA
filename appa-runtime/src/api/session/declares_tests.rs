@@ -43,15 +43,37 @@ max_body_bytes = 65536
 /// A runtime whose root is open, serving a policy that does or does not register
 /// `attest-schema`. The directory lives as long as the runtime.
 struct Deployed {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     runtime: Runtime,
 }
 
+impl Deployed {
+    fn config(&self, text: &str) -> Config {
+        let path = self.dir.path().join("appa.toml");
+        std::fs::write(&path, text).expect("the fixture writes");
+        Config::load(&path).expect("the fixture validates")
+    }
+
+    /// Another runtime process serving the same store, as a host's second replica does.
+    fn replica(&self) -> Runtime {
+        let config = Config::load(&self.dir.path().join("appa.toml")).expect("the fixture validates");
+        Runtime::open(config, self.dir.path().join("appa.db"), None).expect("the replica opens")
+    }
+}
+
+fn policy(attesting: bool) -> String {
+    let attest = if attesting { ATTEST } else { "" };
+    format!("{TOOLS}{attest}{DEPLOYMENT}")
+}
+
 fn deployed(attesting: bool) -> Deployed {
+    deployed_serving(&policy(attesting))
+}
+
+fn deployed_serving(text: &str) -> Deployed {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let path = dir.path().join("appa.toml");
-    let attest = if attesting { ATTEST } else { "" };
-    std::fs::write(&path, format!("{TOOLS}{attest}{DEPLOYMENT}")).expect("the fixture writes");
+    std::fs::write(&path, text).expect("the fixture writes");
     let runtime = Runtime::open(
         Config::load(&path).expect("the fixture validates"),
         dir.path().join("appa.db"),
@@ -59,7 +81,7 @@ fn deployed(attesting: bool) -> Deployed {
     )
     .expect("the runtime opens");
     runtime.create_session(root(), None).expect("a fresh root opens");
-    Deployed { _dir: dir, runtime }
+    Deployed { dir, runtime }
 }
 
 fn root() -> TrajectoryId {
@@ -358,4 +380,231 @@ async fn a_return_declared_ahead_is_taken_before_the_one_the_proposal_declares()
         "the return crosses as declared ahead, as spoken"
     );
     assert_eq!(declarations(&runtime), 1);
+}
+
+/// The canonical ids of the offers a block rendered.
+fn canonical(runtime: &Runtime, offers: &[appa_runtime_api::OfferedRemedy]) -> Vec<String> {
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    offers
+        .iter()
+        .filter_map(|offer| crate::engine::resolve_rendered(&log, &OfferId(offer.id.clone())))
+        .map(|offer| offer.0)
+        .collect()
+}
+
+/// The canonical ids of every offer the family accepted.
+fn accepted(runtime: &Runtime) -> Vec<String> {
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    log.facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::OfferAccepted { offer, .. } => Some(offer.to_hex()),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn undeclared(runtime: &Runtime, spawn: ProposedCall, call_id: &str) -> ToolCallDecision {
+    session(runtime)
+        .on_tool_call_identified(spawn, Some(call_id.to_string()), Some(SpawnKind::Single), None)
+        .await
+        .expect("the spawn is judged")
+}
+
+/// A reload and another call's denial leave the block the call stood at stale: the hook's
+/// proposal is decided afresh and applies the fitting offer of the new block.
+#[tokio::test]
+async fn a_fitting_offer_gone_stale_is_replaced_and_applied_in_the_same_hook() {
+    let deployed = deployed(true);
+    let runtime = &deployed.runtime;
+    let ToolCallDecision::Deny { offers, .. } = undeclared(runtime, call("fetch", 1), "toolu-x").await else {
+        panic!("an undeclared spawn is blocked");
+    };
+    let first = canonical(runtime, &offers);
+    runtime
+        .reload(deployed.config(&policy(false)))
+        .expect("the runtime reloads");
+    assert!(matches!(
+        session(runtime).on_tool_call(call("taint", 1), false).await,
+        Ok(ToolCallDecision::Deny { .. })
+    ));
+    let stale = session(runtime)
+        .with_view(|context| Ok(context.fitting_offer(&offers, &as_spoken())))
+        .expect("the view reads");
+    assert_eq!(stale, Fit::Stale);
+    binding(declaring(runtime, call("fetch", 1), "toolu-x", as_spoken()).await);
+    let applied = accepted(runtime);
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    assert!(!first.contains(&applied[0]), "the stale offer was not applied");
+    assert_eq!(dispatches(runtime), 1);
+    assert_eq!(forks(runtime), 1);
+    assert_eq!(declarations(runtime), 1);
+}
+
+/// Another delivery of the call executed the fitting offer: the block it was rendered in reads
+/// it as taken, not as a declaration no plan fits, and the call proposed again is released by
+/// that declaration.
+#[tokio::test]
+async fn a_fitting_offer_another_delivery_took_is_not_unfit() {
+    let Deployed { runtime, .. } = deployed(false);
+    let ToolCallDecision::Deny { offers, .. } = undeclared(&runtime, call("fetch", 1), "toolu-x").await else {
+        panic!("an undeclared spawn is blocked");
+    };
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    let as_spoken_offer = offers
+        .iter()
+        .find(|offer| offer.returns == Some(appa_runtime_api::OfferedReturn::AsSpoken))
+        .and_then(|offer| crate::engine::resolve_rendered(&log, &OfferId(offer.id.clone())))
+        .expect("the bare declaration is offered");
+    assert!(matches!(
+        session(&runtime)
+            .on_remedy(as_spoken_offer, as_spoken(), None, None)
+            .await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    let fit = session(&runtime)
+        .with_view(|context| Ok(context.fitting_offer(&offers, &as_spoken())))
+        .expect("the view reads");
+    assert_eq!(fit, Fit::Ended);
+    binding(declaring(&runtime, call("fetch", 1), "toolu-x", as_spoken()).await);
+    assert_eq!(declarations(&runtime), 1);
+    assert_eq!(dispatches(&runtime), 1);
+}
+
+/// Two deliveries of one call, on two replicas at once: whichever applies the declaration,
+/// the other reads the release, and the call is released once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_deliveries_of_one_declaring_spawn_release_it_once() {
+    for _ in 0..8 {
+        let deployed = deployed(false);
+        let replica = deployed.replica();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let tasks: Vec<_> = [&deployed.runtime, &replica]
+            .into_iter()
+            .map(|runtime| {
+                let session = session(runtime);
+                let barrier = std::sync::Arc::clone(&barrier);
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    session
+                        .on_spawn_declaring(call("fetch", 1), Some("toolu-x".to_string()), None, as_spoken())
+                        .await
+                })
+            })
+            .collect();
+        let mut decisions = Vec::new();
+        for task in tasks {
+            decisions.push(task.await.expect("the task joins"));
+        }
+        let [a, b] = <[_; 2]>::try_from(decisions).expect("two deliveries were decided");
+        let shown = format!("{a:?} {b:?}");
+        assert_eq!(binding(a), binding(b), "{shown}");
+        assert_eq!(dispatches(&deployed.runtime), 1);
+        assert_eq!(forks(&deployed.runtime), 1);
+        assert_eq!(declarations(&deployed.runtime), 1);
+    }
+}
+
+/// The block a declaration no plan fits stands as the undeclared call's, with the notice.
+#[tokio::test]
+async fn a_declaration_no_plan_fits_adds_its_notice_to_the_undeclared_block() {
+    let Deployed { runtime, .. } = deployed(false);
+    let ToolCallDecision::Deny {
+        feedback,
+        offers,
+        display,
+        review,
+    } = undeclared(&runtime, call("fetch", 1), "toolu-x").await
+    else {
+        panic!("an undeclared spawn is blocked");
+    };
+    let decision = declaring(&runtime, call("fetch", 1), "toolu-x", attested())
+        .await
+        .expect("the spawn is judged");
+    assert_eq!(
+        decision,
+        ToolCallDecision::Deny {
+            feedback: format!(
+                "{}{}\n\n{feedback}",
+                super::call::UNFIT_DECLARED,
+                super::call::APPLY_BELOW
+            ),
+            offers,
+            display,
+            review,
+        }
+    );
+    assert_eq!(approvals(&runtime), 0);
+}
+
+#[tokio::test]
+async fn the_prepared_fork_carries_the_declared_floor_and_the_attested_shape() {
+    let Deployed { runtime, .. } = deployed(true);
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": { "days": { "type": "integer", "minimum": 0, "maximum": 30 } },
+        "required": ["days"],
+    });
+    let declares = RemedyArguments {
+        label: Some(LabelSpelling {
+            trust: Some("suspicious".to_string()),
+            audience: None,
+        }),
+        return_schema: Some(schema.clone()),
+    };
+    binding(declaring(&runtime, call("fetch", 1), "toolu-1", declares).await);
+    let suspicious = session(&runtime)
+        .with_view(|context| Ok(context.engine().trust_chain().rank_of("suspicious")))
+        .expect("the view reads")
+        .expect("the chain names the rank");
+    let expected = ReturnPolicy::Crossing(appa_engine::fact::CrossingReturn {
+        floor: appa_engine::label::Label::new(suspicious, appa_engine::label::Audience::public()),
+        sanitizer: Some(appa_engine::fact::ReturnSanitizer::Attest(
+            appa_engine::shape::ReturnShape::compile(&schema).expect("the schema compiles"),
+        )),
+    });
+    assert_eq!(fork_returns(&runtime), vec![expected]);
+}
+
+#[tokio::test]
+async fn a_declaration_whose_application_fails_to_commit_refuses_and_leaves_no_approval() {
+    let Deployed { runtime, .. } = deployed(false);
+    // The proposal's denial commits; the application's commit fails.
+    runtime.store().fail_commit_after(1);
+    assert!(matches!(
+        declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await,
+        Err(EventError::Storage(_))
+    ));
+    assert_eq!(
+        facts(&runtime, |fact| matches!(fact, Fact::ProposalBatchDecided { .. })),
+        1,
+        "the denial committed"
+    );
+    assert_eq!(approvals(&runtime), 0);
+    assert_eq!(accepted(&runtime), Vec::<String>::new());
+    assert_eq!(dispatches(&runtime), 0);
+    binding(declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await);
+    assert_eq!(declarations(&runtime), 1);
+    assert_eq!(dispatches(&runtime), 1);
+}
+
+#[tokio::test]
+async fn a_deployment_without_context_control_refuses_a_declaring_spawn_and_writes_nothing() {
+    let Deployed { runtime, .. } = deployed_serving(&format!(
+        "{TOOLS}{}",
+        DEPLOYMENT.replace("context_control = true", "context_control = false")
+    ));
+    let before = facts(&runtime, |_| true);
+    assert!(matches!(
+        declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await,
+        Err(EventError::DeclaresUncontrolled)
+    ));
+    assert_eq!(facts(&runtime, |_| true), before);
+    assert!(
+        matches!(
+            undeclared(&runtime, call("fetch", 1), "toolu-1").await,
+            ToolCallDecision::Allow { spawn: None, .. }
+        ),
+        "the deployment releases the spawn unmarked, so a declaration would have no fork to bind"
+    );
 }
