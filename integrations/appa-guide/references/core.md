@@ -59,8 +59,14 @@ substitute for an audience or trust boundary.
   report that no change is needed. Do not ask for approval, write, or
   reload an unchanged config. Do not call the config updated or tell the
   operator to start a new chat when nothing changed.
-- Make the smallest change that achieves the request. Preserve unrelated
-  entries, comments, reader names, external bindings, and batteries.
+- Make the smallest change that achieves the request. Change only the
+  tools, the side (what a tool returns or what it may receive), and the
+  label (audience or trust) that the request and the operator's answers
+  cover; propose anything else separately. Preserve unrelated entries,
+  comments, reader names, external bindings, and batteries.
+- Say what will behave differently after the change. If nothing will, for
+  example because an Authority already approves that case or an Annotator
+  already gives the same label, say so.
 - Call the runtime's remedy tool only when the immediately previous tool
   result quoted `offer_id: "<hex>"`. Copy that hex string exactly. Never
   invent an offer id. Never use `human-approval`, an authority name, a
