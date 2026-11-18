@@ -145,15 +145,19 @@ This boundary answer is separate from approval to write or install anything.
 
 ### Propose, then apply
 
-Open with one line on the current state: protected or not, and which batteries
-are included. Then group the proposal by server. Show:
+For an operator new to APPA, open with **How APPA works here**: ideas 1 to 4
+of **Talk to the operator**, one short bullet each with an example from this
+session's tools, and that the status line shows the session's trust and
+audience.
 
-- batteries to include, each with its one-sentence explanation and the
-  credential it needs;
+Then give one line on the current state: protected or not, and which
+batteries are included. Then group the proposal by server. Show:
+
+- batteries to include, each with its explanation;
 - rules for the remaining tools, and how those tools will behave;
 - existing behavior that stays unchanged, but only when it affects the result;
 - tools the proposal leaves to the Annotator (judged call by call, which may
-  ask the user) or refused;
+  ask the user) or refused, only when there are any;
 - every configured MCP server whose tools could not be inspected: "<server>
   is configured, but I could not inspect its tools in this session."
 
@@ -187,12 +191,16 @@ After approval:
    `appa battery status --config <live-path> --battery <name>,<name> --json --check`.
    First, in one short message, list the setup steps ahead as a numbered
    list, one line each (for example "1. GitHub sign-in 2. Slack token"), and
-   say that the batteries are included after them. Then work through each
+   say that the batteries are included after them. For an operator new to
+   APPA, add that APPA asks each provider itself rather than through Claude's
+   connection, and that the token page keeps tokens in OpenAPPA's local
+   credential store, not the config. Then work through each
    battery that is not `ready` in chat, one prerequisite per message. Start
    the next only after the current one is ready or skipped. Open every step
    message with its name and number, then one or two short sentences on why,
    written from the battery's `benefit` in the status JSON: what APPA asks
-   the provider, and what that does for the user's data. For example:
+   the provider, what that does for the user's data, and what stops working
+   if the user skips it. For example:
 
    > **Slack token (2 of 2).** With this token, APPA asks Slack who can read
    > each channel. Channel text then goes only to people who can already
@@ -334,12 +342,12 @@ curl --fail-with-body -sS -X POST \
   "${APPA_RUNTIME_URL:-http://127.0.0.1:8787}/reload"
 ```
 
-Briefly say what succeeded, what failed, and whether the file was restored.
+Briefly say what succeeded. If something failed, say what, and whether the
+file was restored.
 If the fix changes who may receive information, say how before asking for
 approval. Describe only behavior supported by the README or observed results.
 
-Keep the report to about five lines. Do not repeat what each battery
-does.
+Do not repeat what each battery does.
 
 For each battery whose setup was skipped, add one short group:
 "**<Battery> <token or sign-in> not set.** The <Battery> battery is
@@ -352,3 +360,11 @@ After a successful reload, add:
 
 > The updated policy is in effect: this session and every other protected
 > session decide their next tool call under it.
+
+For an operator new to APPA, end with **When something is blocked**:
+Claude shows `[appa] Blocked` with the reason and the ways forward before the
+call runs; `/appa-guide why was this blocked` explains it, `/appa-guide
+adjust` changes the rule, and `/clear` starts a clean label. With
+`file-tracker` included, add that files keep the label of the session that
+wrote them. Add that after adding an MCP server, the user runs `/appa-guide`
+again; until then a model judges each of its calls and may ask them.
