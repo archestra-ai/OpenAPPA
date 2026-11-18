@@ -1285,7 +1285,13 @@ A host can also declare the return on the spawn's own `tool_call` event, in the 
 { "declares": { "label": {} } }
 ```
 
-If the spawn is blocked, OpenAPPA applies the declaration through the block's declaration plan and checks the call again in the same hook. The call is then released, or blocked only by its other preconditions. A prospective declaration takes precedence over `declares`. OpenAPPA refuses a `tool_call` that carries `declares` but does not start exactly one subagent.
+`declares` selects one of two returns. Without `return_schema`, the return crosses as spoken. With `return_schema`, `attest-schema` attests the return. A void return or a named output sanitizer needs a plan from the spawn's block.
+
+If the spawn is blocked, OpenAPPA applies the declaration through the block's declaration plan and checks the call again in the same hook. The call is then released, or blocked only by its other preconditions. If no declaration plan of the block fits `declares`, the block states that the declaration was not applied.
+
+A declaration that already stands for the call, with the same tool and arguments, is kept: `declares` does not replace it. A prospective declaration also takes precedence over `declares`.
+
+OpenAPPA refuses a `tool_call` that carries `declares` but does not start exactly one subagent. It also refuses it under a deployment without `context_control`, as it refuses a prospective declaration there.
 
 In the example below, a child agent can inspect internal customer data and pass its return payload through `remove_customer_details` before the parent receives it:
 
