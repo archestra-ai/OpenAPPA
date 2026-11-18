@@ -80,7 +80,11 @@ pub(crate) struct Deadline(Instant);
 
 impl Deadline {
     pub(crate) fn spanning(budget: Duration) -> Self {
-        Self(Instant::now() + budget)
+        Self::until(Instant::now() + budget)
+    }
+
+    pub(crate) fn until(cutoff: Instant) -> Self {
+        Self(cutoff)
     }
 
     /// A socket reads a zero timeout as "no timeout", so a spent budget must fail

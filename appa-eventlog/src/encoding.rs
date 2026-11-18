@@ -5,7 +5,7 @@ use appa_engine::fact::{Fact, TrajectoryOpening};
 use appa_engine::profile::{PolicyFileKey, PolicyRevision};
 use appa_engine::value::TrajectoryId;
 
-use crate::{HostObservation, HostRecord, Log, ReadError};
+use crate::{HostObservation, HostRecord, Log, LogData, ReadError};
 
 /// One stored batch. Both streams share a position, so an engine decision and the host
 /// observation it belongs with are durable together or not at all.
@@ -69,11 +69,6 @@ fn decode(seq: u64, bytes: &[u8]) -> Result<Record, ReadError> {
 pub(crate) struct SequenceGap {
     expected: u64,
     found: i64,
-}
-
-/// The batches of rows read in `seq` order, refused unless their positions run 0, 1, 2, …
-pub(crate) fn contiguous(rows: Vec<(i64, Vec<u8>)>) -> Result<Vec<Vec<u8>>, SequenceGap> {
-    contiguous_from(0, rows)
 }
 
 /// The batches of rows read in `seq` order from position `first`, refused unless their
@@ -168,34 +163,50 @@ pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: V
             key: opening.policy_file_key.as_str().to_string(),
         });
     }
-    let mut log = Log {
+    let mut data = LogData {
         root: root.clone(),
         deployment: opening.deployment,
         facts: Vec::new(),
         batch_ends: Vec::new(),
         stamps: Vec::new(),
+        revisions: Default::default(),
+        stamp: None,
         basis: 0,
         policy_file,
         host: Vec::new(),
     };
-    push(&mut log, record);
-    extend(&mut log, batches.collect())?;
-    Ok(log)
+    push(&mut data, record);
+    for batch in batches {
+        let record = decode(data.basis, &batch)?;
+        push(&mut data, record);
+    }
+    Ok(Log {
+        data: std::sync::Arc::new(data),
+        lineage: None,
+    })
 }
 
 /// Decode the batches that follow `log` in its root's log onto it, in order. Only the new
 /// batches are decoded: a batch never changes once it is accepted.
 pub(crate) fn extend(log: &mut Log, batches: Vec<Vec<u8>>) -> Result<(), ReadError> {
-    for batch in batches {
-        let record = decode(log.basis, &batch)?;
-        push(log, record);
+    if !batches.is_empty() {
+        let data = std::sync::Arc::make_mut(&mut log.data);
+        for batch in batches {
+            let record = decode(data.basis, &batch)?;
+            push(data, record);
+        }
     }
     Ok(())
 }
 
 /// Fold one decoded batch onto `log`.
-fn push(log: &mut Log, record: Record) {
-    log.stamps.push(stamp_of(&record.facts));
+fn push(log: &mut LogData, record: Record) {
+    let stamp = stamp_of(&record.facts);
+    if let Some(stamp) = stamp {
+        log.revisions.insert(stamp);
+        log.stamp = Some(stamp);
+    }
+    log.stamps.push(stamp);
     log.facts.extend(record.facts);
     log.batch_ends.push(log.facts.len());
     if let Some(observation) = record.host {

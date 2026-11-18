@@ -52,7 +52,11 @@ use crate::external::{ConsultGates, ExternalServices};
 #[cfg(feature = "daemon")]
 use crate::yell;
 use appa_engine::label::ReaderId;
-use appa_eventlog::{AheadAttempt, Backend, DeploymentName, EndKind, HostObservation, Log, LogStore, StoredLabel};
+use appa_engine::profile::PolicyFileKey;
+use appa_eventlog::{
+    AheadAttempt, Backend, DeploymentName, EndKind, HostObservation, Log, LogStore, PolicyHead, PublishError,
+    StoredLabel,
+};
 use appa_runtime_api::Adapter;
 use host::{AheadState, Declared, HostState, host_actor, inventory_at};
 
@@ -1313,40 +1317,47 @@ const SERVING_LINE: &str = "default";
 /// How many times serving a deployment reads the head again after another publisher moved it.
 const PUBLISH_ATTEMPTS: u32 = 8;
 
-/// `deployment` serving the head of `line`: at the head's revision when the head already names
-/// its policy file, or published as the line's next revision when it does not. A publish
-/// another publisher won is read again, so the deployment serves whatever revision its own
-/// file stands at.
-/// `deployment` at the revision of `line` that names its policy file: the head when it already
-/// does, a newly published head otherwise. The flag says whether this call published it.
+/// Serve the revision that names this deployment's policy file, retrying if the head moves.
 fn serve(store: &LogStore, line: &DeploymentName, deployment: &Deployment) -> Result<(Deployment, bool), OpenError> {
-    let bytes = deployment.config.policy_file().bytes();
-    let key = appa_engine::profile::PolicyFileKey::of(bytes);
-    let refused = |error: &dyn std::fmt::Display| OpenError::Publish(error.to_string());
+    let mut key = None;
     for _ in 0..PUBLISH_ATTEMPTS {
-        let head = store.head(line).map_err(|error| refused(&error))?;
-        if let Some(head) = &head
-            && head.key == key
-        {
-            return Ok((deployment.at(line, head.revision.value()), false));
-        }
-        match store.publish(line, head.map(|head| head.revision), bytes) {
-            Ok(published) => {
-                tracing::info!(
-                    deployment = %line,
-                    policy_revision = published.revision.value(),
-                    policy_key = %published.key.as_str(),
-                    "published the policy as the deployment's head"
-                );
-                return Ok((deployment.at(line, published.revision.value()), true));
-            }
-            Err(appa_eventlog::PublishError::Moved { .. }) => continue,
-            Err(error) => return Err(refused(&error)),
+        let head = store
+            .head(line)
+            .map_err(|error| OpenError::Publish(error.to_string()))?;
+        match publish_at_head(store, line, deployment, head, &mut key) {
+            Ok(result) => return Ok(result),
+            Err(PublishError::Moved { .. }) => continue,
+            Err(error) => return Err(OpenError::Publish(error.to_string())),
         }
     }
     Err(OpenError::Publish(format!(
         "the head of deployment {line} moved under {PUBLISH_ATTEMPTS} publishes in a row"
     )))
+}
+
+/// Reuse the observed head when it names this policy file, or publish a new head.
+/// The flag indicates whether a revision was published. The caller can reuse the key on retries.
+fn publish_at_head(
+    store: &LogStore,
+    line: &DeploymentName,
+    deployment: &Deployment,
+    head: Option<PolicyHead>,
+    key: &mut Option<PolicyFileKey>,
+) -> Result<(Deployment, bool), PublishError> {
+    let bytes = deployment.config.policy_file().bytes();
+    if let Some(head) = &head
+        && head.key == *key.get_or_insert_with(|| PolicyFileKey::of(bytes))
+    {
+        return Ok((deployment.at(line, head.revision.value()), false));
+    }
+    let published = store.publish(line, head.map(|head| head.revision), bytes)?;
+    tracing::info!(
+        deployment = %line,
+        policy_revision = published.revision.value(),
+        policy_key = %published.key.as_str(),
+        "published the policy as the deployment's head"
+    );
+    Ok((deployment.at(line, published.revision.value()), true))
 }
 
 struct Inner {
@@ -1617,27 +1628,12 @@ impl Runtime {
         if head.as_ref().map(|head| head.revision) != expected {
             return Err(moved(head.map(|head| head.revision)));
         }
-        let bytes = deployment.config.policy_file().bytes();
-        if let Some(head) = head
-            && head.key == appa_engine::profile::PolicyFileKey::of(bytes)
-        {
-            return Ok(self.published(line, deployment.at(line, head.revision.value()), false));
-        }
-        let published = self
-            .inner
-            .store
-            .publish(line, expected, bytes)
-            .map_err(|error| match error {
-                appa_eventlog::PublishError::Moved { head } => moved(head),
+        let (published, new) =
+            publish_at_head(&self.inner.store, line, &deployment, head, &mut None).map_err(|error| match error {
+                PublishError::Moved { head } => moved(head),
                 error => OpenError::Publish(error.to_string()),
             })?;
-        tracing::info!(
-            deployment = %line,
-            policy_revision = published.revision.value(),
-            policy_key = %published.key.as_str(),
-            "published the policy as the deployment's head"
-        );
-        Ok(self.published(line, deployment.at(line, published.revision.value()), true))
+        Ok(self.published(line, published, new))
     }
 
     fn published(&self, line: &DeploymentName, published: Deployment, new: bool) -> PublishedDeployment {
