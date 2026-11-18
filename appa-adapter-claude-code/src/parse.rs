@@ -79,8 +79,8 @@
 use serde::Deserialize;
 
 use appa_runtime_api::{
-    Actor, HookEvent, OutcomeBody, ParseRefusal, PeerFrame, PromptKey, ProposedCall, SessionTitle, SpawnKind, SpawnRef,
-    StartKind, ToolOutcome, TrajectoryId,
+    Actor, HookEvent, OpenCalls, OutcomeBody, ParseRefusal, PeerFrame, PromptKey, ProposedCall, SessionTitle,
+    SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
 };
 
 use crate::identity::spawn_kind;
@@ -379,7 +379,10 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 spawn: SpawnRef::InFlight,
             })),
         },
-        "Stop" | "StopFailure" => Ok(Some(HookEvent::TurnEnd { actor: event.actor() })),
+        "Stop" | "StopFailure" => Ok(Some(HookEvent::TurnEnd {
+            actor: event.actor(),
+            open_calls: OpenCalls::Abandon,
+        })),
         // Without the agent id this would name the root, whose one open
         // dispatch at this point is the `Agent` spawn still in flight.
         "SubagentStop" => match (event.agent(), non_empty(event.agent_type.as_deref())) {
@@ -388,6 +391,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 root: event.root(),
                 child: event.child_id(agent),
                 value: non_empty(event.last_assistant_message.as_deref()).map(str::to_string),
+                open_calls: OpenCalls::Abandon,
             })),
             // A harness-internal helper, not the deployment's spawn: its
             // stop is a turn end and claims no return.
@@ -396,6 +400,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                     root: event.root(),
                     child: Some(event.child_id(agent)),
                 },
+                open_calls: OpenCalls::Abandon,
             })),
         },
         other => {
@@ -506,6 +511,7 @@ mod tests {
                 parsed,
                 Some(HookEvent::TurnEnd {
                     actor: Actor { root: root(), child },
+                    open_calls: appa_runtime_api::OpenCalls::Abandon,
                 }),
                 "{hook} with agent_type {agent_type:?} did not cross as its actor's turn end",
             );
@@ -535,6 +541,7 @@ mod tests {
                     root: root(),
                     child: TrajectoryId("cc:s1:a1".to_string()),
                     value,
+                    open_calls: appa_runtime_api::OpenCalls::Abandon,
                 })),
                 "a stop with message {message:?} did not cross as the child's return",
             );

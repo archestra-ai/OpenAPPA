@@ -262,6 +262,7 @@ impl Runtime {
         if matches!(prior_call(&log, recipient, &call_id, &message), PriorCall::Foreign) {
             return Err(refused("this call id is already a different dispatch"));
         }
+        drop(log);
         let claim = self
             .inner
             .store
@@ -397,6 +398,7 @@ impl Runtime {
             PriorCall::Admitted(body) => return governed_delivery(row, &body),
             PriorCall::Open | PriorCall::Absent => {}
         }
+        drop(log);
         let session = self.session(&actor.root, recipient).map_err(peer_error)?;
         let open = matches!(
             prior_call(
@@ -607,31 +609,6 @@ enum PriorCall {
     Admitted(String),
 }
 
-pub(crate) fn held_of(
-    log: &Log,
-    trajectory: &TrajectoryId,
-    dispatch: &appa_engine::value::DispatchId,
-) -> Option<HeldMessage> {
-    let mut message = None;
-    let mut closed = false;
-    for fact in log.facts() {
-        match fact {
-            Fact::DispatchOpened {
-                trajectory: opened,
-                dispatch: id,
-                held,
-                ..
-            } if opened == trajectory && id == dispatch => {
-                message = held.clone();
-                closed = false;
-            }
-            Fact::DispatchClosed { dispatch: id, .. } if id == dispatch => closed = true,
-            _ => {}
-        }
-    }
-    (!closed).then_some(message).flatten()
-}
-
 fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &HeldMessage) -> PriorCall {
     let Some(dispatch) = log
         .call_bindings()
@@ -762,7 +739,8 @@ impl TryFrom<&HookDecision> for StoredOutcome {
             | HookDecision::ChildReturn { .. }
             | HookDecision::DenyCall { .. }
             | HookDecision::Block { .. }
-            | HookDecision::Refuse { .. } => Err(refused("this read did not admit the stored message")),
+            | HookDecision::Refuse { .. }
+            | HookDecision::Held { .. } => Err(refused("this read did not admit the stored message")),
         }
     }
 }

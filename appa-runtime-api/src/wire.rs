@@ -50,9 +50,9 @@ use serde_json::value::RawValue;
 
 use crate::{
     Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, LaunchStart, LaunchToken, OfferedInputSanitizer,
-    OfferedRemedy, OfferedReturn, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall,
-    RefusalClass, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef,
-    StartKind, ToolOutcome, TrajectoryId,
+    OfferedRemedy, OfferedReturn, OpenCalls, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey,
+    ProposedCall, RefusalClass, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding, SpawnKind,
+    SpawnRef, StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -164,10 +164,11 @@ enum Field {
     Start,
     ForkedFrom,
     Principal,
+    AnsweredCallIds,
 }
 
 impl Field {
-    const ALL: [Field; 21] = [
+    const ALL: [Field; 22] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -189,6 +190,7 @@ impl Field {
         Field::Start,
         Field::ForkedFrom,
         Field::Principal,
+        Field::AnsweredCallIds,
     ];
 
     fn spelling(self) -> &'static str {
@@ -214,6 +216,7 @@ impl Field {
             Field::Start => "start",
             Field::ForkedFrom => "forked_from",
             Field::Principal => "principal",
+            Field::AnsweredCallIds => "answered_call_ids",
         }
     }
 }
@@ -248,7 +251,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Peer,
             Field::Title,
         ],
-        EventName::TurnEnd => &[Field::RootId, Field::ChildId],
+        EventName::TurnEnd => &[Field::RootId, Field::ChildId, Field::AnsweredCallIds],
         EventName::ToolCall => &[
             Field::RootId,
             Field::ChildId,
@@ -277,8 +280,9 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Value,
         ],
         EventName::ChildStart => &[Field::RootId, Field::ChildId, Field::SpawnBinding, Field::PromptId],
-        EventName::ChildTurnEnd => &[Field::RootId, Field::ChildId],
-        EventName::ChildEnd | EventName::ChildReturn => &[Field::RootId, Field::ChildId, Field::Value],
+        EventName::ChildTurnEnd => &[Field::RootId, Field::ChildId, Field::AnsweredCallIds],
+        EventName::ChildEnd => &[Field::RootId, Field::ChildId, Field::Value, Field::AnsweredCallIds],
+        EventName::ChildReturn => &[Field::RootId, Field::ChildId, Field::Value],
     }
 }
 
@@ -570,6 +574,10 @@ pub struct WireEvent {
     /// The user the host authenticated for a starting session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
+    /// On a stop: the calls whose results the stopping step carried. Present means
+    /// [`OpenCalls::Hold`]; absent means [`OpenCalls::Abandon`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered_call_ids: Option<Vec<String>>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -614,6 +622,7 @@ impl WireEvent {
             start: None,
             forked_from: None,
             principal: None,
+            answered_call_ids: None,
         }
     }
 
@@ -642,6 +651,7 @@ impl WireEvent {
             Field::Start => self.start.is_some(),
             Field::ForkedFrom => self.forked_from.is_some(),
             Field::Principal => self.principal.is_some(),
+            Field::AnsweredCallIds => self.answered_call_ids.is_some(),
         }
     }
 
@@ -717,11 +727,12 @@ impl WireEvent {
                     ..Self::bare(adapter, EventName::Prompt)
                 }
             }
-            HookEvent::TurnEnd { actor } => {
+            HookEvent::TurnEnd { actor, open_calls } => {
                 let (root_id, child_id) = ids(actor)?;
                 Self {
                     root_id: Some(root_id),
                     child_id,
+                    answered_call_ids: answered_on_wire(open_calls),
                     ..Self::bare(adapter, EventName::TurnEnd)
                 }
             }
@@ -817,7 +828,11 @@ impl WireEvent {
                     ..Self::bare(adapter, EventName::ChildStart)
                 }
             }
-            HookEvent::ChildTurnEnd { root, child } => {
+            HookEvent::ChildTurnEnd {
+                root,
+                child,
+                open_calls,
+            } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
                     child: None,
@@ -825,10 +840,16 @@ impl WireEvent {
                 Self {
                     root_id: Some(root_id),
                     child_id: Some(child_host_id(root, child)?),
+                    answered_call_ids: answered_on_wire(open_calls),
                     ..Self::bare(adapter, EventName::ChildTurnEnd)
                 }
             }
-            HookEvent::ChildEnd { root, child, value } => {
+            HookEvent::ChildEnd {
+                root,
+                child,
+                value,
+                open_calls,
+            } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
                     child: None,
@@ -837,6 +858,7 @@ impl WireEvent {
                     root_id: Some(root_id),
                     child_id: Some(child_host_id(root, child)?),
                     value: value.clone(),
+                    answered_call_ids: answered_on_wire(open_calls),
                     ..Self::bare(adapter, EventName::ChildEnd)
                 }
             }
@@ -930,6 +952,7 @@ impl WireEvent {
             launch,
             start,
             forked_from,
+            answered_call_ids,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -1003,7 +1026,10 @@ impl WireEvent {
                 }),
                 None => Err(malformed("prompt without its text")),
             },
-            EventName::TurnEnd => accepted(HookEvent::TurnEnd { actor: actor()? }),
+            EventName::TurnEnd => accepted(HookEvent::TurnEnd {
+                actor: actor()?,
+                open_calls: open_calls_of(answered_call_ids),
+            }),
             EventName::SpawnResume => {
                 let actor = actor()?;
                 let (raw, identified) = identified_call(tool, arguments)?;
@@ -1141,11 +1167,20 @@ impl WireEvent {
             }
             EventName::ChildTurnEnd => {
                 let (root, child) = named_child()?;
-                accepted(HookEvent::ChildTurnEnd { root, child })
+                accepted(HookEvent::ChildTurnEnd {
+                    root,
+                    child,
+                    open_calls: open_calls_of(answered_call_ids),
+                })
             }
             EventName::ChildEnd => {
                 let (root, child) = named_child()?;
-                accepted(HookEvent::ChildEnd { root, child, value })
+                accepted(HookEvent::ChildEnd {
+                    root,
+                    child,
+                    value,
+                    open_calls: open_calls_of(answered_call_ids),
+                })
             }
             EventName::ChildReturn => {
                 let (root, child) = named_child()?;
@@ -1222,6 +1257,7 @@ pub enum DecisionName {
     ChildReturn,
     Context,
     Refuse,
+    Held,
 }
 
 /// One offer a block carries: the id `execute_remedy_plan` takes and,
@@ -1295,6 +1331,8 @@ pub struct WireDecision {
     pub class: Option<RefusalClass>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running: Option<Vec<String>>,
 }
 
 impl WireDecision {
@@ -1312,6 +1350,7 @@ impl WireDecision {
             text: None,
             class: None,
             detail: None,
+            running: None,
         }
     }
 
@@ -1388,6 +1427,10 @@ impl WireDecision {
                 detail: Some(detail.clone()),
                 ..Self::bare(DecisionName::Refuse)
             },
+            HookDecision::Held { running } => Self {
+                running: Some(running.clone()),
+                ..Self::bare(DecisionName::Held)
+            },
         }
     }
 
@@ -1461,7 +1504,26 @@ impl WireDecision {
                 class: self.class.ok_or_else(|| missing("class"))?,
                 detail: required("detail", self.detail)?,
             },
+            DecisionName::Held => HookDecision::Held {
+                running: self.running.ok_or_else(|| missing("running"))?,
+            },
         })
+    }
+}
+
+fn answered_on_wire(open_calls: &OpenCalls) -> Option<Vec<String>> {
+    match open_calls {
+        OpenCalls::Abandon => None,
+        OpenCalls::Hold { answered } => Some(answered.iter().cloned().collect()),
+    }
+}
+
+fn open_calls_of(answered: Option<Vec<String>>) -> OpenCalls {
+    match answered {
+        None => OpenCalls::Abandon,
+        Some(answered) => OpenCalls::Hold {
+            answered: answered.into_iter().collect(),
+        },
     }
 }
 
@@ -1921,6 +1983,7 @@ mod tests {
         let event = HookEvent::ChildTurnEnd {
             root: TrajectoryId("cc:s1".into()),
             child: TrajectoryId("cc:s1:c1".into()),
+            open_calls: crate::OpenCalls::Abandon,
         };
         let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).unwrap();
         let bytes = serde_json::to_vec(&wire).unwrap();
@@ -1929,8 +1992,10 @@ mod tests {
             .into_event(&CLAUDE_CODE, PrincipalSource::None)
             .unwrap()
             .unwrap();
-        assert!(matches!(parsed.event, HookEvent::ChildTurnEnd { root, child }
-            if root.0 == "cc:s1" && child.0 == "cc:s1:c1"));
+        assert!(
+            matches!(parsed.event, HookEvent::ChildTurnEnd { root, child, open_calls: crate::OpenCalls::Abandon }
+            if root.0 == "cc:s1" && child.0 == "cc:s1:c1")
+        );
         for extra in [
             serde_json::json!({"value":"not empty", "child_id":"c1"}),
             serde_json::json!({}),

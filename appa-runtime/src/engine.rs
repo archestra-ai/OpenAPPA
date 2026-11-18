@@ -824,6 +824,7 @@ struct HeldFamilies {
 
 struct HeldView {
     view: EngineView,
+    lineage: Option<appa_eventlog::LogLineage>,
     basis: u64,
     facts: usize,
     /// The view's last record, which a later log of the family must still hold at that
@@ -845,7 +846,8 @@ impl HeldViews {
         let (view, basis) = {
             let held = self.held();
             let found = held.views.get(log.root())?;
-            let same_prefix = found.basis <= log.basis()
+            let same_prefix = found.lineage.as_ref() == log.lineage()
+                && found.basis <= log.basis()
                 && found.facts <= log.facts().len()
                 && found.facts.checked_sub(1).map(|last| &log.facts()[last]) == found.last.as_ref();
             if !same_prefix {
@@ -868,6 +870,7 @@ impl HeldViews {
         {
             let fresh = HeldView {
                 view: view.clone(),
+                lineage: log.lineage().cloned(),
                 basis: log.basis(),
                 facts: log.facts().len(),
                 last: log.facts().last().cloned(),

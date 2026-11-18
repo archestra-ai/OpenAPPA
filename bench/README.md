@@ -12,6 +12,7 @@ where LLM spend goes, and where published results live.
 | [`agentthreatbench/`](agentthreatbench/README.md) | Harness for the pinned Inspect AgentThreatBench suite |
 | [`taubench/`](taubench/README.md) | Harness for Tau 1.0.1 `banking_knowledge` |
 | [`sanitizer/`](sanitizer/README.md) | Model sanitizers asked through the production consult path, without an actor: utility, robustness, latency, withheld consults |
+| [`runtime/`](runtime/long_trajectory.py) | SQLite hook latency and decoded batches as one trajectory grows |
 | [`corp-systems/`](corp-systems/README.md) | Fake company systems and email tools that Corp runs against |
 | [`corp-agent/`](corp-agent/README.md) | The Rust APPA agent for Corp |
 | [`corp-agent-fides/`](corp-agent-fides/README.md) | The same Corp agent, defended by Microsoft's FIDES instead of APPA |
@@ -127,7 +128,7 @@ relays it to the bucket.
 
 ## Running a benchmark
 
-Every harness is a `uv` project with a CLI. A model-free `preflight` or
+The model benchmarks are `uv` projects with CLIs. A model-free `preflight` or
 `--dry-run` checks the setup before any paid call:
 
 ```sh
@@ -140,3 +141,17 @@ Corp and AgentThreatBench need `OPENROUTER_API_KEY`. Tau needs
 `OPENROUTER_API_KEY` for its default retrieval configuration, plus the
 sandbox runtime and system packages listed in its README. Tau requires
 Python 3.12.
+
+The runtime benchmark needs only Python and a release binary. It starts a
+loopback daemon with a temporary SQLite database and reports pair p50, p95,
+and the maximum number of batches decoded per pair at each checkpoint.
+
+```sh
+cargo build --release -p appa --bin appa
+python3 bench/runtime/long_trajectory.py --calls 5000 --check-decodes
+```
+
+Use `--timings-only` for both builds when comparing latency. Pass the older
+release binary's path as a positional argument. Run decode tracing separately
+because writing the trace is part of the measured request. Omit
+`--check-decodes` when measuring a trajectory that may outgrow the cache.

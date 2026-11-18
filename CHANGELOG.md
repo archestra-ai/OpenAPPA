@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.44.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.43.1...v0.44.0) (2026-11-18)
+
+
+### Features
+
+* **archestra:** rule the tuner tools ([#926](https://github.com/archestra-ai/OpenAPPA/issues/926)) ([050cb04](https://github.com/archestra-ai/OpenAPPA/commit/050cb04a2cee8079d41a8e816e2f801b3f3c692c))
+* **runtime:** hold a stop while a call it did not answer is still running ([#936](https://github.com/archestra-ai/OpenAPPA/issues/936)) ([60ce02b](https://github.com/archestra-ai/OpenAPPA/commit/60ce02b60fbf4c72c9727519d3b8532954722939))
+
+
+### Bug Fixes
+
+* **annotators:** evaluate complete shell commands ([#940](https://github.com/archestra-ai/OpenAPPA/issues/940)) ([7992773](https://github.com/archestra-ai/OpenAPPA/commit/79927732adfb5614c1eb77713de14dbbc92cfe07))
+* **release:** attest each chart once, not again as a release file ([#924](https://github.com/archestra-ai/OpenAPPA/issues/924)) ([20079ae](https://github.com/archestra-ai/OpenAPPA/commit/20079ae4ae7537129847d9ce458ae5859eef9497))
+
+
+### Performance Improvements
+
+* **runtime:** reuse SQLite log snapshots and shorten cold starts ([#939](https://github.com/archestra-ai/OpenAPPA/issues/939)) ([b78efe2](https://github.com/archestra-ai/OpenAPPA/commit/b78efe299c862e85b38977b46c621c0afde868cc))
+
+
+### Code Refactoring
+
+* **runtime:** share the policy publication attempt ([#938](https://github.com/archestra-ai/OpenAPPA/issues/938)) ([7131d8f](https://github.com/archestra-ai/OpenAPPA/commit/7131d8fd8f9090877be1ad4fc61a469d261208db))
+
 ## [0.43.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.43.0...v0.43.1) (2026-11-16)
 
 

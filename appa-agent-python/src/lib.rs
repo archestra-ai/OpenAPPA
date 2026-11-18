@@ -10,8 +10,9 @@ use appa_runtime::api::{
 use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OutcomeBody, ProposedCall, RefusalClass,
-    SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OpenCalls, OutcomeBody, ProposedCall,
+    RefusalClass, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name,
+    is_reserved_tool_name,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -809,6 +810,7 @@ impl SessionInner {
             root: self.trajectory.clone(),
             child: child.clone(),
             value,
+            open_calls: OpenCalls::Abandon,
         })
     }
 
