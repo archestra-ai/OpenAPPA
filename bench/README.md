@@ -12,7 +12,6 @@ where LLM spend goes, and where published results live.
 | [`agentthreatbench/`](agentthreatbench/README.md) | Harness for the pinned Inspect AgentThreatBench suite |
 | [`taubench/`](taubench/README.md) | Harness for Tau 1.0.1 `banking_knowledge` |
 | [`sanitizer/`](sanitizer/README.md) | Model sanitizers asked through the production consult path, without an actor: utility, robustness, latency, withheld consults |
-| [`appa-guide/`](appa-guide/README.md) | Simulated setup chats that test whether the `appa-guide` skill teaches a newcomer to predict APPA; agent-run, model-judged, not archived |
 | [`runtime/`](runtime/long_trajectory.py) | SQLite hook latency and decoded batches as one trajectory grows |
 | [`corp-systems/`](corp-systems/README.md) | Fake company systems and email tools that Corp runs against |
 | [`corp-agent/`](corp-agent/README.md) | The Rust APPA agent for Corp |
