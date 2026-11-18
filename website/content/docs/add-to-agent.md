@@ -96,6 +96,8 @@ The hooks report each stage of the agent's work and apply APPA's response before
 
 Replacement values reach the model unchanged. Blocked results stay out of its context. If the runtime cannot respond, the pending call or result stays blocked.
 
+An integration that reads results from the next model request, such as an inference proxy, sends `answered_call_ids` on `turn_end`, `child_turn_end`, and `child_end`. The list names the calls whose results the stopping request carried. An open call outside the list is still running: APPA answers `held` with the `running` call ids and records nothing. The integration delivers the response unchanged and stops again after those calls report. Without `answered_call_ids`, APPA closes each open call as unreported.
+
 ### How the hooks reach APPA
 
 With a separate runtime, a hook sends the tool name and arguments as JSON to `POST /hook` and waits for the response. With an embedded runtime, it makes a function call inside your agent's process instead. Both paths return a decision for the hook to apply.

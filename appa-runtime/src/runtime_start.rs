@@ -36,6 +36,7 @@ pub(crate) const STOP_BUDGET: Duration = Duration::from_secs(10);
 /// finish inside the timeout the SessionStart hook entry declares.
 pub(crate) const START_BUDGET: Duration = Duration::from_secs(20);
 const POLL: Duration = Duration::from_millis(250);
+const START_POLL: Duration = Duration::from_millis(15);
 
 #[derive(Debug, Error)]
 pub enum StartError {
@@ -122,7 +123,11 @@ enum Health {
 }
 
 fn probe(endpoint: &Endpoint) -> Health {
-    let Ok(answer) = get(endpoint, "/health", &Deadline::spanning(PROBE_BUDGET)) else {
+    probe_until(endpoint, &Deadline::spanning(PROBE_BUDGET))
+}
+
+fn probe_until(endpoint: &Endpoint, deadline: &Deadline) -> Health {
+    let Ok(answer) = get(endpoint, "/health", deadline) else {
         return Health::Unreachable;
     };
     if !answer.is_success() {
@@ -409,11 +414,20 @@ fn start(
     // lost the port to a concurrent one is waited on the same way, for the
     // runtime that won it.
     let deadline = Instant::now() + START_BUDGET;
-    while Instant::now() < deadline {
-        if let Health::Ok = probe(endpoint) {
+    let mut interval = START_POLL;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        let cutoff = deadline.min(now + PROBE_BUDGET);
+        if let Health::Ok = probe_until(endpoint, &Deadline::until(cutoff))
+            && Instant::now() < deadline
+        {
             return Ok(());
         }
-        std::thread::sleep(POLL);
+        std::thread::sleep(interval.min(deadline.saturating_duration_since(Instant::now())));
+        interval = (interval * 2).min(POLL);
     }
     Err(StartError::NotHealthy {
         url: url.to_owned(),

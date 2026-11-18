@@ -77,7 +77,8 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: Option<appa_runtime_api::PeerFrame> = peer;
             let _: Option<appa_runtime_api::SessionTitle> = title;
         }
-        HookEvent::TurnEnd { actor } => {
+        HookEvent::TurnEnd { actor, open_calls } => {
+            let _: appa_runtime_api::OpenCalls = open_calls;
             let Actor { root, child } = actor;
             let _: TrajectoryId = root;
             let _: Option<TrajectoryId> = child;
@@ -125,16 +126,23 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
                 }
             }
         }
-        HookEvent::ChildTurnEnd { root, child } => {
+        HookEvent::ChildTurnEnd {
+            root,
+            child,
+            open_calls,
+        } => {
             let _: TrajectoryId = root;
             let _: TrajectoryId = child;
+            let _: appa_runtime_api::OpenCalls = open_calls;
         }
         HookEvent::ChildEnd {
             root: _,
             child: _,
             value,
+            open_calls,
         } => {
             let _: Option<String> = value;
+            let _: appa_runtime_api::OpenCalls = open_calls;
         }
         HookEvent::ChildReturn {
             root: _,
@@ -185,6 +193,9 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         }
         HookDecision::Refuse { detail, .. } => {
             let _: String = detail;
+        }
+        HookDecision::Held { running } => {
+            let _: Vec<String> = running;
         }
     }
     match refusal {

@@ -109,6 +109,31 @@ impl Session {
     /// Finish an empty child turn under its immutable recorded return contract.
     /// A void contract ends here; a crossing contract remains available for follow-ups.
     pub async fn on_child_turn_end(&self) -> Result<ChildReturnDecision, EventError> {
+        if self.returns_void()? {
+            self.on_child_end(None).await
+        } else {
+            self.on_turn_end().await?;
+            Ok(ChildReturnDecision::NoValue)
+        }
+    }
+
+    /// [`Session::on_child_turn_end`] for a harness that reports outcomes by call id after the
+    /// stop: held while a call the stop would close is not in `answered`.
+    pub(crate) async fn on_child_turn_end_holding(
+        &self,
+        answered: &BTreeSet<String>,
+    ) -> Result<Stop<ChildReturnDecision>, EventError> {
+        if self.returns_void()? {
+            self.on_child_end_holding(None, answered).await
+        } else {
+            Ok(match self.on_turn_end_holding(answered).await? {
+                Stop::Taken(()) => Stop::Taken(ChildReturnDecision::NoValue),
+                Stop::Held(running) => Stop::Held(running),
+            })
+        }
+    }
+
+    fn returns_void(&self) -> Result<bool, EventError> {
         let log = self.inner.log(&self.root)?;
         let deployment = self.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log)?;
@@ -117,12 +142,7 @@ impl Session {
             .engine()
             .return_policy_of(&view, &self.trajectory)
             .ok_or(EventError::NotAChild)?;
-        if matches!(returns, appa_engine::fact::ReturnPolicy::Void) {
-            self.on_child_end(None).await
-        } else {
-            self.on_turn_end().await?;
-            Ok(ChildReturnDecision::NoValue)
-        }
+        Ok(matches!(returns, appa_engine::fact::ReturnPolicy::Void))
     }
 
     /// The child finished its turn and returns `value`; `None` returns no
@@ -140,20 +160,43 @@ impl Session {
     /// ended by returning nothing has nothing left to cross: an empty stop
     /// replays, a message is held until the child gives it up.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
-        let open = self.with_view(|context| {
+        match self.child_calls()? {
+            None => Ok(ended_child(value)),
+            Some(open) => self.close_and_cross(open, value).await,
+        }
+    }
+
+    /// [`Session::on_child_end`] for a harness that reports outcomes by call id after the
+    /// stop: held while a call the stop would close is not in `answered`.
+    pub(crate) async fn on_child_end_holding(
+        &self,
+        value: Option<String>,
+        answered: &BTreeSet<String>,
+    ) -> Result<Stop<ChildReturnDecision>, EventError> {
+        let Some(open) = self.child_calls()? else {
+            return Ok(Stop::Taken(ended_child(value)));
+        };
+        match self.unanswered(&open, answered)?.as_slice() {
+            [] => self.close_and_cross(open, value).await.map(Stop::Taken),
+            running => Ok(Stop::Held(running.to_vec())),
+        }
+    }
+
+    /// The calls a child's end closes; `None` for a child that already ended.
+    fn child_calls(&self) -> Result<Option<Vec<OpenDispatch>>, EventError> {
+        self.with_view(|context| {
             Ok(match context.engine().liveness(context.view, &self.trajectory) {
                 Liveness::Ended => None,
                 Liveness::Live | Liveness::Unopened => Some(context.open_dispatches()),
             })
-        })?;
-        let Some(open) = open else {
-            return Ok(match value {
-                None => ChildReturnDecision::NoValue,
-                Some(_) => ChildReturnDecision::Blocked {
-                    feedback: ENDED_CHILD.to_string(),
-                },
-            });
-        };
+        })
+    }
+
+    async fn close_and_cross(
+        &self,
+        open: Vec<OpenDispatch>,
+        value: Option<String>,
+    ) -> Result<ChildReturnDecision, EventError> {
         // Each call it still has open got no outcome hook and closes as unreported, exactly as
         // a turn end closes it.
         self.close_unreported(open, "call closed as unreported at the child's end")
@@ -192,5 +235,14 @@ impl Session {
 
     pub(super) fn liveness_of(&self, trajectory: &TrajectoryId) -> Result<Liveness, EventError> {
         self.with_view(|context| Ok(context.engine().liveness(context.view, trajectory)))
+    }
+}
+
+fn ended_child(value: Option<String>) -> ChildReturnDecision {
+    match value {
+        None => ChildReturnDecision::NoValue,
+        Some(_) => ChildReturnDecision::Blocked {
+            feedback: ENDED_CHILD.to_string(),
+        },
     }
 }

@@ -406,6 +406,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
         root: root(),
         child: child(),
         value: Some("Alice Chen, alice@corp.example".to_string()),
+        open_calls: appa_runtime_api::OpenCalls::Abandon,
     };
     let stopped = hooks::handle(&runtime, end).await;
     let HookDecision::ChildReturn { value } = stopped else {
@@ -419,6 +420,7 @@ async fn a_branch_records_its_seed_its_own_flows_and_how_its_return_crossed() {
         root: root(),
         child: child(),
         value: Some(value),
+        open_calls: appa_runtime_api::OpenCalls::Abandon,
     };
     assert_eq!(hooks::handle(&runtime, echoed).await, HookDecision::Ack);
 
@@ -539,6 +541,7 @@ async fn a_child_bound_attest_schema_return_crosses_in_engine() {
         root: root(),
         child: child(),
         value: Some(r#"{"verdict":"allow"}"#.to_string()),
+        open_calls: appa_runtime_api::OpenCalls::Abandon,
     };
     assert_eq!(hooks::handle(&runtime, end).await, HookDecision::Ack);
 

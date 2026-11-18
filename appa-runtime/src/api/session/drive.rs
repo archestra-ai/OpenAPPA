@@ -736,6 +736,8 @@ impl Session {
                 None => crate::engine::policy_file_key(opened.policy_file()),
             },
         );
+        drop(opened);
+
         // External answers carry the exact call or group they answered for, and the
         // engine matches them only while that is still the one in front of it — a
         // rewritten call is annotated afresh by construction, so this loop carries
