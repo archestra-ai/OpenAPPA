@@ -214,7 +214,8 @@ impl Session {
         declares: &RemedyArguments,
         mut decision: ToolCallDecision,
     ) -> Result<ToolCallDecision, EventError> {
-        for _ in 0..DECLARATION_ROUNDS {
+        let mut rounds = 0..DECLARATION_ROUNDS;
+        loop {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
                 return Ok(decision);
             };
@@ -232,24 +233,31 @@ impl Session {
                     true => Some(context.fitting_offer(offers, declares)),
                 })
             })?;
-            match fit {
+            let live = match fit {
                 None => return Ok(decision),
                 Some(Fit::Unfit) => return Ok(noted(&decision, UNFIT_DECLARED)),
-                Some(Fit::Stale) => {}
-                Some(Fit::Live(offer)) => match self.on_remedy(offer, declares.clone(), None, None).await {
+                Some(Fit::Stale) => None,
+                Some(Fit::Live(offer)) => Some(offer),
+            };
+            // The decision of the last round's proposal is judged above before the rounds end,
+            // so a release that proposal committed is never answered as contention.
+            if rounds.next().is_none() {
+                return Err(EventError::Contended {
+                    attempts: DECLARATION_ROUNDS,
+                });
+            }
+            if let Some(offer) = live {
+                match self.on_remedy(offer, declares.clone(), None, None).await {
                     Ok(_) => {}
                     Err(error) if error.is_operational() => return Err(error),
                     // The next proposal reads what the family holds after the refusal.
                     Err(error) => {
                         tracing::debug!(trajectory = %self.trajectory.0, %error, "the declared return was not applied");
                     }
-                },
+                }
             }
             decision = self.propose_resolving(proposal, None).await?.0;
         }
-        Err(EventError::Contended {
-            attempts: DECLARATION_ROUNDS,
-        })
     }
 
     /// Propose, and while the block offers a plan that asks only stock `approve` authorities,
