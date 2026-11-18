@@ -92,22 +92,35 @@ impl Session {
         call_id: Option<&str>,
         outcome: &ToolOutcome,
     ) -> Result<(), EventError> {
-        let log = self.inner.log(&self.root)?;
-        let deployment = self.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log)?;
-        let open = self.report_calls(call_id)?;
-        let dispatch = match classify_report_identified(
-            call,
-            call_id,
-            || policy.engine().canonical_bytes(call),
-            &open,
-            log.call_bindings(),
-            &self.trajectory,
-        ) {
-            Ok(dispatch) => dispatch,
-            Err(_) => return Ok(()),
-        };
-        let Some(held) = crate::api::embedded::held_of(&log, &self.trajectory, &dispatch) else {
+        // Classify the open dispatch and find its held message in the same snapshot.
+        let held = self.with_view(|context| {
+            if context.engine().liveness(context.view, &self.trajectory) != Liveness::Live {
+                return Ok(None);
+            }
+            let mut open = context.open_dispatches();
+            if call_id.is_none() {
+                open.retain(|open| !context.identified_spawn(open));
+            }
+            let held = classify_report_identified(
+                call,
+                call_id,
+                || context.canonical_bytes(call),
+                &open,
+                context.log.call_bindings(),
+                &self.trajectory,
+            )
+            .ok()
+            .and_then(|dispatch| {
+                context
+                    .view
+                    .views(&self.trajectory)?
+                    .dispatch_call(&dispatch)?
+                    .held()
+                    .cloned()
+            });
+            Ok(held.map(|held| (held, context.engine().trust_chain().clone())))
+        })?;
+        let Some((held, chain)) = held else {
             return Ok(());
         };
         let Ok(id) = crate::api::embedded::EmbeddedPeerId::parse(&held.id) else {
@@ -123,7 +136,7 @@ impl Session {
         };
         if row.recipient != self.trajectory.as_str()
             || row.status != appa_eventlog::embedded::EmbeddedStatus::Read
-            || crate::api::embedded::held_message(&row, policy.engine().trust_chain()) != held
+            || crate::api::embedded::held_message(&row, &chain) != held
         {
             return Ok(());
         }
