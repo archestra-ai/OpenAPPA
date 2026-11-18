@@ -704,6 +704,12 @@ pub enum HookDecision {
         /// The offers whose plans consult a human authority, for a
         /// harness that reviews through its own channel.
         review: Vec<Review>,
+        /// The requirements the checked label misses, as `feedback` lists
+        /// them. Empty for a denial no requirement caused, such as a
+        /// malformed call or a narrowing alone.
+        gaps: Vec<DecisionGap>,
+        /// The narrowing committing the call would cause, when one fired.
+        narrowing: Option<DecisionNarrowing>,
     },
     Block {
         reason: String,
@@ -762,6 +768,36 @@ pub enum HookDecision {
     Held {
         running: Vec<String>,
     },
+}
+
+/// A trajectory label by name: the trust rank, and the audience as the
+/// intersection of union clauses, each clause in the policy's audience-list
+/// grammar. No clause is `public`; a clause with no entries reaches nobody.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DecisionLabel {
+    pub trust: String,
+    pub audience: Vec<Vec<String>>,
+}
+
+/// The label a call would move the trajectory from, and the one it would
+/// move it to.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DecisionNarrowing {
+    pub from: DecisionLabel,
+    pub to: DecisionLabel,
+}
+
+/// One requirement a checked label misses. `required` of an `includes` gap
+/// is one audience list in the policy's grammar: `["public"]`, or the
+/// entries of one union.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DecisionGap {
+    TrustFloor { required: String, actual: String },
+    Includes { required: Vec<String> },
+    Prior { effect: String },
+    NoPrior { effect: String },
+    Attention { mark: String },
 }
 
 /// One remedy a block offers: the id `execute_remedy_plan` takes and,

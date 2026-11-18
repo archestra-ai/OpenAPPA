@@ -147,6 +147,7 @@ pub mod branch;
 pub mod candidate;
 pub mod check;
 pub mod contract;
+pub mod diff;
 pub mod engine;
 pub mod execute;
 pub mod fact;

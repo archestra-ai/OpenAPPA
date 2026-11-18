@@ -84,7 +84,11 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         HookDecision::Refuse { .. } => 409,
         _ => 200,
     };
-    (status, wire(&handled.decision))
+    let answered = WireDecision::of(&handled.decision).labelled(handled.label);
+    (
+        status,
+        serde_json::to_value(answered).expect("a wire decision serializes"),
+    )
 }
 
 /// The event to dispatch, or the answer that ends the hook here. Every way a hook can end
@@ -477,6 +481,7 @@ pub async fn handle_embedded_with_options(
     EmbeddedHookOutcome {
         decision: handled.decision,
         presentation: handled.presentation,
+        label: handled.label,
     }
 }
 
@@ -491,6 +496,9 @@ pub async fn handle_embedded_with_options(
 pub(crate) struct Handled {
     pub(crate) decision: HookDecision,
     pub(crate) presentation: Option<RemedyPresentation>,
+    /// The trajectory label a proposed call was checked at. The wire carries it beside the
+    /// decision; an adapter renders nothing from it.
+    pub(crate) label: Option<appa_runtime_api::DecisionLabel>,
     pub(crate) event: crate::events::RuntimeEvent,
 }
 
@@ -512,11 +520,13 @@ pub(crate) async fn handle_internal(
     let (kind, tool) = hook_shape(&event);
     let mut dispatch = None;
     let mut presentation = None;
+    let mut label = None;
     let decision = dispatch_event(
         runtime,
         event,
         &mut dispatch,
         &mut presentation,
+        &mut label,
         &presentation_options,
         call_ids,
     )
@@ -528,6 +538,7 @@ pub(crate) async fn handle_internal(
     }
     Handled {
         presentation,
+        label,
         event: crate::events::RuntimeEvent::Hook {
             event: kind,
             tool,
@@ -585,6 +596,7 @@ async fn dispatch_event(
     event: HookEvent,
     dispatch: &mut Option<EngineDispatchId>,
     presentation: &mut Option<RemedyPresentation>,
+    label: &mut Option<appa_runtime_api::DecisionLabel>,
     presentation_options: &EmbeddedPresentationOptions,
     call_ids: ToolCallIds,
 ) -> HookDecision {
@@ -592,6 +604,7 @@ async fn dispatch_event(
         runtime,
         dispatch,
         presentation,
+        label,
         options: presentation_options,
         call_ids,
     };
@@ -664,6 +677,8 @@ struct Dispatcher<'a> {
     dispatch: &'a mut Option<EngineDispatchId>,
     /// What a denial or a replacement carries for an embedded harness.
     presentation: &'a mut Option<RemedyPresentation>,
+    /// The trajectory label a proposed call was checked at.
+    label: &'a mut Option<appa_runtime_api::DecisionLabel>,
     options: &'a EmbeddedPresentationOptions,
     call_ids: ToolCallIds,
 }
@@ -863,6 +878,7 @@ impl Dispatcher<'_> {
             Ok(ToolCallDecision::Allow {
                 spawn,
                 dispatch: opened,
+                label,
             }) => {
                 // The send is recorded before it is released: a message that arrives with no
                 // record is held, which is not how a released send should land.
@@ -872,6 +888,7 @@ impl Dispatcher<'_> {
                     return refuse(error);
                 }
                 *self.dispatch = Some(opened);
+                *self.label = label;
                 vouch_call(self.runtime, &actor, &call);
                 HookDecision::AllowCall { spawn }
             }
@@ -880,6 +897,9 @@ impl Dispatcher<'_> {
                 offers,
                 display,
                 review,
+                gaps,
+                narrowing,
+                label,
             }) => {
                 let feedback = match sent.is_some().then(|| self.runtime.peer_hint(&actor.root, &call)) {
                     Some(Ok(Some(address))) => format!(
@@ -894,10 +914,13 @@ impl Dispatcher<'_> {
                     review: review.clone(),
                     display,
                 });
+                *self.label = label;
                 HookDecision::DenyCall {
                     feedback,
                     offers,
                     review,
+                    gaps,
+                    narrowing,
                 }
             }
             Err(error) => fold(error, Refusal::Deny),
@@ -1133,6 +1156,7 @@ fn presentation_for(decision: &HookDecision) -> Option<RemedyPresentation> {
             feedback,
             offers,
             review,
+            ..
         } => Some(RemedyPresentation {
             feedback: feedback.clone(),
             offers: offers.clone(),
@@ -1359,6 +1383,8 @@ fn deny(feedback: String) -> HookDecision {
         feedback: format!("[appa] {feedback}"),
         offers: Vec::new(),
         review: Vec::new(),
+        gaps: Vec::new(),
+        narrowing: None,
     }
 }
 

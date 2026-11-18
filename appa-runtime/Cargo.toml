@@ -60,6 +60,9 @@ name = "huggingface_targets"
 [[test]]
 name = "loopback_proxy"
 
+[[test]]
+name = "offline_contracts"
+
 [dependencies]
 tower = { version = "0.5", features = ["util"], optional = true }
 rusqlite = { version = "0.41", default-features = false, features = ["bundled"] }

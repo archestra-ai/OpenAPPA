@@ -883,6 +883,51 @@ impl Engine {
         select_call(&self.registry, tool, raw_arguments).map(|(call, _)| call)
     }
 
+    /// What this policy's contracts alone say of one proposed call, for a trajectory at
+    /// `current` that has committed `committed`: the check with no log, no remedy, no recorded
+    /// denial and no consult. A call this policy cannot resolve is the error
+    /// [`Engine::resolve_call`] gives.
+    pub fn check_contract(
+        &self,
+        tool: ToolName,
+        raw_arguments: &[u8],
+        current: &Label,
+        committed: &std::collections::BTreeSet<crate::fact::EffectKind>,
+    ) -> Result<check::ContractVerdict, EngineError> {
+        let call = self.resolve_call(tool, raw_arguments)?;
+        let unknown = || EngineError::UnknownTool(call.tool().as_str().to_string());
+        let declaration = self.registry.declaration(&call).ok_or_else(unknown)?;
+        let annotation = match declaration {
+            crate::contract::ToolDeclaration::Declared(_) => {
+                self.registry.annotation_of(&call).ok_or_else(unknown)?.into_owned()
+            }
+            crate::contract::ToolDeclaration::Annotated { requires, .. } => ToolAnnotation {
+                name: call.tool().clone(),
+                tags: declaration.tags().to_vec(),
+                description: None,
+                parameters: declaration.parameters().clone(),
+                delta: crate::contract::Delta::NONE,
+                forwards: crate::contract::Delta::NONE,
+                emits: crate::fact::EffectSet::default(),
+                requires: crate::contract::Requires {
+                    label: requires.clone(),
+                    ..Default::default()
+                },
+            },
+        };
+        let audience = self.registry.audience();
+        let empty = Expansions::default();
+        let context = MembershipContext::new(audience.within_assertions(), audience.providers(), &empty);
+        Ok(check::check_contract(
+            &annotation,
+            declaration.annotator(),
+            &call,
+            current,
+            committed,
+            &context,
+        ))
+    }
+
     /// Evaluate a proposed call: allow, or block carrying everything that stopped it at once —
     /// the requirement gaps, the narrowing where one fired, and the values whose consumed
     /// dimension no cast has established. Resolution is the runtime's job;

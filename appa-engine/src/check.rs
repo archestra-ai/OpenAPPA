@@ -98,6 +98,74 @@ pub(crate) fn committed_label(annotation: &ToolAnnotation, current: &Label) -> L
     current.combine(&annotation.delta.output_label())
 }
 
+/// What a policy's contracts alone say of one call at a given label: the check without a
+/// trajectory, remedies, denials or consults.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContractVerdict {
+    /// No requirement is missed. A narrowing the call would cause is not a denial: the agent
+    /// accepts it.
+    Allow,
+    Deny {
+        gaps: Vec<Gap>,
+    },
+    /// The contract is produced per call by this Annotator, and the floor the policy writes
+    /// beside it is met. A floor that is missed denies whatever the Annotator would answer.
+    NeedsAnnotator {
+        annotator: AnnotatorName,
+    },
+    /// The audience comparisons need these atoms' members, which only a source can answer.
+    NeedsMembership {
+        atoms: Vec<SymbolicAtom>,
+    },
+}
+
+/// Check `call` against `annotation` for a trajectory at `current` that has committed exactly
+/// `committed` and reserves nothing. For an Annotated declaration `annotation` is the floor the
+/// policy writes beside `annotator`: every answer only narrows it, so a gap here is final.
+/// Deterministic and consults nothing: an audience comparison is decided from the policy's
+/// declared facts alone.
+pub(crate) fn check_contract(
+    annotation: &ToolAnnotation,
+    annotator: Option<&AnnotatorName>,
+    call: &ResolvedCall,
+    current: &Label,
+    committed: &std::collections::BTreeSet<EffectKind>,
+    context: &MembershipContext<'_>,
+) -> ContractVerdict {
+    let evaluate = |annotation: &ToolAnnotation| {
+        evaluate_state(
+            annotation,
+            current,
+            &|kind| committed.contains(kind),
+            &|_| false,
+            CallReads::Resolved(call),
+            &CallStage::default(),
+            context,
+        )
+    };
+    match (evaluate(annotation), annotator) {
+        // No membership answer meets a requirement that names no audience: those gaps are
+        // final whatever the members are.
+        (Err(needed), _) => {
+            let mut unaudienced = annotation.clone();
+            unaudienced.requires.label.audience.clear();
+            match evaluate(&unaudienced) {
+                Ok(block) if !block.requirement_gaps.is_empty() => ContractVerdict::Deny {
+                    gaps: block.requirement_gaps,
+                },
+                Ok(_) | Err(_) => ContractVerdict::NeedsMembership { atoms: needed.needed },
+            }
+        }
+        (Ok(block), _) if !block.requirement_gaps.is_empty() => ContractVerdict::Deny {
+            gaps: block.requirement_gaps,
+        },
+        (Ok(_), Some(annotator)) => ContractVerdict::NeedsAnnotator {
+            annotator: annotator.clone(),
+        },
+        (Ok(_), None) => ContractVerdict::Allow,
+    }
+}
+
 /// What the check reads from the call it evaluates: the arguments its placeholders spell.
 /// `Static` is the argument-independent case — a [`StaticAnnotation`] evaluated with no call at
 /// hand, which by construction reads nothing.

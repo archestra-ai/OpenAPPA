@@ -419,6 +419,9 @@ impl Runtime {
                     feedback,
                     offers,
                     review,
+                    gaps,
+                    narrowing,
+                    label,
                     ..
                 } => {
                     return Ok(EmbeddedHookOutcome {
@@ -426,6 +429,8 @@ impl Runtime {
                             feedback: feedback.clone(),
                             offers: offers.clone(),
                             review: review.clone(),
+                            gaps,
+                            narrowing,
                         },
                         presentation: Some(RemedyPresentation {
                             feedback,
@@ -433,6 +438,7 @@ impl Runtime {
                             review,
                             display: Vec::new(),
                         }),
+                        label,
                     });
                 }
                 ToolCallDecision::Allow { .. } => {}
@@ -577,6 +583,7 @@ fn outcome_of(decision: ToolResultDecision, proved: PriorCall) -> Result<Embedde
         } => Ok(EmbeddedHookOutcome {
             decision: HookDecision::ReplaceOutput { output: placeholder },
             presentation,
+            label: None,
         }),
         ToolResultDecision::Keep => {
             let body = proved.ok_or_else(|| refused("the read was acknowledged without an admitted body"))?;
@@ -589,6 +596,7 @@ fn deliver(body: String) -> EmbeddedHookOutcome {
     EmbeddedHookOutcome {
         decision: HookDecision::DeliverValue { value: body },
         presentation: None,
+        label: None,
     }
 }
 
@@ -715,6 +723,7 @@ fn stored_outcome(row: &EmbeddedRow) -> Result<EmbeddedHookOutcome, EmbeddedPeer
     Ok(EmbeddedHookOutcome {
         decision: stored.into(),
         presentation: None,
+        label: None,
     })
 }
 

@@ -7,6 +7,7 @@ mod annotate;
 pub mod api;
 pub mod batteries;
 pub mod config;
+pub mod contracts;
 mod credentials;
 pub mod describe;
 pub mod guide;

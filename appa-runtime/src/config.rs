@@ -1655,12 +1655,13 @@ impl Config {
         let llm = llm.map(|raw| resolve_llm(raw, keys)).transpose()?;
         let jev = jev
             .map(|raw| {
-                resolve_jev(
-                    raw,
-                    Duration::from_millis(timeout_ms),
-                    keys,
-                    std::env::var(JEV_URL_VARIABLE).ok(),
-                )
+                // A deferred configuration only validates: it reads nothing from the
+                // operator's environment, so it depends on its document alone.
+                let operator_url = match keys {
+                    KeySource::Lookup(_) => std::env::var(JEV_URL_VARIABLE).ok(),
+                    KeySource::Deferred => None,
+                };
+                resolve_jev(raw, Duration::from_millis(timeout_ms), keys, operator_url)
             })
             .transpose()?;
         let resolve = |section: Section, entries: BTreeMap<String, RawBinding>| {

@@ -449,7 +449,7 @@ async fn a_repeated_call_is_answered_with_its_own_release() {
         .await
         .expect("the repeat is answered");
     assert!(
-        matches!(replayed, ToolCallDecision::Allow { dispatch: ref again, spawn: None } if *again == dispatch),
+        matches!(replayed, ToolCallDecision::Allow { dispatch: ref again, spawn: None, .. } if *again == dispatch),
         "the repeat releases the same dispatch: {replayed:?}"
     );
     assert_eq!(runtime.log_facts(&root()), facts, "a replay appends no facts");
@@ -474,7 +474,7 @@ async fn a_repeated_call_is_answered_with_its_own_release() {
         .await
         .expect("the repeat is answered");
     assert!(
-        matches!(replayed, ToolCallDecision::Allow { dispatch: ref again, spawn: None } if *again == dispatch),
+        matches!(replayed, ToolCallDecision::Allow { dispatch: ref again, spawn: None, .. } if *again == dispatch),
         "the settled release replays its dispatch: {replayed:?}"
     );
     assert_eq!(runtime.log_facts(&root()), facts, "a replay appends no facts");
@@ -519,6 +519,7 @@ async fn a_spawn_call_replays_its_fork_binding() {
     let ToolCallDecision::Allow {
         spawn: Some(binding),
         dispatch,
+        ..
     } = session
         .on_tool_call_identified(
             call.clone().proposed(),
@@ -544,6 +545,7 @@ async fn a_spawn_call_replays_its_fork_binding() {
     let ToolCallDecision::Allow {
         spawn: Some(again),
         dispatch: again_dispatch,
+        ..
     } = replayed
     else {
         panic!("the replay releases the same fork binding: {replayed:?}");
