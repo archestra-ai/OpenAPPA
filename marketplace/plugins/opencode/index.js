@@ -82,8 +82,6 @@ var WorkspaceID = Schema3.String.check(Schema3.isStartingWith("wrk")).pipe(Schem
     ascending: (id) => {
       if (!id)
         return create2();
-      if (!id.startsWith("wrk"))
-        throw Error(`ID ${id} does not start with wrk`);
       return schema.make(id);
     },
     create: create2
@@ -142,11 +140,13 @@ var exports_model = {};
 __export(exports_model, {
   VariantID: () => VariantID,
   Variant: () => Variant,
+  Type: () => Type,
   Settings: () => Settings2,
   Ref: () => Ref3,
   ReasoningField: () => ReasoningField,
   Overlays: () => Overlays2,
   Model: () => exports_model,
+  MediaInput: () => MediaInput,
   MaxTokensField: () => MaxTokensField,
   Info: () => Info6,
   ID: () => ID6,
@@ -156,7 +156,7 @@ __export(exports_model, {
   Compatibility: () => Compatibility,
   Capabilities: () => Capabilities
 });
-import { Schema as Schema14 } from "effect";
+import { Schema as Schema14, Struct as Struct3 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/provider.js
 var exports_provider = {};
@@ -172,6 +172,9 @@ __export(exports_provider, {
   Event: () => Event4,
   Encoding: () => Encoding,
   Compaction: () => Compaction,
+  CacheWarming: () => CacheWarming,
+  CacheTTL: () => CacheTTL,
+  Cache: () => Cache,
   Activation: () => Activation
 });
 import { Effect, Schema as Schema12 } from "effect";
@@ -203,37 +206,94 @@ import { Schema as Schema10 } from "effect";
 var exports_connection = {};
 __export(exports_connection, {
   Status: () => Status,
-  Info: () => Info3,
+  Info: () => Info2,
   EnvInfo: () => EnvInfo,
   CredentialInfo: () => CredentialInfo,
   Connection: () => exports_connection
 });
-import { Schema as Schema9 } from "effect";
+import { Schema as Schema8 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/credential.js
 var exports_credential = {};
 __export(exports_credential, {
-  Value: () => Value2,
+  Value: () => Value,
   OAuth: () => OAuth,
   Key: () => Key,
-  ID: () => ID3,
+  ID: () => ID2,
   External: () => External,
-  Event: () => Event2,
+  Event: () => Event,
   Entry: () => Entry,
   Credential: () => exports_credential,
   CreateInput: () => CreateInput
 });
-import { Schema as Schema8 } from "effect";
+import { Schema as Schema7 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/integration-id.js
 import { Schema as Schema6 } from "effect";
 var IntegrationID = Schema6.String.pipe(Schema6.brand("Integration.ID"), Schema6.annotate({ identifier: "Integration.ID" })), IntegrationMethodID = Schema6.String.pipe(Schema6.brand("Integration.MethodID"), Schema6.annotate({ identifier: "Integration.MethodID" }));
 
+// integrations/opencode/node_modules/@opencode/schema/dist/credential.js
+var ID2 = Schema7.String.pipe(Schema7.brand("Credential.ID"), Schema7.annotate({ identifier: "Credential.ID" }), statics((schema) => ({ create: () => schema.make("cred_" + ascending()) }))), Updated = ephemeral({
+  type: "credential.updated",
+  schema: {}
+}), Switched = ephemeral({
+  type: "credential.switched",
+  schema: { integrationID: IntegrationID, credentialID: Schema7.NullOr(ID2) }
+}), Event = {
+  Updated,
+  Switched,
+  Definitions: inventory(Updated, Switched)
+}, OAuth = Schema7.Struct({
+  type: Schema7.Literal("oauth"),
+  methodID: IntegrationMethodID,
+  refresh: Schema7.String,
+  access: Schema7.String,
+  expires: NonNegativeInt,
+  metadata: optional(Schema7.Record(Schema7.String, Schema7.Unknown))
+}).annotate({ identifier: "Credential.OAuth" }), Key = Schema7.Struct({
+  type: Schema7.Literal("key"),
+  key: Schema7.String,
+  metadata: optional(Schema7.Record(Schema7.String, Schema7.Unknown))
+}).annotate({ identifier: "Credential.Key" }), External = Schema7.Struct({
+  type: Schema7.Literal("external"),
+  methodID: IntegrationMethodID,
+  metadata: optional(Schema7.Record(Schema7.String, Schema7.Unknown))
+}).annotate({ identifier: "Credential.External" }), Value = Schema7.Union([OAuth, Key, External]).pipe(Schema7.toTaggedUnion("type")).annotate({ identifier: "Credential.Value" }), Entry = Schema7.Struct({
+  id: ID2,
+  integrationID: IntegrationID,
+  label: Schema7.String,
+  active: Schema7.Boolean,
+  value: Value
+}).annotate({ identifier: "Credential.Entry" }), CreateInput = Schema7.Struct({
+  id: optional(ID2),
+  integrationID: IntegrationID,
+  label: optional(Schema7.String),
+  value: Value,
+  activate: optional(Schema7.Boolean)
+}).annotate({ identifier: "Credential.CreateInput" });
+
+// integrations/opencode/node_modules/@opencode/schema/dist/connection.js
+var Status = Schema8.Struct({
+  status: Schema8.Literals(["needs_auth"]),
+  message: Schema8.String,
+  url: optional(Schema8.String)
+}).annotate({ identifier: "Connection.Status" }), CredentialInfo = Schema8.Struct({
+  type: Schema8.Literal("credential"),
+  id: exports_credential.ID,
+  label: Schema8.String,
+  method: Schema8.Literals(["key", "oauth", "external"]),
+  status: optional(Status)
+}).annotate({ identifier: "Connection.CredentialInfo" }), EnvInfo = Schema8.Struct({
+  type: Schema8.Literal("env"),
+  name: Schema8.String,
+  status: optional(Status)
+}).annotate({ identifier: "Connection.EnvInfo" }), Info2 = Schema8.Union([CredentialInfo, EnvInfo]).pipe(Schema8.toTaggedUnion("type")).annotate({ identifier: "Connection.Info" });
+
 // integrations/opencode/node_modules/@opencode/schema/dist/form.js
 var exports_form = {};
 __export(exports_form, {
   When: () => When,
-  Value: () => Value,
+  Value: () => Value2,
   StringField: () => StringField,
   State: () => State,
   Reply: () => Reply,
@@ -242,161 +302,103 @@ __export(exports_form, {
   MultiselectField: () => MultiselectField,
   Metadata: () => Metadata,
   IntegerField: () => IntegerField,
-  Info: () => Info2,
-  ID: () => ID2,
+  Info: () => Info3,
+  ID: () => ID3,
   Form: () => exports_form,
   Fields: () => Fields,
   Field: () => Field,
   ExternalField: () => ExternalField,
-  Event: () => Event,
+  Event: () => Event2,
   Detail: () => Detail,
   BooleanField: () => BooleanField,
   Answer: () => Answer
 });
-import { Schema as Schema7 } from "effect";
-var IDSchema = Schema7.String.check(Schema7.isStartingWith("frm_")).pipe(Schema7.brand("Form.ID"), Schema7.annotate({ identifier: "Form.ID" })), ID2 = IDSchema.pipe(statics((schema) => ({ create: (id) => schema.make(id ?? "frm_" + ascending()) }))), Metadata = Schema7.Record(Schema7.String, Schema7.Unknown).annotate({ identifier: "Form.Metadata" }), Option2 = Schema7.Struct({
-  value: Schema7.String,
-  label: Schema7.String,
-  description: Schema7.String.pipe(optional)
-}).annotate({ identifier: "Form.Option" }), When = Schema7.Struct({
-  key: Schema7.String,
-  op: Schema7.Literals(["eq", "neq"]),
-  value: Schema7.Union([Schema7.String, Schema7.Number, Schema7.Boolean])
+import { Schema as Schema9 } from "effect";
+var IDSchema = Schema9.String.check(Schema9.isStartingWith("frm_")).pipe(Schema9.brand("Form.ID"), Schema9.annotate({ identifier: "Form.ID" })), ID3 = IDSchema.pipe(statics((schema) => ({ create: (id) => schema.make(id ?? "frm_" + ascending()) }))), Metadata = Schema9.Record(Schema9.String, Schema9.Unknown).annotate({ identifier: "Form.Metadata" }), Option2 = Schema9.Struct({
+  value: Schema9.String,
+  label: Schema9.String,
+  description: Schema9.String.pipe(optional)
+}).annotate({ identifier: "Form.Option" }), When = Schema9.Struct({
+  key: Schema9.String,
+  op: Schema9.Literals(["eq", "neq"]),
+  value: Schema9.Union([Schema9.String, Schema9.Number, Schema9.Boolean])
 }).annotate({ identifier: "Form.When" }), FieldBase = {
-  key: Schema7.String,
-  title: Schema7.String.pipe(optional),
-  description: Schema7.String.pipe(optional),
-  required: Schema7.Boolean.pipe(optional),
-  hidden: Schema7.Boolean.pipe(optional).annotate({
+  key: Schema9.String,
+  title: Schema9.String.pipe(optional),
+  description: Schema9.String.pipe(optional),
+  required: Schema9.Boolean.pipe(optional),
+  hidden: Schema9.Boolean.pipe(optional).annotate({
     description: "Skip the interactive authentication prompt and use the default unless an answer is supplied"
   }),
-  when: Schema7.Array(When).pipe(optional)
-}, StringField = Schema7.Struct({
+  when: Schema9.Array(When).pipe(optional)
+}, StringField = Schema9.Struct({
   ...FieldBase,
-  type: Schema7.Literal("string"),
-  format: Schema7.Literals(["email", "uri", "date", "date-time"]).pipe(optional),
+  type: Schema9.Literal("string"),
+  format: Schema9.Literals(["email", "uri", "date", "date-time"]).pipe(optional),
   minLength: NonNegativeInt.pipe(optional),
   maxLength: NonNegativeInt.pipe(optional),
-  pattern: Schema7.String.pipe(optional),
-  placeholder: Schema7.String.pipe(optional),
-  default: Schema7.String.pipe(optional),
-  options: Schema7.Array(Option2).pipe(optional),
-  custom: Schema7.Boolean.pipe(optional)
-}).annotate({ identifier: "Form.StringField" }), NumberField = Schema7.Struct({
+  pattern: Schema9.String.pipe(optional),
+  placeholder: Schema9.String.pipe(optional),
+  default: Schema9.String.pipe(optional),
+  options: Schema9.Array(Option2).pipe(optional),
+  custom: Schema9.Boolean.pipe(optional)
+}).annotate({ identifier: "Form.StringField" }), NumberField = Schema9.Struct({
   ...FieldBase,
-  type: Schema7.Literal("number"),
-  minimum: Schema7.Number.pipe(optional),
-  maximum: Schema7.Number.pipe(optional),
-  default: Schema7.Number.pipe(optional)
-}).annotate({ identifier: "Form.NumberField" }), IntegerField = Schema7.Struct({
+  type: Schema9.Literal("number"),
+  minimum: Schema9.Number.pipe(optional),
+  maximum: Schema9.Number.pipe(optional),
+  default: Schema9.Number.pipe(optional)
+}).annotate({ identifier: "Form.NumberField" }), IntegerField = Schema9.Struct({
   ...FieldBase,
-  type: Schema7.Literal("integer"),
-  minimum: Schema7.Number.pipe(optional),
-  maximum: Schema7.Number.pipe(optional),
-  default: Schema7.Number.pipe(optional)
-}).annotate({ identifier: "Form.IntegerField" }), BooleanField = Schema7.Struct({
+  type: Schema9.Literal("integer"),
+  minimum: Schema9.Number.pipe(optional),
+  maximum: Schema9.Number.pipe(optional),
+  default: Schema9.Number.pipe(optional)
+}).annotate({ identifier: "Form.IntegerField" }), BooleanField = Schema9.Struct({
   ...FieldBase,
-  type: Schema7.Literal("boolean"),
-  default: Schema7.Boolean.pipe(optional)
-}).annotate({ identifier: "Form.BooleanField" }), MultiselectField = Schema7.Struct({
+  type: Schema9.Literal("boolean"),
+  default: Schema9.Boolean.pipe(optional)
+}).annotate({ identifier: "Form.BooleanField" }), MultiselectField = Schema9.Struct({
   ...FieldBase,
-  type: Schema7.Literal("multiselect"),
-  options: Schema7.Array(Option2),
+  type: Schema9.Literal("multiselect"),
+  options: Schema9.Array(Option2),
   minItems: NonNegativeInt.pipe(optional),
   maxItems: NonNegativeInt.pipe(optional),
-  custom: Schema7.Boolean.pipe(optional),
-  default: Schema7.Array(Schema7.String).pipe(optional)
-}).annotate({ identifier: "Form.MultiselectField" }), ExternalField = Schema7.Struct({
-  key: Schema7.String,
-  type: Schema7.Literal("external"),
-  url: Schema7.String,
-  title: Schema7.String.pipe(optional),
-  description: Schema7.String.pipe(optional)
-}).annotate({ identifier: "Form.ExternalField" }), Field = Schema7.Union([
+  custom: Schema9.Boolean.pipe(optional),
+  default: Schema9.Array(Schema9.String).pipe(optional)
+}).annotate({ identifier: "Form.MultiselectField" }), ExternalField = Schema9.Struct({
+  key: Schema9.String,
+  type: Schema9.Literal("external"),
+  url: Schema9.String,
+  title: Schema9.String.pipe(optional),
+  description: Schema9.String.pipe(optional)
+}).annotate({ identifier: "Form.ExternalField" }), Field = Schema9.Union([
   StringField,
   NumberField,
   IntegerField,
   BooleanField,
   MultiselectField,
   ExternalField
-]).pipe(Schema7.toTaggedUnion("type"), Schema7.annotate({ identifier: "Form.Field" })), Fields = Schema7.NonEmptyArray(Field).annotate({ identifier: "Form.Fields" }), InfoBase = {
-  id: ID2,
-  sessionID: Schema7.String,
-  title: Schema7.String,
+]).pipe(Schema9.toTaggedUnion("type"), Schema9.annotate({ identifier: "Form.Field" })), Fields = Schema9.NonEmptyArray(Field).annotate({ identifier: "Form.Fields" }), InfoBase = {
+  id: ID3,
+  sessionID: Schema9.String,
+  title: Schema9.String,
   metadata: Metadata.pipe(optional)
-}, Info2 = Schema7.Struct({
+}, Info3 = Schema9.Struct({
   ...InfoBase,
   fields: Fields
-}).annotate({ identifier: "Form.Info" }), Value = Schema7.Union([Schema7.String, Schema7.Number, Schema7.Boolean, Schema7.Array(Schema7.String)]).annotate({
+}).annotate({ identifier: "Form.Info" }), Value2 = Schema9.Union([Schema9.String, Schema9.Number, Schema9.Boolean, Schema9.Array(Schema9.String)]).annotate({
   identifier: "Form.Value"
-}), Answer = Schema7.Record(Schema7.String, Value).annotate({ identifier: "Form.Answer" }), State = Schema7.Union([
-  Schema7.Struct({ status: Schema7.Literal("pending") }),
-  Schema7.Struct({ status: Schema7.Literal("answered"), answer: Answer }),
-  Schema7.Struct({ status: Schema7.Literal("cancelled"), message: Schema7.String.pipe(optional) })
-]).pipe(Schema7.toTaggedUnion("status")).annotate({ identifier: "Form.State" }), Detail = Schema7.Struct({
-  ...Info2.fields,
+}), Answer = Schema9.Record(Schema9.String, Value2).annotate({ identifier: "Form.Answer" }), State = Schema9.Union([
+  Schema9.Struct({ status: Schema9.Literal("pending") }),
+  Schema9.Struct({ status: Schema9.Literal("answered"), answer: Answer }),
+  Schema9.Struct({ status: Schema9.Literal("cancelled"), message: Schema9.String.pipe(optional) })
+]).pipe(Schema9.toTaggedUnion("status")).annotate({ identifier: "Form.State" }), Detail = Schema9.Struct({
+  ...Info3.fields,
   state: State
-}).annotate({ identifier: "Form.Detail" }), Reply = Schema7.Struct({
+}).annotate({ identifier: "Form.Detail" }), Reply = Schema9.Struct({
   answer: Answer
-}).annotate({ identifier: "Form.Reply" }), Created = ephemeral({ type: "form.created", schema: { form: Info2 } }), Replied = ephemeral({ type: "form.replied", schema: { id: ID2, sessionID: Schema7.String, answer: Answer } }), Cancelled = ephemeral({ type: "form.cancelled", schema: { id: ID2, sessionID: Schema7.String } }), Event = { Created, Replied, Cancelled, Definitions: inventory(Created, Replied, Cancelled) };
-
-// integrations/opencode/node_modules/@opencode/schema/dist/credential.js
-var ID3 = Schema8.String.pipe(Schema8.brand("Credential.ID"), Schema8.annotate({ identifier: "Credential.ID" }), statics((schema) => ({ create: () => schema.make("cred_" + ascending()) }))), Updated = ephemeral({
-  type: "credential.updated",
-  schema: {}
-}), Switched = ephemeral({
-  type: "credential.switched",
-  schema: { integrationID: IntegrationID, credentialID: Schema8.NullOr(ID3) }
-}), Event2 = {
-  Updated,
-  Switched,
-  Definitions: inventory(Updated, Switched)
-}, OAuth = Schema8.Struct({
-  type: Schema8.Literal("oauth"),
-  methodID: IntegrationMethodID,
-  refresh: Schema8.String,
-  access: Schema8.String,
-  expires: NonNegativeInt,
-  metadata: optional(Schema8.Record(Schema8.String, Schema8.Unknown))
-}).annotate({ identifier: "Credential.OAuth" }), Key = Schema8.Struct({
-  type: Schema8.Literal("key"),
-  key: Schema8.String,
-  metadata: optional(Schema8.Record(Schema8.String, Schema8.Unknown)),
-  configuration: optional(exports_form.Answer)
-}).annotate({ identifier: "Credential.Key" }), External = Schema8.Struct({
-  type: Schema8.Literal("external"),
-  methodID: IntegrationMethodID,
-  metadata: optional(Schema8.Record(Schema8.String, Schema8.Unknown))
-}).annotate({ identifier: "Credential.External" }), Value2 = Schema8.Union([OAuth, Key, External]).pipe(Schema8.toTaggedUnion("type")).annotate({ identifier: "Credential.Value" }), Entry = Schema8.Struct({
-  id: ID3,
-  integrationID: IntegrationID,
-  label: Schema8.String,
-  active: Schema8.Boolean,
-  value: Value2
-}).annotate({ identifier: "Credential.Entry" }), CreateInput = Schema8.Struct({
-  id: optional(ID3),
-  integrationID: IntegrationID,
-  label: optional(Schema8.String),
-  value: Value2,
-  activate: optional(Schema8.Boolean)
-}).annotate({ identifier: "Credential.CreateInput" });
-
-// integrations/opencode/node_modules/@opencode/schema/dist/connection.js
-var Status = Schema9.Struct({
-  status: Schema9.Literals(["needs_auth"]),
-  message: Schema9.String,
-  url: optional(Schema9.String)
-}).annotate({ identifier: "Connection.Status" }), CredentialInfo = Schema9.Struct({
-  type: Schema9.Literal("credential"),
-  id: exports_credential.ID,
-  label: Schema9.String,
-  method: Schema9.Literals(["key", "oauth", "external"]),
-  status: optional(Status)
-}).annotate({ identifier: "Connection.CredentialInfo" }), EnvInfo = Schema9.Struct({
-  type: Schema9.Literal("env"),
-  name: Schema9.String,
-  status: optional(Status)
-}).annotate({ identifier: "Connection.EnvInfo" }), Info3 = Schema9.Union([CredentialInfo, EnvInfo]).pipe(Schema9.toTaggedUnion("type")).annotate({ identifier: "Connection.Info" });
+}).annotate({ identifier: "Form.Reply" }), Created = ephemeral({ type: "form.created", schema: { form: Info3 } }), Replied = ephemeral({ type: "form.replied", schema: { id: ID3, sessionID: Schema9.String, answer: Answer } }), Cancelled = ephemeral({ type: "form.cancelled", schema: { id: ID3, sessionID: Schema9.String } }), Event2 = { Created, Replied, Cancelled, Definitions: inventory(Created, Replied, Cancelled) };
 
 // integrations/opencode/node_modules/@opencode/schema/dist/integration.js
 var ID4 = IntegrationID, MethodID = IntegrationMethodID, OAuthMethod = Schema10.Struct({
@@ -444,6 +446,7 @@ class Attempt extends Schema10.Class("Integration.Attempt")({
   url: Schema10.String,
   instructions: Schema10.String,
   mode: Schema10.Literals(["auto", "code"]),
+  paste: Schema10.optionalKey(Schema10.Literal(!0)),
   time: AttemptTime
 }) {
 }
@@ -469,6 +472,8 @@ var ReasoningField = Schema11.Union([
   Schema11.String
 ]).annotate({ identifier: "Model.ReasoningField" }), MaxTokensField = Schema11.Literals(["max_completion_tokens", "max_tokens"]).annotate({
   identifier: "Model.MaxTokensField"
+}), MediaInput = Schema11.Literals(["assets", "state", "root"]).annotate({
+  identifier: "Model.MediaInput"
 }), CacheFormat = Schema11.Literals(["anthropic", "alibaba"]).annotate({ identifier: "Model.CacheFormat" }), Compatibility = Schema11.Struct({
   reasoningField: ReasoningField.pipe(optional),
   requireReasoning: Schema11.Boolean.pipe(optional),
@@ -476,9 +481,11 @@ var ReasoningField = Schema11.Union([
   requireFinishReason: Schema11.Boolean.pipe(optional),
   requireAssistantAfterTool: Schema11.Boolean.pipe(optional),
   supportsPromptCacheKey: Schema11.Boolean.pipe(optional),
+  streamUsage: Schema11.Boolean.pipe(optional),
   cacheFormat: CacheFormat.pipe(optional),
   supportsThinkingBlockBinding: Schema11.Boolean.pipe(optional),
-  supportsEffortUpdates: Schema11.Boolean.pipe(optional)
+  supportsEffortUpdates: Schema11.Boolean.pipe(optional),
+  mediaInput: MediaInput.pipe(optional)
 }).annotate({ identifier: "Model.Compatibility" }), ProviderCompatibility = Schema11.Struct(Struct2.omit(Compatibility.fields, ["supportsThinkingBlockBinding", "supportsEffortUpdates"])).annotate({ identifier: "Provider.Compatibility" });
 
 // integrations/opencode/node_modules/@opencode/schema/dist/provider.js
@@ -489,6 +496,7 @@ var ID5 = Schema12.String.pipe(Schema12.brand("Provider.ID"), Schema12.annotate(
   google: schema.make("google"),
   googleVertex: schema.make("google-vertex"),
   githubCopilot: schema.make("github-copilot"),
+  claudeAgent: schema.make("claude-agent"),
   amazonBedrock: schema.make("amazon-bedrock"),
   azure: schema.make("azure"),
   openrouter: schema.make("openrouter"),
@@ -497,11 +505,21 @@ var ID5 = Schema12.String.pipe(Schema12.brand("Provider.ID"), Schema12.annotate(
 }))), Updated3 = ephemeral({ type: "provider.updated", schema: {} }), Event4 = { Updated: Updated3, Definitions: inventory(Updated3) }, Package = Schema12.String, Activation = Schema12.Literals(["auto", "enabled", "disabled"]), Compaction = Schema12.Union([
   Schema12.Struct({ type: Schema12.Literal("summary") }),
   Schema12.Struct({ type: Schema12.Literal("native") })
-]).pipe(Schema12.toTaggedUnion("type")).annotate({ identifier: "Provider.Compaction" }), Transport = Schema12.Literals(["http", "websocket"]).annotate({ identifier: "Provider.Transport" }), Encoding = Schema12.Literals(["zstd", "gzip", "none"]).annotate({ identifier: "Provider.Encoding" }), Settings = Schema12.StructWithRest(Schema12.Struct({
-  timeout: Schema12.Union([Schema12.Finite, Schema12.Literal(!1)]).pipe(optional),
-  headerTimeout: Schema12.Union([Schema12.Finite, Schema12.Literal(!1)]).pipe(optional),
-  chunkTimeout: Schema12.Union([Schema12.Finite, Schema12.Literal(!1)]).pipe(optional),
+]).pipe(Schema12.toTaggedUnion("type")).annotate({ identifier: "Provider.Compaction" }), Transport = Schema12.Literals(["http", "websocket"]).annotate({ identifier: "Provider.Transport" }), CacheTTL = Schema12.TemplateLiteral([Schema12.Number, Schema12.Literals(["ms", "s", "m", "h", "d"])]).check(Schema12.isPattern(/^\d+(ms|s|m|h|d)$/)).annotate({ identifier: "Provider.CacheTTL" }), CacheWarming = Schema12.Union([
+  Schema12.Boolean,
+  Schema12.Struct({
+    interval: Schema12.Union([Schema12.Literal("auto"), Schema12.String]).pipe(optional).annotate({ description: `Duration such as "4 minutes", or "auto" for 90% of the model's cache.ttl` }),
+    duration: Schema12.String.pipe(optional).annotate({ description: 'Duration such as "30 minutes"' })
+  })
+]).annotate({ identifier: "Provider.CacheWarming" }), Cache = Schema12.Struct({
+  ttl: CacheTTL.pipe(optional),
+  warming: CacheWarming.pipe(optional)
+}).annotate({ identifier: "Provider.Cache" }), Encoding = Schema12.Literals(["zstd", "gzip", "none"]).annotate({ identifier: "Provider.Encoding" }), Timeout = Schema12.Union([Schema12.Finite, Schema12.Literal(!1)]).pipe(optional), Settings = Schema12.StructWithRest(Schema12.Struct({
+  timeout: Timeout,
+  headerTimeout: Timeout,
+  chunkTimeout: Timeout,
   compaction: Compaction.pipe(optional),
+  cache: Cache.pipe(optional),
   transport: Transport.pipe(optional),
   encoding: Encoding.pipe(optional)
 }), [Schema12.Record(Schema12.String, Schema12.Any)]).annotate({ identifier: "Provider.Settings" }), Overlays = {
@@ -555,17 +573,18 @@ var ID6 = Schema14.String.pipe(Schema14.brand("Model.ID")), Updated4 = ephemeral
     });
   }
 })));
-var Family = Schema14.String.pipe(Schema14.brand("Model.Family")), Settings2 = Schema14.StructWithRest(Schema14.Struct({
-  compaction: exports_provider.Compaction.pipe(optional),
-  encoding: exports_provider.Encoding.pipe(optional)
-}), [Schema14.Record(Schema14.String, Schema14.Any)]).annotate({ identifier: "Model.Settings" }), Overlays2 = {
+var Family = Schema14.String.pipe(Schema14.brand("Model.Family")), Type = Schema14.Union([
+  Schema14.Literals(["chat", "decision", "image"]),
+  Schema14.String
+]).annotate({ identifier: "Model.Type" }), Settings2 = Schema14.StructWithRest(Schema14.Struct(Struct3.pick(exports_provider.Settings.schema.fields, ["compaction", "cache", "encoding"])), [Schema14.Record(Schema14.String, Schema14.Any)]).annotate({ identifier: "Model.Settings" }), VariantSettings = Schema14.StructWithRest(Schema14.Struct(Struct3.omit(Settings2.schema.fields, ["cache"])), Settings2.records).annotate({ identifier: "Model.VariantSettings" }), Overlays2 = {
   settings: Settings2.pipe(optional),
   headers: Schema14.Record(Schema14.String, Schema14.String).pipe(optional),
   body: Schema14.Record(Schema14.String, Schema14.Any).pipe(optional)
 }, Capabilities = Schema14.Struct({
   tools: Schema14.Boolean,
   input: Schema14.Array(Schema14.String),
-  output: Schema14.Array(Schema14.String)
+  output: Schema14.Array(Schema14.String),
+  temperature: Schema14.Boolean.pipe(optional)
 }).annotate({ identifier: "Model.Capabilities" }).pipe(statics(() => ({
   default: () => ({ tools: !0, input: ["text", "image"], output: ["text"] })
 }))), Cost = Schema14.Struct({
@@ -581,12 +600,14 @@ var Family = Schema14.String.pipe(Schema14.brand("Model.Family")), Settings2 = S
   })
 }).annotate({ identifier: "Model.Cost" }), Variant = Schema14.Struct({
   id: VariantID,
-  ...Overlays2
+  ...Overlays2,
+  settings: VariantSettings.pipe(optional)
 }).annotate({ identifier: "Model.Variant" }), Info6 = Schema14.Struct({
   id: ID6,
   modelID: ID6,
   providerID: exports_provider.ID,
   canonical: exports_provider.ID.pipe(optional),
+  type: Type.pipe(optional),
   family: Family.pipe(optional),
   name: Schema14.String,
   compatibility: Compatibility.pipe(optional),
@@ -638,13 +659,9 @@ import { Schema as Schema16 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/session-id.js
 import { Schema as Schema15 } from "effect";
-var SessionID = Schema15.String.check(Schema15.isStartingWith("ses")).pipe(Schema15.brand("SessionID"), Schema15.annotate({ identifier: "Session.ID" }), statics((schema) => {
-  let create2 = () => schema.make("ses_" + descending());
-  return {
-    create: create2,
-    descending: (id) => id === void 0 ? create2() : schema.make(id)
-  };
-}));
+var SessionID = Schema15.String.check(Schema15.isStartingWith("ses")).pipe(Schema15.brand("SessionID"), Schema15.annotate({ identifier: "Session.ID" }), statics((schema) => ({
+  create: () => schema.make("ses_" + descending())
+})));
 
 // integrations/opencode/node_modules/@opencode/schema/dist/permission.js
 var ID7 = Schema16.String.check(Schema16.isStartingWith("per")).pipe(Schema16.brand("Permission.ID"), Schema16.annotate({ identifier: "Permission.ID" }), statics((schema) => ({ create: (id) => schema.make(id ?? "per_" + ascending()) }))), Source = Schema16.Union([
@@ -723,10 +740,12 @@ __export(exports_session_message, {
   Skill: () => Skill,
   Shell: () => Shell,
   SessionMessage: () => exports_session_message,
-  ProviderState: () => ProviderState,
+  Native: () => Native,
   ModelSelected: () => ModelSelected,
+  MediaUser: () => MediaUser,
+  MediaInfo: () => MediaInfo,
   LocationSwitched: () => LocationSwitched,
-  Info: () => Info13,
+  Info: () => Info12,
   Idle: () => Idle,
   ID: () => ID13,
   CompactionRunning: () => CompactionRunning,
@@ -742,28 +761,7 @@ __export(exports_session_message, {
   Assistant: () => Assistant,
   AgentSelected: () => AgentSelected
 });
-import { Schema as Schema28 } from "effect";
-
-// integrations/opencode/node_modules/@opencode/schema/dist/session-provider-context.js
-var exports_session_provider_context = {};
-__export(exports_session_provider_context, {
-  SessionProviderContext: () => exports_session_provider_context,
-  Provenance: () => Provenance,
-  Info: () => Info8
-});
-import { Schema as Schema18 } from "effect";
-var Provenance = Schema18.Struct({
-  providerID: exports_provider.ID,
-  provider: Schema18.String,
-  modelID: Schema18.String,
-  route: Schema18.String,
-  protocol: Schema18.String,
-  endpoint: Schema18.String
-}).annotate({ identifier: "Session.ProviderContext.Provenance" }), Info8 = Schema18.Struct({
-  version: Schema18.Literal(1),
-  provenance: Provenance,
-  messages: Schema18.Json
-}).annotate({ identifier: "Session.ProviderContext" });
+import { Schema as Schema27 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/tool.js
 var exports_tool = {};
@@ -775,24 +773,24 @@ __export(exports_tool, {
   Content: () => Content,
   CallID: () => CallID
 });
-import { Effect as Effect3, JsonSchema, Schema as Schema19 } from "effect";
-var CallID = Schema19.String.pipe(Schema19.brand("Tool.CallID"));
+import { Effect as Effect3, JsonSchema, Schema as Schema18 } from "effect";
+var CallID = Schema18.String.pipe(Schema18.brand("Tool.CallID"));
 
-class Error2 extends Schema19.TaggedError()("Tool.Error", {
-  message: Schema19.String,
-  error: Schema19.optional(Schema19.Defect()),
-  metadata: Schema19.optional(Schema19.Record(Schema19.String, Schema19.Unknown))
+class Error2 extends Schema18.TaggedError()("Tool.Error", {
+  message: Schema18.String,
+  error: Schema18.optional(Schema18.Defect()),
+  metadata: Schema18.optional(Schema18.Record(Schema18.String, Schema18.Unknown))
 }) {
 }
-var TextContent = Schema19.Struct({
-  type: Schema19.Literal("text"),
-  text: Schema19.String
-}).annotate({ identifier: "Tool.TextContent" }), FileContent = Schema19.Struct({
-  type: Schema19.Literal("file"),
-  uri: Schema19.String,
-  mime: Schema19.String,
-  name: Schema19.optional(Schema19.String)
-}).annotate({ identifier: "Tool.FileContent" }), Content = Schema19.Union([TextContent, FileContent]).pipe(Schema19.toTaggedUnion("type")).annotate({ identifier: "Tool.Content" });
+var TextContent = Schema18.Struct({
+  type: Schema18.Literal("text"),
+  text: Schema18.String
+}).annotate({ identifier: "Tool.TextContent" }), FileContent = Schema18.Struct({
+  type: Schema18.Literal("file"),
+  uri: Schema18.String,
+  mime: Schema18.String,
+  name: Schema18.optional(Schema18.String)
+}).annotate({ identifier: "Tool.FileContent" }), Content = Schema18.Union([TextContent, FileContent]).pipe(Schema18.toTaggedUnion("type")).annotate({ identifier: "Tool.Content" });
 
 // integrations/opencode/node_modules/@opencode/schema/dist/project.js
 var exports_project = {};
@@ -801,50 +799,50 @@ __export(exports_project, {
   UpdateInput: () => UpdateInput,
   Time: () => Time,
   Project: () => exports_project,
-  Info: () => Info9,
+  Info: () => Info8,
   Icon: () => Icon,
   ID: () => ID9,
   Event: () => Event8,
   Current: () => Current,
   Commands: () => Commands
 });
-import { Schema as Schema20 } from "effect";
-var ID9 = ProjectID, Vcs = Schema20.String.check(Schema20.isPattern(/^[a-z][a-z0-9._-]*$/u)).annotate({
+import { Schema as Schema19 } from "effect";
+var ID9 = ProjectID, Vcs = Schema19.String.check(Schema19.isPattern(/^[a-z][a-z0-9._-]*$/u)).annotate({
   identifier: "Project.Vcs"
-}), Current = Schema20.Struct({
+}), Current = Schema19.Struct({
   id: ID9,
   directory: AbsolutePath,
   canonical: AbsolutePath
-}).annotate({ identifier: "Project.Current" }), Icon = Schema20.Struct({
-  url: optional(Schema20.String),
-  override: optional(Schema20.String),
-  color: optional(Schema20.String)
-}).annotate({ identifier: "Project.Icon" }), Commands = Schema20.Struct({
-  start: optional(Schema20.String.annotate({ description: "Startup script to run when creating a new workspace (worktree)" }))
-}).annotate({ identifier: "Project.Commands" }), Time = Schema20.Struct({
+}).annotate({ identifier: "Project.Current" }), Icon = Schema19.Struct({
+  url: optional(Schema19.String),
+  override: optional(Schema19.String),
+  color: optional(Schema19.String)
+}).annotate({ identifier: "Project.Icon" }), Commands = Schema19.Struct({
+  start: optional(Schema19.String.annotate({ description: "Startup script to run when creating a new workspace (worktree)" }))
+}).annotate({ identifier: "Project.Commands" }), Time = Schema19.Struct({
   created: NonNegativeInt,
   updated: NonNegativeInt,
   active: NonNegativeInt,
   archived: optional(NonNegativeInt)
-}).annotate({ identifier: "Project.Time" }), Info9 = Schema20.Struct({
+}).annotate({ identifier: "Project.Time" }), Info8 = Schema19.Struct({
   id: ID9,
   canonical: AbsolutePath,
   vcs: optional(Vcs),
-  name: optional(Schema20.String),
+  name: optional(Schema19.String),
   icon: optional(Icon),
   commands: optional(Commands),
   time: Time,
-  sandboxes: Schema20.Array(Schema20.String)
-}).annotate({ identifier: "Project" }), UpdateInput = Schema20.Struct({
+  sandboxes: Schema19.Array(Schema19.String)
+}).annotate({ identifier: "Project" }), UpdateInput = Schema19.Struct({
   projectID: ID9,
   canonical: optional(AbsolutePath),
-  name: optional(Schema20.String),
+  name: optional(Schema19.String),
   icon: optional(Icon),
   commands: optional(Commands)
-}).annotate({ identifier: "Project.UpdateInput" }), Updated6 = ephemeral({ type: "project.updated", schema: Info9.fields }), Event8 = { Updated: Updated6, Definitions: inventory(Updated6) };
+}).annotate({ identifier: "Project.UpdateInput" }), Updated6 = ephemeral({ type: "project.updated", schema: Info8.fields }), Event8 = { Updated: Updated6, Definitions: inventory(Updated6) };
 
 // integrations/opencode/node_modules/@opencode/schema/dist/prompt.js
-import { Schema as Schema22 } from "effect";
+import { Schema as Schema21 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/skill.js
 var exports_skill = {};
@@ -853,30 +851,30 @@ __export(exports_skill, {
   Source: () => Source2,
   Skill: () => exports_skill,
   Name: () => Name2,
-  Info: () => Info10,
+  Info: () => Info9,
   ID: () => ID10,
   Event: () => Event9,
   EmbeddedSource: () => EmbeddedSource,
   DirectorySource: () => DirectorySource
 });
-import { Schema as Schema21 } from "effect";
-var ID10 = Schema21.String.pipe(Schema21.brand("Skill.ID"), Schema21.annotate({ identifier: "Skill.ID" })), Name2 = Schema21.String.pipe(Schema21.brand("Skill.Name"), Schema21.annotate({ identifier: "Skill.Name" })), DirectorySource = Schema21.Struct({
-  type: Schema21.tag("directory"),
+import { Schema as Schema20 } from "effect";
+var ID10 = Schema20.String.pipe(Schema20.brand("Skill.ID"), Schema20.annotate({ identifier: "Skill.ID" })), Name2 = Schema20.String.pipe(Schema20.brand("Skill.Name"), Schema20.annotate({ identifier: "Skill.Name" })), DirectorySource = Schema20.Struct({
+  type: Schema20.tag("directory"),
   path: AbsolutePath
-}).annotate({ identifier: "Skill.DirectorySource" }), UrlSource = Schema21.Struct({
-  type: Schema21.tag("url"),
-  url: Schema21.String
-}).annotate({ identifier: "Skill.UrlSource" }), Info10 = Schema21.Struct({
+}).annotate({ identifier: "Skill.DirectorySource" }), UrlSource = Schema20.Struct({
+  type: Schema20.tag("url"),
+  url: Schema20.String
+}).annotate({ identifier: "Skill.UrlSource" }), Info9 = Schema20.Struct({
   id: ID10,
   name: Name2,
-  description: Schema21.String.pipe(optional),
-  autoinvoke: Schema21.Boolean.pipe(optional),
+  description: Schema20.String.pipe(optional),
+  autoinvoke: Schema20.Boolean.pipe(optional),
   path: AbsolutePath,
-  content: Schema21.String
-}).annotate({ identifier: "Skill.Info" }), Updated7 = ephemeral({ type: "skill.updated", schema: {} }), Event9 = { Updated: Updated7, Definitions: inventory(Updated7) }, EmbeddedSource = Schema21.Struct({
-  type: Schema21.tag("embedded"),
-  skill: Schema21.suspend(() => Info10)
-}).annotate({ identifier: "Skill.EmbeddedSource" }), Source2 = Object.assign(Schema21.Union([DirectorySource, UrlSource, EmbeddedSource]).pipe(Schema21.toTaggedUnion("type"), Schema21.annotate({ identifier: "Skill.Source" })), {
+  content: Schema20.String
+}).annotate({ identifier: "Skill.Info" }), Updated7 = ephemeral({ type: "skill.updated", schema: {} }), Event9 = { Updated: Updated7, Definitions: inventory(Updated7) }, EmbeddedSource = Schema20.Struct({
+  type: Schema20.tag("embedded"),
+  skill: Schema20.suspend(() => Info9)
+}).annotate({ identifier: "Skill.EmbeddedSource" }), Source2 = Object.assign(Schema20.Union([DirectorySource, UrlSource, EmbeddedSource]).pipe(Schema20.toTaggedUnion("type"), Schema20.annotate({ identifier: "Skill.Source" })), {
   equals: (a, b) => {
     if (a.type !== b.type)
       return !1;
@@ -892,19 +890,19 @@ var ID10 = Schema21.String.pipe(Schema21.brand("Skill.ID"), Schema21.annotate({ 
 });
 
 // integrations/opencode/node_modules/@opencode/schema/dist/prompt.js
-var PromptMention = Schema22.Struct({
-  start: Schema22.Finite,
-  end: Schema22.Finite,
-  text: Schema22.String
-}).annotate({ identifier: "Prompt.Mention" }), FileSource = Schema22.Union([
-  Schema22.Struct({ type: Schema22.Literal("inline") }),
-  Schema22.Struct({ type: Schema22.Literal("uri"), uri: Schema22.String })
-]).pipe(Schema22.toTaggedUnion("type")).annotate({ identifier: "Prompt.FileSource" }), Base64 = Schema22.String.check(Schema22.isPattern(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u)).annotate({ identifier: "Prompt.Base64" }), FileAttachment = Schema22.Struct({
+var PromptMention = Schema21.Struct({
+  start: Schema21.Finite,
+  end: Schema21.Finite,
+  text: Schema21.String
+}).annotate({ identifier: "Prompt.Mention" }), FileSource = Schema21.Union([
+  Schema21.Struct({ type: Schema21.Literal("inline") }),
+  Schema21.Struct({ type: Schema21.Literal("uri"), uri: Schema21.String })
+]).pipe(Schema21.toTaggedUnion("type")).annotate({ identifier: "Prompt.FileSource" }), Base64 = Schema21.String.check(Schema21.makeFilter((value) => value.length % 4 === 0 && /^[A-Za-z0-9+/]*={0,2}$/u.test(value), Schema21.isPattern(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u).annotations)).annotate({ identifier: "Prompt.Base64" }), FileAttachment = Schema21.Struct({
   data: Base64,
-  mime: Schema22.String,
+  mime: Schema21.String,
   source: FileSource,
-  name: Schema22.String.pipe(optional),
-  description: Schema22.String.pipe(optional),
+  name: Schema21.String.pipe(optional),
+  description: Schema21.String.pipe(optional),
   mention: PromptMention.pipe(optional)
 }).annotate({ identifier: "Prompt.FileAttachment" }).pipe(statics((schema) => ({
   create: (input) => schema.make({
@@ -915,21 +913,31 @@ var PromptMention = Schema22.Struct({
     description: input.description,
     mention: input.mention
   })
-}))), AgentAttachment = Schema22.Struct({
-  name: Schema22.String,
+}))), MediaRef = Schema21.String.check(Schema21.isPattern(/^media:[0-9a-f]{64}$/)).annotate({
+  identifier: "Prompt.MediaRef"
+}), { data: _, ...fileAttachmentFields } = FileAttachment.fields, MediaFileAttachment = Schema21.Struct({
+  ...fileAttachmentFields,
+  uri: MediaRef,
+  bytes: Schema21.Int.pipe(optional),
+  width: Schema21.Int.pipe(optional),
+  height: Schema21.Int.pipe(optional)
+}).annotate({ identifier: "Prompt.MediaFileAttachment" }), Attachment = Schema21.Union([FileAttachment, MediaFileAttachment]).annotate({
+  identifier: "Prompt.Attachment"
+}), AgentAttachment = Schema21.Struct({
+  name: Schema21.String,
   mention: PromptMention.pipe(optional)
-}).annotate({ identifier: "Prompt.AgentAttachment" }), SkillAttachment = Schema22.Struct({
+}).annotate({ identifier: "Prompt.AgentAttachment" }), SkillAttachment = Schema21.Struct({
   id: exports_skill.ID,
   name: exports_skill.Name,
-  text: Schema22.String.pipe(optional),
+  text: Schema21.String.pipe(optional),
   mention: PromptMention.pipe(optional)
-}).annotate({ identifier: "Prompt.SkillAttachment" }), Prompt = Schema22.Struct({
-  text: Schema22.String,
-  files: Schema22.Array(FileAttachment).pipe(optional),
-  agents: Schema22.Array(AgentAttachment).pipe(optional),
-  skills: Schema22.Array(SkillAttachment).pipe(optional)
+}).annotate({ identifier: "Prompt.SkillAttachment" }), Prompt = Schema21.Struct({
+  text: Schema21.String,
+  files: Schema21.Array(FileAttachment).pipe(optional),
+  agents: Schema21.Array(AgentAttachment).pipe(optional),
+  skills: Schema21.Array(SkillAttachment).pipe(optional)
 }).annotate({ identifier: "Prompt" }).pipe(statics((schema) => ({
-  equivalence: Schema22.toEquivalence(schema),
+  equivalence: Schema21.toEquivalence(schema),
   fromUserMessage: (input) => schema.make({
     text: input.text,
     ...input.files === void 0 ? {} : { files: input.files },
@@ -947,53 +955,53 @@ __export(exports_shell, {
   OutputInput: () => OutputInput,
   Output: () => Output,
   Metadata: () => Metadata2,
-  Info: () => Info11,
+  Info: () => Info10,
   ID: () => ID11,
   Event: () => Event10,
   CreateInput: () => CreateInput2
 });
-import { Schema as Schema23 } from "effect";
-var IDSchema2 = Schema23.String.check(Schema23.isStartingWith("sh_")).pipe(Schema23.brand("Shell.ID"), Schema23.annotate({ identifier: "Shell.ID" })), ID11 = IDSchema2.pipe(statics((schema) => {
+import { Schema as Schema22 } from "effect";
+var IDSchema2 = Schema22.String.check(Schema22.isStartingWith("sh_")).pipe(Schema22.brand("Shell.ID"), Schema22.annotate({ identifier: "Shell.ID" })), ID11 = IDSchema2.pipe(statics((schema) => {
   let create2 = () => schema.make("sh_" + ascending());
   return {
     create: create2,
     ascending: (id) => id === void 0 ? create2() : schema.make(id)
   };
-})), Status2 = Schema23.Literals(["running", "exited", "timeout", "killed"]), Time2 = Schema23.Struct({
-  started: Schema23.Finite.annotate({ description: "Start time in milliseconds since the Unix epoch" }),
-  completed: optional(Schema23.Finite).annotate({
+})), Status2 = Schema22.Literals(["running", "exited", "timeout", "killed"]), Time2 = Schema22.Struct({
+  started: Schema22.Finite.annotate({ description: "Start time in milliseconds since the Unix epoch" }),
+  completed: optional(Schema22.Finite).annotate({
     description: "Completion time in milliseconds since the Unix epoch"
   })
-}), Metadata2 = Schema23.Record(Schema23.String, Schema23.Unknown), Info11 = Schema23.Struct({
+}), Metadata2 = Schema22.Record(Schema22.String, Schema22.Unknown), Info10 = Schema22.Struct({
   id: ID11,
   status: Status2,
-  command: Schema23.String,
-  cwd: Schema23.String,
-  shell: Schema23.String,
-  file: Schema23.String,
+  command: Schema22.String,
+  cwd: Schema22.String,
+  shell: Schema22.String,
+  file: Schema22.String,
   pid: optional(NonNegativeInt),
-  exit: optional(Schema23.Finite),
-  signal: optional(Schema23.String),
+  exit: optional(Schema22.Finite),
+  signal: optional(Schema22.String),
   metadata: Metadata2,
   time: Time2
-}).annotate({ identifier: "Shell.Info" }), Created2 = ephemeral({ type: "shell.created", schema: { info: Info11 } }), Exited = ephemeral({ type: "shell.exited", schema: { id: ID11, exit: optional(Schema23.Finite), status: Status2 } }), Deleted = ephemeral({ type: "shell.deleted", schema: { id: ID11 } }), Event10 = { Created: Created2, Exited, Deleted, Definitions: inventory(Created2, Exited, Deleted) }, CreateInput2 = Schema23.Struct({
-  command: Schema23.String,
-  cwd: optional(Schema23.String),
+}).annotate({ identifier: "Shell.Info" }), Created2 = ephemeral({ type: "shell.created", schema: { info: Info10 } }), Exited = ephemeral({ type: "shell.exited", schema: { id: ID11, exit: optional(Schema22.Finite), status: Status2 } }), Deleted = ephemeral({ type: "shell.deleted", schema: { id: ID11 } }), Event10 = { Created: Created2, Exited, Deleted, Definitions: inventory(Created2, Exited, Deleted) }, CreateInput2 = Schema22.Struct({
+  command: Schema22.String,
+  cwd: optional(Schema22.String),
   timeout: optional(NonNegativeInt),
   metadata: optional(Metadata2)
-}), OutputInput = Schema23.Struct({
+}), OutputInput = Schema22.Struct({
   cursor: optional(NonNegativeInt),
   limit: optional(NonNegativeInt)
-}), Output = Schema23.Struct({
-  output: Schema23.String,
+}), Output = Schema22.Struct({
+  output: Schema22.String,
   cursor: NonNegativeInt,
   size: NonNegativeInt,
-  truncated: Schema23.Boolean
+  truncated: Schema22.Boolean
 });
 
 // integrations/opencode/node_modules/@opencode/schema/dist/llm.js
-import { Schema as Schema24 } from "effect";
-var FinishReason = Schema24.Literals(["stop", "length", "tool-calls", "content-filter", "error", "unknown"]);
+import { Schema as Schema23 } from "effect";
+var FinishReason = Schema23.Literals(["stop", "length", "tool-calls", "content-filter", "error", "unknown"]);
 
 // integrations/opencode/node_modules/@opencode/schema/dist/session-error.js
 var exports_session_error = {};
@@ -1001,12 +1009,13 @@ __export(exports_session_error, {
   SessionError: () => exports_session_error,
   Error: () => Error3
 });
-import { Schema as Schema25 } from "effect";
-var Error3 = Schema25.Struct({
-  type: Schema25.String,
-  message: Schema25.String,
-  status: Schema25.Int.check(Schema25.isBetween({ minimum: 100, maximum: 599 })).pipe(optional),
-  response: Schema25.Struct({ body: Schema25.String }).pipe(optional)
+import { Schema as Schema24 } from "effect";
+var Error3 = Schema24.Struct({
+  type: Schema24.String,
+  message: Schema24.String,
+  status: Schema24.Int.check(Schema24.isBetween({ minimum: 100, maximum: 599 })).pipe(optional),
+  response: Schema24.Struct({ body: Schema24.String }).pipe(optional),
+  retryAfterMs: NonNegativeInt.pipe(optional)
 }).annotate({ identifier: "Session.StructuredError" });
 
 // integrations/opencode/node_modules/@opencode/schema/dist/snapshot.js
@@ -1015,24 +1024,24 @@ __export(exports_snapshot, {
   Snapshot: () => exports_snapshot,
   ID: () => ID12
 });
-import { Schema as Schema26 } from "effect";
-var ID12 = Schema26.String.pipe(Schema26.brand("Snapshot.ID"), Schema26.annotate({ identifier: "Snapshot.ID" }));
+import { Schema as Schema25 } from "effect";
+var ID12 = Schema25.String.pipe(Schema25.brand("Snapshot.ID"), Schema25.annotate({ identifier: "Snapshot.ID" }));
 
 // integrations/opencode/node_modules/@opencode/schema/dist/token-usage.js
 var exports_token_usage = {};
 __export(exports_token_usage, {
   total: () => total,
   TokenUsage: () => exports_token_usage,
-  Info: () => Info12
+  Info: () => Info11
 });
-import { Schema as Schema27 } from "effect";
-var Info12 = Schema27.Struct({
-  input: Schema27.Finite,
-  output: Schema27.Finite,
-  reasoning: Schema27.Finite,
-  cache: Schema27.Struct({
-    read: Schema27.Finite,
-    write: Schema27.Finite
+import { Schema as Schema26 } from "effect";
+var Info11 = Schema26.Struct({
+  input: Schema26.Finite,
+  output: Schema26.Finite,
+  reasoning: Schema26.Finite,
+  cache: Schema26.Struct({
+    read: Schema26.Finite,
+    write: Schema26.Finite
   })
 }).annotate({ identifier: "TokenUsage.Info" });
 function total(tokens) {
@@ -1040,174 +1049,173 @@ function total(tokens) {
 }
 
 // integrations/opencode/node_modules/@opencode/schema/dist/session-message.js
-var ID13 = Schema28.String.check(Schema28.isStartingWith("msg_")).pipe(Schema28.brand("Session.Message.ID"), Schema28.annotate({ identifier: "Session.Message.ID" }), statics((schema) => ({
+var ID13 = Schema27.String.check(Schema27.isStartingWith("msg_")).pipe(Schema27.brand("Session.Message.ID"), Schema27.annotate({ identifier: "Session.Message.ID" }), statics((schema) => ({
   create: () => schema.make("msg_" + ascending()),
   fromEvent: (eventID) => schema.make(eventID.replace(/^evt_/, "msg_"))
 }))), Base = {
   id: ID13,
-  metadata: Schema28.Record(Schema28.String, Schema28.Unknown).pipe(optional),
-  time: Schema28.Struct({ created: DateTimeUtcFromMillis })
-}, ProviderState = Schema28.Record(Schema28.String, Schema28.Unknown).annotate({
-  identifier: "Session.Message.ProviderState"
-}), AgentSelected = Schema28.Struct({
+  metadata: Schema27.Record(Schema27.String, Schema27.Unknown).pipe(optional),
+  time: Schema27.Struct({ created: DateTimeUtcFromMillis })
+}, Native = Schema27.Record(Schema27.String, Schema27.Unknown).annotate({
+  identifier: "Session.Message.Native"
+}), AgentSelected = Schema27.Struct({
   ...Base,
-  type: Schema28.tag("agent-switched"),
+  type: Schema27.tag("agent-switched"),
   agent: exports_agent.ID,
   previous: exports_agent.ID.pipe(optional)
-}).annotate({ identifier: "Session.Message.AgentSelected" }), ModelSelected = Schema28.Struct({
+}).annotate({ identifier: "Session.Message.AgentSelected" }), ModelSelected = Schema27.Struct({
   ...Base,
-  type: Schema28.tag("model-switched"),
+  type: Schema27.tag("model-switched"),
   model: exports_model.Ref,
   previous: exports_model.Ref.pipe(optional)
-}).annotate({ identifier: "Session.Message.ModelSelected" }), LocationSwitched = Schema28.Struct({
+}).annotate({ identifier: "Session.Message.ModelSelected" }), LocationSwitched = Schema27.Struct({
   ...Base,
-  type: Schema28.tag("location-switched"),
+  type: Schema27.tag("location-switched"),
   location: exports_location.Ref,
   projectID: exports_project.ID.pipe(optional),
   subpath: RelativePath.pipe(optional),
-  previous: Schema28.Struct({
+  previous: Schema27.Struct({
     location: exports_location.Ref,
     projectID: exports_project.ID.pipe(optional),
     subpath: RelativePath.pipe(optional)
   }).pipe(optional)
-}).annotate({ identifier: "Session.Message.LocationSwitched" }), User = Schema28.Struct({
+}).annotate({ identifier: "Session.Message.LocationSwitched" }), User = Schema27.Struct({
   ...Base,
   text: Prompt.fields.text,
   files: Prompt.fields.files,
   agents: Prompt.fields.agents,
   skills: Prompt.fields.skills,
-  type: Schema28.tag("user")
-}).annotate({ identifier: "Session.Message.User" }), Synthetic = Schema28.Struct({
+  type: Schema27.tag("user")
+}).annotate({ identifier: "Session.Message.User" }), MediaUser = Schema27.Struct({
+  ...User.fields,
+  files: Schema27.Array(Attachment).pipe(optional)
+}).annotate({ identifier: "Session.Message.MediaUser" }), Synthetic = Schema27.Struct({
   ...Base,
-  text: Schema28.String,
-  description: Schema28.String.pipe(optional),
-  type: Schema28.tag("synthetic")
-}).annotate({ identifier: "Session.Message.Synthetic" }), System = Schema28.Struct({
+  text: Schema27.String,
+  description: Schema27.String.pipe(optional),
+  type: Schema27.tag("synthetic")
+}).annotate({ identifier: "Session.Message.Synthetic" }), System = Schema27.Struct({
   ...Base,
-  type: Schema28.tag("system"),
-  text: Schema28.String,
-  description: Schema28.String.pipe(optional)
-}).annotate({ identifier: "Session.Message.System" }), Skill = Schema28.Struct({
+  type: Schema27.tag("system"),
+  text: Schema27.String,
+  description: Schema27.String.pipe(optional)
+}).annotate({ identifier: "Session.Message.System" }), Skill = Schema27.Struct({
   ...Base,
-  type: Schema28.tag("skill"),
+  type: Schema27.tag("skill"),
   skill: exports_skill.ID,
   name: exports_skill.Name,
-  text: Schema28.String
-}).annotate({ identifier: "Session.Message.Skill" }), Shell = Schema28.Struct({
+  text: Schema27.String
+}).annotate({ identifier: "Session.Message.Skill" }), Shell = Schema27.Struct({
   ...Base,
-  type: Schema28.tag("shell"),
+  type: Schema27.tag("shell"),
   shellID: exports_shell.ID,
-  command: Schema28.String,
+  command: Schema27.String,
   status: exports_shell.Status,
-  exit: Schema28.Number.pipe(optional),
+  exit: Schema27.Number.pipe(optional),
   output: exports_shell.Output.pipe(optional),
-  time: Schema28.Struct({
+  time: Schema27.Struct({
     created: DateTimeUtcFromMillis,
     completed: DateTimeUtcFromMillis.pipe(optional)
   })
-}).annotate({ identifier: "Session.Message.Shell" }), ToolStateStreaming = Schema28.Struct({
-  status: Schema28.tag("streaming"),
-  input: Schema28.String
-}).annotate({ identifier: "Session.Message.ToolState.Streaming" }), ToolStateRunning = Schema28.Struct({
-  status: Schema28.tag("running"),
-  input: Schema28.Record(Schema28.String, Schema28.Unknown),
-  metadata: Schema28.Record(Schema28.String, Schema28.Json)
-}).annotate({ identifier: "Session.Message.ToolState.Running" }), ToolStateCompleted = Schema28.Struct({
-  status: Schema28.tag("completed"),
-  input: Schema28.Record(Schema28.String, Schema28.Unknown),
-  content: Schema28.NonEmptyArray(Content),
-  metadata: Schema28.Record(Schema28.String, Schema28.Json).pipe(optional)
-}).annotate({ identifier: "Session.Message.ToolState.Completed" }), ToolStateError = Schema28.Struct({
-  status: Schema28.tag("error"),
-  input: Schema28.Record(Schema28.String, Schema28.Unknown),
+}).annotate({ identifier: "Session.Message.Shell" }), ToolStateStreaming = Schema27.Struct({
+  status: Schema27.tag("streaming"),
+  input: Schema27.String
+}).annotate({ identifier: "Session.Message.ToolState.Streaming" }), ToolStateRunning = Schema27.Struct({
+  status: Schema27.tag("running"),
+  input: Schema27.Record(Schema27.String, Schema27.Unknown),
+  metadata: Schema27.Record(Schema27.String, Schema27.Json)
+}).annotate({ identifier: "Session.Message.ToolState.Running" }), ToolStateCompleted = Schema27.Struct({
+  status: Schema27.tag("completed"),
+  input: Schema27.Record(Schema27.String, Schema27.Unknown),
+  content: Schema27.NonEmptyArray(Content),
+  metadata: Schema27.Record(Schema27.String, Schema27.Json).pipe(optional)
+}).annotate({ identifier: "Session.Message.ToolState.Completed" }), ToolStateError = Schema27.Struct({
+  status: Schema27.tag("error"),
+  input: Schema27.Record(Schema27.String, Schema27.Unknown),
   error: exports_session_error.Error,
-  content: Schema28.NonEmptyArray(Content).pipe(optional),
-  metadata: Schema28.Record(Schema28.String, Schema28.Json).pipe(optional)
-}).annotate({ identifier: "Session.Message.ToolState.Error" }), ToolState = Schema28.Union([ToolStateStreaming, ToolStateRunning, ToolStateCompleted, ToolStateError]).pipe(Schema28.toTaggedUnion("status")), AssistantTool = Schema28.Struct({
-  type: Schema28.tag("tool"),
-  id: Schema28.String,
-  name: Schema28.String,
-  executed: Schema28.Boolean.pipe(optional),
-  providerState: ProviderState.pipe(optional),
-  providerResultState: ProviderState.pipe(optional),
+  content: Schema27.NonEmptyArray(Content).pipe(optional),
+  metadata: Schema27.Record(Schema27.String, Schema27.Json).pipe(optional)
+}).annotate({ identifier: "Session.Message.ToolState.Error" }), ToolState = Schema27.Union([ToolStateStreaming, ToolStateRunning, ToolStateCompleted, ToolStateError]).pipe(Schema27.toTaggedUnion("status")), AssistantTool = Schema27.Struct({
+  type: Schema27.tag("tool"),
+  id: Schema27.String,
+  name: Schema27.String,
+  executed: Schema27.Boolean.pipe(optional),
+  native: Native.pipe(optional),
   state: ToolState,
-  time: Schema28.Struct({
+  time: Schema27.Struct({
     created: DateTimeUtcFromMillis,
     ran: DateTimeUtcFromMillis.pipe(optional),
     completed: DateTimeUtcFromMillis.pipe(optional)
   })
-}).annotate({ identifier: "Session.Message.Assistant.Tool" }), AssistantText = Schema28.Struct({
-  type: Schema28.tag("text"),
-  text: Schema28.String,
-  state: ProviderState.pipe(optional)
-}).annotate({ identifier: "Session.Message.Assistant.Text" }), AssistantReasoning = Schema28.Struct({
-  type: Schema28.tag("reasoning"),
-  text: Schema28.String,
-  state: ProviderState.pipe(optional),
-  time: Schema28.Struct({
+}).annotate({ identifier: "Session.Message.Assistant.Tool" }), AssistantText = Schema27.Struct({
+  type: Schema27.tag("text"),
+  text: Schema27.String,
+  native: Native.pipe(optional)
+}).annotate({ identifier: "Session.Message.Assistant.Text" }), AssistantReasoning = Schema27.Struct({
+  type: Schema27.tag("reasoning"),
+  text: Schema27.String,
+  native: Native.pipe(optional),
+  time: Schema27.Struct({
     created: DateTimeUtcFromMillis,
     completed: DateTimeUtcFromMillis.pipe(optional)
   }).pipe(optional)
-}).annotate({ identifier: "Session.Message.Assistant.Reasoning" }), AssistantContent = Schema28.Union([AssistantText, AssistantReasoning, AssistantTool]).pipe(Schema28.toTaggedUnion("type")), AssistantContentEncoded = Schema28.toEncoded(AssistantContent).annotate({
+}).annotate({ identifier: "Session.Message.Assistant.Reasoning" }), AssistantContent = Schema27.Union([AssistantText, AssistantReasoning, AssistantTool]).pipe(Schema27.toTaggedUnion("type")), AssistantContentEncoded = Schema27.toEncoded(AssistantContent).annotate({
   identifier: "Session.Message.AssistantContent.Encoded"
-}), AssistantRetry = Schema28.Struct({
+}), AssistantRetry = Schema27.Struct({
   attempt: PositiveInt,
   at: DateTimeUtcFromMillis,
   error: exports_session_error.Error
-}).annotate({ identifier: "Session.Message.Assistant.Retry" }), Assistant = Schema28.Struct({
+}).annotate({ identifier: "Session.Message.Assistant.Retry" }), Assistant = Schema27.Struct({
   ...Base,
-  type: Schema28.tag("assistant"),
+  type: Schema27.tag("assistant"),
   agent: exports_agent.ID,
   model: exports_model.Ref,
-  content: AssistantContent.pipe(Schema28.Array),
-  snapshot: Schema28.Struct({
+  content: AssistantContent.pipe(Schema27.Array),
+  snapshot: Schema27.Struct({
     start: exports_snapshot.ID.pipe(optional),
     end: exports_snapshot.ID.pipe(optional),
-    files: Schema28.Array(RelativePath).pipe(optional)
+    files: Schema27.Array(RelativePath).pipe(optional)
   }).pipe(optional),
   finish: FinishReason.pipe(optional),
-  rawFinish: Schema28.String.pipe(optional),
-  providerState: ProviderState.pipe(optional),
+  rawFinish: Schema27.String.pipe(optional),
+  native: Native.pipe(optional),
   cost: exports_money.USD.pipe(optional),
   tokens: exports_token_usage.Info.pipe(optional),
   error: exports_session_error.Error.pipe(optional),
   retry: AssistantRetry.pipe(optional),
-  time: Schema28.Struct({
+  time: Schema27.Struct({
     created: DateTimeUtcFromMillis,
     streamed: DateTimeUtcFromMillis.pipe(optional),
     completed: DateTimeUtcFromMillis.pipe(optional)
   })
-}).annotate({ identifier: "Session.Message.Assistant" }), CompactionBase = { type: Schema28.tag("compaction"), ...Base }, CompactionUsage = {
+}).annotate({ identifier: "Session.Message.Assistant" }), CompactionBase = { type: Schema27.tag("compaction"), ...Base }, CompactionUsage = {
   cost: exports_money.USD.pipe(optional),
   tokens: exports_token_usage.Info.pipe(optional)
-}, CompactionRunning = Schema28.Struct({
+}, CompactionRunning = Schema27.Struct({
   ...CompactionBase,
-  status: Schema28.tag("running"),
-  reason: Schema28.Literals(["auto", "manual"]),
-  summary: Schema28.String,
-  recent: Schema28.String
-}).annotate({ identifier: "Session.Message.Compaction.Running" }), CompactionCompleted = Schema28.Struct({
+  status: Schema27.tag("running"),
+  reason: Schema27.Literals(["auto", "manual"]),
+  summary: Schema27.String
+}).annotate({ identifier: "Session.Message.Compaction.Running" }), CompactionCompleted = Schema27.Struct({
   ...CompactionBase,
-  status: Schema28.tag("completed"),
-  reason: Schema28.Literals(["auto", "manual"]),
+  status: Schema27.tag("completed"),
+  reason: Schema27.Literals(["auto", "manual"]),
   model: exports_model.Ref.pipe(optional),
-  providerState: ProviderState.pipe(optional),
-  summary: Schema28.String,
-  recent: Schema28.String,
-  providerContext: exports_session_provider_context.Info.pipe(optional),
+  native: Native.pipe(optional),
+  summary: Schema27.String,
   ...CompactionUsage
-}).annotate({ identifier: "Session.Message.Compaction.Completed" }), CompactionFailed = Schema28.Struct({
+}).annotate({ identifier: "Session.Message.Compaction.Completed" }), CompactionFailed = Schema27.Struct({
   ...CompactionBase,
-  status: Schema28.tag("failed"),
-  reason: Schema28.Literals(["auto", "manual"]),
+  status: Schema27.tag("failed"),
+  reason: Schema27.Literals(["auto", "manual"]),
   error: exports_session_error.Error,
   ...CompactionUsage
-}).annotate({ identifier: "Session.Message.Compaction.Failed" }), Compaction2 = Schema28.Union([CompactionRunning, CompactionCompleted, CompactionFailed]).pipe(Schema28.toTaggedUnion("status"), Schema28.annotate({ identifier: "Session.Message.Compaction" })), Idle = Schema28.Struct({
+}).annotate({ identifier: "Session.Message.Compaction.Failed" }), Compaction2 = Schema27.Union([CompactionRunning, CompactionCompleted, CompactionFailed]).pipe(Schema27.toTaggedUnion("status"), Schema27.annotate({ identifier: "Session.Message.Compaction" })), Idle = Schema27.Struct({
   ...Base,
-  type: Schema28.tag("idle"),
-  outcome: Schema28.Literals(["succeeded", "failed", "interrupted"]),
+  type: Schema27.tag("idle"),
+  outcome: Schema27.Literals(["succeeded", "failed", "interrupted"]),
   error: exports_session_error.Error.pipe(optional)
-}).annotate({ identifier: "Session.Message.Idle" }), Info13 = Schema28.Union([
+}).annotate({ identifier: "Session.Message.Idle" }), Info12 = Schema27.Union([
   AgentSelected,
   ModelSelected,
   LocationSwitched,
@@ -1219,10 +1227,22 @@ var ID13 = Schema28.String.check(Schema28.isStartingWith("msg_")).pipe(Schema28.
   Assistant,
   Compaction2,
   Idle
-]).annotate({ identifier: "Session.Message.Info" });
+]).annotate({ identifier: "Session.Message.Info" }), MediaInfo = Schema27.Union([
+  AgentSelected,
+  ModelSelected,
+  LocationSwitched,
+  MediaUser,
+  Synthetic,
+  System,
+  Skill,
+  Shell,
+  Assistant,
+  Compaction2,
+  Idle
+]).annotate({ identifier: "Session.Message.MediaInfo" });
 
 // integrations/opencode/appencode.ts
-import { Cause, Effect as Effect4, Fiber, Schedule, Schema as Schema29, Semaphore } from "effect";
+import { Cause, Effect as Effect4, Fiber, Schedule, Schema as Schema28, Semaphore } from "effect";
 import { lstat as lstat2, realpath as realpath2, stat } from "fs/promises";
 import { dirname as dirname2, isAbsolute as isAbsolute2, join as join2, relative, resolve as resolve2, sep } from "path";
 
@@ -1578,13 +1598,13 @@ ${task.state.value}`;
           name: "appa_setup",
           options: { codemode: !1 },
           description: "Inspect AppenCode policy and live tools, read a catalog battery, or publish a complete approved policy. Publish only after a later operator message approves your proposal. Configuration access only; no coding or shell execution.",
-          input: Schema29.Struct({
-            operation: Schema29.Literals(["inspect", "battery", "publish"]),
-            battery: Schema29.optionalKey(Schema29.String),
-            policy: Schema29.optionalKey(Schema29.String),
-            expected_digest: Schema29.optionalKey(Schema29.String)
+          input: Schema28.Struct({
+            operation: Schema28.Literals(["inspect", "battery", "publish"]),
+            battery: Schema28.optionalKey(Schema28.String),
+            policy: Schema28.optionalKey(Schema28.String),
+            expected_digest: Schema28.optionalKey(Schema28.String)
           }),
-          output: Schema29.String,
+          output: Schema28.String,
           execute: (input, call) => Effect4.gen(function* () {
             let session = yield* ctx.session.get({ sessionID: call.sessionID });
             if (session.parentID || session.fork)
@@ -1606,16 +1626,16 @@ ${task.state.value}`;
         name: "appa_subagent",
         options: { codemode: !1 },
         description: "Delegate to a fresh subagent through APPA. Declare its return using the offered remedy, then retry. Set background: true to receive an owned task handle and keep working; its checked final text arrives later as a message naming the handle, and its return then narrows this session. Set deliver: false as well to receive it only through appa_collect, so it narrows this session only when collected. Use appa_collect to wait for it now, or appa_cancel to stop it. Default: foreground. APPA authorizes delegation; native subagent permissions do not apply. No resume or nested delegation.",
-        input: Schema29.Struct({
-          agent: Schema29.String,
-          description: Schema29.String,
-          prompt: Schema29.String,
-          model: Schema29.optionalKey(Schema29.String),
-          sessionID: Schema29.optionalKey(Schema29.String),
-          background: Schema29.optionalKey(Schema29.Boolean),
-          deliver: Schema29.optionalKey(Schema29.Boolean)
+        input: Schema28.Struct({
+          agent: Schema28.String,
+          description: Schema28.String,
+          prompt: Schema28.String,
+          model: Schema28.optionalKey(Schema28.String),
+          sessionID: Schema28.optionalKey(Schema28.String),
+          background: Schema28.optionalKey(Schema28.Boolean),
+          deliver: Schema28.optionalKey(Schema28.Boolean)
         }),
-        output: Schema29.String,
+        output: Schema28.String,
         execute: (input, call) => Effect4.gen(function* () {
           if (children.has(call.sessionID) || input.sessionID !== void 0)
             throw Error("[appencode] Only fresh, one-level delegation is supported.");
@@ -1728,8 +1748,8 @@ ${task.state.value}`;
         name: "appa_collect",
         options: { codemode: !1 },
         description: "Wait for an owned background task and return only its APPA-admitted final text. Use it when you need the result before continuing, or for a task launched with deliver: false; otherwise it arrives as a message. Root-only. Repeated collection reuses the admitted result. Interrupting this wait does not cancel the task.",
-        input: Schema29.Struct({ task: Schema29.String }),
-        output: Schema29.String,
+        input: Schema28.Struct({ task: Schema28.String }),
+        output: Schema28.String,
         execute: (input, call) => Effect4.gen(function* () {
           let task = yield* Effect4.tryPromise({ try: () => ownedTask(input.task, call.sessionID), catch: failure });
           if (task.state.status === "active")
@@ -1745,8 +1765,8 @@ ${task.state.value}`;
         name: "appa_cancel",
         options: { codemode: !1 },
         description: "Revoke and stop an owned background task without returning child content. Root-only; safe to repeat. Cannot undo effects or retract an admitted return. Retry if cancellation is unconfirmed.",
-        input: Schema29.Struct({ task: Schema29.String }),
-        output: Schema29.String,
+        input: Schema28.Struct({ task: Schema28.String }),
+        output: Schema28.String,
         execute: (input, call) => Effect4.gen(function* () {
           let task = yield* Effect4.tryPromise({ try: () => ownedTask(input.task, call.sessionID), catch: failure }), value = yield* cancelTask(task);
           return { output: value, content: value };
