@@ -102,9 +102,9 @@ async fn yell(
             ExitCode::SUCCESS
         }
         Err(failure) => {
-            fail(&failure);
+            let code = fail(&failure);
             eprintln!("  The report stays at {path}.");
-            ExitCode::FAILURE
+            code
         }
     }
 }
