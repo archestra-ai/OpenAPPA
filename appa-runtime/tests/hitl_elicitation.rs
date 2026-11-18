@@ -210,6 +210,7 @@ async fn deployment_from(policy: String) -> Deployment {
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;
@@ -338,6 +339,7 @@ builtin = "hitl"
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;
@@ -419,6 +421,7 @@ async fn execute_over<H: ClientHandler>(
             spawn: None,
             prompt: None,
             ruling,
+            declares: None,
         },
     )
     .await;
@@ -842,6 +845,7 @@ async fn reviews_of_blocked_publish(policy: String) -> Vec<Review> {
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;
@@ -985,6 +989,7 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;
@@ -1046,6 +1051,7 @@ async fn an_embedded_host_ruling_survives_without_any_mcp_request_context() {
             spawn: None,
             prompt: None,
             ruling: Some(Ruling::Approve),
+            declares: None,
         },
     )
     .await;
@@ -1122,6 +1128,7 @@ async fn a_harness_ruling_for_an_offer_from_an_earlier_revision_authorizes_nothi
                     spawn: None,
                     prompt: None,
                     ruling: Some(Ruling::Approve),
+                    declares: None,
                 },
             )
             .await;
@@ -1153,6 +1160,7 @@ async fn a_harness_ruling_for_an_offer_from_an_earlier_revision_authorizes_nothi
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;

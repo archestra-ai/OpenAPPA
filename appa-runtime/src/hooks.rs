@@ -12,8 +12,8 @@ use appa_runtime_api::{
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
 use crate::api::{
     ChildReturnDecision, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen, LaunchedStart,
-    OfferId, RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision, ToolResultDecision,
-    is_control_tool,
+    OfferId, RemedyArguments, RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision,
+    ToolResultDecision, is_control_tool,
 };
 use appa_eventlog::EndKind;
 
@@ -177,6 +177,7 @@ fn continued(
             spawn,
             prompt,
             ruling,
+            declares,
         } => HookEvent::ToolCall {
             actor: actor(who),
             call,
@@ -184,6 +185,7 @@ fn continued(
             spawn,
             prompt,
             ruling,
+            declares,
         },
         HookEvent::SpawnResume {
             actor: who,
@@ -619,7 +621,19 @@ async fn dispatch_event(
             spawn,
             prompt,
             ruling,
-        } => dispatcher.tool_call(actor, call, call_id, spawn, prompt, ruling).await,
+            declares,
+        } => {
+            // Only a single spawn declares its return: a declaration on any other call is
+            // refused here, before the call writes anything.
+            let proposing = match (spawn, declares) {
+                (spawn, None) => Proposing::Plain(spawn),
+                (Some(SpawnKind::Single), Some(declares)) => Proposing::Declaring(declares),
+                (_, Some(_)) => return refuse(EventError::DeclaresOffSpawn),
+            };
+            dispatcher
+                .tool_call(actor, call, call_id, proposing, prompt, ruling)
+                .await
+        }
         HookEvent::SpawnResume { actor, call, child } => dispatcher.spawn_resume(actor, call, child).await,
         HookEvent::ToolResult {
             actor,
@@ -652,6 +666,23 @@ async fn dispatch_event(
             open_calls,
         } => dispatcher.child_turn_end(root, child, open_calls).await,
         HookEvent::ChildReturn { root, child, value } => dispatcher.child_return(root, child, value).await,
+    }
+}
+
+/// What a proposed call starts as the host identified it, and the return a single spawn
+/// declares with it.
+#[derive(Debug, Clone)]
+enum Proposing {
+    Plain(Option<SpawnKind>),
+    Declaring(RemedyArguments),
+}
+
+impl Proposing {
+    fn spawn(&self) -> Option<SpawnKind> {
+        match self {
+            Proposing::Plain(spawn) => *spawn,
+            Proposing::Declaring(_) => Some(SpawnKind::Single),
+        }
     }
 }
 
@@ -801,7 +832,7 @@ impl Dispatcher<'_> {
         actor: Actor,
         call: ProposedCall,
         call_id: Option<String>,
-        spawn: Option<SpawnKind>,
+        proposing: Proposing,
         prompt: Option<PromptKey>,
         ruling: Option<Ruling>,
     ) -> HookDecision {
@@ -850,10 +881,18 @@ impl Dispatcher<'_> {
                 let call = call.clone();
                 let call_id = call_id.clone();
                 let prompt = prompt.clone();
-                async move { session.on_tool_call_identified(call, call_id, spawn, prompt).await }
+                let proposing = proposing.clone();
+                async move {
+                    match proposing {
+                        Proposing::Plain(spawn) => session.on_tool_call_identified(call, call_id, spawn, prompt).await,
+                        Proposing::Declaring(declares) => {
+                            session.on_spawn_declaring(call, call_id, prompt, declares).await
+                        }
+                    }
+                }
             })
         };
-        let decided = match (spawn, propose().await) {
+        let decided = match (proposing.spawn(), propose().await) {
             (Some(SpawnKind::Single), Err(EventError::SpawnOutstanding)) => {
                 self.runtime.hold_spawn(&actor.root, hold_until, propose).await
             }
@@ -1524,6 +1563,7 @@ mod tests {
             spawn: Some(appa_runtime_api::SpawnKind::Single),
             prompt: None,
             ruling: None,
+            declares: None,
         };
         let HookDecision::DenyCall { offers, .. } = handle(runtime, spawn()).await else {
             panic!("a marked spawn blocks until its return is declared");
@@ -1783,6 +1823,7 @@ mod tests {
             spawn: Some(appa_runtime_api::SpawnKind::Single),
             prompt: None,
             ruling: None,
+            declares: None,
         };
         let HookDecision::DenyCall { offers, .. } = handle(&runtime, spawn()).await else {
             panic!("a marked spawn blocks until its return is declared");
@@ -1836,6 +1877,7 @@ mod tests {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -1927,6 +1969,7 @@ mod tests {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -1999,6 +2042,7 @@ mod tests {
             spawn: Some(appa_runtime_api::SpawnKind::Single),
             prompt: None,
             ruling: None,
+            declares: None,
         };
         let HookDecision::DenyCall { offers, .. } = handle(&runtime, spawn()).await else {
             panic!("a marked spawn blocks until its return is declared");
@@ -2054,6 +2098,7 @@ mod tests {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -3022,6 +3067,7 @@ mod tests {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -3053,6 +3099,7 @@ mod tests {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -3094,6 +3141,7 @@ mod tests {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -3135,6 +3183,7 @@ mod tests {
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         };
         let started = |runtime: &Runtime| {
             runtime.create_session(root.clone(), None).expect("a fresh id opens");
@@ -3389,6 +3438,7 @@ mod tests {
             spawn: Some(SpawnKind::Single),
             prompt: None,
             ruling: None,
+            declares: None,
         }
     }
 

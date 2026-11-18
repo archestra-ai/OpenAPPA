@@ -49,10 +49,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
-    Actor, AdapterName, CanonicalTool, HookDecision, HookEvent, LaunchStart, LaunchToken, OfferedInputSanitizer,
-    OfferedRemedy, OfferedReturn, OpenCalls, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame, PromptKey,
-    ProposedCall, RefusalClass, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding, SpawnKind,
-    SpawnRef, StartKind, ToolOutcome, TrajectoryId,
+    Actor, AdapterName, CanonicalTool, DeclaredArguments, HookDecision, HookEvent, LaunchStart, LaunchToken,
+    OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame,
+    PromptKey, ProposedCall, RefusalClass, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding,
+    SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -165,10 +165,11 @@ enum Field {
     ForkedFrom,
     Principal,
     AnsweredCallIds,
+    Declares,
 }
 
 impl Field {
-    const ALL: [Field; 22] = [
+    const ALL: [Field; 23] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -191,6 +192,7 @@ impl Field {
         Field::ForkedFrom,
         Field::Principal,
         Field::AnsweredCallIds,
+        Field::Declares,
     ];
 
     fn spelling(self) -> &'static str {
@@ -217,6 +219,7 @@ impl Field {
             Field::ForkedFrom => "forked_from",
             Field::Principal => "principal",
             Field::AnsweredCallIds => "answered_call_ids",
+            Field::Declares => "declares",
         }
     }
 }
@@ -261,6 +264,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Ruling,
             Field::Cwd,
             Field::PromptId,
+            Field::Declares,
         ],
         EventName::SpawnResume => &[
             Field::RootId,
@@ -578,6 +582,9 @@ pub struct WireEvent {
     /// [`OpenCalls::Hold`]; absent means [`OpenCalls::Abandon`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answered_call_ids: Option<Vec<String>>,
+    /// On a single spawn's tool call: the return it declares for its subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declares: Option<DeclaredArguments>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -623,6 +630,7 @@ impl WireEvent {
             forked_from: None,
             principal: None,
             answered_call_ids: None,
+            declares: None,
         }
     }
 
@@ -652,6 +660,7 @@ impl WireEvent {
             Field::ForkedFrom => self.forked_from.is_some(),
             Field::Principal => self.principal.is_some(),
             Field::AnsweredCallIds => self.answered_call_ids.is_some(),
+            Field::Declares => self.declares.is_some(),
         }
     }
 
@@ -742,6 +751,7 @@ impl WireEvent {
                 call_id,
                 prompt,
                 ruling,
+                declares,
                 ..
             } => {
                 let (root_id, child_id) = ids(actor)?;
@@ -754,6 +764,7 @@ impl WireEvent {
                     ruling: checked_ruling(adapter, *ruling)?,
                     cwd: call.cwd.clone(),
                     prompt_id: prompt.as_ref().map(|prompt| prompt.0.clone()),
+                    declares: declares.clone(),
                     ..Self::bare(adapter, EventName::ToolCall)
                 }
             }
@@ -953,6 +964,7 @@ impl WireEvent {
             start,
             forked_from,
             answered_call_ids,
+            declares,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -1084,6 +1096,7 @@ impl WireEvent {
                         spawn,
                         prompt,
                         ruling,
+                        declares,
                     },
                     names_children,
                 }))
@@ -1869,6 +1882,7 @@ mod tests {
                 spawn,
                 prompt,
                 ruling,
+                declares: None,
             } => {
                 assert_eq!(actor.root.0, "kagent:r1");
                 assert_eq!(prompt, None);
@@ -1885,6 +1899,56 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(accepted.names_children.is_empty());
+    }
+
+    #[test]
+    fn a_tool_call_carries_the_return_it_declares_and_no_other_event_does() {
+        let declares = DeclaredArguments {
+            label: Some(crate::LabelSpelling::default()),
+            return_schema: Some(serde_json::json!({ "type": "object" })),
+        };
+        let call = HookEvent::ToolCall {
+            actor: Actor {
+                root: TrajectoryId("kagent:r1".to_string()),
+                child: None,
+            },
+            call: ProposedCall {
+                tool: "spawn".to_string(),
+                arguments: raw(r#"{"a":1}"#),
+                cwd: None,
+            },
+            call_id: Some("call-1".to_string()),
+            spawn: None,
+            prompt: None,
+            ruling: None,
+            declares: Some(declares.clone()),
+        };
+        let wire = WireEvent::from_event(AdapterName::Kagent, &call).expect("translates");
+        let bytes = serde_json::to_vec(&wire).expect("serializes");
+        let accepted = WireEvent::read(&bytes)
+            .expect("reads")
+            .into_event(&SERVED, PrincipalSource::None)
+            .expect("parses")
+            .expect("is an event");
+        match accepted.event {
+            HookEvent::ToolCall {
+                declares: crossed,
+                spawn,
+                ..
+            } => {
+                assert_eq!(crossed, Some(declares));
+                assert_eq!(spawn, Some(SpawnKind::Single));
+            }
+            other => panic!("{other:?}"),
+        }
+
+        let read = |body: &[u8]| {
+            WireEvent::read(body).and_then(|event| event.into_event(&NEVER_SCANNED, PrincipalSource::None))
+        };
+        let unknown = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"spawn","arguments":{},"declares":{"label":{},"floor":{}}}"#;
+        assert!(matches!(read(unknown), Err(ParseRefusal::Malformed { .. })));
+        let on_result = br#"{"protocol":1,"adapter":"kagent","event":"tool_result","root_id":"r1","tool":"spawn","arguments":{},"outcome":{"status":"indeterminate"},"declares":{"label":{}}}"#;
+        assert!(matches!(read(on_result), Err(ParseRefusal::Malformed { .. })));
     }
 
     #[test]
@@ -2110,6 +2174,7 @@ mod tests {
             spawn: None,
             prompt: Some(PromptKey("p1".to_string())),
             ruling: None,
+            declares: None,
         };
         match through(&call) {
             HookEvent::ToolCall { spawn, prompt, .. } => {
@@ -2336,6 +2401,7 @@ mod tests {
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         };
         let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("translates");
         assert_eq!(wire.cwd.as_deref(), Some("/work/checkout"));
@@ -2564,6 +2630,7 @@ mod tests {
             spawn: None,
             prompt: None,
             ruling,
+            declares: None,
         };
         let wire = WireEvent::from_event(AdapterName::Kagent, &call(Some(Ruling::Deny))).expect("translates");
         assert_eq!(wire.ruling, Some(Ruling::Deny));

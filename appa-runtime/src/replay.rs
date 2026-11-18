@@ -664,6 +664,7 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
         spawn: None,
         prompt: None,
         ruling: None,
+        declares: None,
     };
     match hooks::handle(runtime, event).await {
         HookDecision::AllowCall { .. } => Proposed::Allowed(call),

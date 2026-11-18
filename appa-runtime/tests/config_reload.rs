@@ -109,6 +109,7 @@ async fn propose_notes(runtime: &Arc<Runtime>, root: &TrajectoryId) -> HookDecis
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;

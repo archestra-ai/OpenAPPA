@@ -104,6 +104,7 @@ async fn propose(runtime: &Arc<Runtime>, root: &str, proposed: ProposedCall) -> 
         spawn: None,
         prompt: None,
         ruling: None,
+        declares: None,
     };
     hooks::handle(runtime, event).await
 }

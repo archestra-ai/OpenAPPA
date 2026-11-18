@@ -14,13 +14,18 @@ pub(super) const UNFIT_AHEAD: &str =
 pub(super) const FAN_OUT_AHEAD: &str = "[appa] A return declared ahead covers a single subagent call, so it was not applied. \
     A call that starts several subagents declares at its block.";
 
+/// What a spawn's block says when no declaration it offers fits the return its proposal
+/// declares.
+pub(super) const UNFIT_DECLARED: &str =
+    "[appa] The return this subagent call declares does not fit it, so it was not applied.";
+
 /// Follows a notice on a block that offers plans.
 pub(super) const APPLY_BELOW: &str = " Apply a plan below.";
 
-/// How many rounds a blocked spawn spends settling or applying the declaration it took before
-/// it refuses operationally. Each round either commits a settlement, applies, or meets a
-/// family another writer changed under it.
-const AHEAD_ROUNDS: u32 = 3;
+/// How many rounds a blocked spawn spends settling or applying the declaration it took or
+/// carries before it refuses operationally. Each round either commits a settlement, applies,
+/// or meets a family another writer changed under it.
+const DECLARATION_ROUNDS: u32 = 3;
 
 /// How many plans of stock `approve` rulings one proposal applies before its block stands. A
 /// plan can go stale between its block and its execution, and an approval can meet a label
@@ -28,26 +33,18 @@ const AHEAD_ROUNDS: u32 = 3;
 const STOCK_APPROVE_ROUNDS: usize = 3;
 
 /// One proposed tool call and what came with it: the host's call id, the spawn it starts, the
-/// prompt a fan-out spawn is keyed by, and the held peer message a held read delivers.
+/// prompt a fan-out spawn is keyed by, the return a single spawn declares, and the held peer
+/// message a held read delivers.
 struct Proposal {
     call: ProposedCall,
     call_id: Option<String>,
     spawn: Option<SpawnKind>,
     prompt: Option<PromptKey>,
+    declares: Option<RemedyArguments>,
     held_message: Option<appa_engine::value::HeldMessage>,
 }
 
 impl Session {
-    #[tracing::instrument(target = "appa_telemetry", name = "appa.policy.check", skip_all, fields(
-        appa.trajectory.root = crate::telemetry::name(&self.root.0),
-        appa.trajectory.id = crate::telemetry::name(&self.trajectory.0),
-        appa.tool.name = crate::telemetry::name(&call.tool),
-        appa.tool.call.id = call_id.as_deref().map(crate::telemetry::name).unwrap_or_default(),
-        appa.outcome = tracing::field::Empty,
-        appa.policy.id = tracing::field::Empty,
-        appa.policy.gaps = tracing::field::Empty,
-        appa.policy.narrowing = tracing::field::Empty,
-    ))]
     pub async fn on_tool_call_identified(
         &self,
         call: ProposedCall,
@@ -55,17 +52,50 @@ impl Session {
         spawn: Option<SpawnKind>,
         prompt: Option<PromptKey>,
     ) -> Result<ToolCallDecision, EventError> {
+        self.on_proposal(Proposal {
+            call,
+            call_id,
+            spawn,
+            prompt,
+            declares: None,
+            held_message: None,
+        })
+        .await
+    }
+
+    /// A single spawn proposed with the return it declares for its subagent.
+    pub(crate) async fn on_spawn_declaring(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        prompt: Option<PromptKey>,
+        declares: RemedyArguments,
+    ) -> Result<ToolCallDecision, EventError> {
+        self.on_proposal(Proposal {
+            call,
+            call_id,
+            spawn: Some(SpawnKind::Single),
+            prompt,
+            declares: Some(declares),
+            held_message: None,
+        })
+        .await
+    }
+
+    #[tracing::instrument(target = "appa_telemetry", name = "appa.policy.check", skip_all, fields(
+        appa.trajectory.root = crate::telemetry::name(&self.root.0),
+        appa.trajectory.id = crate::telemetry::name(&self.trajectory.0),
+        appa.tool.name = crate::telemetry::name(&proposal.call.tool),
+        appa.tool.call.id = proposal.call_id.as_deref().map(crate::telemetry::name).unwrap_or_default(),
+        appa.outcome = tracing::field::Empty,
+        appa.policy.id = tracing::field::Empty,
+        appa.policy.gaps = tracing::field::Empty,
+        appa.policy.narrowing = tracing::field::Empty,
+    ))]
+    async fn on_proposal(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
         let started = std::time::Instant::now();
-        let tool = call.tool.clone();
-        let result = self
-            .check_tool_call(Proposal {
-                call,
-                call_id,
-                spawn,
-                prompt,
-                held_message: None,
-            })
-            .await;
+        let tool = proposal.call.tool.clone();
+        let result = self.check_tool_call(proposal).await;
         crate::telemetry::policy(&result, &tool, started.elapsed().as_secs_f64());
         result
     }
@@ -102,6 +132,7 @@ impl Session {
             call_id,
             spawn: None,
             prompt: None,
+            declares: None,
             held_message: Some(held),
         })
         .await
@@ -114,28 +145,24 @@ impl Session {
     /// another label has lapsed; one no offer fits, or one a fan-out spawn meets, is not
     /// applied, and one a turn boundary cleared is dropped. Each settlement is judged and
     /// written where it commits, the first one wins, and a retry of the call reads it back.
+    ///
+    /// A blocked single spawn that took no declaration ahead applies the return its proposal
+    /// declares, if it declares one ([`Session::apply_declared`]).
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
         let invocation = appa_eventlog::InvocationNonce(rand::random());
-        let (mut decision, took) = self.propose_resolving(&proposal, invocation).await?;
-        let (Some(spawn), ToolCallDecision::Deny { .. }, Some(attempt)) = (proposal.spawn, &decision, took) else {
+        let (mut decision, took) = self.propose_resolving(&proposal, Some(invocation)).await?;
+        let (Some(spawn), ToolCallDecision::Deny { .. }) = (proposal.spawn, &decision) else {
             return Ok(decision);
         };
-        for _ in 0..AHEAD_ROUNDS {
-            let ToolCallDecision::Deny {
-                feedback,
-                offers,
-                display,
-                review,
-            } = &decision
-            else {
-                return Ok(decision);
+        let Some(attempt) = took else {
+            return match &proposal.declares {
+                Some(declares) => self.apply_declared(&proposal, declares, decision).await,
+                None => Ok(decision),
             };
-            let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
-            let noted = |notice: &str| ToolCallDecision::Deny {
-                feedback: format!("{notice}{apply}\n\n{feedback}"),
-                offers: offers.clone(),
-                display: display.clone(),
-                review: review.clone(),
+        };
+        for _ in 0..DECLARATION_ROUNDS {
+            let ToolCallDecision::Deny { offers, .. } = &decision else {
+                return Ok(decision);
             };
             let offers = offers.clone();
             let claim = AheadClaim {
@@ -145,21 +172,21 @@ impl Session {
             };
             let (offer, arguments) = match self.settle_terminal(&claim)? {
                 Judgment::Settled(AheadOutcome::Applied) => {
-                    return Ok(self.propose_resolving(&proposal, invocation).await?.0);
+                    return Ok(self.propose_resolving(&proposal, Some(invocation)).await?.0);
                 }
                 Judgment::Settled(AheadOutcome::Ended) => return Ok(decision),
-                Judgment::Settled(AheadOutcome::Lapsed) => return Ok(noted(LAPSED_AHEAD)),
-                Judgment::Settled(AheadOutcome::Unfit) => return Ok(noted(UNFIT_AHEAD)),
-                Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(FAN_OUT_AHEAD)),
+                Judgment::Settled(AheadOutcome::Lapsed) => return Ok(noted(&decision, LAPSED_AHEAD)),
+                Judgment::Settled(AheadOutcome::Unfit) => return Ok(noted(&decision, UNFIT_AHEAD)),
+                Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(&decision, FAN_OUT_AHEAD)),
                 Judgment::Apply { offer, arguments } => (offer, arguments),
                 Judgment::Stale => {
-                    decision = self.propose_resolving(&proposal, invocation).await?.0;
+                    decision = self.propose_resolving(&proposal, Some(invocation)).await?.0;
                     continue;
                 }
             };
             match self.apply_ahead(&offer, &claim, arguments).await {
                 Ok(RemedyDecision::Authorized { .. }) => {
-                    return Ok(self.propose_resolving(&proposal, invocation).await?.0);
+                    return Ok(self.propose_resolving(&proposal, Some(invocation)).await?.0);
                 }
                 Ok(_) => {}
                 Err(error) if error.is_operational() => return Err(error),
@@ -169,7 +196,60 @@ impl Session {
                 }
             }
         }
-        Err(EventError::Contended { attempts: AHEAD_ROUNDS })
+        Err(EventError::Contended {
+            attempts: DECLARATION_ROUNDS,
+        })
+    }
+
+    /// Apply the return a blocked single spawn's proposal declares through its block's own
+    /// declaration plan, one that asks no authority, and propose the call again, so it meets
+    /// only what else blocks it. The decision returned is the last proposal's. A block that
+    /// offers no declaration plan is planned on a declaration that already stands for this
+    /// call, as a retry of the call finds, and stands as it is. A block whose declaration plans
+    /// do not fit the arguments says so. Nothing is recorded beside the engine's own facts: a
+    /// retry reads what stands in the log.
+    async fn apply_declared(
+        &self,
+        proposal: &Proposal,
+        declares: &RemedyArguments,
+        mut decision: ToolCallDecision,
+    ) -> Result<ToolCallDecision, EventError> {
+        for _ in 0..DECLARATION_ROUNDS {
+            let ToolCallDecision::Deny { offers, .. } = &decision else {
+                return Ok(decision);
+            };
+            let fit = self.with_view(|context| {
+                Ok(match offers.iter().any(|offer| offer.returns.is_some()) {
+                    false => None,
+                    // Arguments the policy does not accept here are refused by every application.
+                    true if context
+                        .engine()
+                        .declare_ahead(context.view, &self.trajectory, declares)
+                        .is_err() =>
+                    {
+                        Some(Fit::Unfit)
+                    }
+                    true => Some(context.fitting_offer(offers, declares)),
+                })
+            })?;
+            match fit {
+                None => return Ok(decision),
+                Some(Fit::Unfit) => return Ok(noted(&decision, UNFIT_DECLARED)),
+                Some(Fit::Stale) => {}
+                Some(Fit::Live(offer)) => match self.on_remedy(offer, declares.clone(), None, None).await {
+                    Ok(_) => {}
+                    Err(error) if error.is_operational() => return Err(error),
+                    // The next proposal reads what the family holds after the refusal.
+                    Err(error) => {
+                        tracing::debug!(trajectory = %self.trajectory.0, %error, "the declared return was not applied");
+                    }
+                },
+            }
+            decision = self.propose_resolving(proposal, None).await?.0;
+        }
+        Err(EventError::Contended {
+            attempts: DECLARATION_ROUNDS,
+        })
     }
 
     /// Propose, and while the block offers a plan that asks only stock `approve` authorities,
@@ -181,13 +261,14 @@ impl Session {
     /// lost a race: another dispatch moved its basis or took its subject. The next proposal
     /// reads what stands after that, and the rounds bound how often it is tried. Only the
     /// first proposal takes a declaration made ahead: when it took none, the later ones run
-    /// outside the invocation, so a declaration made meanwhile waits for the next spawn.
+    /// outside the invocation, so a declaration made meanwhile waits for the next spawn. A
+    /// proposal outside any invocation takes none.
     async fn propose_resolving(
         &self,
         proposal: &Proposal,
-        invocation: appa_eventlog::InvocationNonce,
+        invocation: Option<appa_eventlog::InvocationNonce>,
     ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
-        let (mut decision, took) = self.propose_once(proposal, Some(invocation)).await?;
+        let (mut decision, took) = self.propose_once(proposal, invocation).await?;
         for _ in 0..STOCK_APPROVE_ROUNDS {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
                 break;
@@ -199,7 +280,7 @@ impl Session {
             if !matches!(applied, Ok(RemedyDecision::Authorized { .. })) {
                 tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
             }
-            decision = self.propose_once(proposal, took.as_ref().map(|_| invocation)).await?.0;
+            decision = self.propose_once(proposal, took.as_ref().and(invocation)).await?.0;
         }
         Ok((decision, took))
     }
@@ -261,6 +342,7 @@ impl Session {
             spawn,
             prompt,
             held_message,
+            ..
         } = proposal;
         let spawn = *spawn;
         self.inner.note_working_directory(&self.root, call.cwd.as_deref());
@@ -369,5 +451,26 @@ impl Session {
             Occasion::Other,
         )
         .await
+    }
+}
+
+/// A denial with `notice` before its feedback, pointing at the plans when it offers any.
+fn noted(decision: &ToolCallDecision, notice: &str) -> ToolCallDecision {
+    match decision {
+        ToolCallDecision::Deny {
+            feedback,
+            offers,
+            display,
+            review,
+        } => {
+            let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
+            ToolCallDecision::Deny {
+                feedback: format!("{notice}{apply}\n\n{feedback}"),
+                offers: offers.clone(),
+                display: display.clone(),
+                review: review.clone(),
+            }
+        }
+        allowed => allowed.clone(),
     }
 }

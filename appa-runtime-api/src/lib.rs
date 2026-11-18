@@ -604,6 +604,10 @@ pub enum HookEvent {
         /// A ruling the harness already obtained for the offer this
         /// control call quotes; `None` on every ordinary call.
         ruling: Option<Ruling>,
+        /// The return this single spawn declares for its subagent. A blocked spawn applies it
+        /// through its block's declaration plan and is proposed again in the same hook. Any
+        /// other call that carries one is refused.
+        declares: Option<DeclaredArguments>,
     },
     /// Continue an already released spawn after native approval, without a new proposal.
     SpawnResume {

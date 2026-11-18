@@ -11,7 +11,7 @@ use appa_runtime::api::{
 };
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OfferedReturn};
+use appa_runtime_api::{Actor, HookDecision, HookEvent, OfferedReturn, RefusalClass};
 
 /// `claude -p` on Claude Code 2.1.257 starting one subagent with `Agent`.
 fn events() -> Vec<serde_json::Value> {
@@ -507,6 +507,63 @@ async fn a_fan_out_spawn_drops_a_declaration_ahead_and_declares_at_its_block() {
         panic!("the single spawn needs its own declaration");
     };
     assert!(feedback.starts_with("[appa] Blocked:"), "{feedback}");
+}
+
+/// `event`'s tool call carrying the return its host declares for it.
+fn declaring(event: &serde_json::Value, declares: RemedyArguments) -> HookEvent {
+    let mut event = parsed(event);
+    let HookEvent::ToolCall { declares: carried, .. } = &mut event else {
+        panic!("the event is a tool call");
+    };
+    *carried = Some(declares);
+    event
+}
+
+fn this_floor() -> RemedyArguments {
+    RemedyArguments {
+        label: Some(LabelSpelling::default()),
+        return_schema: None,
+    }
+}
+
+#[tokio::test]
+async fn a_spawn_that_declares_its_return_is_released_by_its_own_hook_and_only_that_spawn() {
+    let runtime = deployment("delta = {}");
+    let spawn = hook(&events(), "PreToolUse", "Agent", false);
+    let decision = hooks::handle(&runtime, declaring(&spawn, this_floor())).await;
+    assert!(
+        matches!(decision, HookDecision::AllowCall { spawn: Some(_) }),
+        "{decision:?}"
+    );
+    assert!(
+        matches!(
+            hooks::handle(&runtime, parsed(&another(&spawn))).await,
+            HookDecision::DenyCall { .. }
+        ),
+        "the declaration covered one spawn"
+    );
+}
+
+#[tokio::test]
+async fn a_return_declared_on_a_call_that_starts_no_single_subagent_is_refused() {
+    let runtime = deployment("delta = {}");
+    let mut read = hook(&events(), "PreToolUse", "Bash", true);
+    read.as_object_mut().unwrap().remove("agent_id");
+    read.as_object_mut().unwrap().remove("agent_type");
+    let workflow = hook(&workflow_events(), "PreToolUse", "Workflow", false);
+    for call in [read, workflow] {
+        let decision = hooks::handle(&runtime, declaring(&call, this_floor())).await;
+        assert!(
+            matches!(
+                decision,
+                HookDecision::Refuse {
+                    class: RefusalClass::Spawn,
+                    ..
+                }
+            ),
+            "{decision:?}"
+        );
+    }
 }
 
 /// The daemon's control tool, served over MCP as `appa runtime` serves it to Claude Code.
