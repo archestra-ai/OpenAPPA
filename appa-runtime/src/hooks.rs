@@ -623,11 +623,13 @@ async fn dispatch_event(
             ruling,
             declares,
         } => {
-            // Only a single spawn declares its return: a declaration on any other call is
-            // refused here, before the call writes anything.
+            // Only a single spawn declares its return: a declaration on any other call, the
+            // control call included, is refused here, before the call writes anything.
             let proposing = match (spawn, declares) {
                 (spawn, None) => Proposing::Plain(spawn),
-                (Some(SpawnKind::Single), Some(declares)) => Proposing::Declaring(declares),
+                (Some(SpawnKind::Single), Some(declares)) if !is_control_tool(&call.tool) => {
+                    Proposing::Declaring(declares)
+                }
                 (_, Some(_)) => return refuse(EventError::DeclaresOffSpawn),
             };
             dispatcher

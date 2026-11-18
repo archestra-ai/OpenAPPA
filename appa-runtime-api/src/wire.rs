@@ -1081,6 +1081,14 @@ impl WireEvent {
                         )));
                     }
                 };
+                // Only a single spawn declares its return. Refused here, before the server
+                // takes in an inventory or opens a root for the call.
+                if declares.is_some() && identified.spawn != Some(SpawnKind::Single) {
+                    return Err(malformed(format!(
+                        "a return declaration on {}, which this adapter does not identify as a single spawn",
+                        identified.canonical
+                    )));
+                }
                 let names_children = (served.names_children)(&actor, &raw);
                 let spawn = identified.spawn;
                 Ok(Some(Accepted {
