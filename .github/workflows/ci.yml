@@ -129,6 +129,7 @@ jobs:
               - 'appa-runtime-api/**'
               - 'appa-file-tracker/**'
               - 'scripts/claude-bash-selftest.sh'
+              - '.github/tools/claude-code/**'
               - 'appa-engine/**'
               - 'appa-eventlog/**'
               - 'appa-policy/**'
@@ -405,13 +406,8 @@ jobs:
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
 
       # clappa gives Claude Code native Bash only where this self-test passes.
-      # Claude Code's Linux sandbox needs bubblewrap and socat, and Ubuntu's
-      # AppArmor default refuses bubblewrap the user namespace it needs.
       - name: Install Claude Code's sandbox
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap socat
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: .github/tools/claude-code/install-sandbox.sh
 
       - name: Self-test the Bash preload on the pinned Claude Code
         run: scripts/claude-bash-selftest.sh target/debug/appa

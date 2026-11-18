@@ -15,6 +15,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: claude-code-canary
+  cancel-in-progress: false
+
 jobs:
   selftest:
     name: Bash preload on Claude Code latest
@@ -45,14 +49,12 @@ jobs:
       # Unpinned on purpose: this job checks the release users auto-update to.
       - name: Install the newest Claude Code
         run: | # zizmor: ignore[adhoc-packages]
+          # supply-chain-policy: allow-latest the newest release is what this job checks
           npm install --prefix "$RUNNER_TEMP/claude-code" --no-audit --no-fund @anthropic-ai/claude-code@latest
           echo "$RUNNER_TEMP/claude-code/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Install Claude Code's sandbox
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap socat
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        run: .github/tools/claude-code/install-sandbox.sh
 
       - name: Self-test the Bash preload
         run: scripts/claude-bash-selftest.sh target/debug/appa
