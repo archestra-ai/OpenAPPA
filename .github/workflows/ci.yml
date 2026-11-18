@@ -87,6 +87,7 @@ jobs:
       bench_publish: ${{ steps.filter.outputs.bench_publish }}
       agentthreatbench: ${{ steps.filter.outputs.agentthreatbench }}
       taubench: ${{ steps.filter.outputs.taubench }}
+      sanitizer_bench: ${{ steps.filter.outputs.sanitizer_bench }}
       marketplace: ${{ steps.filter.outputs.marketplace }}
       receiver: ${{ steps.filter.outputs.receiver }}
     steps:
@@ -223,6 +224,13 @@ jobs:
             taubench:
               - *rust
               - 'bench/taubench/**'
+            # The bench composes the shipped batteries and the Claude Code
+            # default, so a change to either can break it.
+            sanitizer_bench:
+              - *rust
+              - 'marketplace/**'
+              - 'bench/sanitizer/**'
+              - 'bench/publish/**'
             marketplace:
               - 'marketplace/**'
               - 'appa-package/**'
@@ -824,6 +832,49 @@ jobs:
 
       - name: Corporate benchmark tests
         run: uv run --project bench/corp pytest bench/corp/tests
+
+  sanitizer-benchmark-checks:
+    name: Sanitizer Benchmark Checks
+    needs: changes
+    if: needs.changes.outputs.sanitizer_bench == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          env-vars: ImageOS
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Sanitizer benchmark lint
+        run: |
+          uv run --project bench/sanitizer --only-group dev ruff check bench/sanitizer
+          uv run --project bench/sanitizer --only-group dev ruff format --check bench/sanitizer
+
+      # The runtime tests skip without target/debug/appa, and the preflight
+      # fails without it: a deployment the runtime refuses fails this job.
+      - name: Build appa
+        run: cargo build -p appa --locked
+
+      - name: Sanitizer benchmark tests
+        run: uv run --project bench/sanitizer pytest bench/sanitizer/tests
+
+      - name: Sanitizer benchmark preflight
+        run: uv run --project bench/sanitizer appa-sanitizer-bench preflight --skip-build
 
   benchmark-publisher-checks:
     name: Benchmark Publisher Checks
