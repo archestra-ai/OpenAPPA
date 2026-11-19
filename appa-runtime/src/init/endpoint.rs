@@ -265,10 +265,7 @@ pub(crate) fn is_owned_appa_runtime(pid: i32) -> Result<bool, InitError> {
     let Some(command_name) = query("comm=") else {
         return Ok(false);
     };
-    if Path::new(&command_name).file_name().and_then(OsStr::to_str) != Some("appa") {
-        return Ok(false);
-    }
-    Ok(true)
+    Ok(Path::new(&command_name).file_name().and_then(OsStr::to_str) == Some("appa"))
 }
 
 #[cfg(unix)]

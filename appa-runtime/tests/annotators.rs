@@ -1046,6 +1046,7 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
                     spawn: None,
                     prompt: None,
                     ruling: None,
+                    declares: None,
                 },
             )
             .await
@@ -2427,6 +2428,7 @@ async fn a_hung_command_recorder_never_delays_a_command_annotator() {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;

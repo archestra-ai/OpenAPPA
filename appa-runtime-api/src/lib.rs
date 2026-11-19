@@ -604,6 +604,10 @@ pub enum HookEvent {
         /// A ruling the harness already obtained for the offer this
         /// control call quotes; `None` on every ordinary call.
         ruling: Option<Ruling>,
+        /// The return this single spawn declares for its subagent. A blocked spawn applies it
+        /// through its block's declaration plan and is proposed again in the same hook. Any
+        /// other call that carries one is refused.
+        declares: Option<DeclaredArguments>,
     },
     /// Continue an already released spawn after native approval, without a new proposal.
     SpawnResume {
@@ -791,6 +795,24 @@ pub enum OfferedReturn {
     AsSpoken,
     Sanitized { sanitizer: String },
     Void,
+}
+
+/// A label as the policy dialect spells a `delta`: a trust rank name and an audience list. An
+/// omitted dimension keeps the declaring trajectory's current value.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LabelSpelling {
+    pub trust: Option<String>,
+    pub audience: Option<Vec<String>>,
+}
+
+/// The arguments a subagent's return is declared with, as its caller spelled them: the lowest
+/// label the parent accepts from the return, and the schema an attested return matches.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredArguments {
+    pub label: Option<LabelSpelling>,
+    pub return_schema: Option<serde_json::Value>,
 }
 
 /// A refusal at the parse stage, before any event exists. `Unreadable`

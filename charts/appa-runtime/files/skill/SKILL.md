@@ -1,6 +1,6 @@
 ---
 name: appa-guide
-description: Set up and tune OpenAPPA on Claude Code, OpenCode, or a kagent cluster. Checks tool coverage, includes matching batteries, writes remaining rules, and explains blocked calls. Use for initial setup or policy changes.
+description: Set up and tune OpenAPPA on Claude Code, OpenCode, or a kagent cluster. Checks tool coverage, includes matching batteries, writes remaining rules, and explains blocked calls and how OpenAPPA works. Use for initial setup, policy changes, or questions about OpenAPPA.
 argument-hint: "[init | adjust | explain | what you want]"
 ---
 
@@ -51,9 +51,9 @@ Use one mode:
 - **`adjust`** — change how OpenAPPA treats a tool, data source,
   destination, battery, or approval, including making the defaults
   stricter or looser.
-- **`explain`** — say why a call was blocked, or what the current policy
-  does. Read-only: it proposes nothing unless the operator then asks for
-  a change, which continues as `adjust`.
+- **`explain`** — say why a call was blocked, what the current policy
+  does, or how OpenAPPA works. Read-only: it proposes nothing unless the
+  operator then asks for a change, which continues as `adjust`.
 
 With no request, run `init`. Otherwise start in the mode the request
 makes clear, and ask only when two modes fit it equally. Do not run two

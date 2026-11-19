@@ -118,6 +118,7 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;

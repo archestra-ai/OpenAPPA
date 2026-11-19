@@ -123,6 +123,7 @@ async fn propose(runtime: &Arc<Runtime>, within: Option<&TrajectoryId>, call: Pr
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await
@@ -169,6 +170,7 @@ async fn open_child(
                 spawn: Some(appa_runtime_api::SpawnKind::Single),
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
     };
@@ -282,6 +284,7 @@ async fn each_entry_names_the_host_call_its_dispatch_ran_for() {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;

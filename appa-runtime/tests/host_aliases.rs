@@ -145,6 +145,7 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall, id: &str)
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await
