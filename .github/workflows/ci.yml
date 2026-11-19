@@ -31,6 +31,19 @@ jobs:
       - name: Test release validation and PR lifecycle
         run: python3 .github/scripts/test_appa_archestra_update.py
 
+  vex-document:
+    name: VEX Document
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      # The rules each release applies when it attests the statements.
+      - name: Validate the VEX document
+        uses: archestra-ai/.github/actions/validate-vex@v1.33.0
+
   cargo-release-age:
     name: Cargo Release Age
     runs-on: ubuntu-latest
