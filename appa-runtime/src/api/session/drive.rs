@@ -642,6 +642,36 @@ impl Decided<'_> {
             .fork_return_contract(self.view, &self.session.trajectory, fork)
     }
 
+    /// What this trajectory's spawn `dispatch` answers its result with once its child's answer
+    /// was deferred; `None` for every other dispatch.
+    pub(super) fn deferral_notice(&self, dispatch: &appa_engine::value::DispatchId) -> Option<String> {
+        let deferred = self
+            .engine()
+            .deferred_return_of(self.view, &self.session.trajectory, dispatch)?;
+        Some(self.engine().deferral_notice(&deferred, &self.session.presentation))
+    }
+
+    /// The dispatch this trajectory's call `call_id` was released as.
+    pub(super) fn spawn_dispatch(&self, call_id: &str) -> Option<appa_engine::value::DispatchId> {
+        self.log
+            .call_bindings()
+            .find(|binding| binding.trajectory == &self.session.trajectory && binding.call_id == call_id)
+            .map(|binding| binding.dispatch.clone())
+    }
+
+    pub(super) fn child_end(&self, child: &TrajectoryId) -> super::child::ChildEnd {
+        let deferred = self.parent_of(child).is_some_and(|parent| {
+            self.engine()
+                .deferred_returns(self.view, &parent)
+                .iter()
+                .any(|deferred| deferred.id.child() == child)
+        });
+        match deferred {
+            true => super::child::ChildEnd::Deferred,
+            false => super::child::ChildEnd::Void,
+        }
+    }
+
     pub(super) fn fork_status(&self, fork: &appa_engine::value::ForkId) -> ForkStatus {
         self.engine().fork_status(self.view, fork)
     }

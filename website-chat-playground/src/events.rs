@@ -343,7 +343,11 @@ impl Reader {
                 events
             }
             // Algebraically detailed records the chat does not render.
-            AuditEvent::SanitizerBound { .. } | AuditEvent::VoidReturn | AuditEvent::Resumed { .. } => Vec::new(),
+            AuditEvent::SanitizerBound { .. }
+            | AuditEvent::VoidReturn
+            | AuditEvent::ReturnDeferred { .. }
+            | AuditEvent::ReturnDiscarded
+            | AuditEvent::Resumed { .. } => Vec::new(),
         }
     }
 }

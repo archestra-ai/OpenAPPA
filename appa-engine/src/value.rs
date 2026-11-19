@@ -138,6 +138,10 @@ impl CanonicalDigest {
             Some(mark) => {
                 hasher.update([1u8]);
                 hasher.update(mark.index().to_be_bytes());
+                // Written only when set, so a batch decided before deferral existed keeps its digest.
+                if mark.deferral() {
+                    hasher.update(b"deferral");
+                }
             }
             None => hasher.update([0u8]),
         }

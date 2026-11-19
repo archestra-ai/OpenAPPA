@@ -53,6 +53,7 @@ use crate::external::{ConsultGates, ExternalServices};
 use crate::yell;
 use appa_engine::label::ReaderId;
 use appa_engine::profile::PolicyFileKey;
+use appa_engine::transition::ReturnDecision;
 use appa_eventlog::{
     AheadAttempt, Backend, DeploymentName, EndKind, HostObservation, Log, LogStore, PolicyHead, PublishError,
     StoredLabel,
@@ -75,6 +76,70 @@ impl OfferId {
         }
         Ok(Self(value.to_owned()))
     }
+}
+
+/// One decision on one deferred return, as the runtime quotes it to the parent that owns the
+/// return: `ret-` and 16 lowercase hexadecimal characters, a spelling no offer id has. It
+/// locates the decision and authorizes nothing; the owning trajectory's own call does.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ReturnReference(String);
+
+impl ReturnReference {
+    const PREFIX: &'static str = "ret-";
+
+    pub fn parse(value: &str) -> Option<Self> {
+        OfferId::parse(value.strip_prefix(Self::PREFIX)?).ok()?;
+        Some(Self(value.to_owned()))
+    }
+
+    /// A function of the return and the decision alone, so every replica and every replay
+    /// spells it alike.
+    pub(crate) fn of(id: &appa_engine::value::ChildReturnId, decision: ReturnDecision) -> Self {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"appa/deferred-return\0");
+        hasher.update(id.child().as_str().as_bytes());
+        hasher.update([0]);
+        hasher.update(id.occurrence().to_be_bytes());
+        hasher.update([match decision {
+            ReturnDecision::Accept => 1,
+            ReturnDecision::Discard => 0,
+        }]);
+        Self(format!(
+            "{}{}",
+            Self::PREFIX,
+            crate::engine::hex(&hasher.finalize()[..8])
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What a control call quotes in `offer_id`: an offer, or a decision on a deferred return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Quoted {
+    Offer(OfferId),
+    Return(ReturnReference),
+}
+
+impl Quoted {
+    pub(crate) fn parse(value: &str) -> Result<Self, OfferIdRefusal> {
+        match ReturnReference::parse(value) {
+            Some(reference) => Ok(Self::Return(reference)),
+            None => OfferId::parse(value).map(Self::Offer),
+        }
+    }
+}
+
+/// What the parent that owns a deferred return is told about it, and the two references its
+/// control call may quote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredReturnNotice {
+    pub feedback: String,
+    pub accept: ReturnReference,
+    pub discard: ReturnReference,
 }
 
 /// Why an externally supplied rendered offer id cannot identify an offer.
@@ -263,6 +328,15 @@ pub(crate) enum RemedyDecision {
     Returned { value: String },
     Declined { presentation: RemedyPresentation },
     NoAnswer { feedback: String },
+}
+
+/// How a deferred return stands after its parent's control call: decided now, or read back
+/// from the log. `Unacceptable` appended nothing and leaves the return pending.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SettlementDecision {
+    Accepted { value: String },
+    Discarded,
+    Unacceptable { feedback: String },
 }
 
 /// Structured presentation for policy decisions offering remedies.
@@ -486,6 +560,8 @@ pub(crate) enum ChildReturnDecision {
         value: String,
     },
     NoValue,
+    /// The return is frozen for the parent's decision and the child's errand is over.
+    Deferred,
     Blocked {
         feedback: String,
     },
@@ -613,6 +689,10 @@ pub(crate) enum EventError {
     /// The host carried a return declaration on a call that starts no single subagent.
     #[error("only a call that starts a single subagent declares its return; this call starts none")]
     DeclaresOffSpawn,
+    /// The host declared a deferred return on a spawn it gave no call id: the parent finds
+    /// the answer it decides on by that id.
+    #[error("a spawn that declares a deferred return carries the host's call id; this one carries none")]
+    DeferralUnkeyed,
     #[error("the host reused a call id")]
     CallIdReused,
     #[error("the trajectory has ended")]
@@ -772,7 +852,8 @@ impl EventError {
             | EventError::BindingMismatch
             | EventError::SpawnStopped
             | EventError::SpawnNeverStarted
-            | EventError::DeclaresOffSpawn => RefusalClass::Spawn,
+            | EventError::DeclaresOffSpawn
+            | EventError::DeferralUnkeyed => RefusalClass::Spawn,
         }
     }
 
@@ -798,6 +879,7 @@ impl EventError {
             | EventError::MalformedPrincipal(_)
             | EventError::PrincipalMismatch
             | EventError::DeclaresOffSpawn
+            | EventError::DeferralUnkeyed
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding
@@ -3100,8 +3182,18 @@ impl Runtime {
                 (elicitation, None, EmbeddedPresentationOptions::default(), false)
             }
         };
-        let quoted = match OfferId::parse(&offer_id) {
-            Ok(quoted) => quoted,
+        let quoted = match Quoted::parse(&offer_id) {
+            Ok(Quoted::Offer(quoted)) => quoted,
+            // The stamped caller's ownership of the return is the authorization: no hook
+            // vouched, and a caller that names no actor has none to check.
+            Ok(Quoted::Return(reference)) => {
+                return match expected_actor {
+                    Some(actor) => self.settle(actor, reference, presentation).await,
+                    None => RemedyOutcome::Refused {
+                        reason: RemedyRefusal::UnknownOffer,
+                    },
+                };
+            }
             Err(reason) => {
                 return RemedyOutcome::Refused {
                     reason: RemedyRefusal::InvalidOfferId(reason),
@@ -3212,7 +3304,8 @@ enum Admission {
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
 /// declaring a subagent's return `label` and `return_schema` — for a harness that routes the
 /// control tool itself. No `offer_id` is a declaration ahead of the spawn, which
-/// [`Runtime::declare_return_ahead`] takes.
+/// [`Runtime::declare_return_ahead`] takes. An `offer_id` that settles a deferred return is not
+/// an offer and is refused here: [`Runtime::execute_embedded_remedy`] takes it as written.
 pub fn parse_control_arguments(arguments: &str) -> Result<(Option<OfferId>, RemedyArguments), String> {
     let args: ExecuteRemedyPlanArgs =
         serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;
@@ -3223,6 +3316,10 @@ pub fn parse_control_arguments(arguments: &str) -> Result<(Option<OfferId>, Reme
         .transpose()?;
     Ok((offer, RemedyArguments::from(args)))
 }
+
+/// What discarding a deferred return tells the model.
+const DISCARDED_RETURN: &str =
+    "[appa] Discarded. Nothing from the subagent's answer entered this session, and it cannot be accepted later.";
 
 /// What a declaration ahead of the spawn tells the model.
 const DECLARED_AHEAD: &str = "[appa] Declared. Call the subagent tool now, before any other tool: your next \
@@ -3639,6 +3736,81 @@ impl Runtime {
         };
         claim.release();
         outcome
+    }
+
+    /// The parent's decision on a deferred return it owns. The step that appends it reads the
+    /// return's state at that position, so a repeat, or a replica that lost the append,
+    /// answers the recorded outcome.
+    async fn settle(
+        &self,
+        acting: &Actor,
+        reference: ReturnReference,
+        presentation: EmbeddedPresentationOptions,
+    ) -> RemedyOutcome {
+        let started = std::time::Instant::now();
+        let settled = match self.session_with_presentation(&acting.root, acting_trajectory(acting), presentation) {
+            Ok(session) => session.on_settle(&reference).await,
+            Err(error) => Err(error),
+        };
+        let outcome = match settled {
+            Ok(SettlementDecision::Accepted { value }) => RemedyOutcome::Returned { value },
+            Ok(SettlementDecision::Discarded) => RemedyOutcome::Returned {
+                value: DISCARDED_RETURN.to_string(),
+            },
+            Ok(SettlementDecision::Unacceptable { feedback }) => RemedyOutcome::Declined {
+                presentation: RemedyPresentation {
+                    feedback,
+                    offers: Vec::new(),
+                    review: Vec::new(),
+                    display: Vec::new(),
+                },
+            },
+            Err(EventError::UnknownOffer) => RemedyOutcome::Refused {
+                reason: RemedyRefusal::UnknownOffer,
+            },
+            Err(error) => error.into(),
+        };
+        self.record(
+            Some(&acting.root),
+            crate::events::RuntimeEvent::Control {
+                call: crate::events::ControlCall::Remedy {
+                    offer: reference.0,
+                    dispatch: None,
+                },
+                outcome: (&outcome).into(),
+                duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            },
+        );
+        outcome
+    }
+
+    /// Does this reference name a decision on a deferred return, pending or settled, that
+    /// `acting` owns? A family that cannot be read owns none.
+    pub(crate) fn owns_return(&self, acting: &Actor, reference: &ReturnReference) -> bool {
+        self.session(&acting.root, acting_trajectory(acting))
+            .and_then(|session| session.owns_return(reference))
+            .unwrap_or(false)
+    }
+
+    /// What the spawn `call_id` of `acting` is told when its subagent's answer was deferred,
+    /// before and after `acting` decides; `None` for a spawn with no deferred return.
+    pub fn deferred_return(
+        &self,
+        acting: &Actor,
+        call_id: &str,
+        presentation: &EmbeddedPresentationOptions,
+    ) -> Result<Option<DeferredReturnNotice>, EmbeddedPeerError> {
+        self.session_with_presentation(&acting.root, acting_trajectory(acting), presentation.clone())
+            .and_then(|session| session.deferred_return(call_id))
+            .map_err(embedded::peer_error)
+    }
+
+    /// Was the spawn `call_id` of `acting` released under a deferred return? A declaration made
+    /// ahead of a spawn can release it under another return than the one its host declared.
+    pub fn defers_return(&self, acting: &Actor, call_id: &str) -> Result<bool, EmbeddedPeerError> {
+        self.session(&acting.root, acting_trajectory(acting))
+            .and_then(|session| session.defers_return(call_id))
+            .map_err(embedded::peer_error)
     }
 
     async fn run_remedy(

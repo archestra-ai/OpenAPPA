@@ -126,7 +126,12 @@ async fn declaring(
     declares: RemedyArguments,
 ) -> Result<ToolCallDecision, EventError> {
     session(runtime)
-        .on_spawn_declaring(spawn, Some(call_id.to_string()), None, declares)
+        .on_spawn_declaring(
+            spawn,
+            Some(call_id.to_string()),
+            None,
+            DeclaredReturn::Arguments(declares),
+        )
         .await
 }
 
@@ -194,7 +199,7 @@ fn crossing_through(policy: &ReturnPolicy) -> Option<Option<String>> {
                 .as_ref()
                 .map(|sanitizer| sanitizer.name().as_str().to_string()),
         ),
-        ReturnPolicy::Void => None,
+        ReturnPolicy::Void | ReturnPolicy::Deferred => None,
     }
 }
 
@@ -487,7 +492,12 @@ async fn two_deliveries_of_one_declaring_spawn_release_it_once() {
                 tokio::spawn(async move {
                     barrier.wait().await;
                     session
-                        .on_spawn_declaring(call("fetch", 1), Some("toolu-x".to_string()), None, as_spoken())
+                        .on_spawn_declaring(
+                            call("fetch", 1),
+                            Some("toolu-x".to_string()),
+                            None,
+                            DeclaredReturn::Arguments(as_spoken()),
+                        )
                         .await
                 })
             })
@@ -605,4 +615,425 @@ async fn a_deployment_without_context_control_releases_a_declaring_spawn_unmarke
     assert_eq!(approvals(&runtime), 0);
     assert_eq!(forks(&runtime), 0);
     assert_eq!(dispatches(&runtime), 1);
+}
+
+async fn deferring(runtime: &Runtime, spawn: ProposedCall, call_id: &str) -> Result<ToolCallDecision, EventError> {
+    session(runtime)
+        .on_spawn_declaring(spawn, Some(call_id.to_string()), None, DeclaredReturn::Deferred)
+        .await
+}
+
+#[tokio::test]
+async fn a_deferred_return_declared_on_a_spawn_without_a_call_id_is_refused_and_writes_nothing() {
+    let Deployed { runtime, .. } = deployed(false);
+    let refused = session(&runtime)
+        .on_spawn_declaring(call("fetch", 1), None, None, DeclaredReturn::Deferred)
+        .await;
+    assert!(matches!(refused, Err(EventError::DeferralUnkeyed)), "{refused:?}");
+    assert_eq!(dispatches(&runtime), 0);
+    assert_eq!(declarations(&runtime), 0);
+}
+
+#[tokio::test]
+async fn a_spawn_proposed_with_a_deferred_return_is_released_under_it() {
+    let Deployed { runtime, .. } = deployed(false);
+    binding(deferring(&runtime, call("fetch", 1), "toolu-1").await);
+    assert_eq!(declarations(&runtime), 1, "the return was declared once");
+    assert_eq!(spent(&runtime).len(), 1, "the declaration was spent by the release");
+    assert_eq!(fork_returns(&runtime), vec![ReturnPolicy::Deferred]);
+}
+
+#[tokio::test]
+async fn a_deferred_return_is_declared_for_its_own_proposal_and_not_for_the_same_call_without_it() {
+    let Deployed { runtime, .. } = deployed(false);
+    // The narrowing keeps the deferral declared and unspent.
+    let blocked = deferring(&runtime, call("taint", 1), "toolu-1")
+        .await
+        .expect("the spawn is judged");
+    assert!(matches!(blocked, ToolCallDecision::Deny { .. }));
+    assert_eq!(declarations(&runtime), 1);
+
+    // The same call proposed without the deferral declares for itself.
+    let plain = declaring(&runtime, call("taint", 1), "toolu-2", as_spoken())
+        .await
+        .expect("the spawn is judged");
+    assert!(matches!(plain, ToolCallDecision::Deny { .. }));
+    assert_eq!(
+        declarations(&runtime),
+        2,
+        "each class of proposal holds its own declaration"
+    );
+    assert_eq!(forks(&runtime), 0);
+}
+
+#[tokio::test]
+async fn a_call_id_decided_without_the_deferral_is_not_answered_for_a_proposal_that_carries_it() {
+    let Deployed { runtime, .. } = deployed(false);
+    binding(declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await);
+    assert!(matches!(
+        deferring(&runtime, call("fetch", 1), "toolu-1").await,
+        Err(EventError::CallIdReused)
+    ));
+}
+
+#[tokio::test]
+async fn a_deployment_that_does_not_control_context_releases_a_deferring_spawn_unmarked() {
+    let Deployed { runtime, .. } =
+        deployed_serving(&policy(false).replace("context_control = true", "context_control = false"));
+    assert!(matches!(
+        deferring(&runtime, call("fetch", 1), "toolu-1").await,
+        Ok(ToolCallDecision::Allow { spawn: None, .. })
+    ));
+    assert_eq!(forks(&runtime), 0);
+    assert_eq!(declarations(&runtime), 0);
+}
+
+/// A child opened under a deferred return.
+async fn deferred_child(runtime: &Runtime) -> Session {
+    let fork = binding(deferring(runtime, call("fetch", 1), "toolu-1").await);
+    session(runtime)
+        .on_child_start(TrajectoryId("cc:root:child".to_string()), SpawnRef::Binding(fork))
+        .expect("the fork binds and the child opens")
+}
+
+/// Run `taint` in `child`, accepting the narrowing its block offers.
+async fn tainted(runtime: &Runtime, child: &Session) {
+    let taint = call("taint", 1);
+    let blocked = child
+        .on_tool_call_identified(taint.clone(), Some("toolu-c1".to_string()), None, None)
+        .await
+        .expect("the child's call is judged");
+    let ToolCallDecision::Deny { offers, .. } = &blocked else {
+        panic!("the narrowing blocks the child's call: {blocked:?}");
+    };
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    let narrowing = crate::engine::resolve_rendered(&log, &OfferId(offers[0].id.clone())).expect("the offer resolves");
+    assert!(matches!(
+        child.on_remedy(narrowing, RemedyArguments::default(), None, None).await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    assert!(matches!(
+        child
+            .on_tool_call_identified(taint.clone(), Some("toolu-c2".to_string()), None, None)
+            .await,
+        Ok(ToolCallDecision::Allow { .. })
+    ));
+    child
+        .on_tool_result_identified(
+            taint,
+            Some("toolu-c2".to_string()),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("tainted".to_string()),
+            },
+        )
+        .await
+        .expect("the result is admitted");
+}
+
+fn deferred_returns(runtime: &Runtime) -> usize {
+    facts(runtime, |fact| matches!(fact, Fact::ReturnDeferred { .. }))
+}
+
+fn crossings(runtime: &Runtime) -> usize {
+    facts(runtime, |fact| matches!(fact, Fact::ChildReturn { .. }))
+}
+
+#[tokio::test]
+async fn a_deferred_child_that_narrowed_is_answered_deferred_at_its_stop_and_nothing_crosses() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_end(Some("the answer".to_string())).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert_eq!(deferred_returns(&runtime), 1);
+    assert_eq!(crossings(&runtime), 0);
+    assert!(
+        matches!(
+            child.on_child_end(Some("the answer".to_string())).await,
+            Ok(ChildReturnDecision::Deferred)
+        ),
+        "a repeated stop is answered as the deferral that ended the errand"
+    );
+    assert!(
+        matches!(
+            child.on_child_return("the answer".to_string()).await,
+            Ok(ChildReturnDecision::Deferred)
+        ),
+        "and so is a return made without ending"
+    );
+    assert!(matches!(
+        child.on_child_end(None).await,
+        Ok(ChildReturnDecision::NoValue)
+    ));
+    assert_eq!(deferred_returns(&runtime), 1);
+    assert_eq!(crossings(&runtime), 0);
+}
+
+#[tokio::test]
+async fn a_deferred_child_that_narrowed_nothing_returns_at_its_stop() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    assert!(matches!(
+        child.on_child_end(Some("done".to_string())).await,
+        Ok(ChildReturnDecision::Returned { value }) if value == "done"
+    ));
+    assert_eq!(deferred_returns(&runtime), 0);
+    assert_eq!(crossings(&runtime), 1);
+}
+
+fn parent() -> Actor {
+    Actor {
+        root: root(),
+        child: None,
+    }
+}
+
+/// A child that narrowed and stopped under a deferred return, and what its parent is told.
+async fn deferred_answer(runtime: &Runtime) -> (Session, crate::api::DeferredReturnNotice) {
+    let child = deferred_child(runtime).await;
+    tainted(runtime, &child).await;
+    assert!(matches!(
+        child.on_child_end(Some("the answer".to_string())).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    let notice = runtime
+        .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+        .expect("the family reads")
+        .expect("the spawn's return was deferred");
+    (child, notice)
+}
+
+async fn settling(runtime: &Runtime, actor: &Actor, reference: &crate::api::ReturnReference) -> RemedyOutcome {
+    let args =
+        serde_json::from_value(serde_json::json!({ "offer_id": reference.as_str() })).expect("the arguments parse");
+    runtime.execute_embedded_remedy(actor, args).await
+}
+
+#[tokio::test]
+async fn accepting_a_deferred_return_crosses_it_once_as_the_control_calls_result() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (_, notice) = deferred_answer(&runtime).await;
+    assert!(runtime.owns_return(&parent(), &notice.accept));
+
+    let accepted = settling(&runtime, &parent(), &notice.accept).await;
+    assert_eq!(
+        accepted,
+        RemedyOutcome::Returned {
+            value: "the answer".to_string()
+        }
+    );
+    assert_eq!(crossings(&runtime), 1);
+
+    // A settled return answers its recorded outcome, whichever decision the repeat names.
+    assert_eq!(settling(&runtime, &parent(), &notice.accept).await, accepted);
+    assert_eq!(settling(&runtime, &parent(), &notice.discard).await, accepted);
+    assert_eq!(crossings(&runtime), 1);
+    assert_eq!(
+        runtime
+            .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+            .expect("the family reads"),
+        Some(notice),
+        "the notice reads the same after the decision"
+    );
+}
+
+#[tokio::test]
+async fn discarding_a_deferred_return_crosses_nothing_and_cannot_be_undone() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (_, notice) = deferred_answer(&runtime).await;
+
+    let discarded = settling(&runtime, &parent(), &notice.discard).await;
+    assert!(matches!(discarded, RemedyOutcome::Returned { .. }), "{discarded:?}");
+    assert_eq!(facts(&runtime, |fact| matches!(fact, Fact::ReturnDiscarded { .. })), 1);
+    assert_eq!(settling(&runtime, &parent(), &notice.accept).await, discarded);
+    assert_eq!(crossings(&runtime), 0);
+}
+
+#[tokio::test]
+async fn a_return_reference_settles_nothing_for_a_trajectory_that_does_not_own_the_return() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (child, notice) = deferred_answer(&runtime).await;
+    let stranger = Actor {
+        root: root(),
+        child: Some(child.trajectory.clone()),
+    };
+    let unknown = RemedyOutcome::Refused {
+        reason: crate::api::RemedyRefusal::UnknownOffer,
+    };
+    assert!(!runtime.owns_return(&stranger, &notice.accept));
+    let refused = settling(&runtime, &stranger, &notice.accept).await;
+    assert!(matches!(refused, RemedyOutcome::Refused { .. }), "{refused:?}");
+
+    let unminted = crate::api::ReturnReference::parse("ret-0123456789abcdef").expect("the spelling is a reference");
+    assert!(!runtime.owns_return(&parent(), &unminted));
+    assert_eq!(settling(&runtime, &parent(), &unminted).await, unknown);
+    assert_eq!(crossings(&runtime), 0);
+    assert_eq!(deferred_returns(&runtime), 1);
+}
+
+#[tokio::test]
+async fn a_spawn_whose_return_crossed_at_the_stop_has_no_deferral_notice() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    assert!(matches!(
+        child.on_child_end(Some("done".to_string())).await,
+        Ok(ChildReturnDecision::Returned { .. })
+    ));
+    assert_eq!(
+        runtime
+            .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+            .expect("the family reads"),
+        None
+    );
+    assert!(runtime.defers_return(&parent(), "toolu-1").expect("the family reads"));
+    assert!(
+        !runtime
+            .defers_return(&parent(), "toolu-unknown")
+            .expect("the family reads")
+    );
+}
+
+fn admitted(runtime: &Runtime) -> usize {
+    facts(runtime, |fact| matches!(fact, Fact::ValueAdmitted { .. }))
+}
+
+fn spoken(body: &str) -> ToolOutcome {
+    ToolOutcome::Success {
+        body: OutcomeBody::Available(body.to_string()),
+    }
+}
+
+#[tokio::test]
+async fn a_deferred_spawns_result_carries_the_notice_and_admits_nothing_the_host_reports() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (child, notice) = deferred_answer(&runtime).await;
+    let before = admitted(&runtime);
+    let decided = session(&runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            spoken("the answer"),
+            Some(child.trajectory.clone()),
+            Some("the answer".to_string()),
+        )
+        .await
+        .expect("the spawn's result is decided");
+    assert_eq!(
+        decided,
+        SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+            placeholder: notice.feedback.clone(),
+            presentation: None,
+        })
+    );
+    assert_eq!(admitted(&runtime), before);
+    assert_eq!(crossings(&runtime), 0);
+    assert_eq!(
+        settling(&runtime, &parent(), &notice.accept).await,
+        RemedyOutcome::Returned {
+            value: "the answer".to_string()
+        },
+        "the closed dispatch leaves the decision open"
+    );
+}
+
+#[tokio::test]
+async fn a_deferred_spawns_result_reported_as_an_ordinary_result_is_withheld() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (_, notice) = deferred_answer(&runtime).await;
+    let before = admitted(&runtime);
+    let decided = session(&runtime)
+        .on_tool_result_identified(call("fetch", 1), Some("toolu-1".to_string()), spoken("the answer"))
+        .await
+        .expect("the result is decided");
+    assert_eq!(
+        decided,
+        ToolResultDecision::Replace {
+            placeholder: notice.feedback,
+            presentation: None,
+        }
+    );
+    assert_eq!(admitted(&runtime), before);
+}
+
+#[tokio::test]
+async fn a_deferred_spawns_result_before_its_childs_stop_is_withheld() {
+    let Deployed { runtime, .. } = deployed(false);
+    let _child = deferred_child(&runtime).await;
+    let decided = session(&runtime)
+        .on_tool_result_identified(call("fetch", 1), Some("toolu-1".to_string()), spoken("early words"))
+        .await
+        .expect("the result is decided");
+    assert!(matches!(decided, ToolResultDecision::Replace { .. }), "{decided:?}");
+    assert_eq!(admitted(&runtime), 0);
+}
+
+#[tokio::test]
+async fn a_deferred_spawns_result_reported_after_its_acceptance_still_carries_the_notice() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (child, notice) = deferred_answer(&runtime).await;
+    settling(&runtime, &parent(), &notice.accept).await;
+    let before = admitted(&runtime);
+    let decided = session(&runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            spoken("the answer"),
+            Some(child.trajectory.clone()),
+            Some("the answer".to_string()),
+        )
+        .await
+        .expect("the spawn's result is decided");
+    assert_eq!(
+        decided,
+        SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+            placeholder: notice.feedback,
+            presentation: None,
+        })
+    );
+    assert_eq!(admitted(&runtime), before);
+}
+
+#[tokio::test]
+async fn a_deferred_spawns_reported_failure_closes_its_dispatch_as_failed() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (child, notice) = deferred_answer(&runtime).await;
+    let before = admitted(&runtime);
+    let failed = || ToolOutcome::Failure {
+        message: "boom".to_string(),
+    };
+    let decided = session(&runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            failed(),
+            Some(child.trajectory.clone()),
+            Some("the answer".to_string()),
+        )
+        .await
+        .expect("the spawn's result is decided");
+    assert_eq!(
+        decided,
+        SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+            placeholder: notice.feedback,
+            presentation: None,
+        })
+    );
+    assert_eq!(
+        facts(&runtime, |fact| matches!(
+            fact,
+            Fact::DispatchClosed {
+                outcome: appa_engine::fact::CloseOutcome::Failure
+                    | appa_engine::fact::CloseOutcome::FailureWithBody { .. },
+                ..
+            }
+        )),
+        1
+    );
+    session(&runtime)
+        .on_tool_result_identified(call("fetch", 1), Some("toolu-1".to_string()), failed())
+        .await
+        .expect("the same failure reported again does not contradict the close");
+    assert_eq!(admitted(&runtime), before);
 }

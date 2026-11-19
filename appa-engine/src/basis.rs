@@ -125,6 +125,8 @@ pub enum DecidedAct {
     ChildReturn(ChildReturnId),
     Binding(ForkId),
     Offer(OfferId),
+    /// The parent's decision on a deferred return, named by the occurrence it settles.
+    Settlement(ChildReturnId),
 }
 
 /// What one decision declares it moves. `family` and `flow` move at most once in a decision;

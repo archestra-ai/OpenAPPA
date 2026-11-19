@@ -737,6 +737,7 @@ impl TryFrom<&HookDecision> for StoredOutcome {
             | HookDecision::PassControl
             | HookDecision::Context { .. }
             | HookDecision::ChildReturn { .. }
+            | HookDecision::DeferReturn
             | HookDecision::DenyCall { .. }
             | HookDecision::Block { .. }
             | HookDecision::Refuse { .. }
@@ -798,7 +799,7 @@ fn store_error(error: EmbeddedError) -> EmbeddedPeerError {
     }
 }
 
-fn peer_error(error: EventError) -> EmbeddedPeerError {
+pub(super) fn peer_error(error: EventError) -> EmbeddedPeerError {
     if error.is_operational() {
         EmbeddedPeerError::Storage(error.to_string())
     } else {

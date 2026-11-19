@@ -40,7 +40,7 @@ struct Proposal {
     call_id: Option<String>,
     spawn: Option<SpawnKind>,
     prompt: Option<PromptKey>,
-    declares: Option<RemedyArguments>,
+    declares: Option<DeclaredReturn>,
     held_message: Option<appa_engine::value::HeldMessage>,
 }
 
@@ -69,8 +69,11 @@ impl Session {
         call: ProposedCall,
         call_id: Option<String>,
         prompt: Option<PromptKey>,
-        declares: RemedyArguments,
+        declares: DeclaredReturn,
     ) -> Result<ToolCallDecision, EventError> {
+        if declares == DeclaredReturn::Deferred && call_id.is_none() {
+            return Err(EventError::DeferralUnkeyed);
+        }
         self.on_proposal(Proposal {
             call,
             call_id,
@@ -218,7 +221,7 @@ impl Session {
     async fn apply_declared(
         &self,
         proposal: &Proposal,
-        declares: &RemedyArguments,
+        declares: &DeclaredReturn,
         mut decision: ToolCallDecision,
     ) -> Result<ToolCallDecision, EventError> {
         let mut rounds = 0..DECLARATION_ROUNDS;
@@ -230,13 +233,20 @@ impl Session {
                 return Ok(decision);
             }
             let fit = self.with_view(|context| {
-                // Arguments the policy does not accept here are refused by every application.
-                Ok(
-                    match context.engine().declare_ahead(context.view, &self.trajectory, declares) {
-                        Err(_) => Fit::Unfit,
-                        Ok(_) => context.fitting_offer(offers, declares),
-                    },
-                )
+                Ok(match declares {
+                    // Arguments the policy does not accept here are refused by every application.
+                    DeclaredReturn::Arguments(arguments) => {
+                        match context
+                            .engine()
+                            .declare_ahead(context.view, &self.trajectory, arguments)
+                        {
+                            Err(_) => Fit::Unfit,
+                            Ok(_) => context.fitting_offer(offers, arguments),
+                        }
+                    }
+                    // A deferred return rides the plan that takes the return as spoken.
+                    DeclaredReturn::Deferred => context.fitting_offer(offers, &RemedyArguments::default()),
+                })
             })?;
             let live = match fit {
                 Fit::Unfit => return Ok(noted(&decision, UNFIT_DECLARED)),
@@ -251,7 +261,7 @@ impl Session {
                 });
             }
             if let Some(offer) = live {
-                match self.on_remedy(offer, declares.clone(), None, None).await {
+                match self.apply_declared_return(&offer, declares.clone()).await {
                     Ok(_) => {}
                     Err(error) if error.is_operational() => return Err(error),
                     // The next proposal reads what the family holds after the refusal.
@@ -354,9 +364,14 @@ impl Session {
             spawn,
             prompt,
             held_message,
-            ..
+            declares,
         } = proposal;
         let spawn = *spawn;
+        let mark = spawn.map(|kind| match (kind, declares) {
+            (SpawnKind::Single, Some(DeclaredReturn::Deferred)) => SpawnMark::deferred(0),
+            (SpawnKind::Single, _) => SpawnMark::at(0),
+            (SpawnKind::FanOut, _) => SpawnMark::fan_out(0),
+        });
         self.inner.note_working_directory(&self.root, call.cwd.as_deref());
         if spawn.is_some()
             && self.inner.shared.naming.spawn_coverage() == crate::api::SpawnCoverage::Declared
@@ -379,7 +394,7 @@ impl Session {
                         call: call.clone(),
                         evidence,
                         entropy: fresh_entropy(),
-                        spawn,
+                        spawn: mark,
                         replay: context.replay_batch(call, call_id.as_deref())?,
                     })
                 },

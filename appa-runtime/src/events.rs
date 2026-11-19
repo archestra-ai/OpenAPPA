@@ -137,6 +137,7 @@ pub(crate) enum HookOutcome {
     Malformed,
     Unreadable,
     Held,
+    Deferred,
 }
 
 /// One per [`crate::consult::ConsultKind`].

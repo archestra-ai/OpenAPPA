@@ -17,6 +17,7 @@ pub(super) fn return_decision(decision: EngineDecision) -> Result<ChildReturnDec
         Next::PresentToModel(Presentation::Value { value }) => Ok(ChildReturnDecision::Returned { value }),
         Next::PresentToModel(Presentation::Staged { value }) => Ok(ChildReturnDecision::Staged { value }),
         Next::PresentToModel(Presentation::NoValue) => Ok(ChildReturnDecision::NoValue),
+        Next::PresentToModel(Presentation::Deferred) => Ok(ChildReturnDecision::Deferred),
         Next::PresentToModel(Presentation::Blocked { feedback, .. }) => Ok(ChildReturnDecision::Blocked { feedback }),
         _ => Err(EventError::UnexpectedDecision),
     }
@@ -161,8 +162,8 @@ impl Session {
     /// replays, a message is held until the child gives it up.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
         match self.child_calls()? {
-            None => Ok(ended_child(value)),
-            Some(open) => self.close_and_cross(open, value).await,
+            ChildCalls::Ended(end) => Ok(ended_child(end, value)),
+            ChildCalls::Open(open) => self.close_and_cross(open, value).await,
         }
     }
 
@@ -173,8 +174,9 @@ impl Session {
         value: Option<String>,
         answered: &BTreeSet<String>,
     ) -> Result<Stop<ChildReturnDecision>, EventError> {
-        let Some(open) = self.child_calls()? else {
-            return Ok(Stop::Taken(ended_child(value)));
+        let open = match self.child_calls()? {
+            ChildCalls::Ended(end) => return Ok(Stop::Taken(ended_child(end, value))),
+            ChildCalls::Open(open) => open,
         };
         match self.unanswered(&open, answered)?.as_slice() {
             [] => self.close_and_cross(open, value).await.map(Stop::Taken),
@@ -182,12 +184,12 @@ impl Session {
         }
     }
 
-    /// The calls a child's end closes; `None` for a child that already ended.
-    fn child_calls(&self) -> Result<Option<Vec<OpenDispatch>>, EventError> {
+    /// The calls a child's end closes, or how a child that already ended did so.
+    fn child_calls(&self) -> Result<ChildCalls, EventError> {
         self.with_view(|context| {
             Ok(match context.engine().liveness(context.view, &self.trajectory) {
-                Liveness::Ended => None,
-                Liveness::Live | Liveness::Unopened => Some(context.open_dispatches()),
+                Liveness::Ended => ChildCalls::Ended(context.child_end(&self.trajectory)),
+                Liveness::Live | Liveness::Unopened => ChildCalls::Open(context.open_dispatches()),
             })
         })
     }
@@ -207,7 +209,10 @@ impl Session {
     /// A return the child makes without ending, judged exactly as a stop's return: the calls
     /// it has open stay open, and a return made beside one is refused until they report.
     pub async fn on_child_return(&self, value: String) -> Result<ChildReturnDecision, EventError> {
-        self.cross_return(Some(value)).await
+        match self.child_calls()? {
+            ChildCalls::Ended(ChildEnd::Deferred) => Ok(ChildReturnDecision::Deferred),
+            ChildCalls::Ended(ChildEnd::Void) | ChildCalls::Open(_) => self.cross_return(Some(value)).await,
+        }
     }
 
     pub(super) async fn cross_return(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
@@ -238,10 +243,23 @@ impl Session {
     }
 }
 
-fn ended_child(value: Option<String>) -> ChildReturnDecision {
-    match value {
-        None => ChildReturnDecision::NoValue,
-        Some(_) => ChildReturnDecision::Blocked {
+enum ChildCalls {
+    Open(Vec<OpenDispatch>),
+    Ended(ChildEnd),
+}
+
+/// How an ended child ended: every later stop repeats what that end answered.
+#[derive(Clone, Copy)]
+pub(super) enum ChildEnd {
+    Void,
+    Deferred,
+}
+
+fn ended_child(end: ChildEnd, value: Option<String>) -> ChildReturnDecision {
+    match (value, end) {
+        (None, _) => ChildReturnDecision::NoValue,
+        (Some(_), ChildEnd::Deferred) => ChildReturnDecision::Deferred,
+        (Some(_), ChildEnd::Void) => ChildReturnDecision::Blocked {
             feedback: ENDED_CHILD.to_string(),
         },
     }

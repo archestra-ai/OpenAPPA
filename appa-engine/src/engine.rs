@@ -53,6 +53,15 @@ pub enum EngineError {
     InvalidHeldEvidence(String),
 }
 
+/// One deferred return as the parent that owns it reads it. The label is the one its value froze
+/// under; `settled` is the parent's decision, once made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferredReturn {
+    pub id: ChildReturnId,
+    pub label: Label,
+    pub settled: Option<crate::transition::ReturnDecision>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForkStatus {
     Unprepared,
@@ -475,6 +484,7 @@ impl Engine {
             EngineEvent::Proposals(batch) => Some(&batch.trajectory),
             EngineEvent::ExecuteOffer(execution) => Some(&execution.trajectory),
             EngineEvent::ChildReturn(report) => Some(&report.child),
+            EngineEvent::SettleReturn(settlement) => Some(&settlement.trajectory),
             EngineEvent::Outcome(_) | EngineEvent::BindFork(_) => None,
         };
         if acting.is_some_and(|trajectory| !view.projection().is_opened(trajectory)) {
@@ -487,6 +497,7 @@ impl Engine {
             EngineEvent::ChildReturn(report) => self.decide_child_return(view, &report, &act),
             EngineEvent::BindFork(binding) => self.decide_binding(view, &binding),
             EngineEvent::ExecuteOffer(execution) => self.decide_offer(view, &execution, &act),
+            EngineEvent::SettleReturn(settlement) => self.decide_settlement(view, &settlement),
         }?;
         act.settle(self.registry.audience())?;
         Ok(decision)
@@ -514,7 +525,9 @@ impl Engine {
                 }
             }
             EngineEvent::ChildReturn(report) => (report.audience.clone(), AudienceEvidence::default()),
-            EngineEvent::BindFork(_) => (AudienceEvidence::default(), AudienceEvidence::default()),
+            EngineEvent::BindFork(_) | EngineEvent::SettleReturn(_) => {
+                (AudienceEvidence::default(), AudienceEvidence::default())
+            }
         };
         self.act_evidence(merged, inherited, projection.principal().cloned())
     }
@@ -706,7 +719,13 @@ impl Engine {
     ) -> Result<(), crate::plan::ReturnPolicyRefusal> {
         let views = view.crossed_to(self);
         match views.views(trajectory) {
-            Some(views) => plan::declared_return_policy(&self.registry, &views, &policy.route(), policy),
+            Some(views) => plan::declared_return_policy(
+                &self.registry,
+                &views,
+                &policy.route(),
+                policy,
+                crate::check::CallRole::Ordinary,
+            ),
             None => Err(crate::plan::ReturnPolicyRefusal::RouteMismatch),
         }
     }
@@ -741,6 +760,24 @@ impl Engine {
             .views(parent)?
             .prepared_fork(fork)
             .map(|prepared| prepared.return_policy.clone())
+    }
+
+    /// The deferred returns `parent` owns, pending and settled: those of its direct children.
+    pub fn deferred_returns(&self, view: &EngineView, parent: &TrajectoryId) -> Vec<DeferredReturn> {
+        let views = view.projection().view(parent);
+        views
+            .deferrals()
+            .filter(|(id, _)| views.parent_of(id.child()) == Some(parent))
+            .map(|(id, deferral)| DeferredReturn {
+                id: id.clone(),
+                label: deferral.label.clone(),
+                settled: match deferral.standing {
+                    crate::projection::DeferralStanding::Pending(_) => None,
+                    crate::projection::DeferralStanding::Accepted => Some(crate::transition::ReturnDecision::Accept),
+                    crate::projection::DeferralStanding::Discarded => Some(crate::transition::ReturnDecision::Discard),
+                },
+            })
+            .collect()
     }
 
     /// The value `child` crossed most recently: a stop or a spawn result repeating it replays

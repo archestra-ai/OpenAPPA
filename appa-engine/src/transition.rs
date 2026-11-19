@@ -110,9 +110,45 @@ pub struct ProviderResult {
 /// batch's proposals, and how many children it starts. At most one exists, which is what makes it
 /// an `Option` rather than a flag per proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "MarkRecord", into = "MarkRecord")]
 pub struct SpawnMark {
     index: usize,
     kind: SpawnKind,
+    /// The host declared a deferred return on this proposal. Only a single spawn carries it.
+    deferral: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MarkRecord {
+    index: usize,
+    kind: SpawnKind,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deferral: bool,
+}
+
+impl From<SpawnMark> for MarkRecord {
+    fn from(mark: SpawnMark) -> MarkRecord {
+        MarkRecord {
+            index: mark.index,
+            kind: mark.kind,
+            deferral: mark.deferral,
+        }
+    }
+}
+
+impl TryFrom<MarkRecord> for SpawnMark {
+    type Error = &'static str;
+
+    fn try_from(record: MarkRecord) -> Result<SpawnMark, Self::Error> {
+        match (record.kind, record.deferral) {
+            (SpawnKind::FanOut, true) => Err("a fan-out spawn declares no deferred return"),
+            (kind, deferral) => Ok(SpawnMark {
+                index: record.index,
+                kind,
+                deferral,
+            }),
+        }
+    }
 }
 
 /// How many children one spawn starts under its single return declaration. A single spawn binds
@@ -129,6 +165,16 @@ impl SpawnMark {
         SpawnMark {
             index,
             kind: SpawnKind::Single,
+            deferral: false,
+        }
+    }
+
+    /// A single spawn whose host declared a deferred return on this proposal.
+    pub const fn deferred(index: usize) -> SpawnMark {
+        SpawnMark {
+            index,
+            kind: SpawnKind::Single,
+            deferral: true,
         }
     }
 
@@ -136,7 +182,12 @@ impl SpawnMark {
         SpawnMark {
             index,
             kind: SpawnKind::FanOut,
+            deferral: false,
         }
+    }
+
+    pub const fn deferral(self) -> bool {
+        self.deferral
     }
 
     pub const fn index(self) -> usize {
@@ -157,6 +208,30 @@ pub enum EngineEvent {
     ChildReturn(ChildReport),
     BindFork(ForkBinding),
     ExecuteOffer(OfferExecution),
+    SettleReturn(ReturnSettlement),
+}
+
+/// The parent's decision on one deferred return: `trajectory` is the parent that owns it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReturnSettlement {
+    pub trajectory: TrajectoryId,
+    pub id: ChildReturnId,
+    pub decision: ReturnDecision,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReturnDecision {
+    Accept,
+    Discard,
+}
+
+/// How a deferred return stands after its settlement, decided now or read back from the log.
+/// `Accepted` is the value the parent holds; a settled return answers its recorded outcome
+/// whatever a repeat asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SettlementFollowUp {
+    Accepted { admitted: ValueBody },
+    Discarded,
 }
 
 /// One offer the agent selected, and what the runtime got back from the authorities it names.
@@ -284,11 +359,13 @@ pub enum ChildSubmission {
 /// What one child's stop came to. `Merged` is the value the parent holds now — crossed by this
 /// act, or crossed before and repeated. `Staged` is the fork's sanitizer's derivation, recorded
 /// once and crossing when the child returns exactly it: a host that delivers the child's own
-/// words to the parent holds the child until it says them.
+/// words to the parent holds the child until it says them. `Deferred` is a value frozen for
+/// the parent's decision: the child's errand ended and nothing crossed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildFollowUp {
     Merged { admitted: ValueBody },
     Staged { derived: ValueBody },
+    Deferred,
     Ended,
     Resolve(EvidenceRequest),
 }
@@ -426,6 +503,7 @@ pub struct Blocked {
 pub enum FollowUp {
     Outcome(OutcomeFollowUp),
     Child(ChildFollowUp),
+    Settlement(SettlementFollowUp),
     Fork {
         child: TrajectoryId,
     },
@@ -519,6 +597,8 @@ pub enum TransitionError {
     NotForked,
     #[error("this branch already ended its errand")]
     BranchEnded,
+    #[error("no deferred return stands at this occurrence for this trajectory")]
+    NoDeferredReturn,
     #[error("this deployment does not control child context, so no proposal can be marked as its spawn")]
     SpawnUncontrolled,
     #[error("the spawn mark names no proposal of this batch")]
@@ -933,6 +1013,12 @@ pub enum TransitionRefusal {
     NotForked,
     #[error("a return record's identity is not the next one for its child")]
     WrongReturnIdentity,
+    #[error("a return is deferred under a fork whose parent did not declare a deferred return")]
+    ReturnNotDeferred,
+    #[error("a deferred return would not narrow its parent: it crosses at the stop")]
+    DeferralUnneeded,
+    #[error("a record settles a deferred return that is not pending")]
+    NoDeferredReturn,
     #[error("a return lifecycle record is not one this state produces")]
     ReturnRecordMismatch,
     #[error("a recorded acceptance is not the narrowing its admission folds")]
@@ -1063,6 +1149,8 @@ pub(crate) struct Sequence<'a> {
     /// crossing ends the child, so a log that records one without folding it into the parent
     /// would leave the parent reading a label the crossing never restricted.
     crossed: BTreeMap<ChildReturnId, Crossing>,
+    /// Deferred returns accepted in the open act, each owing the crossing of its frozen value.
+    accepted: BTreeMap<ChildReturnId, crate::value::LabeledValue>,
     /// The return policy each marked spawn's spent approval declared, owed to the fork its
     /// release prepares next.
     spawn_policies: BTreeMap<DispatchId, ReturnPolicy>,
@@ -1156,6 +1244,7 @@ impl<'a> Sequence<'a> {
             derived: BTreeMap::new(),
             candidate_accepted: BTreeMap::new(),
             crossed: BTreeMap::new(),
+            accepted: BTreeMap::new(),
             spawn_policies: BTreeMap::new(),
             declared: None,
             admitting: None,
@@ -1179,6 +1268,7 @@ impl<'a> Sequence<'a> {
             derived: BTreeMap::new(),
             candidate_accepted: BTreeMap::new(),
             crossed: BTreeMap::new(),
+            accepted: BTreeMap::new(),
             spawn_policies: BTreeMap::new(),
             declared: None,
             admitting: None,
@@ -1381,6 +1471,18 @@ impl<'a> Sequence<'a> {
                 kind,
             } => self.fork_prepared(trajectory, fork, snapshot, return_policy, kind, released)?,
             Fact::ForkOpened { trajectory, fork } => self.fork_opened(trajectory, fork)?,
+            Fact::ReturnDeferred { trajectory, id, value } => self.return_deferred(trajectory, id, value)?,
+            Fact::ReturnAccepted {
+                trajectory,
+                id,
+                narrowing,
+            } => {
+                let frozen = self.return_accepted(trajectory, id, narrowing)?;
+                self.accepted.insert(id.clone(), frozen);
+            }
+            Fact::ReturnDiscarded { trajectory, id } => {
+                self.pending_deferral(trajectory, id)?;
+            }
             Fact::Boundary { trajectory, kind } => self.boundary(trajectory, kind)?,
         }
         self.settle_advance(fact, &implied, released)?;
@@ -1865,7 +1967,9 @@ impl<'a> Sequence<'a> {
                         .cloned()
                         .collect();
                 // A log an earlier planner wrote offers an undeclared spawn its bundled menu.
+                // No such log carries a deferral mark.
                 if !menu.contains(plan)
+                    && !matches!(role, crate::check::CallRole::MarkedSpawn(class) if class.deferral)
                     && crate::plan::Declaring::of(role, views, candidate) != crate::plan::Declaring::No
                 {
                     let bundled = crate::plan::bundled_spawn_menu(self.engine.registry(), views, blocked(), &context)
@@ -1910,7 +2014,8 @@ impl<'a> Sequence<'a> {
                 )
                 .map_err(TransitionRefusal::from)
             }
-            // A child return is never planned: it crosses at the child's stop or is refused there.
+            // A child return is never planned: it crosses at the child's stop, is refused there, or is
+            // frozen there for the parent's settlement, which no offer carries.
             crate::basis::SubjectKey::Return(_) | crate::basis::SubjectKey::Approval(_) => {
                 Err(TransitionRefusal::ForeignOffer)
             }
@@ -1993,7 +2098,8 @@ impl<'a> Sequence<'a> {
         // is the choice it made.
         // A marked spawn's declaration stands beside the approval of its other gaps.
         let offered = &recorded.plan;
-        if views.approval(offer).is_some() || views.approval_pending(call, offered.declares_only()) {
+        let role = views.call_role(&recorded.subject);
+        if views.approval(offer).is_some() || views.approval_pending(call, offered.declares_only(), role.deferral()) {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
         if views.standing_call(&recorded.subject) != Some(call)
@@ -2010,20 +2116,17 @@ impl<'a> Sequence<'a> {
         }) {
             return Err(TransitionRefusal::UnbackedApproval);
         }
-        let marked = matches!(
-            views.call_role(&recorded.subject),
-            crate::check::CallRole::MarkedSpawn(_)
-        );
+        let marked = matches!(role, crate::check::CallRole::MarkedSpawn(_));
         match (offered.return_step(), return_policy) {
             (None, None) if !marked => {}
             // The plan of a declared spawn's other gaps carries the declaration that stands.
             (None, Some(policy))
                 if marked
                     && views
-                        .declaration(call)
+                        .declaration(call, role.deferral())
                         .is_some_and(|(_, declaration)| declaration.return_policy.as_ref() == Some(policy)) => {}
             (Some(step), Some(policy)) => {
-                crate::plan::declared_return_policy(self.engine.registry(), &views, step, policy)
+                crate::plan::declared_return_policy(self.engine.registry(), &views, step, policy, role)
                     .map_err(|_| TransitionRefusal::UnbackedReturnPolicy)?;
             }
             _ => return Err(TransitionRefusal::UnbackedReturnPolicy),
@@ -2066,6 +2169,10 @@ impl<'a> Sequence<'a> {
     ) -> Result<(), TransitionRefusal> {
         if self.declared.as_ref().is_some_and(|open| !open.owed.is_empty()) {
             return Err(TransitionRefusal::UnbackedAdvance);
+        }
+        // An accepted return crosses under the act that accepted it.
+        if !self.accepted.is_empty() {
+            return Err(TransitionRefusal::UnmergedCrossing);
         }
         // The previous act is complete; its evidence must be inherited or asked-for.
         self.settle_audit()?;
@@ -2176,6 +2283,7 @@ impl<'a> Sequence<'a> {
             .filter(|(declared, approval)| {
                 declared != offer
                     && approval.declares_only()
+                    && approval.deferral == spent.deferral
                     && approval.return_policy == spent.return_policy
                     && self.stood(
                         trajectory,
@@ -2359,7 +2467,7 @@ impl<'a> Sequence<'a> {
         if !self.derived.is_empty() || !self.candidate_accepted.is_empty() {
             return Err(TransitionRefusal::UnadmittedDerivation);
         }
-        if self.crossed.values().any(|crossing| crossing != &Crossing::Merged) {
+        if self.crossed.values().any(|crossing| crossing != &Crossing::Merged) || !self.accepted.is_empty() {
             return Err(TransitionRefusal::UnmergedCrossing);
         }
         if !self.spawn_policies.is_empty() {
@@ -2850,6 +2958,10 @@ impl<'a> Sequence<'a> {
                 if self.projection.admitted_result(dispatch) {
                     return Err(TransitionRefusal::RepeatAdmission);
                 }
+                // A withheld result admits nothing, whatever a sanitizer derived from it.
+                if views.withholds_output(dispatch) {
+                    return Err(TransitionRefusal::ForgedLabel);
+                }
                 let expected = match self.derived.remove(dispatch) {
                     Some(candidate) => {
                         if value != &candidate {
@@ -2875,7 +2987,7 @@ impl<'a> Sequence<'a> {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
                         None => {
-                            if views.bound_sanitizer(dispatch).is_some() || views.withholds_output(dispatch) {
+                            if views.bound_sanitizer(dispatch).is_some() {
                                 return Err(TransitionRefusal::ForgedLabel);
                             }
                             let digest = RawResultDigest::of(value.body.as_str().as_bytes());
@@ -2932,6 +3044,15 @@ impl<'a> Sequence<'a> {
         evidence: &AudienceEvidence,
     ) -> Result<(), TransitionRefusal> {
         let expansions = self.recorded_expansions(evidence)?;
+        // An accepted deferred return crosses the value its stop froze, whose label that stop
+        // already derived: the child has ended, and nothing is read again.
+        if let Some(frozen) = self.accepted.remove(id) {
+            if id.child() != child || &frozen != value || *derivation != ReturnDerivation::Raw {
+                return Err(TransitionRefusal::ReturnRecordMismatch);
+            }
+            self.audit_reads(&expansions);
+            return Ok(());
+        }
         let parent = self
             .projection
             .view(child)
@@ -2939,8 +3060,25 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::NotForked)?
             .clone();
         let views = self.projection.view(&parent);
-        let ReturnPolicy::Crossing(policy) = standing_return(&views, child, id)?.clone() else {
-            return Err(TransitionRefusal::ReturnVoid);
+        let policy = match standing_return(&views, child, id)?.clone() {
+            ReturnPolicy::Void => return Err(TransitionRefusal::ReturnVoid),
+            // A value that would narrow the parent is deferred, never crossed at the stop.
+            ReturnPolicy::Deferred => {
+                let standing = views.branch_label(&parent);
+                if *derivation != ReturnDerivation::Raw {
+                    return Err(TransitionRefusal::ReturnRecordMismatch);
+                }
+                if value.label != views.branch_label(child) {
+                    return Err(TransitionRefusal::ForgedLabel);
+                }
+                if standing.combine(&value.label) != standing {
+                    return Err(TransitionRefusal::ReturnBelowFloor);
+                }
+                self.holds_child_floor(child, &value.label)?;
+                self.audit_reads(&expansions);
+                return Ok(());
+            }
+            ReturnPolicy::Crossing(policy) => policy,
         };
         let fold = views.branch_label(child);
         let expected = match (&policy.sanitizer, derivation) {
@@ -3000,11 +3138,75 @@ impl<'a> Sequence<'a> {
     }
 
     fn holds_child_floor(&self, child: &TrajectoryId, label: &Label) -> Result<(), TransitionRefusal> {
-        let floor = crate::plan::floor_of(self.engine.registry(), &self.projection.view(child))
-            .expect("a forked child stands under its fork's floor");
-        match floor.holds(label) {
-            true => Ok(()),
-            false => Err(TransitionRefusal::ReturnBelowFloor),
+        match crate::plan::floor_of(self.engine.registry(), &self.projection.view(child)) {
+            Some(floor) if !floor.holds(label) => Err(TransitionRefusal::ReturnBelowFloor),
+            Some(_) | None => Ok(()),
+        }
+    }
+
+    /// A deferral, re-derived from the fork's recorded policy: the child is live under a
+    /// deferred return, the label is its fold, and the value would narrow its parent.
+    fn return_deferred(
+        &self,
+        child: &TrajectoryId,
+        id: &ChildReturnId,
+        value: &crate::value::LabeledValue,
+    ) -> Result<(), TransitionRefusal> {
+        let parent = self
+            .projection
+            .view(child)
+            .parent_of(child)
+            .ok_or(TransitionRefusal::NotForked)?
+            .clone();
+        let views = self.projection.view(&parent);
+        match standing_return(&views, child, id)? {
+            ReturnPolicy::Deferred => {}
+            ReturnPolicy::Void => return Err(TransitionRefusal::ReturnVoid),
+            ReturnPolicy::Crossing(_) => return Err(TransitionRefusal::ReturnNotDeferred),
+        }
+        if value.label != views.branch_label(child) {
+            return Err(TransitionRefusal::ForgedLabel);
+        }
+        let standing = views.branch_label(&parent);
+        if standing.combine(&value.label) == standing {
+            return Err(TransitionRefusal::DeferralUnneeded);
+        }
+        self.holds_child_floor(child, &value.label)
+    }
+
+    /// The value a pending deferred return froze, for the parent that owns it.
+    fn pending_deferral(
+        &self,
+        parent: &TrajectoryId,
+        id: &ChildReturnId,
+    ) -> Result<crate::value::LabeledValue, TransitionRefusal> {
+        let views = self.projection.view(parent);
+        if views.parent_of(id.child()) != Some(parent) {
+            return Err(TransitionRefusal::ForeignTrajectory);
+        }
+        views
+            .deferral(id)
+            .and_then(crate::projection::Deferral::pending)
+            .ok_or(TransitionRefusal::NoDeferredReturn)
+    }
+
+    /// An acceptance records exactly the narrowing the frozen value causes at the parent's
+    /// label now, and the parent's own floor holds the result.
+    fn return_accepted(
+        &self,
+        parent: &TrajectoryId,
+        id: &ChildReturnId,
+        narrowing: &crate::check::Narrowing,
+    ) -> Result<crate::value::LabeledValue, TransitionRefusal> {
+        let frozen = self.pending_deferral(parent, id)?;
+        let views = self.projection.view(parent);
+        let standing = views.branch_label(parent);
+        if narrowing.from != standing || narrowing.to != standing.combine(&frozen.label) {
+            return Err(TransitionRefusal::AcceptanceMismatch);
+        }
+        match crate::plan::floor_of(self.engine.registry(), &views) {
+            Some(floor) if !floor.holds(&narrowing.to) => Err(TransitionRefusal::ReturnBelowFloor),
+            Some(_) | None => Ok(frozen),
         }
     }
 
@@ -3586,7 +3788,24 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
                 ..
             },
         ) => dispatch == act,
-        (DecidedAct::ChildReturn(act), Fact::ChildReturn { id, .. }) => id == act,
+        (DecidedAct::ChildReturn(act), Fact::ChildReturn { id, .. } | Fact::ReturnDeferred { id, .. }) => id == act,
+        (
+            DecidedAct::Settlement(act),
+            Fact::ReturnAccepted { id, .. }
+            | Fact::ReturnDiscarded { id, .. }
+            | Fact::ChildReturn { id, .. }
+            | Fact::ValueAdmitted {
+                provenance: crate::value::Provenance::ChildReturn { id, .. },
+                ..
+            },
+        ) => id == act,
+        (
+            DecidedAct::Settlement(act),
+            Fact::Boundary {
+                kind: BoundaryKind::Merge { child_return },
+                ..
+            },
+        ) => child_return == act,
         (
             DecidedAct::ChildReturn(act),
             Fact::ValueAdmitted {

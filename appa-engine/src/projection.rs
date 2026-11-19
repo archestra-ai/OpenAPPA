@@ -116,6 +116,9 @@ pub(crate) struct PreparedApproval {
     pub(crate) rulings: Vec<crate::execute::AuthorityEvidence>,
     pub(crate) output: Option<crate::plan::OutputRemedy>,
     pub(crate) return_policy: Option<ReturnPolicy>,
+    /// The deferral class of the proposal this approval was made for: it covers no proposal of
+    /// the other class.
+    pub(crate) deferral: bool,
     pub(crate) basis: crate::basis::PolicyBasis,
     /// The pinned audience evidence the approval was prepared under: its consumption
     /// releases under it.
@@ -133,6 +136,33 @@ impl PreparedApproval {
 struct ReturnedChild {
     id: ChildReturnId,
     value: LabeledValue,
+}
+
+/// A deferred return: the label its value froze under, which stands for the life of the log,
+/// and where the parent's decision on it stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Deferral {
+    pub(crate) label: Label,
+    pub(crate) standing: DeferralStanding,
+}
+
+/// A pending return holds the frozen value; a settled one keeps only the parent's decision,
+/// which a retry reads back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DeferralStanding {
+    Pending(crate::value::ValueBody),
+    Accepted,
+    Discarded,
+}
+
+impl Deferral {
+    /// The frozen value, while the parent has not decided.
+    pub(crate) fn pending(&self) -> Option<LabeledValue> {
+        match &self.standing {
+            DeferralStanding::Pending(body) => Some(LabeledValue::new(body.clone(), self.label.clone())),
+            DeferralStanding::Accepted | DeferralStanding::Discarded => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,6 +208,8 @@ pub struct Projection {
     /// The label each resumed child last inherited from its parent, folded beside its fork seed.
     resumed: OrdMap<TrajectoryId, Label>,
     ended: OrdSet<TrajectoryId>,
+    /// Every deferred return, by the occurrence it froze at.
+    deferrals: OrdMap<ChildReturnId, Deferral>,
     bound_sanitizers: OrdMap<DispatchId, SanitizerName>,
     withheld_outputs: OrdSet<DispatchId>,
     /// Dispatches whose result a value was admitted for.
@@ -308,6 +340,7 @@ impl Projection {
             resumed_since_return: Default::default(),
             resumed: Default::default(),
             ended: Default::default(),
+            deferrals: Default::default(),
             bound_sanitizers: Default::default(),
             withheld_outputs: Default::default(),
             admitted_results: Default::default(),
@@ -368,6 +401,7 @@ impl Projection {
         for returned in self.child_returns.iter_mut() {
             returned.value.label.cross_value(crossing);
         }
+        each_mut(&mut self.deferrals, |deferral| deferral.label.cross_value(crossing));
         each_mut(&mut self.resumed, |label| label.cross_value(crossing));
         if let Some((_, label)) = self.opening.as_mut() {
             label.cross_value(crossing);
@@ -437,6 +471,7 @@ impl Projection {
             resumed_since_return,
             resumed,
             ended,
+            deferrals,
             bound_sanitizers,
             withheld_outputs,
             admitted_results,
@@ -547,6 +582,12 @@ impl Projection {
                 evidence,
             } => {
                 unspent.insert(*offer);
+                let deferral = offers.get(offer).is_some_and(|recorded| match &recorded.subject {
+                    SubjectKey::Call { batch, position, .. } => decided.get(batch).is_some_and(|decided| {
+                        crate::check::CallRole::of(decided.spawn, *position as usize).deferral()
+                    }),
+                    SubjectKey::Approval(_) | SubjectKey::ConfinedResult(_) | SubjectKey::Return(_) => false,
+                });
                 approvals.insert(
                     *offer,
                     PreparedApproval {
@@ -557,6 +598,7 @@ impl Projection {
                         rulings: rulings.clone(),
                         output: output.clone(),
                         return_policy: return_policy.clone(),
+                        deferral,
                         basis: *basis,
                         evidence: evidence.clone(),
                     },
@@ -757,6 +799,29 @@ impl Projection {
                 *returns_by.entry(id.child().clone()).or_insert(0) += 1;
                 resumed_since_return.remove(id.child());
                 candidates.remove(&SubjectKey::Return(id.clone()));
+            }
+            // The stop ends the child's errand. The occurrence counter moves when the parent
+            // settles: an accepted return's crossing advances it, a discarded one's record does.
+            Fact::ReturnDeferred { trajectory, id, value } => {
+                deferrals.insert(
+                    id.clone(),
+                    Deferral {
+                        label: value.label.clone(),
+                        standing: DeferralStanding::Pending(value.body.clone()),
+                    },
+                );
+                ended.insert(trajectory.clone());
+            }
+            Fact::ReturnAccepted { id, .. } => {
+                if let Some(deferral) = deferrals.get_mut(id) {
+                    deferral.standing = DeferralStanding::Accepted;
+                }
+            }
+            Fact::ReturnDiscarded { id, .. } => {
+                if let Some(deferral) = deferrals.get_mut(id) {
+                    deferral.standing = DeferralStanding::Discarded;
+                }
+                *returns_by.entry(id.child().clone()).or_insert(0) += 1;
             }
             Fact::Boundary { trajectory, kind } => match kind {
                 BoundaryKind::Merge { .. } => {}
@@ -986,6 +1051,11 @@ pub struct Views<'a> {
 }
 
 impl Views<'_> {
+    /// The same family, seen from another of its trajectories.
+    pub(crate) fn beside<'b>(&'b self, trajectory: &'b TrajectoryId) -> Views<'b> {
+        self.projection.view(trajectory)
+    }
+
     /// The reader the family acts for, as its opening pinned it.
     pub(crate) fn principal(&self) -> Option<&crate::label::ReaderId> {
         self.projection.principal()
@@ -1232,15 +1302,19 @@ impl Views<'_> {
     /// The current approval that only declares this marked spawn's return: no ruling, no
     /// acceptance, no output remedy. It releases the spawn alone only while nothing else blocks
     /// it; otherwise a second approval covers the rest and carries the same declaration.
-    pub(crate) fn declaration(&self, call: &ResolvedCall) -> Option<(crate::value::OfferId, &PreparedApproval)> {
-        self.current_approvals_for(call)
+    pub(crate) fn declaration(
+        &self,
+        call: &ResolvedCall,
+        deferral: bool,
+    ) -> Option<(crate::value::OfferId, &PreparedApproval)> {
+        self.current_approvals_for(call, deferral)
             .find(|(_, approval)| approval.declares_only())
     }
 
     /// Would a new approval of this call stand beside the current ones? A call holds one current
     /// approval, and a marked spawn may hold its declaration beside it.
-    pub(crate) fn approval_pending(&self, call: &ResolvedCall, declares_only: bool) -> bool {
-        self.current_approvals_for(call)
+    pub(crate) fn approval_pending(&self, call: &ResolvedCall, declares_only: bool, deferral: bool) -> bool {
+        self.current_approvals_for(call, deferral)
             .any(|(_, standing)| standing.declares_only() == declares_only)
     }
 
@@ -1249,9 +1323,12 @@ impl Views<'_> {
     fn current_approvals_for(
         &self,
         call: &ResolvedCall,
+        deferral: bool,
     ) -> impl Iterator<Item = (crate::value::OfferId, &PreparedApproval)> {
-        self.approvals_for(call)
-            .filter(|(offer, approval)| approval.basis == self.basis_for(&crate::basis::SubjectKey::Approval(*offer)))
+        self.approvals_for(call).filter(move |(offer, approval)| {
+            approval.deferral == deferral
+                && approval.basis == self.basis_for(&crate::basis::SubjectKey::Approval(*offer))
+        })
     }
 
     /// One opened offer, whatever its freshness. `None` means the identity is unknown to
@@ -1347,6 +1424,16 @@ impl Views<'_> {
             .rev()
             .find(|returned| returned.id.child() == child)
             .map(|returned| &returned.value)
+    }
+
+    /// Where the deferred return at this occurrence stands, if one froze there.
+    pub(crate) fn deferral(&self, id: &ChildReturnId) -> Option<&Deferral> {
+        self.projection.deferrals.get(id)
+    }
+
+    /// Every deferred return of the family, settled or not, in occurrence order per child.
+    pub(crate) fn deferrals(&self) -> impl Iterator<Item = (&ChildReturnId, &Deferral)> {
+        self.projection.deferrals.iter()
     }
 
     /// How many values `child` has already returned — the occurrence its next crossing mints.
@@ -1475,8 +1562,14 @@ impl Views<'_> {
         self.projection.release_terms.get(dispatch)
     }
 
+    /// Does this dispatch's result stay out of its trajectory? A plan withheld it at release, or
+    /// it is a spawn whose return is deferred: what that child says reaches its parent only by
+    /// a crossing at its stop or by the parent's acceptance, never as the spawn's own output.
     pub(crate) fn withholds_output(&self, dispatch: &DispatchId) -> bool {
         self.projection.withheld_outputs.contains(dispatch)
+            || self
+                .prepared_fork(&ForkId::of(dispatch))
+                .is_some_and(|prepared| prepared.return_policy == ReturnPolicy::Deferred)
     }
 
     /// The live derived candidate of this subject, if a hop has produced one. The next

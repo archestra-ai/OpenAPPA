@@ -608,21 +608,22 @@ impl Engine {
         // plans the agent selected separately, and only one of them is the choice it made;
         // the approval that stands is released by proposing its call. A marked spawn's
         // declaration stands beside it.
-        if views.approval_pending(call, declares_only) {
+        let role = views.call_role(&recorded.subject);
+        if views.approval_pending(call, declares_only, role.deferral()) {
             return Err(TransitionError::ApprovalPending);
         }
         // A marked spawn's plan declares the child's return policy the parent now supplies; a
         // plan for a declared spawn's other gaps carries the declaration that stands.
-        let declared = match views.call_role(&recorded.subject) {
-            crate::check::CallRole::MarkedSpawn(_) => views
-                .declaration(call)
+        let declared = match role {
+            crate::check::CallRole::MarkedSpawn(class) => views
+                .declaration(call, class.deferral)
                 .and_then(|(_, declaration)| declaration.return_policy.clone()),
             crate::check::CallRole::Ordinary => None,
         };
         let return_policy = match (recorded.plan.return_step(), &execution.return_policy) {
             (None, None) => declared,
             (Some(step), Some(policy)) => {
-                plan::declared_return_policy(&self.registry, views, step, policy)?;
+                plan::declared_return_policy(&self.registry, views, step, policy, role)?;
                 Some(policy.clone())
             }
             _ => return Err(TransitionError::PlanOutcomeMismatch),

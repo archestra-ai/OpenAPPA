@@ -1,4 +1,6 @@
 use super::*;
+use crate::projection::DeferralStanding;
+use crate::transition::{ReturnDecision, ReturnSettlement, SettlementFollowUp};
 
 impl Engine {
     pub(super) fn decide_binding(
@@ -147,13 +149,17 @@ impl Engine {
             }
             ChildSubmission::Value { body } => body.clone(),
         };
-        let ReturnPolicy::Crossing(policy) = views.return_policy_of(child).ok_or(TransitionError::NotForked)?.clone()
-        else {
-            return Err(TransitionError::ReturnVoid);
-        };
-        let floor = plan::floor_of(&self.registry, &projection.view(child))
-            .expect("a forked child stands under its fork's floor");
         let fold = views.branch_label(child);
+        let policy = match views.return_policy_of(child).ok_or(TransitionError::NotForked)?.clone() {
+            ReturnPolicy::Void => return Err(TransitionError::ReturnVoid),
+            ReturnPolicy::Deferred => {
+                return self.decide_deferred_return(view, &views, child, LabeledValue::new(body, fold), act);
+            }
+            ReturnPolicy::Crossing(policy) => policy,
+        };
+        let Some(floor) = plan::floor_of(&self.registry, &projection.view(child)) else {
+            return Err(TransitionError::NotForked);
+        };
         let replay = |admitted: &LabeledValue| EngineDecision {
             append: None,
             follow_up: FollowUp::Child(ChildFollowUp::Merged {
@@ -305,6 +311,130 @@ impl Engine {
 }
 
 /// The act one child's stop lands under: its next crossing's identity.
+impl Engine {
+    /// A stop under a deferred return. A value that leaves the parent's label where it is
+    /// crosses now, as a value under a floor does. One that would narrow it is frozen at this
+    /// occurrence and ends the child's errand: nothing crosses until the parent accepts it.
+    fn decide_deferred_return(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        child: &TrajectoryId,
+        value: LabeledValue,
+        act: &ActEvidence,
+    ) -> Result<EngineDecision, TransitionError> {
+        if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == value.body) {
+            return Ok(EngineDecision {
+                append: None,
+                follow_up: FollowUp::Child(ChildFollowUp::Merged {
+                    admitted: latest.body.clone(),
+                }),
+            });
+        }
+        if let Some(floor) = plan::floor_of(&self.registry, &view.projection().view(child))
+            && !floor.holds(&value.label)
+        {
+            return Err(TransitionError::ReturnBelowFloor {
+                floor: floor.label().clone(),
+            });
+        }
+        let standing = views.branch_label(views.trajectory());
+        let (facts, follow_up) = match standing.combine(&value.label) == standing {
+            true => {
+                let admitted = value.body.clone();
+                (
+                    branch::crossing_facts(views, child, value, ReturnDerivation::Raw, act.pinned().clone()),
+                    ChildFollowUp::Merged { admitted },
+                )
+            }
+            false => (
+                vec![Fact::ReturnDeferred {
+                    trajectory: child.clone(),
+                    id: ChildReturnId::new(child.clone(), views.returns_by(child)),
+                    value,
+                }],
+                ChildFollowUp::Deferred,
+            ),
+        };
+        Ok(EngineDecision {
+            append: Some(self.decided(view, return_act(views, child), facts)?),
+            follow_up: FollowUp::Child(follow_up),
+        })
+    }
+
+    /// The parent's decision on a deferred return. Accepting crosses the frozen value under the
+    /// narrowing it causes at the parent's label now, which the parent's own floor must hold;
+    /// discarding crosses nothing. A settled return answers its recorded outcome and appends
+    /// nothing, whatever the repeat asks for.
+    pub(super) fn decide_settlement(
+        &self,
+        view: &EngineView,
+        settlement: &ReturnSettlement,
+    ) -> Result<EngineDecision, TransitionError> {
+        let parent = &settlement.trajectory;
+        let id = &settlement.id;
+        let views = view.projection().view(parent);
+        if views.parent_of(id.child()) != Some(parent) {
+            return Err(TransitionError::NoDeferredReturn);
+        }
+        let settled = |follow_up: SettlementFollowUp| EngineDecision {
+            append: None,
+            follow_up: FollowUp::Settlement(follow_up),
+        };
+        let deferral = views.deferral(id).ok_or(TransitionError::NoDeferredReturn)?;
+        let frozen = match &deferral.standing {
+            DeferralStanding::Pending(body) => LabeledValue::new(body.clone(), deferral.label.clone()),
+            DeferralStanding::Discarded => return Ok(settled(SettlementFollowUp::Discarded)),
+            DeferralStanding::Accepted => {
+                let admitted = views
+                    .child_return(id)
+                    .expect("an accepted deferred return crossed in the batch that accepted it")
+                    .body
+                    .clone();
+                return Ok(settled(SettlementFollowUp::Accepted { admitted }));
+            }
+        };
+        let (facts, follow_up) = match settlement.decision {
+            ReturnDecision::Discard => (
+                vec![Fact::ReturnDiscarded {
+                    trajectory: parent.clone(),
+                    id: id.clone(),
+                }],
+                SettlementFollowUp::Discarded,
+            ),
+            ReturnDecision::Accept => {
+                let from = views.branch_label(parent);
+                let to = from.combine(&frozen.label);
+                if let Some(floor) = plan::floor_of(&self.registry, &views)
+                    && !floor.holds(&to)
+                {
+                    return Err(TransitionError::ReturnBelowFloor {
+                        floor: floor.label().clone(),
+                    });
+                }
+                let admitted = frozen.body.clone();
+                let mut facts = vec![Fact::ReturnAccepted {
+                    trajectory: parent.clone(),
+                    id: id.clone(),
+                    narrowing: Narrowing { from, to },
+                }];
+                facts.extend(branch::crossing_facts(
+                    &views,
+                    id.child(),
+                    frozen,
+                    ReturnDerivation::Raw,
+                    AudienceEvidence::default(),
+                ));
+                (facts, SettlementFollowUp::Accepted { admitted })
+            }
+        };
+        Ok(EngineDecision {
+            append: Some(self.decided(view, crate::basis::DecidedAct::Settlement(id.clone()), facts)?),
+            follow_up: FollowUp::Settlement(follow_up),
+        })
+    }
+}
+
 fn return_act(views: &Views, child: &TrajectoryId) -> crate::basis::DecidedAct {
     crate::basis::DecidedAct::ChildReturn(ChildReturnId::new(child.clone(), views.returns_by(child)))
 }

@@ -85,6 +85,18 @@ pub(super) fn outcome_decision(
     }
 }
 
+/// A spawn whose child's answer was deferred answers its result with the deferral notice,
+/// whatever its dispatch closed as: the result carries none of the child's words.
+fn deferred_or(deferral: Option<String>, decided: ToolResultDecision) -> Result<ToolResultDecision, EventError> {
+    Ok(match deferral {
+        Some(placeholder) => ToolResultDecision::Replace {
+            placeholder,
+            presentation: None,
+        },
+        None => decided,
+    })
+}
+
 impl Session {
     pub(super) fn refuse_substituted_embedded_read(
         &self,
@@ -160,21 +172,26 @@ impl Session {
     ) -> Result<ToolResultDecision, EventError> {
         self.refuse_substituted_embedded_read(&call, call_id.as_deref(), &o)?;
         let o = self.cap_outcome(o);
-        outcome_decision(
-            self.report_outcome(&call, call_id.as_deref(), &o).await?,
-            &self.deployment().externals,
-        )
+        let mut deferral = None;
+        let decision = self
+            .report_outcome(&call, call_id.as_deref(), &o, &mut deferral)
+            .await?;
+        deferred_or(deferral, outcome_decision(decision, &self.deployment().externals)?)
     }
 
+    /// `deferral` receives the notice of the reported dispatch, where it is a spawn whose
+    /// child's answer was deferred.
     pub(super) async fn report_outcome(
         &self,
         call: &ProposedCall,
         call_id: Option<&str>,
         o: &ToolOutcome,
+        deferral: &mut Option<String>,
     ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
             |context, evidence| {
                 let dispatch = context.classify_report(call, call_id)?;
+                *deferral = context.deferral_notice(&dispatch);
                 Ok(EngineEvent::ToolOutcome {
                     dispatch,
                     outcome: o.clone(),
@@ -241,14 +258,23 @@ impl Session {
             // The attempt that commits is the one whose plan the delivery below
             // follows, so each attempt overwrites what the last one wrote.
             let mut plan: Option<SpawnPlan> = None;
+            let mut deferral = None;
             let decision = self
                 .drive_with_evidence(
                     |context, evidence| {
                         let dispatch = context.classify_spawn_report(&call, call_id.as_deref())?;
+                        deferral = context.deferral_notice(&dispatch);
                         let fork = appa_engine::value::ForkId::of(&dispatch);
                         let next = match (context.fork_status(&fork), &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
                             (ForkStatus::Unprepared | ForkStatus::FanOut, _) => SpawnPlan::Outcome,
+                            // A deferred return answers every report of its spawn with the notice,
+                            // so the report closes the dispatch as what the host says it was.
+                            (ForkStatus::Bound(bound), named)
+                                if deferral.is_some() && named.as_ref().is_none_or(|named| *named == bound) =>
+                            {
+                                SpawnPlan::Outcome
+                            }
                             (ForkStatus::Prepared, Some(child)) => SpawnPlan::Bind {
                                 fork: fork.clone(),
                                 child: child.clone(),
@@ -315,7 +341,8 @@ impl Session {
             // The engine decided on an event this handler built from the view.
             match plan.expect("the spawn result is typed before the engine decides") {
                 SpawnPlan::Outcome => {
-                    return outcome_decision(decision, &self.deployment().externals).map(SpawnResultDecision::Outcome);
+                    return deferred_or(deferral, outcome_decision(decision, &self.deployment().externals)?)
+                        .map(SpawnResultDecision::Outcome);
                 }
                 SpawnPlan::Close(refusal) => return Err(refusal),
                 SpawnPlan::Bind { child, .. } => match decision.then {

@@ -64,14 +64,26 @@ pub struct RawBlock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CallRole {
     Ordinary,
-    MarkedSpawn(crate::transition::SpawnKind),
+    MarkedSpawn(SpawnClass),
+}
+
+/// What a marked spawn's proposal is: how many children it starts, and whether its host declared
+/// a deferred return on it. A return declaration made for one class covers no proposal of the
+/// other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SpawnClass {
+    pub(crate) kind: crate::transition::SpawnKind,
+    pub(crate) deferral: bool,
 }
 
 impl CallRole {
     /// The role of the proposal at `position` in a batch its decision marked with `mark`.
     pub(crate) fn of(mark: Option<crate::transition::SpawnMark>, position: usize) -> CallRole {
         match mark {
-            Some(mark) if mark.index() == position => CallRole::MarkedSpawn(mark.kind()),
+            Some(mark) if mark.index() == position => CallRole::MarkedSpawn(SpawnClass {
+                kind: mark.kind(),
+                deferral: mark.deferral(),
+            }),
             Some(_) | None => CallRole::Ordinary,
         }
     }
@@ -79,8 +91,16 @@ impl CallRole {
     /// The kind of spawn a marked spawn starts, or `None` for an ordinary call.
     pub(crate) fn spawn(self) -> Option<crate::transition::SpawnKind> {
         match self {
-            CallRole::MarkedSpawn(kind) => Some(kind),
+            CallRole::MarkedSpawn(class) => Some(class.kind),
             CallRole::Ordinary => None,
+        }
+    }
+
+    /// Did the host declare a deferred return on this proposal?
+    pub(crate) fn deferral(self) -> bool {
+        match self {
+            CallRole::MarkedSpawn(class) => class.deferral,
+            CallRole::Ordinary => false,
         }
     }
 }

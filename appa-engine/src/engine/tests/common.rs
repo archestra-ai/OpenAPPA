@@ -265,14 +265,26 @@ pub(super) fn reads(
 /// sanitizer and supplies the policy, the approved spawn releases and prepares the fork,
 /// and the child binds. Returns the facts appended after `log`.
 pub(super) fn spawn_family_at(e: &Engine, log: &[Fact], child: &TrajectoryId, policy: ReturnPolicy) -> Vec<Fact> {
+    spawn_family_marked(e, log, &traj(), child, policy, crate::transition::SpawnMark::at(0))
+}
+
+/// [`spawn_family_at`] for a spawn `parent` proposes under `mark`.
+pub(super) fn spawn_family_marked(
+    e: &Engine,
+    log: &[Fact],
+    parent: &TrajectoryId,
+    child: &TrajectoryId,
+    policy: ReturnPolicy,
+    mark: crate::transition::SpawnMark,
+) -> Vec<Fact> {
     let spawn = call("spawn", json!({}));
     let batch = |id: &str| {
         EngineEvent::Proposals(ProposalBatch {
             id: crate::transition::ProposalBatchId::new(format!("{id}-{}", child.as_str())),
-            trajectory: traj(),
+            trajectory: parent.clone(),
             provider_results: Vec::new(),
             proposals: vec![raw(&spawn)],
-            spawn: Some(crate::transition::SpawnMark::at(0)),
+            spawn: Some(mark),
             offer_nonce: nonce(),
             evidence: Vec::new(),
             audience: crate::audience::AudienceEvidence::default(),
@@ -295,7 +307,7 @@ pub(super) fn spawn_family_at(e: &Engine, log: &[Fact], child: &TrajectoryId, po
         .handle(
             &viewing(e, &so_far(&facts)),
             EngineEvent::ExecuteOffer(OfferExecution {
-                trajectory: traj(),
+                trajectory: parent.clone(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
                 return_policy: Some(policy),

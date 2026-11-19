@@ -416,6 +416,10 @@ fn replay(entries: &[AuditEntry]) {
             }
             AuditEvent::Merged => eprintln!("appa: [{at}] merged a child return"),
             AuditEvent::VoidReturn => eprintln!("appa: [{at}] ended with a void return"),
+            AuditEvent::ReturnDeferred { label: at_label } => {
+                eprintln!("appa: [{at}] deferred its return at {}", label(at_label))
+            }
+            AuditEvent::ReturnDiscarded => eprintln!("appa: [{at}] discarded a deferred return"),
             AuditEvent::Resumed { seed } => eprintln!("appa: [{at}] resumed at {}/{}", seed.trust, seed.audience),
         }
     }
