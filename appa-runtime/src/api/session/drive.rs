@@ -130,6 +130,18 @@ pub(super) enum Judgment {
     Stale,
 }
 
+/// The declaration offer of a block that fits a return's arguments.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Fit {
+    Live(OfferId),
+    /// The fitting offer no longer stands: a fresh decision offers it again.
+    Stale,
+    /// The fitting offer was executed or refused, as another delivery of the call leaves it.
+    Ended,
+    /// No offer of the block declares the route the arguments ask for.
+    Unfit,
+}
+
 /// A judged host write's failure: the deriver's own refusal, or the store's.
 enum Judged<Refusal> {
     Refused(Refusal),
@@ -389,14 +401,27 @@ impl Decided<'_> {
         {
             return Ok(Judgment::Settled(AheadOutcome::Unfit));
         }
-        let route = match declared.arguments.return_schema {
+        Ok(match self.fitting_offer(claim.offers, &declared.arguments) {
+            Fit::Live(offer) => Judgment::Apply {
+                offer,
+                arguments: declared.arguments.clone(),
+            },
+            Fit::Stale => Judgment::Stale,
+            Fit::Ended | Fit::Unfit => Judgment::Settled(AheadOutcome::Unfit),
+        })
+    }
+
+    /// The block's declaration offer for the route `arguments` ask for: `attest-schema` with a
+    /// schema, as spoken without one. Only an offer that declares and asks no authority fits.
+    pub(super) fn fitting_offer(&self, offers: &[appa_runtime_api::OfferedRemedy], arguments: &RemedyArguments) -> Fit {
+        let trajectory = &self.session.trajectory;
+        let route = match arguments.return_schema {
             Some(_) => appa_runtime_api::OfferedReturn::Sanitized {
                 sanitizer: appa_engine::names::SanitizerName::ATTEST_SCHEMA.to_string(),
             },
             None => appa_runtime_api::OfferedReturn::AsSpoken,
         };
-        let fitting: Vec<(OfferId, crate::api::OfferStanding)> = claim
-            .offers
+        let fitting: Vec<(OfferId, crate::api::OfferStanding)> = offers
             .iter()
             .filter(|offer| offer.returns.as_ref() == Some(&route))
             .filter_map(|offer| crate::engine::resolve_rendered(self.log, &OfferId(offer.id.clone())))
@@ -409,19 +434,17 @@ impl Decided<'_> {
         let live = fitting
             .iter()
             .find(|(_, standing)| matches!(standing, crate::api::OfferStanding::Live(_)));
-        Ok(match live {
-            Some((offer, _)) => Judgment::Apply {
-                offer: offer.clone(),
-                arguments: declared.arguments.clone(),
-            },
+        match live {
+            Some((offer, _)) => Fit::Live(offer.clone()),
             None if fitting
                 .iter()
                 .any(|(_, standing)| matches!(standing, crate::api::OfferStanding::Stale)) =>
             {
-                Judgment::Stale
+                Fit::Stale
             }
-            None => Judgment::Settled(AheadOutcome::Unfit),
-        })
+            None if !fitting.is_empty() => Fit::Ended,
+            None => Fit::Unfit,
+        }
     }
 
     pub(in crate::api) fn engine(&self) -> &crate::engine::RuntimeEngine {

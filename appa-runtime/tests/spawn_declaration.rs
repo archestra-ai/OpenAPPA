@@ -11,7 +11,10 @@ use appa_runtime::api::{
 };
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OfferedReturn};
+use appa_runtime_api::{
+    Actor, AdapterName, HookDecision, HookEvent, OfferedReturn, PrincipalSource, RefusalClass, SpawnKind, WireDecision,
+    WireEvent,
+};
 
 /// `claude -p` on Claude Code 2.1.257 starting one subagent with `Agent`.
 fn events() -> Vec<serde_json::Value> {
@@ -507,6 +510,172 @@ async fn a_fan_out_spawn_drops_a_declaration_ahead_and_declares_at_its_block() {
         panic!("the single spawn needs its own declaration");
     };
     assert!(feedback.starts_with("[appa] Blocked:"), "{feedback}");
+}
+
+/// `event`'s tool call carrying the return its host declares for it.
+fn declaring(event: &serde_json::Value, declares: RemedyArguments) -> HookEvent {
+    let mut event = parsed(event);
+    let HookEvent::ToolCall { declares: carried, .. } = &mut event else {
+        panic!("the event is a tool call");
+    };
+    *carried = Some(declares);
+    event
+}
+
+fn this_floor() -> RemedyArguments {
+    RemedyArguments {
+        label: Some(LabelSpelling::default()),
+        return_schema: None,
+    }
+}
+
+/// The spawn again under another call id, with the same tool and arguments.
+fn redelivered(spawn: &serde_json::Value) -> serde_json::Value {
+    let mut spawn = spawn.clone();
+    spawn["tool_use_id"] = serde_json::json!("toolu_test_same_bytes_spawn");
+    spawn
+}
+
+#[tokio::test]
+async fn a_spawn_that_declares_its_return_is_released_by_its_own_hook_and_only_that_spawn() {
+    let runtime = deployment("delta = {}");
+    let events = events();
+    let spawn = hook(&events, "PreToolUse", "Agent", false);
+    let decision = hooks::handle(&runtime, declaring(&spawn, this_floor())).await;
+    assert!(
+        matches!(decision, HookDecision::AllowCall { spawn: Some(_) }),
+        "{decision:?}"
+    );
+    let (status, answer) = claude_hook(&runtime, &lifecycle(&events, "SubagentStart")).await;
+    assert_eq!(status, 200, "{answer}");
+    let HookDecision::DenyCall { offers, .. } = hooks::handle(&runtime, parsed(&redelivered(&spawn))).await else {
+        panic!("the declaration covered one spawn");
+    };
+    assert!(
+        offers
+            .iter()
+            .any(|offer| offer.returns == Some(OfferedReturn::AsSpoken)),
+        "the second spawn is offered a declaration of its own: {offers:?}"
+    );
+}
+
+/// A declaring spawn behind one whose child has not bound yet is held, and released by its
+/// own declaration once that child binds.
+#[tokio::test]
+async fn a_declaring_spawn_held_behind_an_unbound_one_is_released_once_that_child_binds() {
+    let runtime = deployment("delta = {}");
+    let events = events();
+    let spawn = hook(&events, "PreToolUse", "Agent", false);
+    assert!(matches!(
+        hooks::handle(&runtime, declaring(&spawn, this_floor())).await,
+        HookDecision::AllowCall { spawn: Some(_) }
+    ));
+    let held = hooks::handle(&runtime, declaring(&another(&spawn), this_floor()));
+    tokio::pin!(held);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(300), &mut held)
+            .await
+            .is_err(),
+        "the second spawn waits for the first child"
+    );
+    let (status, answer) = claude_hook(&runtime, &lifecycle(&events, "SubagentStart")).await;
+    assert_eq!(status, 200, "{answer}");
+    let decision = held.await;
+    assert!(
+        matches!(decision, HookDecision::AllowCall { spawn: Some(_) }),
+        "{decision:?}"
+    );
+}
+
+/// `event` as the Claude Code client puts it on the wire.
+fn on_the_wire(event: &serde_json::Value) -> serde_json::Value {
+    let body = serde_json::to_vec(event).expect("the event serializes");
+    let event = (appa_adapter_claude_code::codec().parse)(&body)
+        .expect("the event parses")
+        .expect("the event is gated");
+    serde_json::to_value(WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the event translates"))
+        .expect("the wire event serializes")
+}
+
+async fn answered(runtime: &Runtime, body: &serde_json::Value) -> (u16, serde_json::Value) {
+    let body = serde_json::to_vec(body).expect("the body serializes");
+    hooks::answer(
+        runtime,
+        &appa_adapter_claude_code::adapter(),
+        PrincipalSource::None,
+        &body,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_spawn_declaring_its_return_on_the_wire_is_answered_with_its_binding() {
+    let runtime = deployment("delta = {}");
+    let mut spawn = on_the_wire(&hook(&events(), "PreToolUse", "Agent", false));
+    spawn["declares"] = serde_json::json!({ "label": {} });
+    let (status, answer) = answered(&runtime, &spawn).await;
+    assert_eq!(status, 200, "{answer}");
+    let decision = serde_json::from_value::<WireDecision>(answer.clone())
+        .expect("the answer is a decision")
+        .into_decision();
+    assert!(
+        matches!(decision, Ok(HookDecision::AllowCall { spawn: Some(_) })),
+        "{answer}"
+    );
+}
+
+#[tokio::test]
+async fn a_return_declared_on_the_wire_for_a_call_that_starts_no_subagent_writes_nothing() {
+    let runtime = deployment("delta = {}");
+    let mut read = hook(&events(), "PreToolUse", "Bash", true);
+    read.as_object_mut().unwrap().remove("agent_id");
+    read.as_object_mut().unwrap().remove("agent_type");
+    let root = actor_of(&read).root;
+    let mut read = on_the_wire(&read);
+    read["declares"] = serde_json::json!({ "label": {} });
+    let (status, answer) = answered(&runtime, &read).await;
+    assert_eq!(status, 409, "{answer}");
+    assert!(
+        serde_json::from_value::<WireDecision>(answer.clone()).is_err(),
+        "refused as the event is read, before any decision: {answer}"
+    );
+    assert!(runtime.status(&root).is_none(), "no root was opened for the call");
+}
+
+#[tokio::test]
+async fn a_return_declared_on_a_call_that_starts_no_single_subagent_is_refused() {
+    let runtime = deployment("delta = {}");
+    let mut read = hook(&events(), "PreToolUse", "Bash", true);
+    read.as_object_mut().unwrap().remove("agent_id");
+    read.as_object_mut().unwrap().remove("agent_type");
+    let workflow = hook(&workflow_events(), "PreToolUse", "Workflow", false);
+    let mut control = hook(&events(), "PreToolUse", "Agent", false);
+    control["tool_name"] = serde_json::json!("mcp__appa__execute_remedy_plan");
+    control["tool_input"] = serde_json::json!({ "label": {} });
+    // An embedding host that tags its own control call as a single spawn.
+    let mut control = declaring(&control, this_floor());
+    let HookEvent::ToolCall { spawn, .. } = &mut control else {
+        panic!("the event is a tool call");
+    };
+    *spawn = Some(SpawnKind::Single);
+    let events = [
+        declaring(&read, this_floor()),
+        declaring(&workflow, this_floor()),
+        control,
+    ];
+    for event in events {
+        let decision = hooks::handle(&runtime, event).await;
+        assert!(
+            matches!(
+                decision,
+                HookDecision::Refuse {
+                    class: RefusalClass::Spawn,
+                    ..
+                }
+            ),
+            "{decision:?}"
+        );
+    }
 }
 
 /// The daemon's control tool, served over MCP as `appa runtime` serves it to Claude Code.

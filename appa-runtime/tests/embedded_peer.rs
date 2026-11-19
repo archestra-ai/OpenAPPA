@@ -114,6 +114,7 @@ async fn release(runtime: &Runtime, who: Option<&TrajectoryId>, tool: &str, call
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await
@@ -144,6 +145,7 @@ async fn release_spawn(runtime: &Runtime) -> appa_runtime_api::SpawnBinding {
             spawn: Some(SpawnKind::Single),
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;
@@ -177,6 +179,7 @@ async fn release_spawn(runtime: &Runtime) -> appa_runtime_api::SpawnBinding {
             spawn: Some(SpawnKind::Single),
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await;

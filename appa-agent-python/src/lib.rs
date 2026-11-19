@@ -394,6 +394,7 @@ impl SessionInner {
             spawn: spawn.then_some(SpawnKind::Single),
             prompt: None,
             ruling: None,
+            declares: None,
         })? {
             HookDecision::AllowCall { spawn: binding } => {
                 let pending = Pending { call: call.clone() };
