@@ -62,6 +62,9 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
         path: None,
     };
     let named = named(&role, arguments)?;
+    if let Some(missing) = missing(config) {
+        return Err(missing);
+    }
     let placeholders = prepare(&named)?;
     // The call's own scratch directory holds nothing of the user's. Under `srt` the sandbox
     // runtime opens its proxy's sockets, which the command must reach; under `tmp` the
@@ -71,18 +74,21 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
     for dir in [&runtime, &temporary] {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     }
+    let program = program(config)?;
     let (mut settings, hidden_outputs) = settings(config, &named, Concealing::Restricted)?;
     push(&mut settings["filesystem"]["allowRead"], &runtime);
     push(&mut settings["filesystem"]["allowWrite"], &temporary);
+    // The sandbox runtime's own package holds the helper it starts inside the sandbox, such as
+    // `apply-seccomp`, so the command reads it wherever it is installed. It starts every later
+    // call's sandbox from outside, so no command writes it.
+    if let Some(package) = package_of(&program) {
+        push(&mut settings["filesystem"]["allowRead"], &package);
+        push(&mut settings["filesystem"]["denyWrite"], &package);
+    }
     let file = Removed(tempfile_in_temp(&settings)?);
-    let (program, prefix) = config
-        .sandbox
-        .command
-        .split_first()
-        .ok_or("the sandbox command is empty")?;
-    let mut sandbox = Command::new(program);
+    let mut sandbox = Command::new(&program);
     sandbox
-        .args(prefix)
+        .args(&config.sandbox.command[1..])
         .arg("--settings")
         .arg(&file.0)
         .arg("-c")
@@ -97,9 +103,6 @@ pub fn run(config: &Config, arguments: &Value) -> Result<String, String> {
         if std::env::var_os(name).is_none() {
             sandbox.env(name, value);
         }
-    }
-    if let Some(missing) = missing(config) {
-        return Err(missing);
     }
     let finished = supervise(sandbox, config.sandbox.timeout_secs)?;
     let failed = !finished.status.is_some_and(|status| status.success());
@@ -147,24 +150,162 @@ fn hidden_output_note(path: &Path, label: &crate::label::Label) -> String {
     )
 }
 
-/// Why the sandbox `config` names cannot start here, when it cannot: its program is not on
-/// `PATH`, or not at the path it names.
-pub fn missing(config: &Config) -> Option<String> {
-    let program = Path::new(config.sandbox.command.first()?);
-    let found = match program.components().count() > 1 {
-        true => program.is_file(),
-        false => std::env::var_os("PATH")
-            .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file())),
+/// The sandbox runtime `appa` installs for SafeBash, locked to exact versions and digests.
+const RUNTIME_PACKAGE: &str = include_str!("../sandbox-runtime/package.json");
+const RUNTIME_LOCK: &str = include_str!("../sandbox-runtime/package-lock.json");
+
+/// Where `appa` installs the sandbox runtime: `sandbox-runtime` in `appa`'s data directory,
+/// beside `clappa`'s own files. The directory is the one `appa-runtime`'s `init::paths`
+/// resolves: `APPA_DATA_DIR`, else the platform's data directory.
+fn runtime_home() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let data = match std::env::var_os("APPA_DATA_DIR") {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None if cfg!(target_os = "macos") => home.map(|home| home.join("Library/Application Support/appa")),
+        None if cfg!(target_os = "windows") => {
+            std::env::var_os("LOCALAPPDATA").map(|dir| PathBuf::from(dir).join("appa"))
+        }
+        None => std::env::var_os("XDG_DATA_HOME")
+            .map(|dir| PathBuf::from(dir).join("appa"))
+            .or_else(|| home.map(|home| home.join(".local/share/appa"))),
     };
-    match (found, program == Path::new("srt")) {
-        (true, _) => None,
-        (false, true) => Some(
+    data.map(|data| data.join("sandbox-runtime"))
+}
+
+/// The program SafeBash runs commands in. A `srt` that is not on `PATH` is the one `appa`
+/// installed, when it did.
+fn program(config: &Config) -> Result<PathBuf, String> {
+    let program = Path::new(config.sandbox.command.first().ok_or("the sandbox command is empty")?);
+    if program.components().count() > 1 {
+        return match program.is_file() {
+            true => Ok(program.to_path_buf()),
+            false => Err(format!("SafeBash's sandbox {} is not installed", program.display())),
+        };
+    }
+    let on_path = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(program))
+            .find(|found| found.is_file())
+    });
+    let installed = (program == Path::new("srt"))
+        .then(runtime_home)
+        .flatten()
+        .map(|home| home.join("node_modules/.bin/srt"))
+        .filter(|installed| installed.is_file());
+    match (on_path.or(installed), program == Path::new("srt")) {
+        (Some(found), _) => Ok(found),
+        (None, true) => Err(
             "SafeBash runs shell commands in Anthropic's sandbox runtime `srt`, which is not installed; \
-             install it with: npm install -g @anthropic-ai/sandbox-runtime"
+             `appa plugin install claude-code` installs it when npm is on PATH, or install it with: \
+             npm install -g @anthropic-ai/sandbox-runtime"
                 .to_string(),
         ),
-        (false, false) => Some(format!("SafeBash's sandbox {} is not installed", program.display())),
+        (None, false) => Err(format!("SafeBash's sandbox {} is not installed", program.display())),
     }
+}
+
+/// The npm package a sandbox program belongs to: the directory above its resolved script's
+/// own directory that holds a `package.json`, such as `.../sandbox-runtime` for `srt`.
+fn package_of(program: &Path) -> Option<PathBuf> {
+    let script = std::fs::canonicalize(program).ok()?;
+    script
+        .ancestors()
+        .skip(1)
+        .take(3)
+        .find(|dir| dir.join("package.json").is_file())
+        .map(Path::to_path_buf)
+}
+
+/// Why the sandbox `config` names cannot start here, when it cannot: its program is not
+/// installed, or, on Linux, the programs Anthropic's sandbox runtime needs are not.
+pub fn missing(config: &Config) -> Option<String> {
+    if let Err(missing) = program(config) {
+        return Some(missing);
+    }
+    // Anthropic's sandbox runtime on Linux: bubblewrap builds the sandbox, socat bridges its
+    // proxy, and ripgrep finds the files it must hide.
+    let absent: Vec<&str> = match cfg!(target_os = "linux") {
+        true => ["bwrap", "socat", "rg"]
+            .into_iter()
+            .filter(|tool| {
+                !std::env::var_os("PATH")
+                    .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(tool).is_file()))
+            })
+            .collect(),
+        false => Vec::new(),
+    };
+    if !absent.is_empty() {
+        return Some(format!(
+            "SafeBash's sandbox needs {} on PATH; on Debian or Ubuntu install them with: \
+             sudo apt-get install bubblewrap socat ripgrep",
+            absent.join(", ")
+        ));
+    }
+    match cfg!(target_os = "linux") && !user_namespaces() {
+        true => Some(
+            "bubblewrap cannot create the user namespace SafeBash's sandbox needs: Ubuntu 24.04 and later restrict \
+             it with AppArmor (kernel.apparmor_restrict_unprivileged_userns). Lift it for bubblewrap with the profile \
+             in Claude Code's sandbox guide (https://code.claude.com/docs/en/sandboxing), or for every program until \
+             the next reboot with: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+                .to_string(),
+        ),
+        false => None,
+    }
+}
+
+/// Whether bubblewrap can create the namespaces the sandbox runtime starts each command in:
+/// its own user and network namespace. Ubuntu's AppArmor default refuses both.
+fn user_namespaces() -> bool {
+    Command::new("bwrap")
+        .args(["--ro-bind", "/", "/", "--unshare-user", "--unshare-net", "--", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Install the locked sandbox runtime into `appa`'s data directory when SafeBash would run
+/// `srt` and none is installed: `npm ci` from the lock file this executable carries, so the
+/// bytes are the ones the lock names, with no install scripts. Says what it installed, or why
+/// it could not; nothing when `srt` was already there or the deployment names another sandbox.
+pub fn install_runtime(config: &Config) -> Result<Option<PathBuf>, String> {
+    if config.sandbox.command.first().map(String::as_str) != Some("srt") || program(config).is_ok() {
+        return Ok(None);
+    }
+    let home = runtime_home().ok_or("appa has no data directory: neither APPA_DATA_DIR nor HOME is set")?;
+    std::fs::create_dir_all(&home).map_err(|error| format!("{}: {error}", home.display()))?;
+    for (name, text) in [("package.json", RUNTIME_PACKAGE), ("package-lock.json", RUNTIME_LOCK)] {
+        std::fs::write(home.join(name), text).map_err(|error| format!("{}: {error}", home.join(name).display()))?;
+    }
+    let output = Command::new("npm")
+        .args([
+            "ci",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            "--loglevel=error",
+            "--prefix",
+        ])
+        .arg(&home)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => {
+                "npm is not installed, so `appa` cannot install Anthropic's sandbox runtime `srt` \
+                 for SafeBash; install Node.js 22.12 or later, then run `appa plugin install claude-code` again"
+                    .to_string()
+            }
+            _ => format!("cannot run npm: {error}"),
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "npm could not install Anthropic's sandbox runtime `srt` into {}: {}",
+            home.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    program(config).map(Some)
 }
 
 /// A call's own scratch directory or settings file, removed however the call returns.

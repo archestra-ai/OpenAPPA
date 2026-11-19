@@ -1,0 +1,8 @@
+{
+  "name": "appa-sandbox-runtime",
+  "private": true,
+  "description": "The sandbox runtime SafeBash runs commands in, locked so `npm ci` installs exactly these bytes into appa's data directory.",
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.83"
+  }
+}

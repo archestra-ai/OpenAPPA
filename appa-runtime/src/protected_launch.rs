@@ -51,7 +51,14 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
             if let Some(note) = appa_file_tracker::earlier_labels() {
                 eprintln!("clappa: {note}");
             }
-            shell(settings, data_dir, &token)
+            match shell(settings, data_dir, &token) {
+                Ok(shell) => shell,
+                Err(refusal) => {
+                    close(messaging.as_ref());
+                    eprintln!("clappa: {refusal}");
+                    std::process::exit(1);
+                }
+            }
         }
         false => Shell::Untracked,
     };
@@ -109,9 +116,10 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
 /// content, out of the file-tracker's sight. The policy blocks them at the hook as well.
 const UNMEDIATED_TOOLS: &str = "PowerShell,Monitor,Grep,NotebookEdit";
 
-/// The Claude Code releases whose internals the preload has been checked against. A release
-/// outside this list runs SafeBash, even when the self-test would pass.
-const NATIVE_BASH_RELEASES: &[&str] = &["2.1.266", "2.1.319"];
+/// The Claude Code releases known to pass the preload's self-test and still run a Bash call
+/// outside the confinement it checks. A release in this list runs SafeBash without a
+/// self-test; every other release runs native Bash exactly when its self-test passes.
+const BROKEN_RELEASES: &[&str] = &[];
 
 /// How long the preload's self-test may take before the session falls back to SafeBash.
 const SELF_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -203,18 +211,29 @@ fn executable() -> String {
     std::env::current_exe().map_or_else(|_| "appa".into(), |path| path.display().to_string())
 }
 
-/// Native Bash when this Claude Code release is one the preload was checked against and the
-/// preload's self-test passes on it; SafeBash otherwise, saying why.
-fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Shell {
-    match native(settings, data_dir, token) {
-        Ok(shell) => shell,
-        Err(reason) => {
-            eprintln!("clappa: shell commands run as SafeBash: {reason}");
-            if let Some(missing) = appa_file_tracker::sandbox_missing() {
-                eprintln!("clappa: {missing}. Until then, every shell command is refused.");
-            }
-            Shell::SafeBash
+/// Native Bash when the preload's self-test passes on this Claude Code build and the release
+/// is not one known to fool it; SafeBash otherwise, saying why, with its sandbox installed
+/// first when it can be. A session whose SafeBash could run no command is not started: the
+/// refusal says what is missing.
+fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Result<Shell, String> {
+    let reason = match native(settings, data_dir, token) {
+        Ok(shell) => return Ok(shell),
+        Err(reason) => reason,
+    };
+    eprintln!("clappa: shell commands run as SafeBash: {reason}");
+    match appa_file_tracker::prepare_sandbox() {
+        Ok(None) => Ok(Shell::SafeBash),
+        Ok(Some(installed)) => {
+            eprintln!(
+                "clappa: installed Anthropic's sandbox runtime for SafeBash at {}",
+                installed.display()
+            );
+            Ok(Shell::SafeBash)
         }
+        Err(missing) => Err(format!(
+            "{missing}. Claude Code was not started, because SafeBash would refuse every shell command; \
+             to start it without file tracking, run: appa battery remove file-tracker"
+        )),
     }
 }
 
@@ -226,10 +245,9 @@ fn native(settings: &Path, data_dir: &Path, token: &Uuid) -> Result<Shell, Strin
         .next()
         .unwrap_or_default()
         .to_string();
-    if !NATIVE_BASH_RELEASES.contains(&release.as_str()) {
+    if BROKEN_RELEASES.contains(&release.as_str()) {
         return Err(format!(
-            "Claude Code {release} is not a release the Bash preload was checked against ({})",
-            NATIVE_BASH_RELEASES.join(", ")
+            "Claude Code {release} runs Bash calls outside the confinement the preload's self-test checks"
         ));
     }
     let preload = data_dir.join("claude-bash.js");

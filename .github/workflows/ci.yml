@@ -127,6 +127,9 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'appa-runtime/**'
               - 'appa-runtime-api/**'
+              - 'appa-file-tracker/**'
+              - 'scripts/claude-bash-selftest.sh'
+              - '.github/tools/claude-code/**'
               - 'appa-engine/**'
               - 'appa-eventlog/**'
               - 'appa-policy/**'
@@ -402,6 +405,13 @@ jobs:
       - name: Exercise the real harness with deterministic inference
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
 
+      # clappa gives Claude Code native Bash only where this self-test passes.
+      - name: Install Claude Code's sandbox
+        run: .github/tools/claude-code/install-sandbox.sh
+
+      - name: Self-test the Bash preload on the pinned Claude Code
+        run: scripts/claude-bash-selftest.sh target/debug/appa
+
   battery-checks:
     name: Battery Checks
     runs-on: ubuntu-latest
@@ -576,6 +586,14 @@ jobs:
           shared-key: rust-tests
           env-vars: CARGO_PROFILE_TEST_DEBUG ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # SafeBash's tests run commands in the sandbox runtime appa installs, from the same
+      # lock, and fail in CI when it cannot start.
+      - name: Install SafeBash's sandbox
+        run: |
+          .github/tools/claude-code/install-sandbox.sh
+          npm ci --prefix appa-file-tracker/sandbox-runtime --ignore-scripts --no-audit --no-fund
+          echo "$PWD/appa-file-tracker/sandbox-runtime/node_modules/.bin" >> "$GITHUB_PATH"
 
       - name: Rust tests
         run: cargo test --workspace --features appa-eventlog/postgres,appa/postgres,appa/archestra --locked
