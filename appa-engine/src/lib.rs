@@ -58,6 +58,17 @@
 //! but those naming an authority that denied it is offered no declaration. Like any approval, a
 //! declaration stops being current when the parent's label moves.
 //!
+//! A declaration may **defer** the return ([`fact::ReturnPolicy::Deferred`]). The child then
+//! stands under its parent's own floor rather than one the declaration sets, and the return is
+//! decided at the child's stop. A value that leaves the parent's label where it is crosses as
+//! any return does. One that would narrow it is frozen ([`fact::Fact::ReturnDeferred`]), ends
+//! the child's errand, and crosses only when the parent accepts it
+//! ([`transition::EngineEvent::SettleReturn`]), under the narrowing it causes at the parent's
+//! label then, which the parent's own floor must hold. A discarded return crosses nothing. The
+//! spawn's own result admits no value, so a deferred child's words reach its parent by one of
+//! those two crossings alone. An approval belongs to the class of the proposal it was made for,
+//! deferring or not, and covers no proposal of the other class. A fan-out spawn defers nothing.
+//!
 //! A **fan-out spawn** ([`transition::SpawnKind::FanOut`]) starts any number of children under
 //! the one return declaration its release consumed. Its own fork binds no child. Each child it
 //! starts gets a member fork ([`value::ForkId::Member`]), prepared by the engine's binding

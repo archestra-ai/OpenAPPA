@@ -166,7 +166,7 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         }
     }
     match decision {
-        HookDecision::Ack | HookDecision::PassControl => {}
+        HookDecision::Ack | HookDecision::PassControl | HookDecision::DeferReturn => {}
         HookDecision::AllowCall { spawn } => {
             let _: Option<SpawnBinding> = spawn;
         }
@@ -269,7 +269,10 @@ fn the_declared_audit(runtime: &Runtime, id: &TrajectoryId) {
             AuditEvent::ChildReturn { sanitizer, label } => {
                 let _: (Option<String>, AuditLabel) = (sanitizer, label);
             }
-            AuditEvent::Merged | AuditEvent::VoidReturn => {}
+            AuditEvent::Merged | AuditEvent::VoidReturn | AuditEvent::ReturnDiscarded => {}
+            AuditEvent::ReturnDeferred { label } => {
+                let _: AuditLabel = label;
+            }
             AuditEvent::Resumed { seed } => {
                 let _: AuditLabel = seed;
             }

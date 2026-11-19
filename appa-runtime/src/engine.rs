@@ -66,23 +66,27 @@ pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
     ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent, Evidence, EvidenceRequest, FollowUp,
     ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody,
-    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, SpawnMark,
-    ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
+    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, ReturnDecision,
+    ReturnSettlement, SettlementFollowUp, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport, TransitionError,
+    TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
-    DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce, RawResultDigest,
-    ResolvedCall, ToolName, ValueBody,
+    ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
+    RawResultDigest, ResolvedCall, ToolName, ValueBody,
 };
 use appa_eventlog::Log;
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::api::{EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, RemedyDisplayPlan, ToolNaming};
+use crate::api::{
+    EmbeddedPresentationOptions, OutcomeBody, RemedyDisplay, RemedyDisplayPlan, ReturnReference, ToolNaming,
+};
 pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId};
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AnswerDelta, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration,
     ContextArtifact, HistoryEntry, ReviewedNarrowing, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
 };
-use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling, SpawnKind};
+pub(crate) use appa_engine::engine::DeferredReturn;
+use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -284,7 +288,7 @@ pub enum EngineEvent {
         call: ProposedCall,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
-        spawn: Option<SpawnKind>,
+        spawn: Option<SpawnMark>,
         /// The batch identity this response was already decided under: the session sets it
         /// when the host's call id names a recorded decision, and the response is answered
         /// from that record rather than decided again.
@@ -299,7 +303,7 @@ pub enum EngineEvent {
     ExecuteOffer {
         trajectory: TrajectoryId,
         offer: OfferId,
-        arguments: RemedyArguments,
+        declared: appa_runtime_api::DeclaredReturn,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
         /// The directory the harness last proposed a call from: what a rewritten call is
@@ -314,6 +318,12 @@ pub enum EngineEvent {
         child: TrajectoryId,
         value: Option<String>,
         evidence: Vec<ExternalEvidence>,
+    },
+    /// The parent's decision on one deferred return it owns.
+    SettleReturn {
+        trajectory: TrajectoryId,
+        id: ChildReturnId,
+        decision: ReturnDecision,
     },
 }
 
@@ -364,6 +374,10 @@ pub enum Presentation {
         feedback: String,
     },
     NoValue,
+    /// A child's return frozen for its parent's decision: nothing crossed.
+    Deferred,
+    /// A deferred return its parent discarded: nothing crossed, and nothing will.
+    Discarded,
     Blocked {
         feedback: String,
         offers: Vec<OfferedRemedy>,
@@ -450,6 +464,9 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::BranchEnded => ReplayRefusalClass("branch_ended"),
             TransitionRefusal::NotForked => ReplayRefusalClass("not_forked"),
             TransitionRefusal::WrongReturnIdentity => ReplayRefusalClass("wrong_return_identity"),
+            TransitionRefusal::ReturnNotDeferred => ReplayRefusalClass("return_not_deferred"),
+            TransitionRefusal::DeferralUnneeded => ReplayRefusalClass("deferral_unneeded"),
+            TransitionRefusal::NoDeferredReturn => ReplayRefusalClass("no_deferred_return"),
             TransitionRefusal::ReturnRecordMismatch => ReplayRefusalClass("return_record_mismatch"),
             TransitionRefusal::AcceptanceMismatch => ReplayRefusalClass("acceptance_mismatch"),
             TransitionRefusal::UnmergedCrossing => ReplayRefusalClass("unmerged_crossing"),
@@ -692,6 +709,12 @@ pub enum AuditEvent {
     },
     Merged,
     VoidReturn,
+    /// A child's return was frozen for its parent's decision: nothing crossed.
+    ReturnDeferred {
+        label: AuditLabel,
+    },
+    /// The parent discarded a deferred return.
+    ReturnDiscarded,
     /// The parent addressed its bound child again: the parent's label as it stood flowed into
     /// the child.
     Resumed {
@@ -1521,6 +1544,14 @@ impl RuntimeEngine {
                 },
                 label: self.render_label(&value.label)?,
             },
+            Fact::ReturnDeferred { value, .. } => AuditEvent::ReturnDeferred {
+                label: self.render_label(&value.label)?,
+            },
+            Fact::ReturnAccepted { narrowing, .. } => AuditEvent::Narrowed {
+                from: self.render_label(&narrowing.from)?,
+                to: self.render_label(&narrowing.to)?,
+            },
+            Fact::ReturnDiscarded { .. } => AuditEvent::ReturnDiscarded,
             Fact::Boundary { kind, .. } => match kind {
                 BoundaryKind::Merge { .. } => AuditEvent::Merged,
                 BoundaryKind::VoidReturn => AuditEvent::VoidReturn,
@@ -1575,7 +1606,7 @@ impl RuntimeEngine {
             EngineEvent::ExecuteOffer {
                 trajectory: owner,
                 offer,
-                arguments,
+                declared,
                 evidence,
                 entropy,
                 cwd,
@@ -1583,7 +1614,7 @@ impl RuntimeEngine {
                 view,
                 &owner,
                 &offer,
-                &arguments,
+                &declared,
                 &evidence,
                 &entropy,
                 cwd.as_deref(),
@@ -1593,6 +1624,11 @@ impl RuntimeEngine {
             EngineEvent::ChildReturn { child, value, evidence } => {
                 self.child_return(view, &child, value, &evidence, presentation)
             }
+            EngineEvent::SettleReturn {
+                trajectory: parent,
+                id,
+                decision,
+            } => self.settle_return(view, parent, id, decision),
         }
     }
 
@@ -1604,7 +1640,7 @@ impl RuntimeEngine {
         call: &ProposedCall,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
-        spawn: Option<SpawnKind>,
+        spawn: Option<SpawnMark>,
         replay: Option<ProposalBatchId>,
         presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
@@ -1653,16 +1689,13 @@ impl RuntimeEngine {
             evidence,
             UnresolvedAudience::Denied { tool: &call.tool },
             |audience| {
-                let decide = |spawn: Option<SpawnKind>| {
+                let decide = |spawn: Option<SpawnMark>| {
                     let batch = ProposalBatch {
                         id: batch_id(entropy),
                         trajectory: trajectory.clone(),
                         provider_results: Vec::new(),
                         proposals: vec![proposed.clone()],
-                        spawn: spawn.map(|kind| match kind {
-                            SpawnKind::Single => SpawnMark::at(0),
-                            SpawnKind::FanOut => SpawnMark::fan_out(0),
-                        }),
+                        spawn,
                         offer_nonce: engine_nonce(entropy),
                         evidence: evidence
                             .iter()
@@ -1709,7 +1742,7 @@ impl RuntimeEngine {
         trajectory: &TrajectoryId,
         call: &ProposedCall,
         batch: &ProposalBatchId,
-        spawn: Option<SpawnKind>,
+        marked: Option<SpawnMark>,
         entropy: &OfferNonce,
         presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
@@ -1739,10 +1772,6 @@ impl RuntimeEngine {
         // The spawn mark is payload: a repeat wears the mark the decision recorded. A batch
         // recorded unmarked answers a marked repeat only where the deployment never controlled
         // the mark — the first delivery was decided unmarked the same way.
-        let marked = spawn.map(|kind| match kind {
-            SpawnKind::Single => SpawnMark::at(0),
-            SpawnKind::FanOut => SpawnMark::fan_out(0),
-        });
         let fallback = recorded.spawn.is_none() && marked.is_some() && !self.engine.profile().context_control();
         if recorded.spawn != marked && !fallback {
             return Err(EngineRefusal::CallIdReused);
@@ -2123,7 +2152,7 @@ impl RuntimeEngine {
         view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
-        arguments: &RemedyArguments,
+        declared: &appa_runtime_api::DeclaredReturn,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
         cwd: Option<&str>,
@@ -2140,7 +2169,7 @@ impl RuntimeEngine {
             });
         };
         let return_policy = self
-            .declared_return_policy(view, trajectory, &views, &engine_offer, arguments)
+            .declared_return_policy(view, trajectory, &views, &engine_offer, declared)
             .map_err(|detail| EngineRefusal::Arguments { detail })?;
         let outcome = match self
             .engine
@@ -2417,7 +2446,7 @@ impl RuntimeEngine {
         owner: &TrajectoryId,
         views: &Views,
         offer: &EngineOfferId,
-        arguments: &RemedyArguments,
+        declared: &appa_runtime_api::DeclaredReturn,
     ) -> Result<Option<ReturnPolicy>, String> {
         let Some(route) = self
             .engine
@@ -2426,7 +2455,15 @@ impl RuntimeEngine {
         else {
             return Ok(None);
         };
-        self.return_policy_of_route(views, route, arguments).map(Some)
+        match (declared, route) {
+            (appa_runtime_api::DeclaredReturn::Arguments(arguments), route) => {
+                self.return_policy_of_route(views, route, arguments).map(Some)
+            }
+            (appa_runtime_api::DeclaredReturn::Deferred, ReturnRoute::Raw) => Ok(Some(ReturnPolicy::Deferred)),
+            (appa_runtime_api::DeclaredReturn::Deferred, ReturnRoute::Void | ReturnRoute::Sanitized(_)) => {
+                Err("a deferred return is declared on the plan that takes the subagent's return as spoken".to_string())
+            }
+        }
     }
 
     /// A return declaration made ahead of the spawn: the bare floor, or the attestation when
@@ -2573,6 +2610,9 @@ impl RuntimeEngine {
                         .to_string(),
                 );
             }
+            // The child returns as it would under a bare floor: whether its answer crosses is the
+            // parent's decision, made after the stop.
+            ReturnPolicy::Deferred => return None,
             ReturnPolicy::Crossing(crossing) => crossing,
         };
         match crossing.sanitizer? {
@@ -2667,6 +2707,97 @@ impl RuntimeEngine {
         }
     }
 
+    /// The deferred returns `parent` owns, pending and settled.
+    pub(crate) fn deferred_returns(&self, view: &EngineView, parent: &TrajectoryId) -> Vec<DeferredReturn> {
+        self.engine.deferred_returns(view, parent)
+    }
+
+    /// The deferred return of the child `parent`'s spawn `dispatch` bound, if its answer froze.
+    pub(crate) fn deferred_return_of(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        dispatch: &EngineDispatchId,
+    ) -> Option<DeferredReturn> {
+        let ForkStatus::Bound(child) = self.engine.fork_status(view, &ForkId::of(dispatch)) else {
+            return None;
+        };
+        self.deferred_returns(view, parent)
+            .into_iter()
+            .find(|deferred| *deferred.id.child() == child)
+    }
+
+    /// What the parent that owns a deferred return is told about it. A function of the frozen
+    /// return alone, so it reads the same before and after the parent decides.
+    pub(crate) fn deferral_notice(
+        &self,
+        deferred: &DeferredReturn,
+        presentation: &EmbeddedPresentationOptions,
+    ) -> String {
+        let control = control_spelling(self.naming, presentation);
+        let quote = |decision| ReturnReference::of(&deferred.id, decision);
+        format!(
+            "[appa] The subagent's answer was deferred. Its label is {label}; accepting it combines this \
+             session's label with that label. Decide once:\n  \
+             Accept:  {control}(offer_id: \"{accept}\")\n  \
+             Discard: {control}(offer_id: \"{discard}\")",
+            label = self.label_text(&deferred.label),
+            accept = quote(ReturnDecision::Accept).as_str(),
+            discard = quote(ReturnDecision::Discard).as_str(),
+        )
+    }
+
+    /// Settles one deferred return for the parent that owns it. A settled return answers its
+    /// recorded outcome and appends nothing.
+    fn settle_return(
+        &self,
+        view: &EngineView,
+        parent: TrajectoryId,
+        id: ChildReturnId,
+        decision: ReturnDecision,
+    ) -> Result<EngineDecision, EngineRefusal> {
+        let settlement = ReturnSettlement {
+            trajectory: parent,
+            id,
+            decision,
+        };
+        let decided = match self.engine.handle(view, CoreEvent::SettleReturn(settlement)) {
+            Ok(decided) => decided,
+            Err(TransitionError::ReturnBelowFloor { floor }) => {
+                return Ok(EngineDecision::deliver(Next::PresentToModel(Presentation::Declined {
+                    feedback: format!(
+                        "[appa] The subagent's answer cannot be accepted: with it this session's label would fall \
+                         below the floor this session stands under ({}). Nothing crossed; the answer can only be \
+                         discarded.",
+                        self.label_text(&floor)
+                    ),
+                })));
+            }
+            Err(TransitionError::NoDeferredReturn) => return Err(EngineRefusal::UnknownOffer),
+            Err(TransitionError::BranchEnded) => return Err(EngineRefusal::Ended),
+            Err(error) => {
+                return Err(EngineRefusal::Invariant {
+                    detail: format!("settling a deferred return: {error}"),
+                });
+            }
+        };
+        let append = decided.append.map(ValidatedFactBatch::into_unsealed);
+        let then = match decided.follow_up {
+            FollowUp::Settlement(SettlementFollowUp::Accepted { admitted }) => {
+                Next::PresentToModel(Presentation::Value {
+                    value: admitted.as_str().to_string(),
+                })
+            }
+            FollowUp::Settlement(SettlementFollowUp::Discarded) => Next::PresentToModel(Presentation::Discarded),
+            other => {
+                return Err(EngineRefusal::Invariant {
+                    detail: format!("a settlement produced a non-settlement follow-up: {other:?}"),
+                });
+            }
+        };
+        Ok(EngineDecision { append, then })
+    }
+
     /// Handles one child's stop and decides what crosses or blocks.
     fn child_return(
         &self,
@@ -2740,6 +2871,7 @@ impl RuntimeEngine {
                 value: derived.as_str().to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
+            FollowUp::Child(ChildFollowUp::Deferred) => Next::PresentToModel(Presentation::Deferred),
             FollowUp::Child(ChildFollowUp::Resolve(request)) => self.resolve_or_withhold(
                 view,
                 child,

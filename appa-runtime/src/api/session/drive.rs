@@ -642,6 +642,15 @@ impl Decided<'_> {
             .fork_return_contract(self.view, &self.session.trajectory, fork)
     }
 
+    /// What this trajectory's spawn `dispatch` answers its result with once its child's answer
+    /// was deferred; `None` for every other dispatch.
+    pub(super) fn deferral_notice(&self, dispatch: &appa_engine::value::DispatchId) -> Option<String> {
+        let deferred = self
+            .engine()
+            .deferred_return_of(self.view, &self.session.trajectory, dispatch)?;
+        Some(self.engine().deferral_notice(&deferred, &self.session.presentation))
+    }
+
     pub(super) fn fork_status(&self, fork: &appa_engine::value::ForkId) -> ForkStatus {
         self.engine().fork_status(self.view, fork)
     }

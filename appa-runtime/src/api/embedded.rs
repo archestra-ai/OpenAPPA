@@ -737,6 +737,7 @@ impl TryFrom<&HookDecision> for StoredOutcome {
             | HookDecision::PassControl
             | HookDecision::Context { .. }
             | HookDecision::ChildReturn { .. }
+            | HookDecision::DeferReturn
             | HookDecision::DenyCall { .. }
             | HookDecision::Block { .. }
             | HookDecision::Refuse { .. }

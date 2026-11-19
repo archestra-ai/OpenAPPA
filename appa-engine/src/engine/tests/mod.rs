@@ -22,6 +22,7 @@ mod boundary;
 mod common;
 mod confined;
 mod contracts;
+mod deferred;
 mod forks;
 mod laws;
 mod offers;

@@ -518,7 +518,7 @@ fn declaring(event: &serde_json::Value, declares: RemedyArguments) -> HookEvent 
     let HookEvent::ToolCall { declares: carried, .. } = &mut event else {
         panic!("the event is a tool call");
     };
-    *carried = Some(declares);
+    *carried = Some(appa_runtime_api::DeclaredReturn::Arguments(declares));
     event
 }
 

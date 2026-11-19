@@ -1282,7 +1282,7 @@ fn a_child_stop_carries_its_parents_declared_floor_to_a_grandchild() {
 
 /// `spawn` requires `partner` among its readers, which `officer` may approve, while the session
 /// holds `insider`; `open_spawn` has no gap. The replay fixture was recorded under this engine.
-fn gapped_spawn_engine() -> Engine {
+pub(super) fn gapped_spawn_engine() -> Engine {
     let mut spawn = plain_tool("spawn");
     spawn.requires = Requires {
         label: LabelRequirements {
@@ -1348,7 +1348,7 @@ fn declare_bare(
     )
 }
 
-fn execute_offer_declaring(
+pub(super) fn execute_offer_declaring(
     e: &Engine,
     log: &[Fact],
     offer: crate::value::OfferId,

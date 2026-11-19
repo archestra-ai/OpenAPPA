@@ -119,6 +119,9 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
             Some(replacement) => replaced(replacement, None),
             None => block(&echo(value)),
         },
+        // Only a host that itself delivers a subagent's answer declares a deferred return.
+        // This harness never does, so the answer cannot arrive; it is held all the same.
+        HookDecision::DeferReturn => block("[appa] this return is deferred and does not cross."),
         // Context reaches an actor at its start, with a prompt, and beside a tool's
         // result; a failed call's hook is acknowledged and the context waits for the next.
         HookDecision::Context { text } => match event {

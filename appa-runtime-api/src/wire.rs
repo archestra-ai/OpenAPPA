@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
-    Actor, AdapterName, CanonicalTool, DeclaredArguments, HookDecision, HookEvent, LaunchStart, LaunchToken,
+    Actor, AdapterName, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
     OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame,
     PromptKey, ProposedCall, RefusalClass, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding,
     SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
@@ -584,7 +584,7 @@ pub struct WireEvent {
     pub answered_call_ids: Option<Vec<String>>,
     /// On a single spawn's tool call: the return it declares for its subagent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub declares: Option<DeclaredArguments>,
+    pub declares: Option<DeclaredReturn>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -1276,6 +1276,7 @@ pub enum DecisionName {
     ReplaceOutput,
     DeliverValue,
     ChildReturn,
+    DeferReturn,
     Context,
     Refuse,
     Held,
@@ -1439,6 +1440,7 @@ impl WireDecision {
                 value: Some(value.clone()),
                 ..Self::bare(DecisionName::ChildReturn)
             },
+            HookDecision::DeferReturn => Self::bare(DecisionName::DeferReturn),
             HookDecision::Context { text } => Self {
                 text: Some(text.clone()),
                 ..Self::bare(DecisionName::Context)
@@ -1518,6 +1520,7 @@ impl WireDecision {
             DecisionName::ChildReturn => HookDecision::ChildReturn {
                 value: required("value", self.value)?,
             },
+            DecisionName::DeferReturn => HookDecision::DeferReturn,
             DecisionName::Context => HookDecision::Context {
                 text: required("text", self.text)?,
             },
@@ -1911,10 +1914,10 @@ mod tests {
 
     #[test]
     fn a_tool_call_carries_the_return_it_declares_and_no_other_event_does() {
-        let declares = DeclaredArguments {
+        let declares = DeclaredReturn::Arguments(crate::DeclaredArguments {
             label: Some(crate::LabelSpelling::default()),
             return_schema: Some(serde_json::json!({ "type": "object" })),
-        };
+        });
         let call = HookEvent::ToolCall {
             actor: Actor {
                 root: TrajectoryId("kagent:r1".to_string()),
@@ -2983,6 +2986,7 @@ mod tests {
             },
             HookDecision::DeliverValue { value: "v".to_string() },
             HookDecision::ChildReturn { value: "v".to_string() },
+            HookDecision::DeferReturn,
             HookDecision::Context { text: "t".to_string() },
             HookDecision::Refuse {
                 class: RefusalClass::UntrustedLog,

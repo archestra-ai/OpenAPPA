@@ -402,7 +402,11 @@ static RETURN_ROUTE: Table = Table {
 
 static RETURN_POLICY: Table = Table {
     name: "ReturnPolicy",
-    entries: &[("Void", Rule::Keep), ("Crossing", Rule::Table(&CROSSING_RETURN))],
+    entries: &[
+        ("Void", Rule::Keep),
+        ("Crossing", Rule::Table(&CROSSING_RETURN)),
+        ("Deferred", Rule::Keep),
+    ],
 };
 
 static CROSSING_RETURN: Table = Table {
@@ -669,6 +673,29 @@ static CHILD_RETURN: Table = Table {
     ],
 };
 
+static RETURN_DEFERRED: Table = Table {
+    name: "ReturnDeferred",
+    entries: &[
+        ("trajectory", TRAJECTORY),
+        ("id", Rule::Table(&CHILD_RETURN_ID)),
+        ("value", Rule::Table(&LABELED_VALUE)),
+    ],
+};
+
+static RETURN_ACCEPTED: Table = Table {
+    name: "ReturnAccepted",
+    entries: &[
+        ("trajectory", TRAJECTORY),
+        ("id", Rule::Table(&CHILD_RETURN_ID)),
+        ("narrowing", Rule::Table(&NARROWING)),
+    ],
+};
+
+static RETURN_DISCARDED: Table = Table {
+    name: "ReturnDiscarded",
+    entries: &[("trajectory", TRAJECTORY), ("id", Rule::Table(&CHILD_RETURN_ID))],
+};
+
 static PROPOSAL_BATCH_DECIDED: Table = Table {
     name: "ProposalBatchDecided",
     entries: &[
@@ -760,7 +787,7 @@ static BASIS_ADVANCED: Table = Table {
 
 static SPAWN_MARK: Table = Table {
     name: "SpawnMark",
-    entries: &[("index", NUMBER), ("kind", Rule::Keep)],
+    entries: &[("index", NUMBER), ("kind", Rule::Keep), ("deferral", NUMBER)],
 };
 
 static FORK_ID: Table = Table {
@@ -816,6 +843,9 @@ pub(crate) static FACT: Table = Table {
         ("CandidateDerived", Rule::Table(&CANDIDATE_DERIVED)),
         ("CandidateAccepted", Rule::Table(&CANDIDATE_ACCEPTED)),
         ("ChildReturn", Rule::Table(&CHILD_RETURN)),
+        ("ReturnDeferred", Rule::Table(&RETURN_DEFERRED)),
+        ("ReturnAccepted", Rule::Table(&RETURN_ACCEPTED)),
+        ("ReturnDiscarded", Rule::Table(&RETURN_DISCARDED)),
         ("ProposalBatchDecided", Rule::Table(&PROPOSAL_BATCH_DECIDED)),
         ("OfferOpened", Rule::Table(&OFFER_OPENED)),
         ("OfferAccepted", Rule::Table(&OFFER_LIFECYCLE)),

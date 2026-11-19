@@ -203,6 +203,8 @@ const TERMS = {
     "A spawn that starts any number of subagents under one return declaration, such as Claude Code's Workflow tool. Each subagent binds its own subagent fork, starts at the parent's label at its start, and its answer crosses the checked return path separately.",
   "void return":
     "A return declaration that takes no answer from a subagent. Nothing the child says crosses, so the child cannot change the parent's label, and no limit restricts what the child may read or accept. The child ends with an empty final message.",
+  "deferred return":
+    "A return declaration that sets no limit for a subagent and is decided at the subagent's stop. An answer that leaves the parent's label unchanged crosses then. An answer that would narrow it is frozen and crosses only when the parent accepts it. A discarded answer never crosses.",
   "root fork":
     "An independent family opened from an identified source trajectory, in the source family's deployment. It freezes the source label and denials, family effects and unsettled reservations. Later activity stays separate; there is no spawn dispatch or child-return contract.",
   deployment:

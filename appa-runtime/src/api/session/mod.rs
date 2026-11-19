@@ -16,14 +16,16 @@ use crate::external::ConsultOutcome;
 use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_engine::label::ReaderId;
 use appa_engine::names::ContextProviderName;
-use appa_engine::transition::ProposalBatchId;
+use appa_engine::transition::{ProposalBatchId, ReturnDecision, SpawnMark};
+use appa_runtime_api::DeclaredReturn;
 use std::collections::BTreeSet;
 
 use super::host::AheadState;
 use super::{
     ChildReturnDecision, ConsultContext, ConsultRecord, Deployment, EmbeddedPresentationOptions, EventError, ExactCall,
-    Inner, OfferId, OutcomeBody, PromptKey, ProposedCall, RemedyDecision, RemedyPresentation, SpawnKind, SpawnRef,
-    SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision, TrajectoryId,
+    Inner, OfferId, OutcomeBody, PromptKey, ProposedCall, RemedyDecision, RemedyPresentation, ReturnReference,
+    SettlementDecision, SpawnKind, SpawnRef, SpawnResultDecision, ToolCallDecision, ToolOutcome, ToolResultDecision,
+    TrajectoryId,
 };
 
 mod call;
@@ -38,6 +40,7 @@ use remedy::*;
 use result::*;
 
 pub(crate) use child::LateOpen;
+pub(in crate::api) use remedy::referenced_return;
 
 /// Whether a stop was taken, or held on the host call ids of calls still running at it.
 #[derive(Debug, Clone, PartialEq)]

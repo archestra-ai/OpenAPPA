@@ -42,7 +42,9 @@
 //! approval carries one, and every plan for it ends in a `Return` step: no return at all, or the
 //! floor the parent supplies at execution and the sanitizer — none, the schema attestation, or
 //! one registered untagged output sanitizer — the plan names. A child return itself is never planned: it
-//! crosses at the child's stop, or is refused there, against the policy the fork recorded.
+//! crosses at the child's stop, or is refused there, against the policy the fork recorded. A
+//! deferred return that would narrow the parent is frozen there instead, for a decision the
+//! parent makes outside any plan.
 //!
 //! **A fork's floor binds the child's remedies.** Inside a forked trajectory no plan accepts a
 //! narrowing below the floor its parent set, on the dimensions the fork's sanitizer does not
@@ -582,7 +584,9 @@ pub(crate) enum Declaring {
 impl Declaring {
     pub(crate) fn of(role: CallRole, views: &Views, call: &ResolvedCall) -> Declaring {
         match role {
-            CallRole::MarkedSpawn(kind) if views.declaration(call).is_none() => Declaring::Separately(kind),
+            CallRole::MarkedSpawn(class) if views.declaration(call, class.deferral).is_none() => {
+                Declaring::Separately(class.kind)
+            }
             CallRole::MarkedSpawn(_) | CallRole::Ordinary => Declaring::No,
         }
     }
@@ -597,7 +601,7 @@ pub(crate) fn bundled_spawn_menu(
     blocked: BlockedCall<'_>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
-    let CallRole::MarkedSpawn(kind) = blocked.role else {
+    let Some(kind) = blocked.role.spawn() else {
         return Ok(Vec::new());
     };
     let no_denials = BTreeSet::new();
@@ -1312,17 +1316,23 @@ impl Floor {
 }
 
 /// The floor that binds this trajectory, or `None` for a root or a child whose parent takes no
-/// return, which no floor bounds.
+/// return, which no floor bounds. A deferred return sets no floor of its own, so its child
+/// stands under whatever binds its parent.
 pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
     let trajectory = views.trajectory();
-    let policy = views.return_policy_of(trajectory)?.crossing()?;
     let parent = views.parent_of(trajectory)?;
-    let raised = policy
-        .sanitizer
-        .as_ref()
-        .and_then(|sanitizer| registry.sanitizer(&sanitizer.name()))
-        .map(|sanitizer| sanitizer.transition.applied());
-    Some(Floor::new(policy.floor.combine(&views.branch_label(parent)), raised))
+    match views.return_policy_of(trajectory)? {
+        ReturnPolicy::Void => None,
+        ReturnPolicy::Deferred => floor_of(registry, &views.beside(parent)),
+        ReturnPolicy::Crossing(policy) => {
+            let raised = policy
+                .sanitizer
+                .as_ref()
+                .and_then(|sanitizer| registry.sanitizer(&sanitizer.name()))
+                .map(|sanitizer| sanitizer.transition.applied());
+            Some(Floor::new(policy.floor.combine(&views.branch_label(parent)), raised))
+        }
+    }
 }
 
 /// The return routes a marked spawn may declare here: the bare floor, then in registry name order
@@ -1429,6 +1439,8 @@ pub enum ReturnPolicyRefusal {
     AttestUnavailable,
     #[error("the named sanitizer is not a registered untagged output sanitizer")]
     SanitizerUnavailable,
+    #[error("a deferred return is declared only by the host, on a single spawn's own proposal")]
+    DeferralUndeclared,
 }
 
 /// Is `policy` the declaration `step` asks for, at this trajectory's label? A void return
@@ -1436,19 +1448,29 @@ pub enum ReturnPolicyRefusal {
 /// below the label — a child starts there and only descends — and at or above the floor this
 /// trajectory itself stands under, so a grandchild inherits the bound; an attestation needs the
 /// reserved sanitizer registered at a rank this label covers; a named sanitizer is a registered
-/// untagged output sanitizer, which is what the step offered.
+/// untagged output sanitizer, which is what the step offered. A deferred return is declared only
+/// for the single spawn whose own proposal carries the host's deferral.
 pub(crate) fn declared_return_policy(
     registry: &Registry,
     views: &Views,
     step: &ReturnRoute,
     policy: &ReturnPolicy,
+    declarer: CallRole,
 ) -> Result<(), ReturnPolicyRefusal> {
     if policy.route() != *step {
         return Err(ReturnPolicyRefusal::RouteMismatch);
     }
-    match policy {
-        ReturnPolicy::Void => Ok(()),
-        ReturnPolicy::Crossing(crossing) => declared_crossing(registry, views, crossing),
+    match (policy, declarer) {
+        (ReturnPolicy::Void, _) => Ok(()),
+        (ReturnPolicy::Crossing(crossing), _) => declared_crossing(registry, views, crossing),
+        (
+            ReturnPolicy::Deferred,
+            CallRole::MarkedSpawn(crate::check::SpawnClass {
+                kind: crate::transition::SpawnKind::Single,
+                deferral: true,
+            }),
+        ) => Ok(()),
+        (ReturnPolicy::Deferred, _) => Err(ReturnPolicyRefusal::DeferralUndeclared),
     }
 }
 

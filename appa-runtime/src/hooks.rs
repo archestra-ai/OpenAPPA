@@ -11,9 +11,9 @@ use appa_runtime_api::{
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
 use crate::api::{
-    ChildReturnDecision, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen, LaunchedStart,
-    OfferId, RemedyArguments, RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision,
-    ToolResultDecision, is_control_tool,
+    ChildReturnDecision, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen, LaunchedStart, Quoted,
+    RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision, ToolResultDecision,
+    is_control_tool,
 };
 use appa_eventlog::EndKind;
 
@@ -576,6 +576,7 @@ fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<Stri
         HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } => (HookOutcome::Blocked, Vec::new()),
         HookDecision::Refuse { .. } => (HookOutcome::Refused, Vec::new()),
         HookDecision::Held { .. } => (HookOutcome::Held, Vec::new()),
+        HookDecision::DeferReturn => (HookOutcome::Deferred, Vec::new()),
     }
 }
 
@@ -676,7 +677,7 @@ async fn dispatch_event(
 #[derive(Debug, Clone)]
 enum Proposing {
     Plain(Option<SpawnKind>),
-    Declaring(RemedyArguments),
+    Declaring(appa_runtime_api::DeclaredReturn),
 }
 
 impl Proposing {
@@ -1194,6 +1195,7 @@ fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookD
         }
         ChildReturnDecision::Staged { value } => HookDecision::ChildReturn { value },
         ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => HookDecision::Ack,
+        ChildReturnDecision::Deferred => HookDecision::DeferReturn,
         ChildReturnDecision::Blocked { feedback } => block(feedback),
     }
 }
@@ -1244,7 +1246,15 @@ fn control_call(
     ruling: Option<Ruling>,
 ) -> HookDecision {
     let quoted = match quoted_offer(call) {
-        Ok(Some(quoted)) => quoted,
+        Ok(Some(Quoted::Offer(quoted))) => quoted,
+        // A decision on a deferred return passes on the caller's ownership of that return, read
+        // again where the decision lands. Nothing is vouched: no offer stands behind it.
+        Ok(Some(Quoted::Return(reference))) => {
+            return match runtime.owns_return(actor, &reference) {
+                true => HookDecision::PassControl,
+                false => deny("this offer no longer stands; re-propose the call".to_string()),
+            };
+        }
         Ok(None) => {
             // A declaration ahead of the spawn quotes no offer: its arguments and the call name
             // it. It can be a root's first call, which opens the root as any root call does.
@@ -1299,14 +1309,14 @@ fn vouch_call(runtime: &Runtime, actor: &Actor, call: &ProposedCall) {
     tracing::debug!(trajectory = %actor.root.0, tool = %call.tool, "vouched for this trajectory");
 }
 
-fn quoted_offer(call: &ProposedCall) -> Result<Option<OfferId>, crate::api::OfferIdRefusal> {
+fn quoted_offer(call: &ProposedCall) -> Result<Option<Quoted>, crate::api::OfferIdRefusal> {
     let Ok(arguments) = serde_json::from_str::<serde_json::Value>(call.arguments.get()) else {
         return Ok(None);
     };
     let Some(offer_id) = arguments.get("offer_id").and_then(serde_json::Value::as_str) else {
         return Ok(None);
     };
-    OfferId::parse(offer_id).map(Some)
+    Quoted::parse(offer_id).map(Some)
 }
 
 /// What a child's event does when the family has not opened that child.
@@ -1435,7 +1445,7 @@ mod tests {
     use super::*;
     use appa_runtime_api::SpawnRef;
 
-    use crate::api::Runtime;
+    use crate::api::{OfferId, Runtime};
     use crate::config::Config;
 
     /// The event the served runtime reads from one Claude Code hook body: parsed by the

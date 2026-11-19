@@ -21,11 +21,13 @@ use crate::value::{
 /// `Crossing` return admits one value under its floor and sanitizer. The submission path is
 /// **derived from this binding**, never selected by the child, so no engine client can route a
 /// return through a sanitizer the fork did not declare — that would be a trust-laundering
-/// selector.
+/// selector. A `Deferred` return declares no floor: the parent decides when the child stops, and a
+/// value that would narrow it is frozen until the parent accepts or discards it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReturnPolicy {
     Void,
     Crossing(CrossingReturn),
+    Deferred,
 }
 
 /// A return that crosses. `floor` is the lowest label the parent accepts from the child — inside
@@ -81,12 +83,13 @@ impl ReturnPolicy {
                 None => ReturnRoute::Raw,
                 Some(sanitizer) => ReturnRoute::Sanitized(sanitizer.name()),
             },
+            ReturnPolicy::Deferred => ReturnRoute::Raw,
         }
     }
 
     pub fn crossing(&self) -> Option<&CrossingReturn> {
         match self {
-            ReturnPolicy::Void => None,
+            ReturnPolicy::Void | ReturnPolicy::Deferred => None,
             ReturnPolicy::Crossing(crossing) => Some(crossing),
         }
     }
@@ -621,6 +624,26 @@ pub enum Fact {
         trajectory: TrajectoryId,
         fork: crate::value::ForkId,
     },
+    /// A child under a deferred return stopped with a value that would narrow its parent. The
+    /// value is frozen here and crosses nowhere; the stop ends the child's errand. `trajectory`
+    /// is the child.
+    ReturnDeferred {
+        trajectory: TrajectoryId,
+        id: ChildReturnId,
+        value: LabeledValue,
+    },
+    /// The parent accepted a deferred return: the narrowing it consented to, in the batch that
+    /// crosses the frozen value. `trajectory` is the parent.
+    ReturnAccepted {
+        trajectory: TrajectoryId,
+        id: ChildReturnId,
+        narrowing: crate::check::Narrowing,
+    },
+    /// The parent discarded a deferred return: nothing of it crosses. `trajectory` is the parent.
+    ReturnDiscarded {
+        trajectory: TrajectoryId,
+        id: ChildReturnId,
+    },
     Boundary {
         trajectory: TrajectoryId,
         kind: BoundaryKind,
@@ -684,6 +707,9 @@ impl Fact {
             | Fact::BasisAdvanced { trajectory, .. }
             | Fact::ForkPrepared { trajectory, .. }
             | Fact::ForkOpened { trajectory, .. }
+            | Fact::ReturnDeferred { trajectory, .. }
+            | Fact::ReturnAccepted { trajectory, .. }
+            | Fact::ReturnDiscarded { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
         }
     }

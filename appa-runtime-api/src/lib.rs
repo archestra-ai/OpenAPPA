@@ -607,7 +607,7 @@ pub enum HookEvent {
         /// The return this single spawn declares for its subagent. A blocked spawn applies it
         /// through its block's declaration plan and is proposed again in the same hook. Any
         /// other call that carries one is refused.
-        declares: Option<DeclaredArguments>,
+        declares: Option<DeclaredReturn>,
     },
     /// Continue an already released spawn after native approval, without a new proposal.
     SpawnResume {
@@ -739,6 +739,10 @@ pub enum HookDecision {
     ChildReturn {
         value: String,
     },
+    /// The child's return is deferred: nothing it said crosses until its parent accepts it,
+    /// and the child's errand is over. The harness ends the child's run and hands the parent
+    /// none of the child's words.
+    DeferReturn,
     /// The event is acknowledged, and `text` goes to the actor it names
     /// as context the harness hands that actor: at a child's start, the
     /// return contract the child works under; with a prompt or a tool's
@@ -813,6 +817,65 @@ pub struct LabelSpelling {
 pub struct DeclaredArguments {
     pub label: Option<LabelSpelling>,
     pub return_schema: Option<serde_json::Value>,
+}
+
+/// The return a single spawn's proposal declares for its subagent: the arguments its block's
+/// declaration plan takes, or a deferred return. Only a host that itself delivers a
+/// subagent's answer to its parent declares the deferral, and only here, on the spawn's own
+/// call: no control call and no declaration made ahead spells it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "DeclaredReturnRecord", into = "DeclaredReturnRecord")]
+pub enum DeclaredReturn {
+    Arguments(DeclaredArguments),
+    Deferred,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeclaredReturnRecord {
+    label: Option<LabelSpelling>,
+    return_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    deferred: bool,
+}
+
+impl TryFrom<DeclaredReturnRecord> for DeclaredReturn {
+    type Error = &'static str;
+
+    fn try_from(record: DeclaredReturnRecord) -> Result<DeclaredReturn, &'static str> {
+        match record {
+            DeclaredReturnRecord {
+                label: None,
+                return_schema: None,
+                deferred: true,
+            } => Ok(DeclaredReturn::Deferred),
+            DeclaredReturnRecord { deferred: true, .. } => {
+                Err("a deferred return takes no `label` and no `return_schema`")
+            }
+            DeclaredReturnRecord {
+                label,
+                return_schema,
+                deferred: false,
+            } => Ok(DeclaredReturn::Arguments(DeclaredArguments { label, return_schema })),
+        }
+    }
+}
+
+impl From<DeclaredReturn> for DeclaredReturnRecord {
+    fn from(declared: DeclaredReturn) -> DeclaredReturnRecord {
+        match declared {
+            DeclaredReturn::Arguments(DeclaredArguments { label, return_schema }) => DeclaredReturnRecord {
+                label,
+                return_schema,
+                deferred: false,
+            },
+            DeclaredReturn::Deferred => DeclaredReturnRecord {
+                label: None,
+                return_schema: None,
+                deferred: true,
+            },
+        }
+    }
 }
 
 /// A refusal at the parse stage, before any event exists. `Unreadable`

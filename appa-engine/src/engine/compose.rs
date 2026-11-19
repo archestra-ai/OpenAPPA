@@ -170,16 +170,17 @@ pub(crate) fn compose_batch<'a>(
             }
             // An approval declaring a child's return policy spends only at the marked spawn's
             // position, and one declaring none only at an ordinary one.
-            let marked = matches!(CallRole::of(spawn, position), CallRole::MarkedSpawn(_));
+            let proposing = CallRole::of(spawn, position);
+            let marked = matches!(proposing, CallRole::MarkedSpawn(_));
             //
             // A marked spawn may hold its return declaration beside the approval that covers its
             // other gaps, which carries the same declaration; the covering one is spent.
             let spendable: Vec<crate::value::OfferId> = if singleton { approval(&views, call) } else { Vec::new() }
                 .into_iter()
                 .filter(|offer| {
-                    views
-                        .approval(offer)
-                        .is_some_and(|prepared| prepared.return_policy.is_some() == marked)
+                    views.approval(offer).is_some_and(|prepared| {
+                        prepared.return_policy.is_some() == marked && prepared.deferral == proposing.deferral()
+                    })
                 })
                 .collect();
             let spends = spendable

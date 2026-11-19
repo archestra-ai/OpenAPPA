@@ -70,7 +70,53 @@ pub(super) fn join_feedback(feedback: &[Feedback]) -> String {
         .join("\n")
 }
 
+/// The return and the decision a reference names among the deferred returns one parent owns.
+pub(in crate::api) fn referenced_return(
+    owned: &[crate::engine::DeferredReturn],
+    reference: &ReturnReference,
+) -> Option<(appa_engine::value::ChildReturnId, ReturnDecision)> {
+    owned.iter().find_map(|deferred| {
+        [ReturnDecision::Accept, ReturnDecision::Discard]
+            .into_iter()
+            .find(|decision| ReturnReference::of(&deferred.id, *decision) == *reference)
+            .map(|decision| (deferred.id.clone(), decision))
+    })
+}
+
 impl Session {
+    /// This trajectory's decision on a deferred return it owns, named by reference. The
+    /// ownership is read in the step that appends the decision.
+    pub(in crate::api) async fn on_settle(
+        &self,
+        reference: &ReturnReference,
+    ) -> Result<SettlementDecision, EventError> {
+        let trajectory = self.trajectory.clone();
+        let decision = self
+            .drive_with_evidence(
+                |context, _| {
+                    let owned = context.engine().deferred_returns(context.view, &trajectory);
+                    let (id, decision) = referenced_return(&owned, reference).ok_or(EventError::UnknownOffer)?;
+                    Ok(EngineEvent::SettleReturn {
+                        trajectory: trajectory.clone(),
+                        id,
+                        decision,
+                    })
+                },
+                None,
+                None,
+                Occasion::Other,
+            )
+            .await?;
+        match decision.then {
+            Next::PresentToModel(Presentation::Value { value }) => Ok(SettlementDecision::Accepted { value }),
+            Next::PresentToModel(Presentation::Discarded) => Ok(SettlementDecision::Discarded),
+            Next::PresentToModel(Presentation::Declined { feedback }) => {
+                Ok(SettlementDecision::Unacceptable { feedback })
+            }
+            _ => Err(EventError::UnexpectedDecision),
+        }
+    }
+
     /// The model called the `execute_remedy_plan` MCP tool. Executes one
     /// offer by its canonical id, which the runtime
     /// resolved from the quoted form before this point. An offer this
@@ -84,12 +130,22 @@ impl Session {
     ) -> Result<RemedyDecision, EventError> {
         self.on_remedy_at(
             &offer,
-            arguments,
+            DeclaredReturn::Arguments(arguments),
             elicitation,
             ruling,
             Occasion::Remedy { offer: &offer },
         )
         .await
+    }
+
+    /// Apply the return a blocked spawn's own proposal declares through its block's offer.
+    pub(super) async fn apply_declared_return(
+        &self,
+        offer: &OfferId,
+        declared: DeclaredReturn,
+    ) -> Result<RemedyDecision, EventError> {
+        self.on_remedy_at(offer, declared, None, None, Occasion::Remedy { offer })
+            .await
     }
 
     /// Apply the declaration a blocked spawn took through its block's offer. The application
@@ -101,14 +157,20 @@ impl Session {
         claim: &AheadClaim<'_>,
         arguments: RemedyArguments,
     ) -> Result<RemedyDecision, EventError> {
-        self.on_remedy_at(offer, arguments, None, None, Occasion::AheadApply { offer, claim })
-            .await
+        self.on_remedy_at(
+            offer,
+            DeclaredReturn::Arguments(arguments),
+            None,
+            None,
+            Occasion::AheadApply { offer, claim },
+        )
+        .await
     }
 
     async fn on_remedy_at(
         &self,
         offer: &OfferId,
-        arguments: RemedyArguments,
+        declared: DeclaredReturn,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
         occasion: Occasion<'_>,
@@ -134,7 +196,7 @@ impl Session {
                     Ok(EngineEvent::ExecuteOffer {
                         trajectory: trajectory.clone(),
                         offer: offer.clone(),
-                        arguments: arguments.clone(),
+                        declared: declared.clone(),
                         evidence,
                         entropy: fresh_entropy(),
                         cwd: self.inner.working_directory(&self.root),

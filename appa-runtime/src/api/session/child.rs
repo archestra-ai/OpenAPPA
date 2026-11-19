@@ -17,6 +17,7 @@ pub(super) fn return_decision(decision: EngineDecision) -> Result<ChildReturnDec
         Next::PresentToModel(Presentation::Value { value }) => Ok(ChildReturnDecision::Returned { value }),
         Next::PresentToModel(Presentation::Staged { value }) => Ok(ChildReturnDecision::Staged { value }),
         Next::PresentToModel(Presentation::NoValue) => Ok(ChildReturnDecision::NoValue),
+        Next::PresentToModel(Presentation::Deferred) => Ok(ChildReturnDecision::Deferred),
         Next::PresentToModel(Presentation::Blocked { feedback, .. }) => Ok(ChildReturnDecision::Blocked { feedback }),
         _ => Err(EventError::UnexpectedDecision),
     }
