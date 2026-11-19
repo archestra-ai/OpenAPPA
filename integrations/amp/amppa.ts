@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import type { PluginAPI, ToolCallEvent } from '@ampcode/plugin'
 
 export const description = 'amppa: APPA information-flow policy for Amp tool calls and results.'
@@ -24,6 +25,105 @@ function isRefusalClass(value: unknown): value is RefusalClass {
 function refusal(reply: Record<string, unknown>): Refusal | undefined {
   const { class: refused, detail } = reply
   return isRefusalClass(refused) && typeof detail === 'string' ? { class: refused, detail } : undefined
+}
+
+// SafeBash as the file-tracker serves it (`appa file-tracker mcp` lists the same tool). amppa
+// installs as this one file, so it carries its own copy; its tests hold it to the binary's.
+export const SAFEBASH = {
+  name: 'appa_safebash',
+  description:
+    'Runs one shell command in a sandbox. The command can read only the files, directories and Unix ' +
+    'sockets listed in input_files (plus system directories such as /usr and /etc, the directories on ' +
+    'PATH and installed toolchains), write only the files and directories listed in output_files, and ' +
+    'connect only to the hosts listed in network_hosts. Use absolute paths. An output file that ' +
+    'exists is read as well, so a command may rewrite it. An output written with a trailing / is a ' +
+    'directory: the command reads what it holds and writes under it, as a build directory, ' +
+    'node_modules/ or a cache needs (for example ~/.cache/go-build/). A command that reaches a Go, ' +
+    "cargo or npm registry keeps what it downloads in that package manager's cache, which every later " +
+    'command reads without declaring it. A credential file such as .env inside a declared directory ' +
+    'stays hidden unless the call names it or git tracks it. Declare every file the command reads or ' +
+    'writes: any other file in your workspace, home or /tmp is hidden from it, so ls and find there ' +
+    'show only what the call declares. $TMPDIR is a private directory for this call alone, removed ' +
+    'when it ends. To list a directory, declare it in input_files. Declare a socket such as ' +
+    '/var/run/docker.sock or $SSH_AUTH_SOCK in input_files to reach the service behind it.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      command: { type: 'string', description: 'The shell command to run with bash -c.' },
+      input_files: { type: 'array', items: { type: 'string' }, description: 'Absolute paths of the files the command reads.' },
+      output_files: { type: 'array', items: { type: 'string' }, description: 'Absolute paths of the files the command writes.' },
+      network_hosts: {
+        type: 'array', items: { type: 'string' },
+        description: 'Hosts the command connects to: example.com, *.example.com, or host:port.',
+      },
+    },
+    required: ['command', 'input_files', 'output_files', 'network_hosts'],
+  },
+}
+
+// The variables an orb routes its traffic through `appa amp-proxy` with. A SafeBash call's hosts
+// are checked with the call itself, and its sandbox's own proxy admits only those, so its traffic
+// does not cross the orb proxy a second time under the orb's label.
+const PROXY_VARIABLE = /^(https?|all)_proxy$/i
+
+// What a confined command's failure means, said beside its result, so the model declares what it
+// lacked instead of concluding that the file is gone or the tool cannot work here. Adapted from
+// clappa's preload (appa-file-tracker/claude-bash.js), whose agentic tests found each of these.
+const HINTS: { command?: RegExp; output?: RegExp; text: string }[] = [
+  {
+    command: /(^|[\s;&|(`])(ls|find|tree|fd|du|git\s+(status|diff|ls-files|add|clean|stash))\b|\*/,
+    text: '[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing or git status here is incomplete. To see a directory, declare it in input_files.',
+  },
+  {
+    output: /^(?!.*config file).*(read-only file system|EROFS)/im,
+    text: '[appa] A write to a path not in output_files fails as a read-only file system. Declare the path in output_files, or its directory with a trailing /, such as node_modules/.vite/ or .git/.',
+  },
+  {
+    output: /could not (lock|write) config file/,
+    text: '[appa] The sandbox keeps .git/config read-only, even in a declared directory: a setting there, such as core.hooksPath or core.fsmonitor, would run code outside the sandbox. So git config and git remote add fail, and git push -u pushes but sets no upstream. Tell the person the git command to run themselves, such as git branch --set-upstream-to=origin/<branch>.',
+  },
+  {
+    output: /^(?!.*config file).*(Device or resource busy|EBUSY)/m,
+    text: `[appa] A declared output file can be rewritten but not replaced, renamed or removed, so a tool that writes a temporary file and renames it over the output fails. Write through the file instead: sed 's/a/b/' f > "$TMPDIR/f" && cat "$TMPDIR/f" > f in place of sed -i. For a tool that always replaces the file, such as cargo add, declare the file's directory with a trailing / in output_files.`,
+  },
+  {
+    output: /not a git repository/,
+    text: "[appa] Git found no repository because the repository's root, the directory that holds .git, is not in input_files. Declare the root in input_files, and its .git/ in output_files if git writes.",
+  },
+  {
+    output: /cannot lock ref|unable to create directory for .*\.git\/|Unable to create '[^']*\.lock'|unable to (create temporary|write new index)/,
+    text: "[appa] Git writes branches, its index and new objects under .git. When the repository's .git/ is not in output_files, it is read-only to this command, so git commit, git checkout -b and git switch fail. Declare it with a trailing /, such as <repository>/.git/, beside the files the command changes.",
+  },
+]
+
+/** `report` with the hints its command and output call for. */
+export function hinted(command: unknown, report: string): string {
+  const hints = HINTS.filter(hint => hint.command
+    ? hint.command.test(typeof command === 'string' ? command : '')
+    : hint.output!.test(report))
+  return [report, ...hints.map(hint => hint.text)].join('\n')
+}
+
+/** Run one SafeBash call in its sandbox: the command's report, or a refusal that ran nothing. */
+function safebash(input: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !PROXY_VARIABLE.test(name)))
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.env.APPA_AMP_BINARY || 'appa', ['file-tracker', 'run'], { env, signal })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.on('error', () => reject(new Error('[amppa] SafeBash could not start. Check APPA_AMP_BINARY.')))
+    child.on('close', code => {
+      if (code !== 0) return reject(new Error(`[amppa] SafeBash refused: ${stderr.trim().replace(/^appa file-tracker: /, '')}`))
+      try {
+        resolve(hinted(input.command, JSON.parse(stdout)))
+      } catch {
+        reject(new Error('[amppa] SafeBash sent an unreadable result.'))
+      }
+    })
+    child.stdin.end(JSON.stringify(input))
+  })
 }
 
 function text(decision: Decision, field: string): string {
@@ -72,6 +172,15 @@ export default function amppa(amp: PluginAPI) {
       ? error.message
       : '[amppa] Runtime unavailable or unreadable reply. Check APPA_AMP_RUNTIME_URL and the runtime logs.'
   }
+
+  // The shell this policy runs commands in: confined to the files and hosts each call declares,
+  // so its result carries only their labels. Exposed directly, so each call reaches tool.call.
+  amp.registerTool({
+    ...SAFEBASH,
+    defer: false,
+    title: 'SafeBash',
+    execute: (input, ctx) => safebash(input, ctx.signal),
+  })
 
   amp.on('agent.start', async (event, ctx) => {
     try {

@@ -9,12 +9,20 @@ checks protect different boundaries; neither requires the other.
 
 V1 is source-distributed; `appa plugin install amp` is not supported. You need
 Amp with `tool.call` and result-replacement hooks, plus Rust to build APPA.
+SafeBash, the shell the example policy runs commands in, needs Anthropic's
+sandbox runtime `srt`, which needs bubblewrap on Linux.
 
 From the OpenAPPA checkout:
 
 ```sh
 cargo build --locked -p appa
+sudo apt-get install -y bubblewrap
+npm install -g @anthropic-ai/sandbox-runtime
 ```
+
+The policy runs `appa file-tracker`, so put the built `appa` on the runtime's
+`PATH`, and `srt` on the plugin's. The plugin runs `appa` from its own `PATH`;
+set `APPA_AMP_BINARY` to its absolute path to use another one.
 
 Choose a persistent directory for this deployment's policy and database. For
 example, copy the starting policy without replacing an existing configuration:
@@ -26,32 +34,41 @@ test -e "$HOME/.config/appa/amp/appa.toml" || \
 ```
 
 Review that policy before using it. It treats the orb's filesystem as part of
-the trajectory and assumes the orb holds internal data under `*/private/*`:
+the trajectory, and labels what each call reads from it
+([Files and the shell](#files-and-the-shell-in-an-orb)):
 
-- Reads of `*/private/*` and every shell result narrow the trajectory to
-  internal. Public web requests and messages to other threads then stop.
-- Each outbound connection through the [network proxy](#network-proxy-in-an-orb)
-  forwards the orb's internal label, so no public host receives orb data.
-- Untrusted web results and connections lower trust, which stops edits.
+- A read of `.env*`, `~/.ssh/*` or another credential narrows the trajectory to
+  `self`. Public web requests, hosts other than package registries, and
+  messages to other threads then stop.
+- Shell commands run in SafeBash, confined to the files and hosts each call
+  declares. Amp's own `shell_command` is refused.
+- Each connection from a process outside SafeBash crosses the
+  [network proxy](#network-proxy-in-an-orb). It forwards the most restricted
+  label the orb's files can carry, so only package registries receive one.
+- Untrusted web results lower trust, which stops patches and writes to
+  instructions, hooks and shell profiles.
 
 **This is an example policy, not a general-purpose coding policy.** Declare
-your other tools, hosts trusted with internal data, or an Annotator through the
-usual APPA configuration. An orb that holds only public data drops the internal
-`delta` on shells and the `forwards` on outbound flows. Undeclared tools stop
-with an operational refusal.
+your other tools, hosts trusted with the orb's data, or more file-tracker path
+rules through the usual APPA configuration. Undeclared tools stop with an
+operational refusal.
 
 Start the runtime in a separate terminal, leaving it running:
 
 ```sh
 ./target/debug/appa runtime --adapter amp --listen 127.0.0.1:8788 \
   --config "$HOME/.config/appa/amp/appa.toml" \
-  --db "$HOME/.config/appa/amp/appa.db"
+  --db "$HOME/.config/appa/amp/appa.db" \
+  --batteries-dir "$(pwd)/marketplace/batteries"
 ```
+
+The policy includes the `file-tracker` battery, which `--batteries-dir` finds in
+the checkout.
 
 In an **Amp orb**, use a supervised service instead. Run this from the checkout:
 
 ```sh
-amp orb service start amppa-runtime --command "\"$(pwd)/target/debug/appa\" runtime --adapter amp --listen 127.0.0.1:8788 --config \"$HOME/.config/appa/amp/appa.toml\" --db \"$HOME/.config/appa/amp/appa.db\""
+amp orb service start amppa-runtime --command "\"$(pwd)/target/debug/appa\" runtime --adapter amp --listen 127.0.0.1:8788 --config \"$HOME/.config/appa/amp/appa.toml\" --db \"$HOME/.config/appa/amp/appa.db\" --batteries-dir \"$(pwd)/marketplace/batteries\""
 ```
 
 Do not expose this runtime through a portal: `/hook` trusts its local client
@@ -93,13 +110,58 @@ runtime cannot be reached. Calls fail closed on connection errors, timeouts,
 invalid replies, or runtime refusals; unchecked results are replaced with a
 withholding message.
 
-## Network proxy in an orb
+## Files and the shell in an orb
 
 An orb's filesystem is created for the thread and discarded with it, so amppa
-treats it as part of the trajectory: a file write keeps its content inside the
-trajectory, and no file tracking is needed. Data leaves the orb through Amp's
-own tools, which the plugin checks, or over the network, which
-`appa amp-proxy` checks.
+treats it as part of the trajectory: what the thread writes stays in its label,
+and no file label needs to outlive the orb. What the orb starts with still needs
+a label, and so does each command, so the example policy includes the
+`file-tracker` battery, the one clappa uses. Its `[aliases.tool.file-tracker]`
+map binds the battery's `read`, `write`, `edit`, `shell` and `unmediated` tools
+to Amp's own, as the `claude-code` battery does for Claude Code's:
+
+- `read` is `Read` and `view_media`, `write` is `create_file`, and `edit` is
+  `edit_file`. A `view_media` of an `http(s)://` URL takes a root rule first:
+  it requires public data and lowers trust.
+- `Read`, `create_file`, `edit_file` and a local `view_media` carry the labels
+  of the files they name. The file-tracker's built-in path rules make
+  credentials `self`, require a trusted session to write instructions, hooks,
+  shell profiles and `.agents/setup`, and refuse writes to `.amp/plugins/*` and
+  `.amp/settings.json`. Add your own rules in `~/.config/appa/file-tracker.toml`.
+- `shell` is `appa_safebash`, which amppa registers. It runs one command in `srt`. The call
+  declares `input_files`, `output_files` and `network_hosts`, and the command
+  reads, writes and reaches only those. A credential inside a declared
+  directory stays hidden unless the call names it. The result carries the
+  labels of what the call declared, so a command that read only `README.md`
+  leaves the trajectory public.
+- A call that names a host requires public data and lowers trust. A call whose
+  hosts all belong to one package registry (npm, Yarn, the Go proxy,
+  crates.io, PyPI) runs as a call without hosts does.
+- `unmediated` is `shell_command`, `shell_command_status` and `Bash`. They are
+  refused, because they
+  read and send files out of the file-tracker's sight. Remove them from the
+  agent's tools to save the model a call.
+
+Without the include, the map binds nothing, and Amp's file tools and shells
+have no rule and are refused. The root also widens the battery's
+`file-tracker` Annotator to `marks = ["human-approval"]`, so a write to
+`.amp/plugins/*` is a policy denial rather than an Annotator failure.
+
+The file-tracker's recorder settles each write's reservation. Its store lives
+in the orb, under `$XDG_STATE_HOME/appa`, and goes with it.
+
+The agent pays for this in declarations. A command that under-declares fails,
+and amppa adds a hint to its result that names what to declare, such as an
+output's directory or a repository's `.git/`; the agent retries with it. The
+hints are clappa's. A command cannot outlive its call, so servers that must keep running
+need another way to start.
+
+## Network proxy in an orb
+
+Data leaves the orb through Amp's own tools, which the plugin checks, through
+SafeBash, whose sandbox admits only the hosts each call declares, or through
+some other process, such as a server Amp or an MCP server starts. That last
+path is what `appa amp-proxy` checks.
 
 Start the proxy beside the runtime, as a supervised service:
 
@@ -107,8 +169,9 @@ Start the proxy beside the runtime, as a supervised service:
 amp orb service start amppa-proxy --command "\"$(pwd)/target/debug/appa\" amp-proxy --listen 127.0.0.1:8789 --runtime http://127.0.0.1:8788 --thread $AMP_THREAD_ID"
 ```
 
-Then route the agent's processes through it, for example in the orb's
-environment variables:
+Then route the orb's processes through it, for example in the orb's
+environment variables. amppa leaves these out of SafeBash's environment: its
+calls were checked with their hosts, and its sandbox runs its own proxy.
 
 ```sh
 HTTP_PROXY=http://127.0.0.1:8789
@@ -134,6 +197,11 @@ HTTPS clients often hide a refused tunnel's body. `curl` reports only
 `CONNECT tunnel failed, response 403`; retry with `curl -v` or read the proxy's
 log to see the remedy offer.
 
+A process outside SafeBash can send any file in the orb, so the example
+policy's connections forward `self`, the most restricted label the path rules
+give. Only package registries, declared ahead of that rule, receive a
+connection.
+
 Sending a message or a file to another thread with `send_thread_message` or
 `create_thread` is an outbound flow, like an upload, and `requires` governs it.
 The receiving thread starts without this thread's label, so the example policy
@@ -145,7 +213,8 @@ label.
 | Amp tool spelling | Policy identity |
 | --- | --- |
 | `Read`, `shell_command`, `apply_patch`, etc. | `host/amp/<exact-name>` |
-| Plugin tool's hook name | `host/amp/<exact-name>` |
+| Plugin tool's hook name, such as `appa_safebash` | `host/amp/<exact-name>` |
+| A connection through `appa amp-proxy` | `host/amp/appa_network` |
 | `mcp__github__create_issue` | `mcp/github/create_issue` |
 | `mcp__appa__execute_remedy_plan` | `appa/execute_remedy_plan` |
 
@@ -153,11 +222,11 @@ Tool names and argument fields vary by Amp mode. Use the names the hooks report;
 `amp plugins show-agent-options --json` lists the available builtin names.
 Canonical identities in policy avoid dependence on tool discovery.
 
-The first read of `/workspace/private/customer.txt` offers a plan to accept a
-narrower audience. The agent calls `mcp__appa__execute_remedy_plan` with the
-offered `offer_id`, then retries the read. Executing the plan does not perform
-the read itself. Subsequent public web requests remain blocked because this
-trajectory now carries internal data. Without the MCP connection above, the
+The first read of a `.env` file offers a plan to accept a narrower audience.
+The agent calls `mcp__appa__execute_remedy_plan` with the offered `offer_id`,
+then retries the read. Executing the plan does not perform the read itself.
+Subsequent public web requests remain blocked because this trajectory now
+carries `self` data. Without the MCP connection above, the
 agent can see the offer but cannot execute it.
 
 Confined results can also be sanitized before delivery when the policy declares
@@ -184,15 +253,21 @@ example policy leaves `code_exec` undeclared.
   labels, and child returns and transferred files have no cross-thread
   provenance guarantee. Add delegation contracts only with that limitation
   understood; the example policy declares none.
-- Path selectors are not filesystem mediation. Aliases, symlinks and alternate
-  read tools reach `*/private/*` without its selector; the example's shell
-  `delta` covers shells only.
+- A file the path rules do not name is public until a call reads labelled
+  data. `apply_patch` names its files inside its text, so the file-tracker does
+  not see them; the example requires a trusted session instead.
+- A package's install script can send what its command reads to the registry
+  the command declares.
 - The proxy checks the connections routed through it. Proxy variables are
-  advisory: a program that ignores them, raw sockets, and DNS queries leave the
-  orb directly. An egress firewall that admits only the proxy closes that path,
-  but Amp's own executor shares the agent's user and process group in an orb and
-  needs direct access to Amp, so such a firewall must exempt Amp's endpoints.
-  An agent's shell can reach those endpoints too.
+  advisory for processes outside SafeBash: a program that ignores them, raw
+  sockets, and DNS queries leave the orb directly. An egress firewall that
+  admits only the proxy closes that path, but Amp's own executor shares the
+  agent's user in an orb and needs direct access to Amp, so such a firewall must
+  exempt Amp's endpoints.
+- An idle orb can be deleted. The next one restores the thread's git changes,
+  but not the runtime's database or the file-tracker's store, so it starts the
+  thread without its label. Keep the database outside the orb's disposable
+  state, or start a new thread for protected work.
 - Amp, its plugin host, the runtime, and other installed plugins are trusted.
   Disabling amppa removes protection. Plugin crash/unload behavior and hook
   ordering between plugins are host limitations, not guarantees supplied here.
@@ -206,7 +281,7 @@ policy and database if you intend to resume protected threads later.
 From the repository root, with Bun installed:
 
 ```sh
-cargo test --locked -p appa-adapter-amp -p appa-runtime-api
+cargo test --locked -p appa-adapter-amp -p appa-runtime-api -p appa-file-tracker
 cargo build --locked -p appa
 bun test integrations/amp
 ```
@@ -216,7 +291,10 @@ runtime with disposable data. It checks audience and trust denials, successful
 reads, output sanitization, failures, cancellation, parallel result correlation,
 persistence across a runtime restart, files sent to another thread, and proxied
 connections: refused before the host receives a request, and labelled before
-the answer is relayed. Its MCP client follows remedy offers
+the answer is relayed. It checks that SafeBash calls carry the labels of the
+files they declare, and that package registries stay reachable after a
+credential read. Where `srt` is installed, it runs one SafeBash command and
+checks that an undeclared credential stays hidden. Its MCP client follows remedy offers
 directly; this does not test Amp's MCP discovery or human-approval UI. It makes
 no inference calls. A successful `amp plugins exec` exit alone is not evidence
 that the installed Amp version delivered the requested hook.
