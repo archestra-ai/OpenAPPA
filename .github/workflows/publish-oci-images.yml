@@ -112,14 +112,14 @@ jobs:
       packages: write # Required to push to the ghcr.io/archestra-ai/ci staging packages.
     steps:
       - name: Checkout project
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.checkout_ref }}
           persist-credentials: false
           fetch-depth: 1
 
       - name: Log in to GHCR
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -139,12 +139,12 @@ jobs:
           df -h /
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+        uses: docker/setup-buildx-action@v4.4.0
 
       - name: Build and push appa-runtime leg
         if: ${{ matrix.image == 'appa-runtime' }}
         id: build-runtime
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
           file: appa-runtime/Dockerfile
@@ -164,7 +164,7 @@ jobs:
       - name: Build and push appa-kagent-adk leg
         if: ${{ matrix.image == 'appa-kagent-adk' }}
         id: build-adk
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: integrations/kagent/appa-kagent-adk
           platforms: ${{ matrix.platform }}
@@ -181,7 +181,7 @@ jobs:
       - name: Build and push appa-demo-tools leg
         if: ${{ matrix.image == 'appa-demo-tools' }}
         id: build-tools
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: integrations/kagent/demo
           platforms: ${{ matrix.platform }}
@@ -198,7 +198,7 @@ jobs:
       - name: Build and push appa-demo-mocks leg
         if: ${{ matrix.image == 'appa-demo-mocks' }}
         id: build-mocks
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: integrations/kagent/demo/mocks
           platforms: ${{ matrix.platform }}
@@ -228,7 +228,7 @@ jobs:
           touch "/tmp/digests/${DIGEST#sha256:}"
 
       - name: Upload image digest
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: digests-${{ matrix.image }}-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -254,45 +254,45 @@ jobs:
       appa_demo_mocks_digest: ${{ steps.merge.outputs.appa_demo_mocks_digest }}
     steps:
       - name: Checkout project
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.checkout_ref }}
           persist-credentials: false
           fetch-depth: 1
 
       - name: Download appa-runtime digests
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: digests-appa-runtime-*
           path: /tmp/digests/appa-runtime
           merge-multiple: true
 
       - name: Download appa-kagent-adk digests
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: digests-appa-kagent-adk-*
           path: /tmp/digests/appa-kagent-adk
           merge-multiple: true
 
       - name: Download appa-demo-tools digests
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: digests-appa-demo-tools-*
           path: /tmp/digests/appa-demo-tools
           merge-multiple: true
 
       - name: Download appa-demo-mocks digests
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: digests-appa-demo-mocks-*
           path: /tmp/digests/appa-demo-mocks
           merge-multiple: true
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+        uses: docker/setup-buildx-action@v4.4.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -365,7 +365,7 @@ jobs:
           done
 
       - name: Attest appa-runtime provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/appa-runtime
           subject-digest: ${{ steps.merge.outputs.appa_runtime_digest }}
@@ -373,7 +373,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest appa-kagent-adk provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/appa-kagent-adk
           subject-digest: ${{ steps.merge.outputs.appa_kagent_adk_digest }}
@@ -381,7 +381,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest appa-demo-tools provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/appa-demo-tools
           subject-digest: ${{ steps.merge.outputs.appa_demo_tools_digest }}
@@ -389,7 +389,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest appa-demo-mocks provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/appa-demo-mocks
           subject-digest: ${{ steps.merge.outputs.appa_demo_mocks_digest }}
@@ -397,7 +397,7 @@ jobs:
           create-storage-record: false
 
       - name: Upload shared image identities
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: generation-images-shared
           path: /tmp/appa-generation-images/*.json
@@ -417,14 +417,14 @@ jobs:
       go_digest: ${{ steps.go-image.outputs.digest }}
     steps:
       - name: Checkout project
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ inputs.checkout_ref }}
           persist-credentials: false
           fetch-depth: 1
 
       - name: Log in to GHCR
-        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -444,7 +444,7 @@ jobs:
           df -h /
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+        uses: docker/setup-buildx-action@v4.4.0
 
       - name: Resolve image tags
         id: tags
@@ -495,7 +495,7 @@ jobs:
       - name: Build and push appa-kagent-adk-go
         id: adk-go
         if: steps.tags.outputs.published_digest == ''
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        uses: docker/build-push-action@v7.4.0
         with:
           context: integrations/kagent/appa-kagent-adk-go
           platforms: linux/amd64
@@ -545,7 +545,7 @@ jobs:
             > /tmp/appa-generation-images/go.json
 
       - name: Attest appa-kagent-adk-go provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/appa-kagent-adk-go
           subject-digest: ${{ steps.go-image.outputs.digest }}
@@ -553,7 +553,7 @@ jobs:
           create-storage-record: false
 
       - name: Attest golang-adk provenance
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        uses: actions/attest-build-provenance@v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/golang-adk
           subject-digest: ${{ steps.go-image.outputs.digest }}
@@ -561,7 +561,7 @@ jobs:
           create-storage-record: false
 
       - name: Upload Go image identity
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: generation-images-go
           path: /tmp/appa-generation-images/go.json

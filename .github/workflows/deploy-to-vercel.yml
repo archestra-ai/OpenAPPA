@@ -40,13 +40,13 @@ jobs:
       cancel-in-progress: false
     steps:
       - name: Checkout project
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
 
       - name: Deploy production
-        uses: archestra-ai/.github/actions/vercel-deploy@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
+        uses: archestra-ai/.github/actions/vercel-deploy@v1.13.6
         with:
           token: ${{ secrets.VERCEL_TOKEN }}
           org-id: ${{ vars.VERCEL_ORG_ID }}
