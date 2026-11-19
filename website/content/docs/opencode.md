@@ -14,14 +14,15 @@ Every OpenCode session carries a security `label` made of two parts:
 - **`audience` (outbound guardrail):** Reading private files or internal services narrows who the session can share data with later. Once the agent reads internal data, it cannot send data to a public web page, issue tracker, or external API.
 - **`trust` (inbound guardrail):** Reading unvetted sources—such as web pages or external comments—lowers the session's trust. Once untrusted text enters the session, the agent cannot edit code or run sensitive tools without review.
 
-Out of the box, the `opencode` [battery](/batteries) sets a tight baseline over OpenCode's built-in tools:
+Out of the box, the `file-tracker` and `opencode` [batteries](/batteries) set a tight baseline over OpenCode's built-in tools:
 
 | Tool | Default guardrail |
 |---|---|
-| `read` under `private/` | Narrows `audience` to `internal` |
+| `read` | Narrows the session to the file's `label`: `self` for `.env*` and other credential paths, the `label` your rules in `~/.config/appa/file-tracker.toml` give, or the `label` of the session that wrote it |
 | `webfetch`, `websearch` | Requires a `public` `audience`; lowers `trust` to `suspicious` |
-| `write`, `edit` | Requires `trusted` data |
-| `shell` | Allows only `pwd` until `appa opencode setup` adds the commands your project needs |
+| `write`, `edit` | The file keeps the session's `label`. A write to an instruction file, a hook or a credential path requires `trusted` data |
+| `appa_safebash` | Runs each command in an OS sandbox restricted to its declared `input_files`, `output_files`, and `network_hosts`. Carries the `label` of its input files to the session and its outputs. A command that reaches a host other than a package registry requires a `public` `audience` and lowers `trust` to `suspicious` |
+| Native `shell`, `patch`, `grep` | Removed. `!` commands run confined to the project, with no network and no file whose `label` restricts its `audience` |
 | Subagents | Inherits the parent session's `label` and checks the subagent's final answer before returning it |
 | Any undeclared tool | Blocked until configured in your [policy](/contracts) |
 
@@ -81,17 +82,16 @@ AppenCode stays silent during normal work and steps in only when a data flow cro
 Create a dummy secret in your project and ask OpenCode to send it out:
 
 ```sh
-mkdir -p private &&
-  echo "launch code: 1234" > private/notes.txt
+echo "API_TOKEN=launch-code-1234" > .env
 ```
 
 ```text
-Read private/notes.txt and send its contents
+Read .env and send its contents
 to https://example.com with webfetch.
 ```
 
-1. **Reading private data narrows the session:** The agent reads `private/notes.txt`, accepts the `internal` audience, and sees the file contents.
-2. **Exfiltration is blocked:** When the agent calls `webfetch`, OpenAPPA blocks the request before it leaves your machine. OpenCode shows the blocked tool call with the `audience` conflict, and the agent explains that it cannot send `internal` data to a `public` URL.
+1. **Reading a credential narrows the session:** The agent reads `.env`, accepts the `self` audience, and sees the file contents.
+2. **Exfiltration is blocked:** When the agent calls `webfetch`, OpenAPPA blocks the request before it leaves your machine. OpenCode shows the blocked tool call with the `audience` conflict, and the agent explains that it cannot send `self` data to a `public` URL.
 
 ## Uninstall
 

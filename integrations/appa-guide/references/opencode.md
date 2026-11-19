@@ -34,7 +34,7 @@ belongs to setup, not the proposed coding policy.
 ## Inspect and propose
 
 Run `inspect`. Read its root policy, included paths, coverage, and catalog.
-Read the `opencode` battery with `battery`. Its response also supplies the
+Read the `file-tracker` and `opencode` batteries with `battery`. The response also supplies the
 installed policy reference. Read every other battery relevant to the observed
 MCP identities before proposing its inclusion. The catalog lists supported
 hosts; include only batteries that list `opencode`.
@@ -71,10 +71,18 @@ GitHub battery directory, with the runtime's environment. Explain that validatio
 checks policy structure, not provider credentials or repository access. Do not
 claim readiness from successful publication alone.
 
-The initial OpenCode battery covers selected file, web, shell, and delegation
-tools. It permits only `pwd` through the shell. Explain that limitation and
-propose narrowly scoped root contracts for needed commands. Do not add a
-universal shell rule to make setup work. Identify private paths and public
+The initial OpenCode batteries cover selected file, web, sandboxed shell, and
+delegation tools. Keep `batteries/file-tracker/appa.toml` before
+`batteries/opencode/appa.toml` in `include`: the first matching rule decides,
+and the `opencode` battery maps the file-tracker's tools onto OpenCode's. AppenCode removes the native `shell`, `patch` and `grep` tools. Commands
+run through `appa_safebash`, whose sandbox limits each command to its declared
+`input_files`, `output_files` and `network_hosts`. The `file-tracker` Annotator
+and recorder label files for `read`, `write`, `edit` and `appa_safebash`. Classify
+private paths in `~/.config/appa/file-tracker.toml`, not with per-path contracts.
+Keep the root policy's `[externals.annotators.file-tracker]` and
+`[externals.recorders.file-tracker]` bindings in every proposal; the battery names
+the file-tracker but cannot bind it.
+Do not add a universal `appa_safebash` rule to make setup work. Identify private paths and public
 destinations with the operator when tool descriptions cannot establish them.
 
 `appa_subagent` is the only child-launch identity. `background: true` returns

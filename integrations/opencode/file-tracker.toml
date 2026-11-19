@@ -1,0 +1,12 @@
+# A sample file-tracker configuration for AppenCode. Copy it to
+# `~/.config/appa/file-tracker.toml`: the annotator, the recorder, the
+# appa_safebash sandbox and `appa file-tracker labels` all read that one file.
+# These rules add to the plugin's built-in ones, which already label `.env*`
+# and other credential paths as `self` and require a trusted session to write
+# instructions and hooks. A pattern with a `/` matches the resolved absolute
+# path; `*` matches any run of characters, `/` included.
+
+# Files under a `private/` directory start as `internal`.
+[[path]]
+pattern = "*/private/*"
+audience = ["internal"]

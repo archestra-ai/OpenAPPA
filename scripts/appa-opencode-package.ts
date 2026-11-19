@@ -37,9 +37,10 @@ description = "AppenCode gates OpenCode V2 tool calls and emissions through the 
 host = "opencode"
 protocol = 1
 default_policy = "default.appa.toml"
-batteries = ["opencode"]
+# The file-tracker's rules precede the opencode rules for the tools both name.
+batteries = ["file-tracker", "opencode"]
 `)
-files.set('default.appa.toml', `include = ["batteries/opencode/appa.toml"]
+files.set('default.appa.toml', `include = ["batteries/file-tracker/appa.toml", "batteries/opencode/appa.toml"]
 
 [policy]
 version = 2
@@ -50,6 +51,16 @@ context_control = true
 [externals]
 timeout_ms = 2000
 max_body_bytes = 65536
+
+# The file-tracker battery routes read, write, edit and appa_safebash through
+# the file-tracker, which the \`appa\` executable serves. To turn file tracking
+# off, run \`appa battery remove file-tracker\`: these bindings then stay idle,
+# and the opencode battery's own rules decide those tools.
+[externals.annotators.file-tracker]
+command = ["appa", "file-tracker", "annotate"]
+
+[externals.recorders.file-tracker]
+command = ["appa", "file-tracker", "record"]
 `)
 let stale = false
 for (const [path, text] of files) {

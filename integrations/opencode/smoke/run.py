@@ -268,7 +268,11 @@ def run(output):
     (project / "private/smoke.txt").write_text(marker)
     (output / "appa.toml").write_bytes((HERE.parent / "appa.toml").read_bytes())
     home = output / "home"
-    home.mkdir()
+    # The file tracker reads the person's configuration, here the sample's private/ rule.
+    (home / "config/appa").mkdir(parents=True)
+    (home / "config/appa/file-tracker.toml").write_bytes(
+        (HERE.parent / "file-tracker.toml").read_bytes()
+    )
     # Whitelist environment, rather than inheriting credentials, providers or config.
     env = {
         "PATH": os.environ["PATH"],
