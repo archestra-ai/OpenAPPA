@@ -69,8 +69,12 @@ rules here decide a call.
 - **read_file** — Reading a hidden path, a credential file, a private key, or
   a system secret location narrows the session to `self`: nothing built from
   it reaches a sink that requires `internal` or `public`. The rules match the
-  path as written, absolute or relative. Other paths keep the session's
-  label. No rule blocks a read or lowers its trust.
+  path as written, absolute or relative. As in the file-tracker's built-in
+  path rules, a committed env template (`.env.example`, `.env.sample`,
+  `.env.template`) and source code or a schema named for credentials or
+  secrets (`bedrock-credentials.ts`, `secrets.schema.json`) hold none and keep
+  the session's label, as other paths do. No rule blocks a read or lowers its
+  trust.
 - **search_files** — A search inside one of the same paths is a read of it
   and narrows the session to `self`. A search over a directory that holds
   such a file is not matched; only the path as written is.

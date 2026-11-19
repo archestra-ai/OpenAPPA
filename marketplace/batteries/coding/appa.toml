@@ -1739,6 +1739,14 @@ annotator = "claude-code.bash-requirements"
 # written name. Hidden names are listed one by one: a selector for every
 # dot-prefixed path would also match `./src/main.rs`. Every other path keeps
 # the session's label. No rule blocks a read or lowers its trust.
+
+# A committed env template holds placeholders, not the requester's values, so
+# it keeps the session's label although `.env*` below matches it, as in the
+# file-tracker's built-in path rules.
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*/.env*.example|*/.env*.sample|*/.env*.template|.env*.example|.env*.sample|.env*.template)"
+delta = {}
+
 [[policy.tool]]
 name = "tool/coding/read_file(file_path:*/.env*)"
 delta = { audience = ["self"] }
@@ -1887,6 +1895,18 @@ delta = { audience = ["self"] }
 name = "tool/coding/read_file(file_path:*_history)"
 delta = { audience = ["self"] }
 
+# Source code and schemas name credentials and secrets without holding them,
+# so they keep the session's label, as in the file-tracker's built-in path
+# rules; so does the sanitizer benchmark's corpus. A data file with such a name
+# (`credentials.json`, `secrets.yaml`, a bare `credentials`) narrows below.
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*credentials*.rs|*credentials*.go|*credentials*.py|*credentials*.rb|*credentials*.php|*credentials*.java|*credentials*.kt|*credentials*.scala|*credentials*.swift|*credentials*.cs|*credentials*.c|*credentials*.h|*credentials*.cc|*credentials*.cpp|*credentials*.hpp|*credentials*.js|*credentials*.mjs|*credentials*.cjs|*credentials*.jsx|*credentials*.ts|*credentials*.tsx|*credentials*.schema.json)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/read_file(file_path:*secrets*.rs|*secrets*.go|*secrets*.py|*secrets*.rb|*secrets*.php|*secrets*.java|*secrets*.kt|*secrets*.scala|*secrets*.swift|*secrets*.cs|*secrets*.c|*secrets*.h|*secrets*.cc|*secrets*.cpp|*secrets*.hpp|*secrets*.js|*secrets*.mjs|*secrets*.cjs|*secrets*.jsx|*secrets*.ts|*secrets*.tsx|*secrets*.schema.json|*/bench/sanitizer/corpus/*secrets*|bench/sanitizer/corpus/*secrets*)"
+delta = {}
+
 [[policy.tool]]
 name = "tool/coding/read_file(file_path:*credentials*)"
 delta = { audience = ["self"] }
@@ -1975,6 +1995,14 @@ delta = {}
 # paths as the Read rules narrow the session to `self`. A search over a
 # directory that happens to hold one of these files is not matched; only the
 # path as written is.
+
+# A committed env template holds placeholders, not the requester's values, so
+# it keeps the session's label although `.env*` below matches it, as in the
+# file-tracker's built-in path rules.
+[[policy.tool]]
+name = "tool/coding/search_files(path:*/.env*.example|*/.env*.sample|*/.env*.template|.env*.example|.env*.sample|.env*.template)"
+delta = {}
+
 [[policy.tool]]
 name = "tool/coding/search_files(path:*/.env*)"
 delta = { audience = ["self"] }
@@ -2122,6 +2150,18 @@ delta = { audience = ["self"] }
 [[policy.tool]]
 name = "tool/coding/search_files(path:*_history)"
 delta = { audience = ["self"] }
+
+# Source code and schemas name credentials and secrets without holding them,
+# so they keep the session's label, as in the file-tracker's built-in path
+# rules; so does the sanitizer benchmark's corpus. A data file with such a name
+# (`credentials.json`, `secrets.yaml`, a bare `credentials`) narrows below.
+[[policy.tool]]
+name = "tool/coding/search_files(path:*credentials*.rs|*credentials*.go|*credentials*.py|*credentials*.rb|*credentials*.php|*credentials*.java|*credentials*.kt|*credentials*.scala|*credentials*.swift|*credentials*.cs|*credentials*.c|*credentials*.h|*credentials*.cc|*credentials*.cpp|*credentials*.hpp|*credentials*.js|*credentials*.mjs|*credentials*.cjs|*credentials*.jsx|*credentials*.ts|*credentials*.tsx|*credentials*.schema.json)"
+delta = {}
+
+[[policy.tool]]
+name = "tool/coding/search_files(path:*secrets*.rs|*secrets*.go|*secrets*.py|*secrets*.rb|*secrets*.php|*secrets*.java|*secrets*.kt|*secrets*.scala|*secrets*.swift|*secrets*.cs|*secrets*.c|*secrets*.h|*secrets*.cc|*secrets*.cpp|*secrets*.hpp|*secrets*.js|*secrets*.mjs|*secrets*.cjs|*secrets*.jsx|*secrets*.ts|*secrets*.tsx|*secrets*.schema.json|*/bench/sanitizer/corpus/*secrets*|bench/sanitizer/corpus/*secrets*)"
+delta = {}
 
 [[policy.tool]]
 name = "tool/coding/search_files(path:*credentials*)"
