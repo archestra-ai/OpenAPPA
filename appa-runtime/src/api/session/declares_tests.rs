@@ -741,11 +741,16 @@ async fn a_deferred_child_that_narrowed_is_answered_deferred_at_its_stop_and_not
     assert!(
         matches!(
             child.on_child_end(Some("the answer".to_string())).await,
-            Ok(ChildReturnDecision::Blocked { .. })
+            Ok(ChildReturnDecision::Deferred)
         ),
-        "the deferral ended the child's errand"
+        "a repeated stop is answered as the deferral that ended the errand"
     );
+    assert!(matches!(
+        child.on_child_end(None).await,
+        Ok(ChildReturnDecision::NoValue)
+    ));
     assert_eq!(deferred_returns(&runtime), 1);
+    assert_eq!(crossings(&runtime), 0);
 }
 
 #[tokio::test]
@@ -933,4 +938,73 @@ async fn a_deferred_spawns_result_before_its_childs_stop_is_withheld() {
         .expect("the result is decided");
     assert!(matches!(decided, ToolResultDecision::Replace { .. }), "{decided:?}");
     assert_eq!(admitted(&runtime), 0);
+}
+
+#[tokio::test]
+async fn a_deferred_spawns_result_reported_after_its_acceptance_still_carries_the_notice() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (child, notice) = deferred_answer(&runtime).await;
+    settling(&runtime, &parent(), &notice.accept).await;
+    let before = admitted(&runtime);
+    let decided = session(&runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            spoken("the answer"),
+            Some(child.trajectory.clone()),
+            Some("the answer".to_string()),
+        )
+        .await
+        .expect("the spawn's result is decided");
+    assert_eq!(
+        decided,
+        SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+            placeholder: notice.feedback,
+            presentation: None,
+        })
+    );
+    assert_eq!(admitted(&runtime), before);
+}
+
+#[tokio::test]
+async fn a_deferred_spawns_reported_failure_closes_its_dispatch_as_failed() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (child, notice) = deferred_answer(&runtime).await;
+    let before = admitted(&runtime);
+    let failed = || ToolOutcome::Failure {
+        message: "boom".to_string(),
+    };
+    let decided = session(&runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            failed(),
+            Some(child.trajectory.clone()),
+            Some("the answer".to_string()),
+        )
+        .await
+        .expect("the spawn's result is decided");
+    assert_eq!(
+        decided,
+        SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+            placeholder: notice.feedback,
+            presentation: None,
+        })
+    );
+    assert_eq!(
+        facts(&runtime, |fact| matches!(
+            fact,
+            Fact::DispatchClosed {
+                outcome: appa_engine::fact::CloseOutcome::Failure
+                    | appa_engine::fact::CloseOutcome::FailureWithBody { .. },
+                ..
+            }
+        )),
+        1
+    );
+    session(&runtime)
+        .on_tool_result_identified(call("fetch", 1), Some("toolu-1".to_string()), failed())
+        .await
+        .expect("the same failure reported again does not contradict the close");
+    assert_eq!(admitted(&runtime), before);
 }

@@ -30,7 +30,14 @@ fn label_of(e: &Engine, log: &[Fact], trajectory: &TrajectoryId) -> Label {
 /// A parent with `child` spawned under a deferred return.
 fn deferring_family(e: &Engine, child: &TrajectoryId) -> Vec<Fact> {
     let parent = vec![opened(e)];
-    let forked = spawn_family_marked(e, &parent, child, ReturnPolicy::Deferred, SpawnMark::deferred(0));
+    let forked = spawn_family_marked(
+        e,
+        &parent,
+        &traj(),
+        child,
+        ReturnPolicy::Deferred,
+        SpawnMark::deferred(0),
+    );
     [parent, forked].concat()
 }
 
@@ -161,6 +168,52 @@ fn discarding_a_deferred_return_crosses_nothing() {
     assert_eq!(again.follow_up, FollowUp::Settlement(SettlementFollowUp::Discarded));
 }
 
+/// The value freezes at `suspicious`, the middle rank; the next revision drops the rank below
+/// it, so `suspicious` moves to the lowest ordinal and the frozen ordinal names `trusted` there.
+#[test]
+fn a_frozen_return_crosses_into_a_later_revision_s_trust_chain() {
+    let read = suspicious_internal_read();
+    let mut cfg = returning_registry(vec![]);
+    cfg.trust_chain = TrustChain::new(vec!["untrusted".into(), "suspicious".into(), "trusted".into()]);
+    cfg.tools = declared(vec![ToolAnnotation {
+        delta: Delta {
+            trust: Some(Trust::new(1)),
+            ..read.delta.clone()
+        },
+        ..read
+    }]);
+    let first = open_engine(cfg);
+    let second = open_engine(returning_registry(vec![])).at(DeploymentName::new("default"), PolicyRevision::new(2));
+    let child = TrajectoryId::new("child");
+    let log = frozen_family(&first, &child, "the answer");
+    let batches = [StampedBatch {
+        revision: Some(PolicyRevision::FIRST),
+        facts: &log,
+    }];
+    let view = second.replay(&traj(), &batches, &[&first]).expect("the log replays");
+    let crossed = view.views(&child).expect("the child is opened").current_label();
+    let root = traj();
+    let parent = view.views(&root).expect("the parent is opened");
+    assert_eq!(
+        parent
+            .deferral(&ChildReturnId::new(child.clone(), 0))
+            .map(|deferral| &deferral.label),
+        Some(&crossed)
+    );
+    let from = parent.current_label();
+
+    let accepted = appended_facts(
+        second
+            .handle(&view, settle(&child, 0, ReturnDecision::Accept))
+            .expect("the parent accepts the frozen value"),
+    );
+    assert!(matches!(
+        declared_records(&accepted),
+        [Fact::ReturnAccepted { narrowing, .. }, ..]
+            if narrowing.from == from && narrowing.to == from.combine(&crossed)
+    ));
+}
+
 #[test]
 fn a_deferred_return_that_leaves_the_parent_where_it_is_crosses_at_the_stop() {
     let e = open_engine(returning_registry(vec![]));
@@ -185,6 +238,67 @@ fn a_deferred_return_that_leaves_the_parent_where_it_is_crosses_at_the_stop() {
     assert_eq!(
         e.handle(&viewing(&e, &log), settle(&child, 0, ReturnDecision::Accept)),
         Err(TransitionError::NoDeferredReturn)
+    );
+}
+
+/// The grandchild's deferral stands under its parent's floor, whose sanitizer leaves trust
+/// unbound at revision 1; revision 2 drops the sanitizer, so the floor binds trust there.
+#[test]
+fn a_deferred_return_that_crosses_at_the_stop_is_held_to_the_inherited_floor() {
+    let first = open_engine(returning_registry(vec![lifting_sanitizer("scrubber")]));
+    let second = open_engine(returning_registry(vec![])).at(DeploymentName::new("default"), PolicyRevision::new(2));
+    let (child, grandchild) = (TrajectoryId::new("child"), TrajectoryId::new("grandchild"));
+    let root = vec![opened(&first)];
+    let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+        sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("scrubber"))),
+        ..floor_crossing(&first, &root)
+    });
+    let mut log = [root.clone(), spawn_family_at(&first, &root, &child, policy)].concat();
+    reads(&first, &mut log, &child, "read_suspicious");
+    log.extend(spawn_family_marked(
+        &first,
+        &log,
+        &child,
+        &grandchild,
+        ReturnPolicy::Deferred,
+        SpawnMark::deferred(0),
+    ));
+    let recorded = StampedBatch {
+        revision: Some(PolicyRevision::FIRST),
+        facts: &log,
+    };
+    let view = second.replay(&traj(), &[recorded], &[&first]).expect("the log replays");
+    assert_eq!(
+        second.handle(&view, stop(&log, &grandchild, "done")),
+        Err(TransitionError::ReturnBelowFloor {
+            floor: Label::new(TRUSTED, Audience::public())
+        })
+    );
+
+    let crossed = first
+        .handle(&viewing(&first, &log), stop(&log, &grandchild, "done"))
+        .expect("the sanitizer leaves the floor's trust unbound");
+    assert_eq!(
+        crossed.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged {
+            admitted: ValueBody::new("done")
+        })
+    );
+    let mut restamped = appended_facts(crossed);
+    let Some(Fact::BasisAdvanced { revision, .. }) = restamped.first_mut() else {
+        panic!("a decided batch leads with its declaration");
+    };
+    *revision = Some(PolicyRevision::new(2));
+    let batches = [
+        recorded,
+        StampedBatch {
+            revision: Some(PolicyRevision::new(2)),
+            facts: &restamped,
+        },
+    ];
+    assert_eq!(
+        second.replay(&traj(), &batches, &[&first]).err(),
+        Some(ReplayRefusal::Transition(TransitionRefusal::ReturnBelowFloor))
     );
 }
 
@@ -467,6 +581,95 @@ fn spending_one_class_s_covering_approval_leaves_the_other_class_s_declaration_s
         "the standing declaration is not declared again: {offered:?}"
     );
     assert_eq!(e.validate_replay(&[log, retried].concat()), Ok(()));
+}
+
+/// A deferred spawn's own output reaches the parent only by its child's return: a forged log
+/// that derives a sanitized result from it and admits that admits nothing.
+#[test]
+fn a_sanitized_result_of_a_deferred_spawn_s_own_dispatch_does_not_replay() {
+    let mut cfg = returning_registry(vec![lifting_sanitizer("redactor")]);
+    cfg.tools = declared(vec![read_tool(
+        "spawn",
+        Delta {
+            trust: Some(SUSPICIOUS),
+            audience: None,
+        },
+    )]);
+    let e = open_engine(cfg);
+    let log = vec![opened(&e)];
+    let log = [
+        log.clone(),
+        declare_gapped(&e, &log, "deferring-1", SpawnMark::deferred(0), ReturnPolicy::Deferred),
+    ]
+    .concat();
+    let retried = appended_facts(
+        e.handle(&viewing(&e, &log), gapped("deferring-2", SpawnMark::deferred(0)))
+            .expect("the narrowing spawn blocks"),
+    );
+    let (offer, _) = opened_offers(&retried)
+        .into_iter()
+        .find(|(_, plan)| plan.sanitizer().is_some())
+        .expect("the narrowing is offered the output sanitizer");
+    let log = [log, retried].concat();
+    let sanitized = appended_facts(
+        execute_offer_declaring(&e, &log, offer, OfferOutcome::Approved(Vec::new()), None)
+            .expect("the sanitizer is bound without a ruling"),
+    );
+    let log = [log, sanitized].concat();
+    let released = e
+        .handle(&viewing(&e, &log), gapped("deferring-3", SpawnMark::deferred(0)))
+        .expect("the proposal decides");
+    let dispatch = match answered(&released) {
+        ([release], []) => release.dispatch.clone(),
+        other => panic!("the declared, sanitized spawn releases, got {other:?}"),
+    };
+    let log = [log, appended_facts(released)].concat();
+    assert_eq!(e.validate_replay(&log), Ok(()));
+
+    let derived = LabeledValue::new(ValueBody::new("clean"), Label::new(TRUSTED, Audience::public()));
+    let sanitizer = SanitizerName::new("redactor");
+    let records = vec![
+        Fact::DispatchClosed {
+            trajectory: traj(),
+            dispatch: dispatch.clone(),
+            outcome: crate::fact::CloseOutcome::Success {
+                effects: EffectSet::default(),
+            },
+        },
+        Fact::CandidateDerived {
+            trajectory: traj(),
+            subject: crate::basis::SubjectKey::ConfinedResult(dispatch.clone()),
+            sanitizer: sanitizer.clone(),
+            derived: DerivedCandidate::Result {
+                dispatch: dispatch.clone(),
+                source: RawResultDigest::of(b"raw"),
+                from: crate::candidate::ConfinedFrom::Bound,
+                value: derived.clone(),
+                residual: None,
+            },
+            lineage: crate::candidate::SanitizerLineage::default()
+                .extend(sanitizer)
+                .expect("an empty lineage spends no sanitizer yet"),
+            evidence: crate::audience::AudienceEvidence::default(),
+        },
+        Fact::ValueAdmitted {
+            trajectory: traj(),
+            value: derived,
+            provenance: Provenance::ToolResult {
+                dispatch: dispatch.clone(),
+            },
+        },
+    ];
+    let declared = Fact::BasisAdvanced {
+        trajectory: traj(),
+        act: crate::basis::DecidedAct::Outcome(dispatch),
+        advance: crate::transition::Sequence::advance_of(&e, &viewing(&e, &log), &records),
+        revision: e.revision(),
+    };
+    assert_eq!(
+        e.validate_replay(&[log, vec![declared], records].concat()),
+        Err(TransitionRefusal::ForgedLabel)
+    );
 }
 
 #[test]

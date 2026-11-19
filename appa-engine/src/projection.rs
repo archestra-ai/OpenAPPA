@@ -401,6 +401,7 @@ impl Projection {
         for returned in self.child_returns.iter_mut() {
             returned.value.label.cross_value(crossing);
         }
+        each_mut(&mut self.deferrals, |deferral| deferral.label.cross_value(crossing));
         each_mut(&mut self.resumed, |label| label.cross_value(crossing));
         if let Some((_, label)) = self.opening.as_mut() {
             label.cross_value(crossing);

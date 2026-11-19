@@ -3298,7 +3298,8 @@ enum Admission {
 /// The control call's arguments as a model spells them — `offer_id`, and for a plan
 /// declaring a subagent's return `label` and `return_schema` — for a harness that routes the
 /// control tool itself. No `offer_id` is a declaration ahead of the spawn, which
-/// [`Runtime::declare_return_ahead`] takes.
+/// [`Runtime::declare_return_ahead`] takes. An `offer_id` that settles a deferred return is not
+/// an offer and is refused here: [`Runtime::execute_embedded_remedy`] takes it as written.
 pub fn parse_control_arguments(arguments: &str) -> Result<(Option<OfferId>, RemedyArguments), String> {
     let args: ExecuteRemedyPlanArgs =
         serde_json::from_str(arguments).map_err(|error| format!("execute_remedy_plan arguments: {error}"))?;

@@ -2741,7 +2741,7 @@ impl RuntimeEngine {
              session's label with that label. Decide once:\n  \
              Accept:  {control}(offer_id: \"{accept}\")\n  \
              Discard: {control}(offer_id: \"{discard}\")",
-            label = self.label_text(&deferred.label),
+            label = frozen_label(&deferred.label, self.engine.registry().trust_chain()),
             accept = quote(ReturnDecision::Accept).as_str(),
             discard = quote(ReturnDecision::Discard).as_str(),
         )
@@ -4456,6 +4456,18 @@ fn audience_count(audience: &Audience) -> String {
     }
     let clause = audience.clauses().next().expect("a non-public audience holds a clause");
     clause_count(clause)
+}
+
+/// A deferred return's label as its parent reads it before deciding: the trust name and the
+/// audience's shape. The child's own calls chose the audience's groups and readers, so
+/// naming one would carry the child's data to the parent ahead of its acceptance.
+fn frozen_label(label: &Label, chain: &TrustChain) -> String {
+    let audience = match label.audience.clauses().count() {
+        0 => "public".to_string(),
+        1 => "a restricted audience".to_string(),
+        clauses => format!("an intersection of {clauses} audiences"),
+    };
+    format!("{}/{audience}", trust_feedback(label.trust, chain))
 }
 
 /// Summarizes a clause: symbolic audiences by their policy names, readers as a count only.
@@ -6777,6 +6789,28 @@ mod tests {
             audience_wire(&symbolic),
             "alice ∩ internal,@finance",
             "clauses intersect in canonical order; each clause unions its spelled atoms",
+        );
+    }
+
+    #[test]
+    fn a_frozen_label_reads_the_same_whichever_groups_and_readers_the_child_chose() {
+        use crate::engine::frozen_label;
+        use appa_engine::label::{Clause, GroupRef, Label};
+        let chain = TrustChain::new(vec!["suspicious".to_string(), "trusted".to_string()]);
+        let sourced = |selector: &str| {
+            let group = GroupRef::Source {
+                provider: "slack".to_string(),
+                selector: selector.to_string(),
+            };
+            Audience::of_clauses([Clause::new([], [group], []).expect("a sourced clause")])
+        };
+        let frozen = |audience| frozen_label(&Label::new(Trust::new(0), audience), &chain);
+        assert_eq!(frozen(sourced("channel-a")), frozen(sourced("channel-b")));
+        assert_eq!(frozen(restricted(&["alice"])), frozen(restricted(&["bob", "carol"])));
+        assert_ne!(frozen(restricted(&["alice"])), frozen(Audience::public()));
+        assert_ne!(
+            frozen(Audience::public()),
+            frozen_label(&Label::new(Trust::new(1), Audience::public()), &chain)
         );
     }
 

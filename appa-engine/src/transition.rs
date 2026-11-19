@@ -1967,7 +1967,9 @@ impl<'a> Sequence<'a> {
                         .cloned()
                         .collect();
                 // A log an earlier planner wrote offers an undeclared spawn its bundled menu.
+                // No such log carries a deferral mark.
                 if !menu.contains(plan)
+                    && !matches!(role, crate::check::CallRole::MarkedSpawn(class) if class.deferral)
                     && crate::plan::Declaring::of(role, views, candidate) != crate::plan::Declaring::No
                 {
                     let bundled = crate::plan::bundled_spawn_menu(self.engine.registry(), views, blocked(), &context)
@@ -2952,6 +2954,10 @@ impl<'a> Sequence<'a> {
                 if self.projection.admitted_result(dispatch) {
                     return Err(TransitionRefusal::RepeatAdmission);
                 }
+                // A withheld result admits nothing, whatever a sanitizer derived from it.
+                if views.withholds_output(dispatch) {
+                    return Err(TransitionRefusal::ForgedLabel);
+                }
                 let expected = match self.derived.remove(dispatch) {
                     Some(candidate) => {
                         if value != &candidate {
@@ -2977,7 +2983,7 @@ impl<'a> Sequence<'a> {
                             return Err(TransitionRefusal::ForgedLabel);
                         }
                         None => {
-                            if views.bound_sanitizer(dispatch).is_some() || views.withholds_output(dispatch) {
+                            if views.bound_sanitizer(dispatch).is_some() {
                                 return Err(TransitionRefusal::ForgedLabel);
                             }
                             let digest = RawResultDigest::of(value.body.as_str().as_bytes());
@@ -3064,6 +3070,7 @@ impl<'a> Sequence<'a> {
                 if standing.combine(&value.label) != standing {
                     return Err(TransitionRefusal::ReturnBelowFloor);
                 }
+                self.holds_child_floor(child, &value.label)?;
                 self.audit_reads(&expansions);
                 return Ok(());
             }

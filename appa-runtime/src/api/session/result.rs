@@ -268,6 +268,13 @@ impl Session {
                         let next = match (context.fork_status(&fork), &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
                             (ForkStatus::Unprepared | ForkStatus::FanOut, _) => SpawnPlan::Outcome,
+                            // A deferred return answers every report of its spawn with the notice,
+                            // so the report closes the dispatch as what the host says it was.
+                            (ForkStatus::Bound(bound), named)
+                                if deferral.is_some() && named.as_ref().is_none_or(|named| *named == bound) =>
+                            {
+                                SpawnPlan::Outcome
+                            }
                             (ForkStatus::Prepared, Some(child)) => SpawnPlan::Bind {
                                 fork: fork.clone(),
                                 child: child.clone(),
@@ -351,13 +358,10 @@ impl Session {
                     }));
                 }
                 SpawnPlan::Withheld => {
-                    let decided = outcome_decision(decision, &self.deployment().externals)?;
-                    return Ok(match deferral {
-                        Some(_) => SpawnResultDecision::Outcome(deferred_or(deferral, decided)?),
-                        None => SpawnResultDecision::Return(ChildReturnDecision::Blocked {
-                            feedback: UNCHECKED_RETURN.to_string(),
-                        }),
-                    });
+                    outcome_decision(decision, &self.deployment().externals)?;
+                    return Ok(SpawnResultDecision::Return(ChildReturnDecision::Blocked {
+                        feedback: UNCHECKED_RETURN.to_string(),
+                    }));
                 }
             }
         }

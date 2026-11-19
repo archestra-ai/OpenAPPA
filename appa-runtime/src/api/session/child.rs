@@ -162,8 +162,8 @@ impl Session {
     /// replays, a message is held until the child gives it up.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
         match self.child_calls()? {
-            None => Ok(ended_child(value)),
-            Some(open) => self.close_and_cross(open, value).await,
+            ChildCalls::Ended(end) => Ok(ended_child(end, value)),
+            ChildCalls::Open(open) => self.close_and_cross(open, value).await,
         }
     }
 
@@ -174,8 +174,9 @@ impl Session {
         value: Option<String>,
         answered: &BTreeSet<String>,
     ) -> Result<Stop<ChildReturnDecision>, EventError> {
-        let Some(open) = self.child_calls()? else {
-            return Ok(Stop::Taken(ended_child(value)));
+        let open = match self.child_calls()? {
+            ChildCalls::Ended(end) => return Ok(Stop::Taken(ended_child(end, value))),
+            ChildCalls::Open(open) => open,
         };
         match self.unanswered(&open, answered)?.as_slice() {
             [] => self.close_and_cross(open, value).await.map(Stop::Taken),
@@ -183,12 +184,12 @@ impl Session {
         }
     }
 
-    /// The calls a child's end closes; `None` for a child that already ended.
-    fn child_calls(&self) -> Result<Option<Vec<OpenDispatch>>, EventError> {
+    /// The calls a child's end closes, or how a child that already ended did so.
+    fn child_calls(&self) -> Result<ChildCalls, EventError> {
         self.with_view(|context| {
             Ok(match context.engine().liveness(context.view, &self.trajectory) {
-                Liveness::Ended => None,
-                Liveness::Live | Liveness::Unopened => Some(context.open_dispatches()),
+                Liveness::Ended => ChildCalls::Ended(context.child_end(&self.trajectory)),
+                Liveness::Live | Liveness::Unopened => ChildCalls::Open(context.open_dispatches()),
             })
         })
     }
@@ -239,10 +240,23 @@ impl Session {
     }
 }
 
-fn ended_child(value: Option<String>) -> ChildReturnDecision {
-    match value {
-        None => ChildReturnDecision::NoValue,
-        Some(_) => ChildReturnDecision::Blocked {
+enum ChildCalls {
+    Open(Vec<OpenDispatch>),
+    Ended(ChildEnd),
+}
+
+/// How an ended child ended: every later stop repeats what that end answered.
+#[derive(Clone, Copy)]
+pub(super) enum ChildEnd {
+    Void,
+    Deferred,
+}
+
+fn ended_child(end: ChildEnd, value: Option<String>) -> ChildReturnDecision {
+    match (value, end) {
+        (None, _) => ChildReturnDecision::NoValue,
+        (Some(_), ChildEnd::Deferred) => ChildReturnDecision::Deferred,
+        (Some(_), ChildEnd::Void) => ChildReturnDecision::Blocked {
             feedback: ENDED_CHILD.to_string(),
         },
     }

@@ -1295,7 +1295,7 @@ OpenAPPA refuses a `tool_call` that carries `declares` but does not start exactl
 
 #### Deferred returns
 
-A deferred return sets no limit for the child. The parent decides when the child stops, instead of choosing a limit before the child starts. Only a host that delivers a child's answer to the parent itself declares one, with `deferred` in `declares` and neither `label` nor `return_schema`:
+A deferred return sets no limit for the child. The parent decides when the child stops, instead of choosing a limit before the child starts. Only an embedded host that delivers a child's answer to the parent itself declares one, and a served hook that declares it is refused. The declaration is `deferred` in `declares`, with neither `label` nor `return_schema`:
 
 ```json
 { "declares": { "deferred": true } }
@@ -1310,10 +1310,12 @@ The child may read and accept whatever the parent's own limits allow. OpenAPPA d
 The parent decides on a frozen answer once, by calling `execute_remedy_plan`. The deferral notice gives one reference that accepts the answer and one that discards it:
 
 ```text
-[appa] The subagent's answer was deferred. Its label is suspicious/internal; accepting it combines this session's label with that label. Decide once:
+[appa] The subagent's answer was deferred. Its label is suspicious/a restricted audience; accepting it combines this session's label with that label. Decide once:
   Accept:  execute_remedy_plan(offer_id: "ret-5f1c02a9d3e84b77")
   Discard: execute_remedy_plan(offer_id: "ret-9a40c7e1b2d36f05")
 ```
+
+The notice names the answer's trust and whether its audience is restricted, but none of the groups or readers in that audience: the child's own calls chose them.
 
 Accepting returns the answer as the result of that call and combines the parent's label with the answer's label. OpenAPPA refuses an acceptance that would take the parent below a limit the parent itself stands under. Discarding crosses nothing, and a discarded answer cannot be accepted later. Repeating either call answers the recorded decision. Only the trajectory that spawned the child can decide on its answer.
 

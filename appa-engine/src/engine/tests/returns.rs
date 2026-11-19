@@ -1667,3 +1667,24 @@ fn a_pending_offer_the_bundled_planner_recorded_shows_its_own_plan() {
         .collect();
     assert_eq!(shown, bundled, "each pending offer shows the plan it recorded");
 }
+
+#[test]
+fn a_bundled_menu_is_not_backed_for_a_proposal_that_carries_the_deferral() {
+    let e = gapped_spawn_engine();
+    let mut log: Vec<Fact> = serde_json::from_str(include_str!("fixtures/bundled-spawn-log.json"))
+        .expect("a log recorded at the base commit decodes");
+    let end = log
+        .iter()
+        .rposition(|fact| matches!(fact, Fact::OfferOpened { .. }))
+        .expect("the fixture opens offers")
+        + 1;
+    log.truncate(end);
+    let Some(Fact::ProposalBatchDecided { spawn, .. }) = log
+        .iter_mut()
+        .rfind(|fact| matches!(fact, Fact::ProposalBatchDecided { .. }))
+    else {
+        panic!("the bundled block decides a batch");
+    };
+    *spawn = Some(crate::transition::SpawnMark::deferred(0));
+    assert_eq!(e.validate_replay(&log), Err(TransitionRefusal::UnbackedOffer));
+}

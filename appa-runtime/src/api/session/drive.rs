@@ -651,6 +651,19 @@ impl Decided<'_> {
         Some(self.engine().deferral_notice(&deferred, &self.session.presentation))
     }
 
+    pub(super) fn child_end(&self, child: &TrajectoryId) -> super::child::ChildEnd {
+        let deferred = self.parent_of(child).is_some_and(|parent| {
+            self.engine()
+                .deferred_returns(self.view, &parent)
+                .iter()
+                .any(|deferred| deferred.id.child() == child)
+        });
+        match deferred {
+            true => super::child::ChildEnd::Deferred,
+            false => super::child::ChildEnd::Void,
+        }
+    }
+
     pub(super) fn fork_status(&self, fork: &appa_engine::value::ForkId) -> ForkStatus {
         self.engine().fork_status(self.view, fork)
     }

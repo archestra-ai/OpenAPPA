@@ -1089,6 +1089,14 @@ impl WireEvent {
                         identified.canonical
                     )));
                 }
+                // Settling a deferred return takes the embedded caller's stamped trajectory,
+                // which no served control call carries.
+                if matches!(declares, Some(crate::DeclaredReturn::Deferred)) {
+                    return Err(malformed(format!(
+                        "a deferred return declared on {}, which only an embedded host declares",
+                        identified.canonical
+                    )));
+                }
                 let names_children = (served.names_children)(&actor, &raw);
                 let spawn = identified.spawn;
                 Ok(Some(Accepted {
@@ -1960,6 +1968,16 @@ mod tests {
         assert!(matches!(read(unknown), Err(ParseRefusal::Malformed { .. })));
         let on_result = br#"{"protocol":1,"adapter":"kagent","event":"tool_result","root_id":"r1","tool":"spawn","arguments":{},"outcome":{"status":"indeterminate"},"declares":{"label":{}}}"#;
         assert!(matches!(read(on_result), Err(ParseRefusal::Malformed { .. })));
+    }
+
+    #[test]
+    fn a_served_tool_call_cannot_declare_a_deferred_return() {
+        let read =
+            |body: &[u8]| WireEvent::read(body).and_then(|event| event.into_event(&SERVED, PrincipalSource::None));
+        let floor = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"spawn","arguments":{"a":1},"declares":{"label":{}}}"#;
+        assert!(read(floor).is_ok());
+        let deferred = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"spawn","arguments":{"a":1},"declares":{"deferred":true}}"#;
+        assert!(matches!(read(deferred), Err(ParseRefusal::Malformed { .. })));
     }
 
     #[test]
