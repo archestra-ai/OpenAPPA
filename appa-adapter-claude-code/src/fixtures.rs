@@ -118,5 +118,6 @@ pub(crate) fn pre_tool_use() -> HookEvent {
         spawn: None,
         prompt: None,
         ruling: None,
+        declares: None,
     }
 }

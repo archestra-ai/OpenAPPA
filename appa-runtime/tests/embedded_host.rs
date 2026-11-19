@@ -136,6 +136,7 @@ fn call(actor: &Actor, raw: &str) -> HookEvent {
         spawn: identified.spawn,
         prompt: None,
         ruling: None,
+        declares: None,
     }
 }
 
@@ -204,6 +205,7 @@ async fn a_battery_rule_reaches_the_server_the_host_aliased_and_speaks_its_spell
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             }
         )
         .await,
@@ -280,6 +282,7 @@ async fn identified_delivery_retries_replay_denied_calls_released_calls_and_clos
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
                 call: ProposedCall {
                     tool: appa_runtime_api::CONTROL_TOOL.into(),
                     arguments: serde_json::value::RawValue::from_string(plan.to_string()).unwrap(),

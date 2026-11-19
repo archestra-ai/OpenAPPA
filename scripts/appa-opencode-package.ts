@@ -27,7 +27,7 @@ files.set('package.json', JSON.stringify({
   name: 'appa-appencode', version: '0.1.0', private: true, type: 'module',
   exports: { '.': './index.js' },
   // OpenCode supplies these public modules; no package installation is needed.
-  dependencies: { '@opencode/plugin': '2.0.28', effect: '4.0.1' },
+  dependencies: { '@opencode/plugin': '2.2.6', effect: '4.1.0' },
 }, null, 2) + '\n')
 files.set('appa-package.toml', `schema = 1
 name = "opencode"

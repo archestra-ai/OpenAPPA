@@ -895,6 +895,7 @@ max_body_bytes = 65536
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -993,6 +994,7 @@ max_body_bytes = 65536
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -1080,6 +1082,7 @@ max_body_bytes = 65536
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -1156,6 +1159,7 @@ max_body_bytes = 65536
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -1198,6 +1202,7 @@ max_body_bytes = 65536
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -1265,6 +1270,7 @@ max_body_bytes = 65536
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;

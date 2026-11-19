@@ -308,6 +308,10 @@ mod real_engine_tests;
 #[cfg(test)]
 mod ahead_tests;
 
+/// Returns a single spawn's proposal declares.
+#[cfg(test)]
+mod declares_tests;
+
 /// Writers of one family on PostgreSQL, each driving its own event at the same moment
 /// through the runtime's shared store: the steps take turns on the family's row, so none
 /// loses its append, and no connection is held past its step.

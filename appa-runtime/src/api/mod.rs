@@ -610,6 +610,9 @@ pub(crate) enum EventError {
     FanOutOutstanding,
     #[error("a fan-out spawn needs the host's call id and prompt id: its subagents bind to it by prompt")]
     FanOutUnkeyed,
+    /// The host carried a return declaration on a call that starts no single subagent.
+    #[error("only a call that starts a single subagent declares its return; this call starts none")]
+    DeclaresOffSpawn,
     #[error("the host reused a call id")]
     CallIdReused,
     #[error("the trajectory has ended")]
@@ -768,7 +771,8 @@ impl EventError {
             | EventError::SpawnAmbiguous
             | EventError::BindingMismatch
             | EventError::SpawnStopped
-            | EventError::SpawnNeverStarted => RefusalClass::Spawn,
+            | EventError::SpawnNeverStarted
+            | EventError::DeclaresOffSpawn => RefusalClass::Spawn,
         }
     }
 
@@ -793,6 +797,7 @@ impl EventError {
             | EventError::UndeclaredTool { .. }
             | EventError::MalformedPrincipal(_)
             | EventError::PrincipalMismatch
+            | EventError::DeclaresOffSpawn
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding
@@ -5809,6 +5814,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     spawn: None,
                     prompt: None,
                     ruling: None,
+                    declares: None,
                 },
             )
             .await;
@@ -7218,6 +7224,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -7382,6 +7389,7 @@ url = "{url}"
                 spawn: spawn.then_some(SpawnKind::Single),
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await

@@ -1694,6 +1694,7 @@ max_body_bytes = 4096
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
         .await;
@@ -1719,6 +1720,7 @@ max_body_bytes = 4096
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         };
         let first = crate::hooks::handle_embedded_with_options(
             &runtime,
@@ -1827,6 +1829,7 @@ max_body_bytes = 4096
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         }
     }
 
