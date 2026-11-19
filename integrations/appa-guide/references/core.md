@@ -139,8 +139,7 @@ it depends on. Examples:
 > already read it: a summary of #eng can go to #eng, not to #all-hands.
 >
 > GitHub battery — Content from a private repository goes only where its
-> collaborators can read it. It checks each repository with your GitHub
-> sign-in.
+> collaborators can read it, once APPA can ask GitHub about that repository.
 
 ## Battery support
 
