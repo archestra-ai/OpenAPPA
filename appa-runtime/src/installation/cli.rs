@@ -939,9 +939,16 @@ pub(crate) fn render_server_coverage(
 /// rather than one sentence quoting both. Terminal output is not markdown, so
 /// neither is wrapped in backticks.
 fn guide_next(style: Style) -> String {
-    let sandbox = match appa_file_tracker::sandbox_missing() {
-        Some(missing) => format!("\n\n{}", style.detail(&missing)),
-        None => String::new(),
+    let sandbox = match appa_file_tracker::prepare_sandbox() {
+        Ok(None) => String::new(),
+        Ok(Some(installed)) => format!(
+            "\n\n{}",
+            style.detail(&format!(
+                "Installed Anthropic's sandbox runtime for SafeBash at {}",
+                installed.display()
+            ))
+        ),
+        Err(missing) => format!("\n\n{}", style.detail(&missing)),
     };
     format!(
         "\n{}\n{}\n\n{}\n{}{sandbox}",

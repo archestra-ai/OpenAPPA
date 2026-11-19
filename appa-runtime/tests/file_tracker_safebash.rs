@@ -50,8 +50,14 @@ fn scratch_of(config: &std::path::Path) -> std::path::PathBuf {
     scratch
 }
 
+/// Whether `program` runs here. A test skips without it on a developer's machine; in CI, where
+/// the workflow installs every program these tests use, a missing one fails the test instead.
 fn installed(program: &str) -> bool {
     let found = Command::new(program).arg("--version").output().is_ok();
+    assert!(
+        found || std::env::var_os("CI").is_none(),
+        "{program} is not installed in CI"
+    );
     if !found {
         eprintln!("skipped: {program} is not installed");
     }

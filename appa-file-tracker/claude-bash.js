@@ -428,8 +428,12 @@ process.on("exit", () => {
   }
 });
 
+// How many commands this preload has wrapped: the self-test reads it to see that Claude Code
+// sent a Bash call through the sandbox and ran it no other way.
+let wraps = 0;
 const wrap = sandbox.wrapWithSandbox;
 sandbox.wrapWithSandbox = async function (command, shell, custom, signal, options) {
+  wraps++;
   const current = calls.getStore();
   if (!current) throw new Error("A sandboxed command outside a declared Bash call was not run.");
   await sandbox.ensureInitializedForWrap();
@@ -706,6 +710,8 @@ async function selfTest() {
       check(opened.stdout.includes("OPEN"), `a cache in ${list} is not readable: ${opened.stdout}${opened.stderr}`);
       check(!opened.stdout.includes("CANARY-RECORDED"), `a recorded file in a cache in ${list} is readable`);
     }
+
+    await callPath(dir, { input, secret, output: path.join(dir, "called.txt"), stray: path.join(dir, "called-stray.txt") });
   } finally {
     delete process.env.APPA_SELFTEST_TOKEN;
     fs.rmSync(dir, { recursive: true, force: true });
@@ -735,6 +741,85 @@ async function selfTest() {
     hostsByNonce.delete(b);
     echo.close();
   }
+}
+
+/**
+ * Bash calls made the way Claude Code makes a model's: through the Bash tool's own `call`, as
+ * this preload wraps it, not straight into the sandbox. Each must reach the sandbox wrapper
+ * and stay confined; a call that cannot run sandboxed must be refused, never run outside it.
+ * The context is the least of a session's that `call` reads. A build that needs more fails
+ * here, and `clappa` falls back to SafeBash.
+ */
+async function callPath(cwd, { input, secret, output, stray }) {
+  // Claude Code's per-tool state: an object that answers every property and call with itself.
+  const opaque = () =>
+    new Proxy(function () {}, {
+      get: (_, key) =>
+        key === "then" ? undefined : key === Symbol.dispose || key === Symbol.asyncDispose ? () => {} : opaque(),
+      apply: () => opaque(),
+    });
+  const context = () => ({
+    toolUseId: `toolu_appa_selftest_${crypto.randomBytes(8).toString("hex")}`,
+    abortController: new AbortController(),
+    messages: [],
+    options: { mainLoopModel: "claude-sonnet-4-5", tools: [] },
+    readFileState: new Map(),
+    toolState: { get: () => opaque(), set() {}, has: () => false },
+    getAppState: () => ({ toolPermissionContext: { mode: "default", additionalWorkingDirectories: new Map() } }),
+    taskRegistry: { all: () => ({}) },
+    agentContext: {},
+    emitToolProgress() {},
+    applyFileHistoryOp() {},
+    markPrResolvedThisSession() {},
+    session: {
+      id: "appa-selftest",
+      host: {},
+      project: { cwd },
+      root: { project: { cwd } },
+      writePermissionStash: { consume() {} },
+    },
+  });
+  const run = async (call) => {
+    wraps = 0;
+    try {
+      return { result: await bash.call({ description: "self-test", ...call }, context()), wraps };
+    } catch (error) {
+      return { error, wraps };
+    }
+  };
+  const lists = (more) => ({ input_files: [], output_files: [], network_hosts: [], ...more });
+
+  const declared = await run({
+    command: `cat ${input}; cat ${secret}; tr A-Z a-z < ${input} > ${output}; echo x > ${stray}`,
+    ...lists({ input_files: [input], output_files: [output] }),
+  });
+  const shown = String(declared.result?.data?.stdout ?? "");
+  check(!declared.error, `a Bash call through Claude Code's call fails: ${declared.error?.message}`);
+  check(declared.wraps > 0, "a Bash call ran without the sandbox wrapper");
+  check(shown.includes("DECLARED"), `a Bash call does not return its output: ${shown}`);
+  check(!shown.includes("UNDECLARED"), "a Bash call reads an undeclared file");
+  check(fs.readFileSync(output, "utf8") === "declared\n", "a Bash call does not write its declared output");
+  check(!fs.existsSync(stray), "a Bash call's undeclared write reached the disk");
+
+  const failed = await run({ command: "exit 3", ...lists() });
+  check(String(failed.result?.data?.stdout ?? "").includes("Exit code 3"), `a failing Bash call does not report its exit code: ${failed.error?.message}`);
+
+  const escape = path.join(cwd, "unsandboxed.txt");
+  const disabled = await run({ command: `echo x > ${escape}`, dangerouslyDisableSandbox: true, ...lists() });
+  check(disabled.wraps > 0 && !fs.existsSync(escape), "a Bash call that asks to leave the sandbox runs outside it");
+
+  // With no sandbox to run in, Claude Code must refuse the call this preload marks required.
+  const enabled = sandbox.isSandboxingEnabled;
+  check(typeof enabled === "function", "this Claude Code build's sandbox manager does not say whether it is enabled");
+  sandbox.isSandboxingEnabled = () => false;
+  let unavailable;
+  try {
+    unavailable = await run({ command: `echo x > ${escape}`, ...lists() });
+  } finally {
+    sandbox.isSandboxingEnabled = enabled;
+  }
+  check(!fs.existsSync(escape), "a Bash call runs outside the sandbox when none is available");
+  check(unavailable.error, "a Bash call without a sandbox is not refused");
 }
 
 function probe(nonce, host, port) {

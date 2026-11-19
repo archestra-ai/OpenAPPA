@@ -43,7 +43,7 @@ jobs:
       changed: ${{ steps.prepare.outputs.changed }}
     steps:
       - name: Checkout updater
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
           path: openappa
@@ -51,7 +51,7 @@ jobs:
           persist-credentials: false
 
       - name: Checkout Archestra main
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           repository: archestra-ai/archestra
           ref: main
@@ -92,7 +92,7 @@ jobs:
 
       - name: Upload validated update
         if: steps.prepare.outputs.changed == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: appa-archestra-update
           path: prepared/update.json
@@ -118,7 +118,7 @@ jobs:
     steps:
       # This fresh runner never executes Archestra or release build scripts.
       - name: Checkout updater
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
           path: openappa
@@ -126,14 +126,14 @@ jobs:
           persist-credentials: false
 
       - name: Download validated update from this run
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        uses: actions/download-artifact@v8.0.2
         with:
           name: appa-archestra-update
           path: prepared
 
       - name: Create Archestra-only installation token
         id: app-token
-        uses: archestra-ai/.github/actions/github-app-token@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
+        uses: archestra-ai/.github/actions/github-app-token@v1.25.2
         with:
           app-id: ${{ vars.APPA_ARCHESTRA_UPDATER_APP_ID }}
           private-key: ${{ secrets.APPA_ARCHESTRA_UPDATER_PRIVATE_KEY }}

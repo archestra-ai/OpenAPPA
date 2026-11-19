@@ -27,12 +27,18 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Why SafeBash cannot run a command on this machine, when it cannot: the sandbox program
-/// the configuration names is not installed. A fresh install says so before the first
-/// session, and `clappa` before every session that falls back to SafeBash.
-pub fn sandbox_missing() -> Option<String> {
-    let config = config::Config::load(None).ok()?;
-    safebash::missing(&config)
+/// Make SafeBash's sandbox ready on this machine: install Anthropic's sandbox runtime `srt`
+/// into `appa`'s data directory when it is missing and npm can, then check what it needs.
+/// `Ok` names the `srt` installed now, if one was; `Err` says why SafeBash cannot run a
+/// command here. A Claude Code install runs it before the first session, and `clappa` before
+/// every session that falls back to SafeBash.
+pub fn prepare_sandbox() -> Result<Option<PathBuf>, String> {
+    let config = config::Config::load(None)?;
+    let installed = safebash::install_runtime(&config)?;
+    match safebash::missing(&config) {
+        Some(missing) => Err(missing),
+        None => Ok(installed),
+    }
 }
 
 /// What `clappa` says before a session in the current directory when files under it carry

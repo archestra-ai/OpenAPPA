@@ -1,0 +1,60 @@
+name: Claude Code Canary
+
+# clappa gives Claude Code native Bash on any release whose Bash preload
+# self-test passes. Claude Code ships several releases a week and updates
+# itself, so this runs the self-test daily on the newest release. Red means
+# protected sessions on that release fall back to SafeBash: fix the preload,
+# or add the release to BROKEN_RELEASES in appa-runtime/src/protected_launch.rs
+# if it passes the self-test but runs a Bash call unconfined.
+
+on:
+  schedule:
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-code-canary
+  cancel-in-progress: false
+
+jobs:
+  selftest:
+    name: Bash preload on Claude Code latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        run: rustup show
+
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: runtime-binary
+          env-vars: CARGO_PROFILE_DEV_DEBUG ImageOS
+          save-if: false
+
+      - name: Build the runtime binary
+        run: cargo build --package appa --locked
+
+      # Unpinned on purpose: this job checks the release users auto-update to.
+      - name: Install the newest Claude Code
+        run: | # zizmor: ignore[adhoc-packages]
+          # supply-chain-policy: allow-latest the newest release is what this job checks
+          npm install --prefix "$RUNNER_TEMP/claude-code" --no-audit --no-fund @anthropic-ai/claude-code@latest
+          echo "$RUNNER_TEMP/claude-code/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Install Claude Code's sandbox
+        run: .github/tools/claude-code/install-sandbox.sh
+
+      - name: Self-test the Bash preload
+        run: scripts/claude-bash-selftest.sh target/debug/appa

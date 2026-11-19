@@ -35,7 +35,7 @@ jobs:
       contents: read # Read the repository to build the image from it.
     steps:
       - name: Checkout project
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -64,7 +64,7 @@ jobs:
       id-token: write # Required for Workload Identity Federation when pushing images.
     steps:
       - name: Checkout project
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 1
@@ -81,7 +81,7 @@ jobs:
           python3 scripts/test_appa_demo_image.py http://127.0.0.1:8787
 
       - name: Authenticate to Artifact Registry
-        uses: archestra-ai/.github/actions/google-auth@2307d6276407c27dca02640dbace45bdd225f468 # v1.13.6
+        uses: archestra-ai/.github/actions/google-auth@v1.25.2
         with:
           service_account: appa-demo-image-push@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider

@@ -235,7 +235,7 @@ var IntegrationID = Schema6.String.pipe(Schema6.brand("Integration.ID"), Schema6
 // integrations/opencode/node_modules/@opencode/schema/dist/credential.js
 var ID2 = Schema7.String.pipe(Schema7.brand("Credential.ID"), Schema7.annotate({ identifier: "Credential.ID" }), statics((schema) => ({ create: () => schema.make("cred_" + ascending()) }))), Updated = ephemeral({
   type: "credential.updated",
-  schema: {}
+  schema: { integrationID: IntegrationID, credentialID: ID2 }
 }), Switched = ephemeral({
   type: "credential.switched",
   schema: { integrationID: IntegrationID, credentialID: Schema7.NullOr(ID2) }
@@ -508,7 +508,7 @@ var ID5 = Schema12.String.pipe(Schema12.brand("Provider.ID"), Schema12.annotate(
 ]).pipe(Schema12.toTaggedUnion("type")).annotate({ identifier: "Provider.Compaction" }), Transport = Schema12.Literals(["http", "websocket"]).annotate({ identifier: "Provider.Transport" }), CacheTTL = Schema12.TemplateLiteral([Schema12.Number, Schema12.Literals(["ms", "s", "m", "h", "d"])]).check(Schema12.isPattern(/^\d+(ms|s|m|h|d)$/)).annotate({ identifier: "Provider.CacheTTL" }), CacheWarming = Schema12.Union([
   Schema12.Boolean,
   Schema12.Struct({
-    interval: Schema12.Union([Schema12.Literal("auto"), Schema12.String]).pipe(optional).annotate({ description: `Duration such as "4 minutes", or "auto" for 90% of the model's cache.ttl` }),
+    interval: Schema12.Union([Schema12.Literal("auto"), Schema12.String]).pipe(optional).annotate({ description: `Duration such as "4 minutes", or "auto" (default) for 90% of the model's cache.ttl` }),
     duration: Schema12.String.pipe(optional).annotate({ description: 'Duration such as "30 minutes"' })
   })
 ]).annotate({ identifier: "Provider.CacheWarming" }), Cache = Schema12.Struct({
