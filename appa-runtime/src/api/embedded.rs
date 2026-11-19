@@ -799,7 +799,7 @@ fn store_error(error: EmbeddedError) -> EmbeddedPeerError {
     }
 }
 
-fn peer_error(error: EventError) -> EmbeddedPeerError {
+pub(super) fn peer_error(error: EventError) -> EmbeddedPeerError {
     if error.is_operational() {
         EmbeddedPeerError::Storage(error.to_string())
     } else {

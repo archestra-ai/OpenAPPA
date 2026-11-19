@@ -745,6 +745,13 @@ async fn a_deferred_child_that_narrowed_is_answered_deferred_at_its_stop_and_not
         ),
         "a repeated stop is answered as the deferral that ended the errand"
     );
+    assert!(
+        matches!(
+            child.on_child_return("the answer".to_string()).await,
+            Ok(ChildReturnDecision::Deferred)
+        ),
+        "and so is a return made without ending"
+    );
     assert!(matches!(
         child.on_child_end(None).await,
         Ok(ChildReturnDecision::NoValue)
@@ -782,6 +789,7 @@ async fn deferred_answer(runtime: &Runtime) -> (Session, crate::api::DeferredRet
     ));
     let notice = runtime
         .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+        .expect("the family reads")
         .expect("the spawn's return was deferred");
     (child, notice)
 }
@@ -812,7 +820,9 @@ async fn accepting_a_deferred_return_crosses_it_once_as_the_control_calls_result
     assert_eq!(settling(&runtime, &parent(), &notice.discard).await, accepted);
     assert_eq!(crossings(&runtime), 1);
     assert_eq!(
-        runtime.deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default()),
+        runtime
+            .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+            .expect("the family reads"),
         Some(notice),
         "the notice reads the same after the decision"
     );
@@ -861,8 +871,16 @@ async fn a_spawn_whose_return_crossed_at_the_stop_has_no_deferral_notice() {
         Ok(ChildReturnDecision::Returned { .. })
     ));
     assert_eq!(
-        runtime.deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default()),
+        runtime
+            .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+            .expect("the family reads"),
         None
+    );
+    assert!(runtime.defers_return(&parent(), "toolu-1").expect("the family reads"));
+    assert!(
+        !runtime
+            .defers_return(&parent(), "toolu-unknown")
+            .expect("the family reads")
     );
 }
 

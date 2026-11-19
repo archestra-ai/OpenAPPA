@@ -3778,27 +3778,12 @@ impl Runtime {
         outcome
     }
 
-    /// Read this root's family under the policy its log resolves to.
-    fn read_family<T>(
-        &self,
-        root: &TrajectoryId,
-        read: impl FnOnce(&crate::engine::RuntimeEngine, &crate::engine::EngineView, &Log) -> Option<T>,
-    ) -> Option<T> {
-        let log = self.inner.log(root).ok()?;
-        let deployment = self.inner.deployment();
-        let policy = self.inner.resolve_policy(&deployment, &log).ok()?;
-        let view = policy.rebuild_view(&log).ok()?;
-        read(policy.engine(), &view, &log)
-    }
-
     /// Does this reference name a decision on a deferred return, pending or settled, that
-    /// `acting` owns?
+    /// `acting` owns? A family that cannot be read owns none.
     pub(crate) fn owns_return(&self, acting: &Actor, reference: &ReturnReference) -> bool {
-        let owner = acting_trajectory(acting);
-        self.read_family(&acting.root, |engine, view, _| {
-            session::referenced_return(&engine.deferred_returns(view, owner), reference)
-        })
-        .is_some()
+        self.session(&acting.root, acting_trajectory(acting))
+            .and_then(|session| session.owns_return(reference))
+            .unwrap_or(false)
     }
 
     /// What the spawn `call_id` of `acting` is told when its subagent's answer was deferred,
@@ -3808,20 +3793,18 @@ impl Runtime {
         acting: &Actor,
         call_id: &str,
         presentation: &EmbeddedPresentationOptions,
-    ) -> Option<DeferredReturnNotice> {
-        let owner = acting_trajectory(acting);
-        self.read_family(&acting.root, |engine, view, log| {
-            let dispatch = log
-                .call_bindings()
-                .find(|binding| binding.trajectory == owner && binding.call_id == call_id)?
-                .dispatch;
-            let deferred = engine.deferred_return_of(view, owner, dispatch)?;
-            Some(DeferredReturnNotice {
-                feedback: engine.deferral_notice(&deferred, presentation),
-                accept: ReturnReference::of(&deferred.id, ReturnDecision::Accept),
-                discard: ReturnReference::of(&deferred.id, ReturnDecision::Discard),
-            })
-        })
+    ) -> Result<Option<DeferredReturnNotice>, EmbeddedPeerError> {
+        self.session_with_presentation(&acting.root, acting_trajectory(acting), presentation.clone())
+            .and_then(|session| session.deferred_return(call_id))
+            .map_err(embedded::peer_error)
+    }
+
+    /// Was the spawn `call_id` of `acting` released under a deferred return? A declaration made
+    /// ahead of a spawn can release it under another return than the one its host declared.
+    pub fn defers_return(&self, acting: &Actor, call_id: &str) -> Result<bool, EmbeddedPeerError> {
+        self.session(&acting.root, acting_trajectory(acting))
+            .and_then(|session| session.defers_return(call_id))
+            .map_err(embedded::peer_error)
     }
 
     async fn run_remedy(

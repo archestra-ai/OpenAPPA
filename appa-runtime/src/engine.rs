@@ -2727,8 +2727,14 @@ impl RuntimeEngine {
             .find(|deferred| *deferred.id.child() == child)
     }
 
+    /// Was `parent`'s spawn `dispatch` released under a deferred return?
+    pub(crate) fn defers_return(&self, view: &EngineView, parent: &TrajectoryId, dispatch: &EngineDispatchId) -> bool {
+        self.engine.prepared_return_policy(view, parent, &ForkId::of(dispatch)) == Some(ReturnPolicy::Deferred)
+    }
+
     /// What the parent that owns a deferred return is told about it. A function of the frozen
-    /// return alone, so it reads the same before and after the parent decides.
+    /// return as the serving policy reads its label, so it reads the same before and after the
+    /// parent decides.
     pub(crate) fn deferral_notice(
         &self,
         deferred: &DeferredReturn,

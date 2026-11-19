@@ -84,6 +84,41 @@ pub(in crate::api) fn referenced_return(
 }
 
 impl Session {
+    pub(in crate::api) fn owns_return(&self, reference: &ReturnReference) -> Result<bool, EventError> {
+        self.with_view(|context| {
+            let owned = context.engine().deferred_returns(context.view, &self.trajectory);
+            Ok(referenced_return(&owned, reference).is_some())
+        })
+    }
+
+    pub(in crate::api) fn deferred_return(
+        &self,
+        call_id: &str,
+    ) -> Result<Option<crate::api::DeferredReturnNotice>, EventError> {
+        self.with_view(|context| {
+            let deferred = context.spawn_dispatch(call_id).and_then(|dispatch| {
+                context
+                    .engine()
+                    .deferred_return_of(context.view, &self.trajectory, &dispatch)
+            });
+            Ok(deferred.map(|deferred| crate::api::DeferredReturnNotice {
+                feedback: context.engine().deferral_notice(&deferred, &self.presentation),
+                accept: ReturnReference::of(&deferred.id, ReturnDecision::Accept),
+                discard: ReturnReference::of(&deferred.id, ReturnDecision::Discard),
+            }))
+        })
+    }
+
+    pub(in crate::api) fn defers_return(&self, call_id: &str) -> Result<bool, EventError> {
+        self.with_view(|context| {
+            Ok(context.spawn_dispatch(call_id).is_some_and(|dispatch| {
+                context
+                    .engine()
+                    .defers_return(context.view, &self.trajectory, &dispatch)
+            }))
+        })
+    }
+
     /// This trajectory's decision on a deferred return it owns, named by reference. The
     /// ownership is read in the step that appends the decision.
     pub(in crate::api) async fn on_settle(

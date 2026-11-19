@@ -209,7 +209,10 @@ impl Session {
     /// A return the child makes without ending, judged exactly as a stop's return: the calls
     /// it has open stay open, and a return made beside one is refused until they report.
     pub async fn on_child_return(&self, value: String) -> Result<ChildReturnDecision, EventError> {
-        self.cross_return(Some(value)).await
+        match self.child_calls()? {
+            ChildCalls::Ended(ChildEnd::Deferred) => Ok(ChildReturnDecision::Deferred),
+            ChildCalls::Ended(ChildEnd::Void) | ChildCalls::Open(_) => self.cross_return(Some(value)).await,
+        }
     }
 
     pub(super) async fn cross_return(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {

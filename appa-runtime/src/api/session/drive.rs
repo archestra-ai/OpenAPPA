@@ -651,6 +651,14 @@ impl Decided<'_> {
         Some(self.engine().deferral_notice(&deferred, &self.session.presentation))
     }
 
+    /// The dispatch this trajectory's call `call_id` was released as.
+    pub(super) fn spawn_dispatch(&self, call_id: &str) -> Option<appa_engine::value::DispatchId> {
+        self.log
+            .call_bindings()
+            .find(|binding| binding.trajectory == &self.session.trajectory && binding.call_id == call_id)
+            .map(|binding| binding.dispatch.clone())
+    }
+
     pub(super) fn child_end(&self, child: &TrajectoryId) -> super::child::ChildEnd {
         let deferred = self.parent_of(child).is_some_and(|parent| {
             self.engine()
