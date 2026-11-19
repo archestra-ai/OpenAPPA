@@ -154,7 +154,7 @@ jobs:
           }
 
       - name: Authenticate to Google Cloud
-        uses: archestra-ai/.github/actions/google-auth@322ad980dd4f3b530a192df546bf3bb703dcb003 # v1.25.2
+        uses: archestra-ai/.github/actions/google-auth@v1.25.2
         with:
           service_account: appa-bench-publish@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider

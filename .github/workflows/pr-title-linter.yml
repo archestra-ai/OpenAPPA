@@ -26,7 +26,7 @@ jobs:
     permissions: {}
     steps:
       - name: Lint PR title
-        uses: archestra-ai/.github/actions/lint-pr-title@dbb529ba77ba07dd8f71f16ccb1b2317f4587312 # v1.24.0
+        uses: archestra-ai/.github/actions/lint-pr-title@v1.24.0
         with:
           # Two vocabularies, both accepted. The organization's types name the
           # kind of change and drive release-please's changelog sections. These
