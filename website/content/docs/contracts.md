@@ -1291,7 +1291,7 @@ If the spawn is blocked, OpenAPPA applies the declaration through the block's de
 
 A declaration that already stands for the call, with the same tool and arguments, is kept: `declares` does not replace it. A prospective declaration also takes precedence over `declares`.
 
-OpenAPPA refuses a `tool_call` that carries `declares` but does not start exactly one subagent. It also refuses it under a deployment without `context_control`, as it refuses a prospective declaration there.
+OpenAPPA refuses a `tool_call` that carries `declares` but does not start exactly one subagent. Under a deployment without `context_control` a spawn is released without a prepared child, so OpenAPPA applies no declaration there.
 
 In the example below, a child agent can inspect internal customer data and pass its return payload through `remove_customer_details` before the parent receives it:
 
