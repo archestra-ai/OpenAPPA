@@ -1243,8 +1243,8 @@ var ID13 = Schema27.String.check(Schema27.isStartingWith("msg_")).pipe(Schema27.
 
 // integrations/opencode/appencode.ts
 import { Cause, Effect as Effect4, Fiber, Schedule, Schema as Schema28, Semaphore } from "effect";
-import { lstat as lstat2, realpath as realpath2, stat } from "fs/promises";
-import { dirname as dirname2, isAbsolute as isAbsolute2, join as join2, relative, resolve as resolve2, sep } from "path";
+import { lstat as lstat3, realpath as realpath3, stat } from "fs/promises";
+import { dirname as dirname3, isAbsolute as isAbsolute3, join as join3, relative as relative2, resolve as resolve3, sep } from "path";
 
 // integrations/opencode/refusal.ts
 var REFUSAL_CLASSES = [
@@ -1279,21 +1279,211 @@ function refusal(reply) {
   return isRefusalClass(refused) && typeof detail === "string" ? { class: refused, detail } : void 0;
 }
 
+// integrations/opencode/safebash.ts
+import { spawn, spawnSync } from "child_process";
+import { lstat, mkdir, mkdtemp, readFile, realpath, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { basename, dirname, join, relative, resolve, isAbsolute } from "path";
+var DESCRIPTION = `Run one shell command in a sandbox with bash -c. The command reads only the files, directories and Unix sockets in input_files, plus system directories such as /usr and /etc, the directories on PATH and installed toolchains. It writes only the files and directories in output_files, and connects only to the hosts in network_hosts (example.com, *.example.com, or host:port). Relative paths resolve from the project directory.
+
+Every other file in the workspace, the home directory and /tmp is hidden, so ls, find and globs there show only what the call declares; an empty listing does not mean a file is missing. To list a directory, declare it in input_files. A credential file such as .env inside a declared directory stays hidden unless the call names it or git tracks it. Declare a socket such as /var/run/docker.sock in input_files to reach the service behind it. $TMPDIR is a private directory for this call alone, removed when it ends.
+
+An output file that exists is read as well, so a command may rewrite it, as npm install does package.json, but not replace, rename or remove it: write through it, as sed 's/a/b/' f > "$TMPDIR/f" && cat "$TMPDIR/f" > f does in place of sed -i. An output written with a trailing / is a directory: the command reads what it holds and writes under it, as a build directory, node_modules/ or a cache needs. Declare a file's directory with a trailing / only for a tool that always replaces the file, such as cargo add.
+
+Name only the hosts the command needs: a host other than a package registry's can lower the session's trust. go get through the Go proxy needs proxy.golang.org and sum.golang.org, not github.com; cargo needs index.crates.io and static.crates.io. A call that names a Go, cargo or npm registry keeps what it downloads in that package manager's cache, which every later command reads without declaring it.
+
+The sandbox keeps a repository's config and hooks read-only, even in a declared directory, so git config, git remote add and the upstream that git push -u sets fail: leave those to the person, in their own terminal.`, HOST = /^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*(:[1-9][0-9]{0,4})?$/;
+function strings(value, field) {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string" && item.length > 0))
+    throw Error(`[appencode] appa_safebash requires ${field} as an array of non-empty strings.`);
+  return value;
+}
+var temporary = (path) => /^\$(TMPDIR|\{TMPDIR\})(\/|$)/.test(path);
+async function canonical(path, directory) {
+  let existing = resolve(directory, path), absent = [];
+  for (;; )
+    try {
+      return join(await realpath(existing), ...absent.reverse());
+    } catch {
+      if (dirname(existing) === existing)
+        throw Error(`[appencode] ${JSON.stringify(path)} names no file.`);
+      absent.push(basename(existing)), existing = dirname(existing);
+    }
+}
+async function writable(path, what) {
+  let existing = await lstat(path).catch((error) => {
+    if (error?.code === "ENOENT")
+      return;
+    throw error;
+  });
+  if (existing && (!existing.isFile() || existing.nlink !== 1))
+    throw Error(`[appencode] ${what} ${JSON.stringify(path)} must be absent or a singly linked regular file; write a directory with a trailing /.`);
+}
+async function checkedWrite(input, directory) {
+  if (!input || typeof input !== "object" || !("path" in input) || typeof input.path !== "string")
+    throw Error("[appencode] write and edit require a path.");
+  let parent = await realpath(dirname(resolve(directory, input.path))).catch(() => {
+    throw Error(`[appencode] path ${JSON.stringify(input.path)} has no existing parent directory.`);
+  }), path = join(parent, basename(input.path));
+  return await writable(path, "path"), { ...input, path };
+}
+async function checkedSafeBash(input, directory) {
+  if (!input || typeof input !== "object" || !("command" in input) || typeof input.command !== "string" || !input.command.trim())
+    throw Error("[appencode] appa_safebash requires a command.");
+  let fields = input, unknown = Object.keys(fields).filter((key) => !["command", "input_files", "output_files", "network_hosts"].includes(key));
+  if (unknown.length)
+    throw Error(`[appencode] appa_safebash does not accept ${unknown.join(", ")}.`);
+  let inputs = [];
+  for (let path of strings(fields.input_files, "input_files"))
+    inputs.push(temporary(path) ? path : await canonical(path, directory));
+  let outputs = [];
+  for (let path of strings(fields.output_files, "output_files")) {
+    if (temporary(path)) {
+      outputs.push(path);
+      continue;
+    }
+    let resolved = await canonical(path, directory), folder = path.endsWith("/") || (await lstat(resolved).catch(() => {
+      return;
+    }))?.isDirectory();
+    if (!folder)
+      await writable(resolved, "appa_safebash output");
+    outputs.push(folder && resolved !== "/" ? `${resolved}/` : resolved);
+  }
+  let hosts = strings(fields.network_hosts, "network_hosts").map((host) => host.toLowerCase()), invalid = hosts.find((host) => !HOST.test(host));
+  if (invalid !== void 0)
+    throw Error(`[appencode] appa_safebash network host ${JSON.stringify(invalid)} is not a hostname, *.suffix, or host:port.`);
+  return { command: input.command, input_files: [...new Set(inputs)], output_files: [...new Set(outputs)], network_hosts: [...new Set(hosts)] };
+}
+async function sandboxRuntime(configured) {
+  let data = process.env.APPA_DATA_DIR || join(process.env.XDG_DATA_HOME || join(process.env.HOME || "/", ".local/share"), "appa"), installed = join(data, "sandbox-runtime/node_modules/.bin/srt"), executable = configured || Bun.which("srt") || await lstat(installed).then(() => installed, () => {
+    return;
+  });
+  if (!executable)
+    throw Error("[appencode] Shell commands run in the Anthropic Sandbox Runtime, which is not installed. Install it with npm install -g @anthropic-ai/sandbox-runtime, or set APPA_OPENCODE_SRT.");
+  let real = await realpath(executable), root = resolve(dirname(real), "..");
+  if (JSON.parse(await readFile(join(root, "package.json"), "utf8").catch(() => "{}")).name !== "@anthropic-ai/sandbox-runtime")
+    throw Error("[appencode] APPA_OPENCODE_SRT must name the srt executable of @anthropic-ai/sandbox-runtime.");
+  return { executable: real, package: root };
+}
+function confinement(request, cwd, appa) {
+  let answer = spawnSync(appa || "appa", ["file-tracker", "sandbox"], { cwd, input: JSON.stringify(request), encoding: "utf8", timeout: 30000 });
+  if (answer.error || answer.status !== 0) {
+    let reason = String(answer.stderr || answer.error?.message || "no answer").trim().replace(/^appa file-tracker: /, "");
+    throw Error(`[appencode] The command was not run: ${reason}`);
+  }
+  return JSON.parse(answer.stdout);
+}
+function settings(confined, srt, sockets) {
+  return JSON.stringify({
+    filesystem: {
+      ...confined.filesystem,
+      allowRead: [...confined.filesystem.allowRead, srt.package, sockets],
+      denyWrite: [...confined.filesystem.denyWrite, srt.package]
+    },
+    network: { allowedDomains: confined.network.allowedDomains, deniedDomains: [] }
+  });
+}
+function environment(confined, sockets) {
+  let env = {};
+  for (let [name, value] of Object.entries(process.env))
+    if (value !== void 0 && !confined.hiddenEnvironment.includes(name))
+      env[name] = value;
+  return { ...env, TMPDIR: sockets };
+}
+var HINTS = [
+  {
+    partial: !0,
+    command: /(^|[\s;&|(`])(ls|find|tree|fd|du|git\s+(status|diff|ls-files|add|clean|stash))\b|\*/,
+    text: "[appa] This command saw only its declared input_files: undeclared files were hidden, so a listing or git status here is incomplete. To see a directory, declare it in input_files."
+  },
+  {
+    output: /^(?!.*config file).*(read-only file system|EROFS)/im,
+    text: "[appa] A write to a path not in output_files fails as a read-only file system. Declare the path in output_files, or its directory with a trailing /, such as node_modules/.vite/ or .git/."
+  },
+  {
+    output: /could not (lock|write) config file/,
+    text: "[appa] The sandbox keeps .git/config read-only, even in a declared directory: a setting there, such as core.hooksPath or core.fsmonitor, would run code outside the sandbox. So git config and git remote add fail, and git push -u pushes but sets no upstream. Tell the person the git command to run in their own terminal."
+  },
+  {
+    output: /^(?!.*config file).*(Device or resource busy|EBUSY)/m,
+    text: `[appa] A declared output file can be rewritten but not replaced, renamed or removed, so a tool that writes a temporary file and renames it over the output fails. Write through the file instead: sed 's/a/b/' f > "$TMPDIR/f" && cat "$TMPDIR/f" > f in place of sed -i. For a tool that always replaces the file, such as cargo add, declare the file's directory with a trailing / in output_files.`
+  },
+  {
+    output: /not a git repository/,
+    text: "[appa] Git found no repository because the repository's root, the directory that holds .git, is not in input_files. Declare the root in input_files, and its .git/ in output_files if git writes."
+  },
+  {
+    output: /cannot lock ref|unable to create directory for .*\.git\/|Unable to create '[^']*\.lock'|unable to (create temporary|write new index)/,
+    text: "[appa] Git writes branches, its index and new objects under .git. When the repository's .git/ is not in output_files, it is read-only to this command, so git commit, git checkout -b and git switch fail. Declare it with a trailing /, such as <repository>/.git/, beside the files the command changes."
+  },
+  {
+    output: /^c\S{9}\s.*\s1,\s+3\s/m,
+    text: "[appa] An entry listed as character device 1, 3, such as .bashrc or .vscode, is /dev/null, which the sandbox mounts where a protected file does not exist so that the command cannot create it. There is no such file."
+  }
+];
+function hints(call, cwd, printed) {
+  let whole = call.input_files.some((declared) => {
+    let within = relative(declared, cwd);
+    return !within.startsWith("..") && !isAbsolute(within);
+  });
+  return HINTS.filter((hint) => hint.partial && whole ? !1 : hint.command ? hint.command.test(call.command) : hint.output.test(printed)).map((hint) => hint.text);
+}
+async function runSafeBash(call, cwd, runtime, signal) {
+  let report = await new Promise((done, fail) => {
+    let child = spawn(runtime.appa || "appa", ["file-tracker", "run"], { cwd, detached: !0, stdio: ["pipe", "pipe", "pipe"] }), stdout = "", stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    }), child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    let stop = () => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {}
+    };
+    signal.addEventListener("abort", stop, { once: !0 }), child.on("error", () => fail(Error("[appencode] appa_safebash could not start appa file-tracker run. Put appa on PATH, or set APPA_FILE_TRACKER."))), child.on("close", (code) => {
+      if (signal.removeEventListener("abort", stop), signal.aborted)
+        return fail(Error("[appencode] appa_safebash was cancelled."));
+      if (code !== 0)
+        return fail(Error(`[appencode] The command was not run: ${stderr.trim().replace(/^appa file-tracker: /, "")}`));
+      try {
+        done(JSON.parse(stdout));
+      } catch {
+        fail(Error("[appencode] appa file-tracker run sent an unreadable result."));
+      }
+    }), child.stdin.end(JSON.stringify(call));
+  });
+  return [report, ...hints(call, cwd, report)].join(`
+`);
+}
+async function typedShell(command, cwd, runtime) {
+  if (process.platform !== "linux")
+    throw Error("[appencode] Typed shell commands run sandboxed on Linux only.");
+  let srt = await sandboxRuntime(runtime.srt), confined = confinement({ command, typed: !0 }, cwd, runtime.appa), run = await mkdtemp(join(tmpdir(), "appencode-typed-")), sockets = join(run, "tmp");
+  await mkdir(sockets, { mode: 448 }), await writeFile(join(run, "settings.json"), settings(confined, srt, sockets), { mode: 384 });
+  let quoted = (text) => `'${text.replace(/'/g, "'\\''")}'`;
+  return {
+    shell: "/bin/sh",
+    env: environment(confined, sockets),
+    command: `${quoted(srt.executable)} --settings ${quoted(join(run, "settings.json"))} -c ${quoted(`${confined.prelude}${command}`)}; status=$?; rm -rf ${quoted(run)} ${quoted(confined.tmpdir)}; exit $status`
+  };
+}
+
 // integrations/opencode/setup.ts
 import { createHash } from "crypto";
-import { lstat, mkdir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "fs/promises";
-import { dirname, isAbsolute, join, resolve } from "path";
-var checkout = resolve(import.meta.dir, "../.."), batteries = join(checkout, "marketplace/batteries"), digest = (text) => createHash("sha256").update(text).digest("hex");
+import { lstat as lstat2, mkdir as mkdir2, readFile as readFile2, readdir, realpath as realpath2, rename, rm, symlink, writeFile as writeFile2 } from "fs/promises";
+import { dirname as dirname2, isAbsolute as isAbsolute2, join as join2, resolve as resolve2 } from "path";
+var checkout = resolve2(import.meta.dir, "../.."), batteries = join2(checkout, "marketplace/batteries"), digest = (text) => createHash("sha256").update(text).digest("hex");
 async function configuration(config, binary) {
-  if (!isAbsolute(config) || !isAbsolute(binary))
+  if (!isAbsolute2(config) || !isAbsolute2(binary))
     throw Error("Setup requires absolute config and appa paths.");
-  if (!(await lstat(config)).isFile())
+  if (!(await lstat2(config)).isFile())
     throw Error("Setup config must be a regular file, not a symlink.");
   let target = process.env.APPA_BATTERY_TARGET ?? "single-user";
   if (!["single-user", "multi-user"].includes(target))
     throw Error("APPA_BATTERY_TARGET must be single-user or multi-user.");
-  let store = process.env.APPA_OPENCODE_BATTERIES || join(dirname(config), "batteries"), catalog = await Promise.all((await readdir(store)).sort().filter((name) => !name.includes(".")).map(async (name) => {
-    let manifest = Bun.TOML.parse(await readFile(join(store, name, "appa-package.toml"), "utf8")), targets = manifest.battery.targets, policy = targets?.[target]?.policy;
+  let store = process.env.APPA_OPENCODE_BATTERIES || join2(dirname2(config), "batteries"), catalog = await Promise.all((await readdir(store)).sort().filter((name) => !name.includes(".")).map(async (name) => {
+    let manifest = Bun.TOML.parse(await readFile2(join2(store, name, "appa-package.toml"), "utf8")), targets = manifest.battery.targets, policy = targets?.[target]?.policy;
     return {
       name,
       description: manifest.description,
@@ -1323,11 +1513,11 @@ ${stdout}`);
   async function documents(path, found = /* @__PURE__ */ new Map) {
     if (found.has(path))
       return found;
-    let text = await readFile(path, "utf8");
+    let text = await readFile2(path, "utf8");
     found.set(path, text);
     let includes = Bun.TOML.parse(text).include ?? [];
     for (let include of includes)
-      await documents(resolve(dirname(path), include), found);
+      await documents(resolve2(dirname2(path), include), found);
     return found;
   }
   return async (input, tools, servers = []) => {
@@ -1338,7 +1528,7 @@ ${stdout}`);
     };
     switch (input.operation) {
       case "inspect": {
-        let policy = await readFile(config, "utf8");
+        let policy = await readFile2(config, "utf8");
         return JSON.stringify({
           config,
           policy,
@@ -1356,13 +1546,13 @@ ${stdout}`);
         if (!battery)
           throw Error("Choose a battery from the inspected catalog.");
         let contracts = process.env.APPA_OPENCODE_SETUP_CONTRACTS;
-        if (!contracts || !isAbsolute(contracts))
+        if (!contracts || !isAbsolute2(contracts))
           throw Error("Setup requires the contract reference path from the operator launcher.");
         return JSON.stringify({
           ...battery,
           deployment_target: target,
-          files: Object.fromEntries(await Promise.all(["appa-package.toml", "appa.toml", "README.md", ...battery.target_policy ? [battery.target_policy] : []].map(async (name) => [name, await readFile(join(store, battery.name, name), "utf8")]))),
-          contracts: await readFile(contracts, "utf8")
+          files: Object.fromEntries(await Promise.all(["appa-package.toml", "appa.toml", "README.md", ...battery.target_policy ? [battery.target_policy] : []].map(async (name) => [name, await readFile2(join2(store, battery.name, name), "utf8")]))),
+          contracts: await readFile2(contracts, "utf8")
         });
       }
       case "publish": {
@@ -1374,16 +1564,16 @@ ${stdout}`);
         if (publishing)
           throw Error("Another publish is in progress; inspect again.");
         publishing = !0;
-        let candidate = join(dirname(config), `.appa-setup-${crypto.randomUUID()}.toml`);
+        let candidate = join2(dirname2(config), `.appa-setup-${crypto.randomUUID()}.toml`);
         try {
-          let previous = await readFile(config, "utf8");
+          let previous = await readFile2(config, "utf8");
           if (digest(previous) !== input.expected_digest)
             throw Error("Policy changed; inspect and propose again.");
           if (previous === input.policy)
             return "Policy unchanged. No new session is needed.";
-          await writeFile(candidate, input.policy, { mode: 384, flag: "wx" });
+          await writeFile2(candidate, input.policy, { mode: 384, flag: "wx" });
           let description = await describe(candidate, tools.map((tool) => tool.canonical));
-          if (digest(await readFile(config, "utf8")) !== input.expected_digest)
+          if (digest(await readFile2(config, "utf8")) !== input.expected_digest)
             throw Error("Policy changed during validation; inspect and propose again.");
           return await rename(candidate, config), JSON.stringify({
             state: "saved",
@@ -1400,6 +1590,7 @@ ${stdout}`);
 }
 
 // integrations/opencode/appencode.ts
+var UNMEDIATED = ["shell", "patch", "grep"];
 function text(decision, field) {
   let value = decision[field];
   if (typeof value !== "string")
@@ -1412,7 +1603,7 @@ function failure(error) {
 var appencode_default = Plugin.define({
   id: "appa.appencode",
   effect: Effect4.fn(function* (ctx) {
-    let base = process.env.APPA_OPENCODE_RUNTIME_URL || ctx.options?.runtimeURL || "http://127.0.0.1:8789", setupConfig = process.env.APPA_OPENCODE_SETUP_CONFIG, setup = setupConfig ? yield* Effect4.tryPromise(() => configuration(setupConfig, process.env.APPA_OPENCODE_SETUP_BINARY || "")).pipe(Effect4.orDie) : void 0, setupGuide, pending = /* @__PURE__ */ new Map, children = /* @__PURE__ */ new Map, initialPrompts = /* @__PURE__ */ new Set, launches = /* @__PURE__ */ new Map, tasks = /* @__PURE__ */ new Map, disposed = !1;
+    let base = process.env.APPA_OPENCODE_RUNTIME_URL || ctx.options?.runtimeURL || "http://127.0.0.1:8789", sandbox = { appa: process.env.APPA_FILE_TRACKER || ctx.options?.appa, srt: process.env.APPA_OPENCODE_SRT || ctx.options?.srt }, setupConfig = process.env.APPA_OPENCODE_SETUP_CONFIG, setup = setupConfig ? yield* Effect4.tryPromise(() => configuration(setupConfig, process.env.APPA_OPENCODE_SETUP_BINARY || "")).pipe(Effect4.orDie) : void 0, setupGuide, pending = /* @__PURE__ */ new Map, children = /* @__PURE__ */ new Map, initialPrompts = /* @__PURE__ */ new Set, launches = /* @__PURE__ */ new Map, tasks = /* @__PURE__ */ new Map, disposed = !1;
     async function post(event, actor, fields = {}) {
       if (event === "tool_call" && actor.child && !children.has(actor.child))
         throw Error("[appencode] Child has no live delegation.");
@@ -1593,7 +1784,31 @@ ${task.state.value}`;
       return value.split("mcp__appa__execute_remedy_plan").join("appa_execute_remedy_plan");
     }
     yield* ctx.tool.transform((editor) => {
-      if (editor.remove("subagent"), setup)
+      editor.remove("subagent");
+      for (let name of UNMEDIATED)
+        editor.remove(name);
+      if (editor.add({
+        name: "appa_safebash",
+        options: { codemode: !1 },
+        description: DESCRIPTION,
+        input: Schema28.Struct({
+          command: Schema28.String,
+          input_files: Schema28.Array(Schema28.String),
+          output_files: Schema28.Array(Schema28.String),
+          network_hosts: Schema28.Array(Schema28.String)
+        }),
+        output: Schema28.String,
+        execute: (input, call) => Effect4.gen(function* () {
+          let approved = pending.get(`${call.sessionID}:${call.id}`);
+          if (!approved || JSON.stringify(approved.proposal.arguments) !== JSON.stringify(input))
+            return yield* Effect4.fail(new exports_tool.Error({ message: "[appencode] appa_safebash runs only APPA-released calls." }));
+          let output = yield* Effect4.tryPromise({
+            try: (signal) => runSafeBash(input, ctx.location.directory, sandbox, signal),
+            catch: (error) => new exports_tool.Error({ message: error instanceof Error && error.message.startsWith("[appencode]") ? error.message : "[appencode] appa_safebash sandbox failed to start." })
+          });
+          return { output, content: output };
+        })
+      }), setup)
         editor.add({
           name: "appa_setup",
           options: { codemode: !1 },
@@ -1780,20 +1995,30 @@ ${task.state.value}`;
     }), yield* ctx.permission.hook("evaluate", (event) => Effect4.sync(() => {
       if (event.action === "execute" || event.action === "subagent")
         event.effect = "deny", event.message = "Use APPA delegation, not Code Mode or native subagent returns.";
+    })), yield* ctx.shell.hook("create.before", (event) => Effect4.promise(async () => {
+      try {
+        let root = await realpath3(ctx.location.directory), within = relative2(root, await realpath3(event.cwd));
+        if (isAbsolute3(within) || within === ".." || within.startsWith(`..${sep}`))
+          throw Error("[appencode] Shell commands run only in the project directory.");
+        Object.assign(event, await typedShell(event.command, event.cwd, sandbox));
+      } catch (error) {
+        let reason = error instanceof Error && error.message.startsWith("[appencode]") ? error.message : "[appencode] The sandbox for shell commands failed to start.";
+        event.shell = "/bin/sh", event.env = {}, event.command = `printf '%s\\n' '${reason.replace(/'/g, "'\\''")} Use appa_safebash.' >&2; exit 126`;
+      }
     })), yield* ctx.session.hook("prompt", (event) => Effect4.tryPromise({
       try: async () => {
         if (setup && !setupGuide) {
           let path = process.env.APPA_OPENCODE_SETUP_GUIDE;
-          if (!path || !isAbsolute2(path) || await realpath2(path) !== path)
+          if (!path || !isAbsolute3(path) || await realpath3(path) !== path)
             throw Error("[appencode] Setup requires a fixed canonical guide path from the operator launcher.");
-          let file = await lstat2(path);
+          let file = await lstat3(path);
           if (!file.isFile())
             throw Error("[appencode] Setup guide must be a regular file.");
-          let project = resolve2(ctx.location.project.directory);
-          for (let root of [ctx.location.directory, ...project === dirname2(project) ? [] : [project]])
-            for (let directory of [resolve2(root), await realpath2(root)]) {
-              let within = relative(directory, path);
-              if (!isAbsolute2(within) && within !== ".." && !within.startsWith(`..${sep}`))
+          let project = resolve3(ctx.location.project.directory);
+          for (let root of [ctx.location.directory, ...project === dirname3(project) ? [] : [project]])
+            for (let directory of [resolve3(root), await realpath3(root)]) {
+              let within = relative2(directory, path);
+              if (!isAbsolute3(within) && within !== ".." && !within.startsWith(`..${sep}`))
                 throw Error("[appencode] Setup guide must be outside the OpenCode project and Location. Choose an external temporary directory.");
             }
           setupGuide = { path, dev: file.dev, ino: file.ino };
@@ -1823,7 +2048,10 @@ ${task.state.value}`;
         if (setup && !setupGuide)
           throw Error("[appencode] Setup guide was not admitted; retry the prompt.");
         let { context } = await open(event.sessionID);
-        if (delete event.tools.execute, delete event.tools.subagent, children.has(event.sessionID))
+        delete event.tools.execute, delete event.tools.subagent;
+        for (let name of UNMEDIATED)
+          delete event.tools[name];
+        if (children.has(event.sessionID))
           delete event.tools.appa_subagent, delete event.tools.appa_collect, delete event.tools.appa_cancel;
         if (setup) {
           for (let name of Object.keys(event.tools))
@@ -1843,8 +2071,8 @@ ${task.state.value}`;
           if (event.tool === "read") {
             if (!event.input || typeof event.input !== "object" || !("path" in event.input) || event.input.path !== setupGuide.path)
               throw Error("[appencode] Setup read is restricted to the fixed guide file.");
-            let file = await lstat2(setupGuide.path);
-            if (!file.isFile() || file.dev !== setupGuide.dev || file.ino !== setupGuide.ino || await realpath2(setupGuide.path) !== setupGuide.path)
+            let file = await lstat3(setupGuide.path);
+            if (!file.isFile() || file.dev !== setupGuide.dev || file.ino !== setupGuide.ino || await realpath3(setupGuide.path) !== setupGuide.path)
               throw Error("[appencode] Setup guide was replaced; close and restart setup.");
           }
         }
@@ -1855,8 +2083,8 @@ ${task.state.value}`;
         }
         if (event.tool === "execute" || event.tool === "subagent")
           throw Error("[appencode] Code Mode and native subagents are refused. Use direct tools or appa_subagent.");
-        if (event.tool === "shell" && typeof event.input === "object" && event.input !== null && "background" in event.input && event.input.background === !0)
-          throw Error("[appencode] Background shell results use an unchecked notification path. Use a foreground call.");
+        if (UNMEDIATED.includes(event.tool))
+          throw Error("[appencode] Unsandboxed shell, patch and grep tools are refused. Use appa_safebash, read, write or edit.");
         let { actor } = await open(event.sessionID);
         if (actor.child && (event.tool === "appa_collect" || event.tool === "appa_cancel"))
           throw Error("[appencode] Background task operations require the owning root.");
@@ -1865,6 +2093,10 @@ ${task.state.value}`;
           throw Error("[appencode] Tool is absent from the current registry.");
         if (event.tool === "read")
           event.input = await checkedRead(event.input, ctx.location.directory);
+        if (event.tool === "write" || event.tool === "edit")
+          event.input = await checkedWrite(event.input, ctx.location.directory);
+        if (event.tool === "appa_safebash")
+          event.input = await checkedSafeBash(event.input, ctx.location.directory);
         let proposal = { tool: tool.tool, arguments: structuredClone(event.input), call_id: event.id }, decision = await post("tool_call", actor, {
           ...proposal,
           cwd: ctx.location.directory,
@@ -1926,21 +2158,21 @@ ${task.state.value}`;
 async function checkedRead(input, directory) {
   if (!input || typeof input !== "object" || !("path" in input) || typeof input.path !== "string")
     throw Error("[appencode] Read requires a path.");
-  let path = await realpath2(resolve2(directory, input.path)).catch(() => {
+  let path = await realpath3(resolve3(directory, input.path)).catch(() => {
     throw Error("[appencode] Cannot resolve the read path. Check that it exists and is accessible; alternate filenames are refused in v1.");
-  }), root = await realpath2(directory), within = relative(root, path);
-  if (path === root || !isAbsolute2(within) && within !== ".." && !within.startsWith(`..${sep}`)) {
-    let current = (await stat(path)).isDirectory() ? path : dirname2(path);
-    while (current !== root && current !== dirname2(current)) {
-      let instruction = join2(current, "AGENTS.md");
+  }), root = await realpath3(directory), within = relative2(root, path);
+  if (path === root || !isAbsolute3(within) && within !== ".." && !within.startsWith(`..${sep}`)) {
+    let current = (await stat(path)).isDirectory() ? path : dirname3(path);
+    while (current !== root && current !== dirname3(current)) {
+      let instruction = join3(current, "AGENTS.md");
       if (instruction !== path)
         try {
-          throw await lstat2(instruction), Error("[appencode] This read would inject unchecked nearby AGENTS.md instructions. V1 refuses it.");
+          throw await lstat3(instruction), Error("[appencode] This read would inject unchecked nearby AGENTS.md instructions. V1 refuses it.");
         } catch (error) {
           if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT")
             throw error;
         }
-      current = dirname2(current);
+      current = dirname3(current);
     }
   }
   return { ...input, path };

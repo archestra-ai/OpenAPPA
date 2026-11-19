@@ -116,11 +116,6 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
 /// content, out of the file-tracker's sight. The policy blocks them at the hook as well.
 const UNMEDIATED_TOOLS: &str = "PowerShell,Monitor,Grep,NotebookEdit";
 
-/// The Claude Code releases known to pass the preload's self-test and still run a Bash call
-/// outside the confinement it checks. A release in this list runs SafeBash without a
-/// self-test; every other release runs native Bash exactly when its self-test passes.
-const BROKEN_RELEASES: &[&str] = &[];
-
 /// How long the preload's self-test may take before the session falls back to SafeBash.
 const SELF_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -211,10 +206,9 @@ fn executable() -> String {
     std::env::current_exe().map_or_else(|_| "appa".into(), |path| path.display().to_string())
 }
 
-/// Native Bash when the preload's self-test passes on this Claude Code build and the release
-/// is not one known to fool it; SafeBash otherwise, saying why, with its sandbox installed
-/// first when it can be. A session whose SafeBash could run no command is not started: the
-/// refusal says what is missing.
+/// Native Bash when the preload's self-test passes on this Claude Code build; SafeBash
+/// otherwise, saying why, with its sandbox installed first when it can be. A session whose
+/// SafeBash could run no command is not started: the refusal says what is missing.
 fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Result<Shell, String> {
     let reason = match native(settings, data_dir, token) {
         Ok(shell) => return Ok(shell),
@@ -238,18 +232,6 @@ fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Result<Shell, String
 }
 
 fn native(settings: &Path, data_dir: &Path, token: &Uuid) -> Result<Shell, String> {
-    let version = crate::child_process::output(Command::new("claude").arg("--version"))
-        .map_err(|error| format!("cannot run claude --version: {error}"))?;
-    let release = String::from_utf8_lossy(&version.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .to_string();
-    if BROKEN_RELEASES.contains(&release.as_str()) {
-        return Err(format!(
-            "Claude Code {release} runs Bash calls outside the confinement the preload's self-test checks"
-        ));
-    }
     let preload = data_dir.join("claude-bash.js");
     let staged = data_dir.join(format!("claude-bash.js.{token}"));
     fs::write(&staged, appa_file_tracker::CLAUDE_BASH_PRELOAD)

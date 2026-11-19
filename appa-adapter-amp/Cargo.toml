@@ -6,6 +6,9 @@ publish = false
 
 [dependencies]
 appa-runtime-api = { path = "../appa-runtime-api" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"

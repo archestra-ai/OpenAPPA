@@ -362,6 +362,11 @@ jobs:
       - name: Test amppa against the runtime
         run: bun test integrations/amp
 
+      # Bubblewrap, socat and ripgrep for srt: AppenCode's appa_safebash tests and the
+      # Claude Code Bash preload self-test both run commands in it.
+      - name: Install Claude Code's sandbox
+        run: .github/tools/claude-code/install-sandbox.sh
+
       - name: Test AppenCode against the runtime
         working-directory: integrations/opencode
         run: bun install --frozen-lockfile && bun run check && bun test
@@ -419,9 +424,6 @@ jobs:
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
 
       # clappa gives Claude Code native Bash only where this self-test passes.
-      - name: Install Claude Code's sandbox
-        run: .github/tools/claude-code/install-sandbox.sh
-
       - name: Self-test the Bash preload on the pinned Claude Code
         run: scripts/claude-bash-selftest.sh target/debug/appa
 

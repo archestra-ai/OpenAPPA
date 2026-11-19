@@ -5,6 +5,11 @@
 //! V1 treats delegation as an ordinary tool call. Amp's public plugin events do
 //! not expose the child binding and checked return lifecycle this runtime needs.
 //! No child provenance or return guarantee is claimed by this adapter.
+//!
+//! In an orb, [`proxy`] is the network boundary: the orb's filesystem is part of
+//! the thread's trajectory, and each outbound connection is a checked flow.
+
+pub mod proxy;
 
 use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal};
 

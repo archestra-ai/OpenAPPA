@@ -7,13 +7,17 @@ OpenCode V1's `@opencode-ai/plugin` API.
 
 ## Install
 
-Install OpenCode V2 2.0.28 and the released `appa` executable. No OpenAPPA
-checkout, Rust compiler, Bun installation, or plugin dependency install is required.
+Install OpenCode V2 2.0.28 and the released `appa` executable. No Bun
+installation or plugin dependency install is required.
 
 ```sh
 curl -fsSL https://openappa.com/install.sh | sh
 ~/.local/bin/appa plugin install opencode
 ```
+
+The `appa` executable also serves the file tracker as `appa file-tracker`, so
+it needs no separate install. `srt`, the sandbox for `appa_safebash`, is a
+separate install; see [Sandboxed commands](#sandboxed-commands-appa_safebash).
 
 The command retains the verified JavaScript plugin, batteries, and matching
 runtime. It merges the plugin, MCP connection, and `/appa-guide` command into
@@ -171,11 +175,15 @@ runtime's loopback HTTP origin. Existing conflicting global MCP or command
 entries are refused rather than overwritten. Global JSONC settings require
 manual setup; project JSONC files remain untouched and load normally.
 
-The OpenCode battery starts conservatively: private reads narrow audience,
-web results lower trust, edits require trust, and the shell permits only `pwd`.
+The plugin includes the `file-tracker` battery before the `opencode` battery.
+The file-tracker labels every file that `read`, `write`, `edit` and the
+sandboxed `appa_safebash` touch, and web results lower trust. `appa battery
+remove file-tracker` turns file tracking off: the `opencode` battery's own
+rules then narrow reads under `private/` to `internal`, require trust for
+writes and edits, and let `appa_safebash` run only `pwd`.
 The guide proposes additional root contracts for the tools you need. It includes
 only batteries that declare OpenCode support: Microsoft Learn, Cloudflare,
-Notion, and GitHub, in addition to the OpenCode baseline.
+Notion, and GitHub, in addition to the file-tracker and OpenCode baselines.
 Other catalog batteries are not automatically treated as OpenCode-compatible.
 
 ### Service batteries
@@ -222,13 +230,19 @@ Copy the starting policy without replacing existing configuration:
 mkdir -p "$HOME/.config/appa/opencode"
 test -e "$HOME/.config/appa/opencode/appa.toml" || \
   cp integrations/opencode/appa.toml "$HOME/.config/appa/opencode/appa.toml"
+test -e "$HOME/.config/appa/file-tracker.toml" || \
+  cp integrations/opencode/file-tracker.toml "$HOME/.config/appa/file-tracker.toml"
 ```
 
-Review the policy before use. It labels reads under `private/` as internal,
-requires public audience for web requests, and requires trust for edits.
-It permits only `pwd` through the shell. This is an example, not a
-general-purpose coding policy. Declare other tools or register an Annotator.
-Undeclared tools are refused. Other shell commands fail with
+Review the policy and `file-tracker.toml` before use. File tools and
+`appa_safebash` use the `file-tracker` Annotator and recorder: files under
+`private/` start as internal, `.env*` as self, writes and edits require trust,
+and a written file keeps the writing trajectory's Label. Web requests, and
+commands that reach a host other than a package registry, require public
+audience. The file tracker reads `~/.config/appa/file-tracker.toml` for the
+annotator, the recorder and the sandbox alike, as it does for Claude Code.
+This is an example, not a general-purpose coding policy. Declare
+other tools or register an Annotator. Undeclared tools are refused with
 `arguments match no registered contract`; this is an expected policy refusal.
 
 Start the runtime and leave it running:
@@ -291,11 +305,75 @@ server; restarting only the CLI does not refresh that server's environment.
 Use `opencode run --standalone --auto 'your task'` for a private-server run.
 `--auto` does not override explicit permission denials or APPA decisions.
 
+## Sandboxed commands: `appa_safebash`
+
+OpenCode bundles no OS sandbox or network proxy. AppenCode pairs with the
+[Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime)
+(`srt`, `@anthropic-ai/sandbox-runtime` 0.0.83), which uses bubblewrap on Linux and
+a filtering HTTP/SOCKS proxy. Install it and bubblewrap on the OpenCode host:
+
+```sh
+npm install -g @anthropic-ai/sandbox-runtime@0.0.83   # puts srt on PATH
+sudo apt-get install bubblewrap socat ripgrep         # Debian/Ubuntu
+```
+
+`srt` is found on `PATH`, or in `appa`'s data directory, where
+`appa plugin install claude-code` installs it. Without `srt`, `appa_safebash`
+reports what is missing and runs no command. Set `APPA_OPENCODE_SRT`, or the
+plugin option `srt`, to select the `srt` that typed `!` commands run in.
+AppenCode is tested on Linux, and typed `!` commands run only on Linux.
+
+`appa_safebash` takes `command`, `input_files`, `output_files` and
+`network_hosts`. Before the proposal reaches APPA, the plugin resolves each
+path as the file tracker does: relative to the project, through every
+symbolic link, and through the nearest existing directory when the path is
+absent. A directory output keeps a trailing `/`. An existing output file must
+be singly linked. Hosts are hostnames, `*.suffix` patterns or `host:port`.
+Policy, file tracking and the sandbox all see these resolved values.
+
+`appa file-tracker run` runs each released call in `srt`, confined as
+`clappa` confines Claude Code's Bash; amppa's `appa_safebash` uses the same
+runner. The command then:
+
+- reads its declared inputs, the system directories, the directories on
+  `PATH`, installed toolchains and the package managers' download caches;
+  every other file in the workspace, the home directory and `/tmp` is hidden;
+- does not see a credential such as `.env` inside a declared directory,
+  unless the call names it or git tracks it;
+- writes only its declared outputs. An existing output is read as well, and
+  its Label counts. An output with a trailing `/` is a directory the command
+  writes under. An absent output the command does not write is removed again;
+- keeps a repository's `.git` config and hooks read-only, even in a declared
+  directory;
+- reaches only the declared hosts through the proxy; it has no other network;
+- starts without the environment variables whose names hold credentials, has
+  a private `$TMPDIR` that is removed when it ends, stops after the
+  file-tracker's `[sandbox] timeout_secs` (600 seconds by default), and returns
+  at most 64 KiB of each output stream.
+
+A command that ran is a successful result whatever its exit code, so APPA
+applies the call's Label. Its result names the exit code and, when the
+confinement explains a failure, a hint such as which path to declare. The
+executor runs only the exact arguments APPA released for that call.
+
+A command typed at the prompt (`!`) reaches no tool hook. It runs in the
+file tracker's typed confinement: the project directory, or the git
+repository that holds it, with no host and without the files whose Label
+restricts their audience. Its result therefore needs no Label.
+
+The person reviews and clears the Labels that recorded writes left, in their
+own terminal:
+
+```sh
+appa file-tracker labels .     # the Labels recorded on files under .
+appa file-tracker reset <path> # remove them
+```
+
 ## Tool identities and remedy plans
 
 | OpenCode dispatch name | APPA policy identity |
 | --- | --- |
-| `read`, `shell`, `write`, `edit`, `webfetch` | `host/opencode/<name>` |
+| `read`, `write`, `edit`, `webfetch`, `appa_safebash` | `host/opencode/<name>` |
 | `appa_subagent` | `host/opencode/appa_subagent` (single child launch) |
 | `appa_collect`, `appa_cancel` | `host/opencode/<name>` (ordinary tools) |
 | Namespaced tool, such as `github_create_issue` | `mcp/github/create_issue` |
@@ -311,9 +389,7 @@ within a session.
 A private read first offers a remedy to accept a narrower audience. The agent
 calls `appa_execute_remedy_plan` with the offered `offer_id`, then retries.
 Executing the plan does not perform the read. Public web requests remain
-blocked after private content enters the trajectory. This example's `pwd`
-contract also requires public audience, so it stops after that narrowing.
-Web results require accepting suspicious trust; subsequent trusted-only edits
+blocked after private content enters the trajectory. Web results require accepting suspicious trust; subsequent trusted-only edits
 then stop. Sanitizers can replace
 confined results when the deployment registers them. The starting policy
 registers no sanitizer.
@@ -460,9 +536,10 @@ Durable OpenCode restart recovery is deferred.
   the native reader to choose an alternate filename. Reads that could load
   additional nearby `AGENTS.md` instructions are refused before execution.
   Initial project instructions remain trusted harness input, outside tool gating.
-- **File-label tracking is deferred.** V1 does not track native file versions
-  or attach Labels to writes. A later read in another session uses its policy
-  contract, not the writing session's Label.
+- **File Labels come from the file-tracker plugin.** `read`, `write`, `edit`
+  and `appa_safebash` name `file-tracker` as Annotator and recorder. A file
+  written in one session keeps that session's Label for later reads in any
+  session. Changes made outside these tools are not tracked.
 - **Labels stay in APPA's database.** Compaction, revert, plugin reload, and
   runtime restart do not clear a root's Label. Revert restores files but cannot
   erase an earlier flow within that root.
@@ -470,14 +547,19 @@ Durable OpenCode restart recovery is deferred.
   provider-executed tools, assistant prose, sharing, and attachments outside
   tool results are outside this boundary. Providers and configured
   provider-side capabilities must be trusted.
-- **Background shell requests are refused.** Host-initiated backgrounding,
-  delayed notifications, direct session shell commands, and other host/plugin
-  side effects are outside tool-result gating. Missing outcomes remain
+- **Unsandboxed shell execution is disabled.** The native `shell`, `patch`
+  and `grep` tools are removed: `grep` reads file content out of the file
+  tracker's sight. Every host shell spawn runs in the typed confinement; one
+  outside the project, or one that cannot be confined, is replaced with a
+  command that exits 126. Other host/plugin side effects
+  are outside tool-result gating. Missing outcomes remain
   unsettled in APPA; interruption does not prove that a tool had no effects.
-- **This is not an OS sandbox.** Native tools, MCP servers, plugins, formatters,
-  and shell subprocesses retain their host capabilities. Path checks do not
+- **A registry install can send what it reads.** A command whose hosts are all
+  one package registry's runs without a `public` requirement, so a package's
+  install script can send its declared inputs to that registry.
+- **Only `appa_safebash` is sandboxed.** Native file tools, MCP servers,
+  plugins and formatters retain their host capabilities. Path checks do not
   establish filesystem confinement or prevent concurrent filesystem changes.
-  General shell access requires separate confinement and appropriate contracts.
 - OpenCode, its plugin host, installed plugins, and APPA are trusted. Hooks run
   in registration order. A later plugin can change an approved call before
   execution; AppenCode can detect changed arguments at result admission, but
@@ -487,9 +569,8 @@ The issue [OpenAPPA #590](https://github.com/archestra-ai/OpenAPPA/issues/590)
 informed the adapter layout. Its V1 tool names and proposed spawn mapping are
 not the V2 contract. The
 [OpenCode sandbox plugin](https://github.com/isanchez31/opencode-sandbox-plugin)
-provides useful shell-sandbox design, but its V1 `bash` hooks do not run under
-this V2 API and it does not mediate native file tools. It is not an AppenCode
-dependency or a claimed security boundary.
+wraps the V1 `bash` tool with the same Sandbox Runtime. Its hooks do not run
+under this V2 API, so AppenCode runs it through `appa file-tracker run`.
 
 To uninstall, remove the plugin entry and reload OpenCode. Stop the runtime
 separately. Keep the policy and database if protected sessions will resume.
@@ -533,12 +614,10 @@ how an existing integration reports child starts and checked returns.
    the surrounding read. Evaluate the V2 model-request hooks separately for
    main, title, compaction, and generation requests, including WebSocket
    providers. Tool-result protection alone does not mediate these emissions.
-6. **File-label tracking: deferred, outside the first subagent extension.**
-   When this work resumes, integrate APPA's runtime-owned file mediation
-   rather than attaching a Label only to a pathname. Preserve Labels across
-   writes, later reads, and snapshot restoration, and prevent native tools or
-   subprocesses from bypassing the managed workspace. Foreground subagent
-   support does not depend on completing this work.
+6. **File Labels across snapshot restoration.** OpenCode's revert restores
+   files without a mediated write, so the file tracker keeps the Label of the
+   reverted content. Map revert to a recorded write before relying on
+   narrower Labels after a revert.
 
 For each enabled path, test both permitted and refused flows through the
 published OpenCode CLI and real APPA runtime. Verify that private child data

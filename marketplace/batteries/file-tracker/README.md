@@ -5,10 +5,14 @@ file-tracker. It writes its rules for canonical tools under
 `tool/file-tracker/`, and a client battery's `[aliases.tool.file-tracker]`
 map binds each to the client's own tool. The `claude-code` battery's map binds
 them to `Bash`, `Read`, `Write`, `Edit`, `PowerShell`, `Monitor`, `Grep` and
-`NotebookEdit`. The battery's own map binds `shell` to
-`mcp/file-tracker/SafeBash`.
+`NotebookEdit`. The `opencode` battery's map binds them to `appa_safebash`,
+`read`, `write`, `edit`, `shell`, `patch` and `grep`. amppa's example policy,
+`integrations/amp/appa.toml`, binds them to Amp's `appa_safebash`, `Read`,
+`view_media`, `create_file`, `edit_file` and its own shells. The battery's own
+map binds `shell` to `mcp/file-tracker/SafeBash`.
 
-`appa plugin install claude-code` includes this battery on a first install.
+`appa plugin install claude-code` and `appa plugin install opencode` include
+this battery on a first install.
 `appa battery remove file-tracker` turns file tracking off, and
 `appa battery install file-tracker` turns it on again.
 
@@ -37,8 +41,9 @@ A shell command declares its `input_files`, `output_files` and
 `network_hosts`, and a sandbox confines it to exactly those. Under Claude Code,
 `clappa` adds the three lists to Claude Code's own `Bash` and confines each
 call in Claude Code's sandbox. Where its self-test fails, it serves SafeBash in
-Anthropic's sandbox runtime `srt` instead. A shell call that declares no lists
-is refused.
+Anthropic's sandbox runtime `srt` instead. Under OpenCode, AppenCode runs
+`appa_safebash` in `srt`, confined by the same answer. A shell call that
+declares no lists is refused.
 
 A call whose hosts are all one package registry's (npm, Yarn, the Go module
 proxy, crates.io, PyPI) runs as a call without hosts. Any other call that
