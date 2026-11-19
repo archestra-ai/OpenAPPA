@@ -342,6 +342,41 @@ fn a_frozen_value_crossed_without_its_acceptance_does_not_replay() {
 }
 
 #[test]
+fn an_acceptance_recorded_in_a_batch_before_its_crossing_does_not_replay() {
+    let e = open_engine(returning_registry(vec![]));
+    let child = TrajectoryId::new("child");
+    let log = frozen_family(&e, &child, "the answer");
+    let accepted = appended_facts(
+        e.handle(&viewing(&e, &log), settle(&child, 0, ReturnDecision::Accept))
+            .expect("the parent accepts the frozen value"),
+    );
+    let [
+        declared @ Fact::BasisAdvanced {
+            trajectory,
+            act,
+            revision,
+            ..
+        },
+        acceptance @ Fact::ReturnAccepted { .. },
+        crossing @ ..,
+    ] = accepted.as_slice()
+    else {
+        panic!("an acceptance leads its batch: {accepted:?}");
+    };
+    let alone = Fact::BasisAdvanced {
+        trajectory: trajectory.clone(),
+        act: act.clone(),
+        advance: Default::default(),
+        revision: *revision,
+    };
+    let split = [vec![alone, acceptance.clone(), declared.clone()], crossing.to_vec()].concat();
+    assert_eq!(
+        e.validate_replay(&[log, split].concat()),
+        Err(TransitionRefusal::UnmergedCrossing)
+    );
+}
+
+#[test]
 fn a_deferred_return_is_declared_only_for_the_proposal_that_carries_the_deferral() {
     let e = open_engine(returning_registry(vec![]));
     for (mark, declares) in [

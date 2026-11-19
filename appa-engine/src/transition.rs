@@ -2170,6 +2170,10 @@ impl<'a> Sequence<'a> {
         if self.declared.as_ref().is_some_and(|open| !open.owed.is_empty()) {
             return Err(TransitionRefusal::UnbackedAdvance);
         }
+        // An accepted return crosses under the act that accepted it.
+        if !self.accepted.is_empty() {
+            return Err(TransitionRefusal::UnmergedCrossing);
+        }
         // The previous act is complete; its evidence must be inherited or asked-for.
         self.settle_audit()?;
         if advance.flows.iter().any(|flow| !self.projection.is_opened(flow)) {
