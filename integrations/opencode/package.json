@@ -6,13 +6,13 @@
   "exports": { ".": "./appencode.ts" },
   "trustedDependencies": ["@opencode/cli"],
   "dependencies": {
-    "@opencode/plugin": "2.2.6",
-    "@opencode/schema": "2.2.6",
-    "effect": "4.1.0"
+    "@opencode/plugin": "2.2.7",
+    "@opencode/schema": "2.2.7",
+    "effect": "4.1.4"
   },
   "devDependencies": {
-    "@opencode/cli": "2.2.6",
-    "@opencode/client": "2.2.6",
+    "@opencode/cli": "2.2.7",
+    "@opencode/client": "2.2.7",
     "@types/bun": "1.4.4",
     "typescript": "7.0.2"
   },

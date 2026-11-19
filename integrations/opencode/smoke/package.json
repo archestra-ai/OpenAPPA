@@ -2,7 +2,7 @@
   "name": "appa-appencode-cli-smoke",
   "private": true,
   "dependencies": {
-    "@opencode/cli": "2.2.6"
+    "@opencode/cli": "2.2.7"
   },
   "trustedDependencies": ["@opencode/cli"]
 }
