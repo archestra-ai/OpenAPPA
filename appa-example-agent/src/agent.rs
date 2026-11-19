@@ -461,6 +461,7 @@ impl Run<'_> {
             spawn: self.marks_spawn(&proposed),
             prompt: None,
             ruling: None,
+            declares: None,
         };
         // A block advises delegating only when this frame can open a child.
         let presentation = EmbeddedPresentationOptions {

@@ -40,22 +40,7 @@ impl AheadAttempt {
     }
 }
 
-/// A label as the policy dialect spells a `delta`: a trust rank name and an audience list. An
-/// omitted dimension keeps the declaring trajectory's current value.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LabelSpelling {
-    pub trust: Option<String>,
-    pub audience: Option<Vec<String>>,
-}
-
-/// The arguments a declaration ahead of the spawn was made with, as its caller spelled them.
-#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DeclaredArguments {
-    pub label: Option<LabelSpelling>,
-    pub return_schema: Option<serde_json::Value>,
-}
+pub use appa_runtime_api::{DeclaredArguments, LabelSpelling};
 
 /// One proposal invocation of a spawn the host gave no call id: what its reservation of a
 /// declaration is keyed by.

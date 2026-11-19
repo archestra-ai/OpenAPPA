@@ -79,6 +79,7 @@ async fn propose(runtime: &Arc<Runtime>, root: &TrajectoryId, call: ProposedCall
             spawn: None,
             prompt: None,
             ruling: None,
+            declares: None,
         },
     )
     .await

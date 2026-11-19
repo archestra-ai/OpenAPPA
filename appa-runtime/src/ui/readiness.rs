@@ -77,18 +77,14 @@ pub(super) fn executable_available(executable: &str) -> bool {
             let Ok(metadata) = candidate.metadata() else {
                 return false;
             };
-            if !metadata.is_file() {
-                return false;
-            }
             #[cfg(unix)]
-            {
+            let runnable = {
                 use std::os::unix::fs::PermissionsExt;
                 metadata.permissions().mode() & 0o111 != 0
-            }
+            };
             #[cfg(not(unix))]
-            {
-                true
-            }
+            let runnable = true;
+            metadata.is_file() && runnable
         })
     })
 }

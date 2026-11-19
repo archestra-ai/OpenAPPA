@@ -305,6 +305,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                 call,
                 call_id: event.tool_use_id.clone(),
                 ruling: None,
+                declares: None,
             })),
             (None, _) => Err(malformed("PreToolUse without a tool call")),
         },
@@ -639,6 +640,7 @@ mod tests {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             })),
         );
     }

@@ -193,6 +193,7 @@ async fn a_root_fork_acts_for_its_parents_principal() {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
     };
@@ -255,6 +256,7 @@ async fn acts_for_alice(runtime: &Arc<Runtime>) {
                 spawn: None,
                 prompt: None,
                 ruling: None,
+                declares: None,
             },
         )
     };

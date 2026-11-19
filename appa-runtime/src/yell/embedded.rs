@@ -129,7 +129,8 @@ mod tests {
                     call_id: None,
                     spawn: None,
                     prompt: None,
-                    ruling: None
+                    ruling: None,
+                    declares: None,
                 }
             )
             .await,
