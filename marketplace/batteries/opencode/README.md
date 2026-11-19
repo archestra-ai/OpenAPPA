@@ -1,22 +1,47 @@
 # OpenCode battery
 
 This battery covers selected OpenCode V2 built-in tools. It does not cover every
-tool or provide filesystem confinement. Install AppenCode in a host-controlled
+tool. Install AppenCode in a host-controlled
 directory. Keep its policy outside the agent's writable project.
 
-Reads whose resolved path matches `*/private/*` narrow the trajectory audience
-to `internal`. Other reads keep the current Label. Web tools require `public`
-audience and return `suspicious` data. When the root binds
+With the `file-tracker` battery included before this one, its
+`[aliases.tool.file-tracker]` map routes `read`, `write`, `edit` and
+`appa_safebash` through the file-tracker, which keeps a Label for every file
+the agent touches:
+
+- A file starts with the Label from the file-tracker's built-in rules, which
+  label `.env*` and other credential paths `self` and require a `trusted`
+  session to write instructions and hooks, and the person's rules in
+  `~/.config/appa/file-tracker.toml`.
+- A `write`, or an `appa_safebash` output, stores the Label the trajectory had
+  when APPA released the call. An `edit` combines it with the file's Label.
+- A `read` narrows the trajectory to the file's Label, in this or a later
+  session, including a Claude Code session on the same machine.
+
+`appa_safebash` runs through `appa file-tracker run`, in Anthropic's sandbox
+runtime `srt`, confined to its declared `input_files`, `output_files` and
+`network_hosts` as `clappa` confines Claude Code's Bash. It
+forwards the Labels of its input files. A command that names a host requires
+`public` audience and returns `suspicious` data. A command whose hosts are all
+one package registry's (npm, Yarn, the Go proxy, crates.io, PyPI) runs as a
+command without hosts. The map also refuses the native `shell`, `patch` and
+`grep`, which AppenCode removes. A command typed at the prompt (`!`) runs
+confined to the project, with no host and no file whose Label restricts its
+audience.
+
+`appa battery remove file-tracker` turns file tracking off. This battery's
+own rules then decide those tools: reads under `private/` narrow audience to
+`internal`, writes and edits require `trusted` data, and `appa_safebash` runs
+only `pwd`.
+
+Web tools require `public` audience and return `suspicious` data. When the root binds
 `opencode.strip-instructions`, the battery confines both web results and
 offers the sanitizer beside the trust narrowing: the model removes every instruction from the page and keeps
 its facts, code and links, and the result returns at the session's own
 trust. APPA does not verify what the model removed. The sanitizer names no
 model; bind it under `[externals.sanitizers."opencode.strip-instructions"]`,
 for example with `builtin = "llm"` and the root's `[externals.llm]`. Unbound,
-it is not offered and the web results are not confined. Edits and writes
-require `trusted` data.
-The shell permits only `pwd`, while the audience remains `public` and trust
-remains `trusted`. Other commands require explicit root contracts.
+it is not offered and the web results are not confined.
 
 The deployment must enable `policy.deployment.context_control` for
 `appa_subagent`. AppenCode gates child returns independently of this tool rule.

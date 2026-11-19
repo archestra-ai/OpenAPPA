@@ -131,12 +131,23 @@ export async function install(settingsDirectory: string, config: string, runtime
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     if (await realpath(store) !== await realpath(batteries)) throw new Error('Existing battery store belongs to another deployment; choose a separate config directory.')
   }
-  const initial = 'include = ["batteries/opencode/appa.toml"]\n\n[policy]\nversion = 2\n\n[policy.deployment]\ncontext_control = true\n\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n'
+  const initial = 'include = ["batteries/file-tracker/appa.toml", "batteries/opencode/appa.toml"]\n\n[policy]\nversion = 2\n\n[policy.deployment]\ncontext_control = true\n\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n' + FILE_TRACKER
   try { await writeFile(config, initial, { flag: 'wx', mode: 0o600 }) }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
   await mkdir(settingsDirectory, { recursive: true })
   await writeFile(path, `${JSON.stringify(settings, null, 2)}\n`)
 }
+
+// The deployment root binds the file-tracker that the file-tracker battery
+// names; `appa` is the runtime's own executable. Keep in sync with
+// scripts/appa-opencode-package.ts.
+export const FILE_TRACKER = `
+[externals.annotators.file-tracker]
+command = ["appa", "file-tracker", "annotate"]
+
+[externals.recorders.file-tracker]
+command = ["appa", "file-tracker", "record"]
+`
 
 if (import.meta.main) {
   const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), '.config')

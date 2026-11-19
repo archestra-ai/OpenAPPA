@@ -3,9 +3,9 @@ name: Claude Code Canary
 # clappa gives Claude Code native Bash on any release whose Bash preload
 # self-test passes. Claude Code ships several releases a week and updates
 # itself, so this runs the self-test daily on the newest release. Red means
-# protected sessions on that release fall back to SafeBash: fix the preload,
-# or add the release to BROKEN_RELEASES in appa-runtime/src/protected_launch.rs
-# if it passes the self-test but runs a Bash call unconfined.
+# protected sessions on that release fall back to SafeBash: fix the preload.
+# A release that passes the self-test but runs a Bash call unconfined needs a
+# self-test check that catches it, so it and every later release fall back.
 
 on:
   schedule:

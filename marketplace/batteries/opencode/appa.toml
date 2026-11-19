@@ -1,3 +1,26 @@
+# OpenCode rules: the map that binds the `file-tracker` battery's canonical
+# tools to OpenCode's own, then OpenCode's built-in tools. Include the
+# `file-tracker` battery before this one to keep a label on every file.
+
+# The `file-tracker` battery's tools, where a deployment includes it. Its rules
+# come first, so they decide the calls of every tool this map binds: read,
+# write and edit take the label the file-tracker keeps on each file, and
+# appa_safebash runs in the sandbox the file-tracker answers for its declared
+# `input_files`, `output_files` and `network_hosts`. AppenCode removes the
+# native shell, patch and grep, which work out of the file-tracker's sight;
+# the map refuses them at the hook too. Without the battery, this map binds
+# nothing and the rules below decide.
+[aliases.tool.file-tracker]
+shell = [{ name = "host/opencode/appa_safebash", args = { network_hosts = "network_hosts" } }]
+read = [{ name = "host/opencode/read" }]
+write = [{ name = "host/opencode/write" }]
+edit = [{ name = "host/opencode/edit" }]
+unmediated = [
+  { name = "host/opencode/shell" },
+  { name = "host/opencode/patch" },
+  { name = "host/opencode/grep" },
+]
+
 [policy]
 version = 2
 
@@ -36,8 +59,9 @@ requires = { trust = "trusted" }
 name = "host/opencode/edit"
 requires = { trust = "trusted" }
 
+# Without file tracking nothing labels what a command reads, so only pwd runs.
 [[policy.tool]]
-name = "host/opencode/shell(command:pwd)"
+name = "host/opencode/appa_safebash(command:pwd)"
 requires = { trust = "trusted", audience = { contains = ["public"] } }
 
 [externals]
