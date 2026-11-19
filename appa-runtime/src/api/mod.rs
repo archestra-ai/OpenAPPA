@@ -613,10 +613,6 @@ pub(crate) enum EventError {
     /// The host carried a return declaration on a call that starts no single subagent.
     #[error("only a call that starts a single subagent declares its return; this call starts none")]
     DeclaresOffSpawn,
-    /// The host carried a return declaration under a deployment that does not control
-    /// subagent context, where no return is declared.
-    #[error("this deployment does not control subagent context, so no return is declared")]
-    DeclaresUncontrolled,
     #[error("the host reused a call id")]
     CallIdReused,
     #[error("the trajectory has ended")]
@@ -776,8 +772,7 @@ impl EventError {
             | EventError::BindingMismatch
             | EventError::SpawnStopped
             | EventError::SpawnNeverStarted
-            | EventError::DeclaresOffSpawn
-            | EventError::DeclaresUncontrolled => RefusalClass::Spawn,
+            | EventError::DeclaresOffSpawn => RefusalClass::Spawn,
         }
     }
 
@@ -803,7 +798,6 @@ impl EventError {
             | EventError::MalformedPrincipal(_)
             | EventError::PrincipalMismatch
             | EventError::DeclaresOffSpawn
-            | EventError::DeclaresUncontrolled
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding

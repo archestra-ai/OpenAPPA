@@ -589,22 +589,20 @@ async fn a_declaration_whose_application_fails_to_commit_refuses_and_leaves_no_a
 }
 
 #[tokio::test]
-async fn a_deployment_without_context_control_refuses_a_declaring_spawn_and_writes_nothing() {
+async fn a_deployment_without_context_control_releases_a_declaring_spawn_unmarked_and_declares_nothing() {
     let Deployed { runtime, .. } = deployed_serving(&format!(
         "{TOOLS}{}",
         DEPLOYMENT.replace("context_control = true", "context_control = false")
     ));
-    let before = facts(&runtime, |_| true);
-    assert!(matches!(
-        declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await,
-        Err(EventError::DeclaresUncontrolled)
-    ));
-    assert_eq!(facts(&runtime, |_| true), before);
     assert!(
         matches!(
-            undeclared(&runtime, call("fetch", 1), "toolu-1").await,
-            ToolCallDecision::Allow { spawn: None, .. }
+            declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await,
+            Ok(ToolCallDecision::Allow { spawn: None, .. })
         ),
-        "the deployment releases the spawn unmarked, so a declaration would have no fork to bind"
+        "the deployment releases the spawn unmarked, so there is no fork for a declaration to bind"
     );
+    assert_eq!(declarations(&runtime), 0);
+    assert_eq!(approvals(&runtime), 0);
+    assert_eq!(forks(&runtime), 0);
+    assert_eq!(dispatches(&runtime), 1);
 }

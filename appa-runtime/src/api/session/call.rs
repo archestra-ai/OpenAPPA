@@ -148,14 +148,9 @@ impl Session {
     ///
     /// A blocked single spawn that took no declaration ahead applies the return its proposal
     /// declares, if it declares one ([`Session::apply_declared`]). A deployment that does not
-    /// control subagent context refuses such a proposal before it is decided, as it refuses a
-    /// declaration made ahead.
+    /// control subagent context releases a spawn unmarked, so nothing is applied there: the
+    /// host declares for every spawn and cannot know the deployment's choice.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
-        if proposal.declares.is_some()
-            && !self.with_view(|context| Ok(context.engine().registry().profile().context_control()))?
-        {
-            return Err(EventError::DeclaresUncontrolled);
-        }
         let invocation = appa_eventlog::InvocationNonce(rand::random());
         let (mut decision, took) = self.propose_resolving(&proposal, Some(invocation)).await?;
         let (Some(spawn), ToolCallDecision::Deny { .. }) = (proposal.spawn, &decision) else {
