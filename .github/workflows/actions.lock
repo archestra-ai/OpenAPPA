@@ -19,6 +19,7 @@ workflows:
         - 'actions/setup-go@v7.0.0'
         - 'actions/upload-artifact@v7.0.2'
         - 'archestra-ai/.github@v1.25.2'
+        - 'archestra-ai/.github@v1.33.0'
         - 'astral-sh/setup-uv@v10.3.3'
         - 'docker/build-push-action@v7.4.0'
         - 'docker/setup-buildx-action@v4.4.0'
@@ -126,6 +127,11 @@ dependencies:
             - 'actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510'
             - 'google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093'
             - 'google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db'
+    'archestra-ai/.github@v1.33.0':
+        ref: 'v1.33.0'
+        commit: 'sha1-1bf4a7d38b15e9a4f48a1d4ad476ad4e4b932e00'
+        owner_id: 216022683
+        repo_id: 1192166927
     'astral-sh/setup-uv@v10.3.3':
         ref: 'v10.3.3'
         commit: 'sha1-68559e99cc807c1eb7e9238fd43a15bba460eec2'
