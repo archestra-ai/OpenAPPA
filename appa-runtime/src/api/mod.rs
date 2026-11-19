@@ -689,6 +689,10 @@ pub(crate) enum EventError {
     /// The host carried a return declaration on a call that starts no single subagent.
     #[error("only a call that starts a single subagent declares its return; this call starts none")]
     DeclaresOffSpawn,
+    /// The host declared a deferred return on a spawn it gave no call id: the parent finds
+    /// the answer it decides on by that id.
+    #[error("a spawn that declares a deferred return carries the host's call id; this one carries none")]
+    DeferralUnkeyed,
     #[error("the host reused a call id")]
     CallIdReused,
     #[error("the trajectory has ended")]
@@ -848,7 +852,8 @@ impl EventError {
             | EventError::BindingMismatch
             | EventError::SpawnStopped
             | EventError::SpawnNeverStarted
-            | EventError::DeclaresOffSpawn => RefusalClass::Spawn,
+            | EventError::DeclaresOffSpawn
+            | EventError::DeferralUnkeyed => RefusalClass::Spawn,
         }
     }
 
@@ -874,6 +879,7 @@ impl EventError {
             | EventError::MalformedPrincipal(_)
             | EventError::PrincipalMismatch
             | EventError::DeclaresOffSpawn
+            | EventError::DeferralUnkeyed
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding

@@ -71,6 +71,9 @@ impl Session {
         prompt: Option<PromptKey>,
         declares: DeclaredReturn,
     ) -> Result<ToolCallDecision, EventError> {
+        if declares == DeclaredReturn::Deferred && call_id.is_none() {
+            return Err(EventError::DeferralUnkeyed);
+        }
         self.on_proposal(Proposal {
             call,
             call_id,

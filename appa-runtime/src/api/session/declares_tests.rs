@@ -624,6 +624,17 @@ async fn deferring(runtime: &Runtime, spawn: ProposedCall, call_id: &str) -> Res
 }
 
 #[tokio::test]
+async fn a_deferred_return_declared_on_a_spawn_without_a_call_id_is_refused_and_writes_nothing() {
+    let Deployed { runtime, .. } = deployed(false);
+    let refused = session(&runtime)
+        .on_spawn_declaring(call("fetch", 1), None, None, DeclaredReturn::Deferred)
+        .await;
+    assert!(matches!(refused, Err(EventError::DeferralUnkeyed)), "{refused:?}");
+    assert_eq!(dispatches(&runtime), 0);
+    assert_eq!(declarations(&runtime), 0);
+}
+
+#[tokio::test]
 async fn a_spawn_proposed_with_a_deferred_return_is_released_under_it() {
     let Deployed { runtime, .. } = deployed(false);
     binding(deferring(&runtime, call("fetch", 1), "toolu-1").await);

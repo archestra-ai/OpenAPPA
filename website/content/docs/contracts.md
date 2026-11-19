@@ -1295,7 +1295,7 @@ OpenAPPA refuses a `tool_call` that carries `declares` but does not start exactl
 
 #### Deferred returns
 
-A deferred return sets no limit for the child. The parent decides when the child stops, instead of choosing a limit before the child starts. Only an embedded host that delivers a child's answer to the parent itself declares one, and a served hook that declares it is refused. The declaration is `deferred` in `declares`, with neither `label` nor `return_schema`:
+A deferred return sets no limit for the child. The parent decides when the child stops, instead of choosing a limit before the child starts. Only an embedded host that delivers a child's answer to the parent itself declares one, and a served hook that declares it is refused. The declaration is `deferred` in `declares`, with neither `label` nor `return_schema`, on a call that carries the host's `call_id`:
 
 ```json
 { "declares": { "deferred": true } }
