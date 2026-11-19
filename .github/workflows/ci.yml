@@ -587,6 +587,14 @@ jobs:
           env-vars: CARGO_PROFILE_TEST_DEBUG ImageOS
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # SafeBash's tests run commands in the sandbox runtime appa installs, from the same
+      # lock, and fail in CI when it cannot start.
+      - name: Install SafeBash's sandbox
+        run: |
+          .github/tools/claude-code/install-sandbox.sh
+          npm ci --prefix appa-file-tracker/sandbox-runtime --ignore-scripts --no-audit --no-fund
+          echo "$PWD/appa-file-tracker/sandbox-runtime/node_modules/.bin" >> "$GITHUB_PATH"
+
       - name: Rust tests
         run: cargo test --workspace --features appa-eventlog/postgres,appa/postgres,appa/archestra --locked
 

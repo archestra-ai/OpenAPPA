@@ -356,6 +356,11 @@ write_attention = ["human-approval"]
 pattern = "*/appa/file-tracker.*"
 write_attention = ["human-approval"]
 
+# The sandbox runtime `appa` installs for SafeBash runs outside every sandbox.
+[[path]]
+pattern = "*/appa/sandbox-runtime/*"
+write_attention = ["human-approval"]
+
 # --- the tools the plugin serves, by canonical tool id ---
 [[tool]]
 name = "host/claude-code/Read"

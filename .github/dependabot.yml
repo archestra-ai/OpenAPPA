@@ -20,13 +20,15 @@ updates:
           - minor
           - patch
 
-  # The website (pnpm), the OpenCode marketplace plugin, and the Claude Code
-  # CLI that CI's live harness check installs.
+  # The website (pnpm), the OpenCode marketplace plugin, the Claude Code CLI
+  # that CI's live harness check installs, and the sandbox runtime appa
+  # installs for SafeBash.
   - package-ecosystem: npm
     directories:
       - /website
       - /marketplace/plugins/opencode
       - /.github/tools/claude-code
+      - /appa-file-tracker/sandbox-runtime
     schedule:
       interval: weekly
     cooldown:

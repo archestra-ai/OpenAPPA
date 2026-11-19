@@ -51,7 +51,14 @@ pub fn launch(settings: &Path, data_dir: &Path, arguments: &[OsString]) -> ! {
             if let Some(note) = appa_file_tracker::earlier_labels() {
                 eprintln!("clappa: {note}");
             }
-            shell(settings, data_dir, &token)
+            match shell(settings, data_dir, &token) {
+                Ok(shell) => shell,
+                Err(refusal) => {
+                    close(messaging.as_ref());
+                    eprintln!("clappa: {refusal}");
+                    std::process::exit(1);
+                }
+            }
         }
         false => Shell::Untracked,
     };
@@ -205,17 +212,28 @@ fn executable() -> String {
 }
 
 /// Native Bash when the preload's self-test passes on this Claude Code build and the release
-/// is not one known to fool it; SafeBash otherwise, saying why.
-fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Shell {
-    match native(settings, data_dir, token) {
-        Ok(shell) => shell,
-        Err(reason) => {
-            eprintln!("clappa: shell commands run as SafeBash: {reason}");
-            if let Some(missing) = appa_file_tracker::sandbox_missing() {
-                eprintln!("clappa: {missing}. Until then, every shell command is refused.");
-            }
-            Shell::SafeBash
+/// is not one known to fool it; SafeBash otherwise, saying why, with its sandbox installed
+/// first when it can be. A session whose SafeBash could run no command is not started: the
+/// refusal says what is missing.
+fn shell(settings: &Path, data_dir: &Path, token: &Uuid) -> Result<Shell, String> {
+    let reason = match native(settings, data_dir, token) {
+        Ok(shell) => return Ok(shell),
+        Err(reason) => reason,
+    };
+    eprintln!("clappa: shell commands run as SafeBash: {reason}");
+    match appa_file_tracker::prepare_sandbox() {
+        Ok(None) => Ok(Shell::SafeBash),
+        Ok(Some(installed)) => {
+            eprintln!(
+                "clappa: installed Anthropic's sandbox runtime for SafeBash at {}",
+                installed.display()
+            );
+            Ok(Shell::SafeBash)
         }
+        Err(missing) => Err(format!(
+            "{missing}. Claude Code was not started, because SafeBash would refuse every shell command; \
+             to start it without file tracking, run: appa battery remove file-tracker"
+        )),
     }
 }
 
