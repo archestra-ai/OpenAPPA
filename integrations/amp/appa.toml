@@ -1,25 +1,83 @@
-# A small, explicit starting policy for amppa. Adapt the paths and tool names to
-# your deployment. Undeclared tools are refused; there is no permissive wildcard.
+# A small, explicit starting policy for amppa in an Amp orb. Adapt the tool
+# names and hosts to your deployment. Undeclared tools are refused; there is no
+# permissive wildcard. The first declaration whose selector matches a call wins,
+# and this file's rules precede the included battery's.
+#
+# The runtime finds the battery with `--batteries-dir`, such as the checkout's
+# `marketplace/batteries`.
+include = ["batteries/file-tracker/appa.toml"]
+
+# --- the orb's files and shell: the `file-tracker` battery ---
+
+# The orb's filesystem is created for the thread and discarded with it, so it
+# is part of the trajectory: what the thread writes stays in its label, and no
+# label needs to outlive the orb. What the orb starts with still needs one, and
+# so does each command. The `file-tracker` battery labels every file a call
+# reads or writes and confines each shell command to the files and hosts it
+# declares; this map binds its canonical tools to Amp's own. Without the
+# include this map binds nothing, and Amp's file tools and shells have no rule
+# and are refused.
+#
+# - `shell` is `appa_safebash`, which amppa registers. It runs each command in
+#   Anthropic's sandbox runtime `srt`, reading only its `input_files` and the
+#   system, writing only its `output_files`, and reaching only its
+#   `network_hosts`. A package registry is reachable after a credential read; a
+#   call that names any other host requires public data and is `suspicious`.
+# - `unmediated` refuses Amp's own shells, which read and send any file in the
+#   orb out of the file-tracker's sight.
+[aliases.tool.file-tracker]
+shell = [{ name = "host/amp/appa_safebash", args = { network_hosts = "network_hosts" } }]
+read = [{ name = "host/amp/Read" }, { name = "host/amp/view_media" }]
+write = [{ name = "host/amp/create_file" }]
+edit = [{ name = "host/amp/edit_file" }]
+unmediated = [
+  { name = "host/amp/shell_command" },
+  { name = "host/amp/shell_command_status" },
+  { name = "host/amp/Bash" },
+]
+
 [policy]
 version = 2
 
-# Amp modes use different builtin names. These are independent host identities.
+# The file-tracker's path rules require `human-approval` to write files that can
+# turn the protection off, such as `.amp/plugins/*` and `.amp/settings.json`.
+# This mandate lets its answers name that mark. amppa has no approval channel
+# and this policy binds no authority, so such a write is denied.
+[[policy.annotator]]
+name = "file-tracker"
+marks = ["human-approval"]
+
+# A patch names its files inside its text, where the file-tracker cannot read
+# them, so only a trusted session applies one.
 [[policy.tool]]
-name = "host/amp/Read(path:*/private/*)"
-delta = { audience = ["internal"] }
+name = "host/amp/apply_patch"
+requires = { trust = "trusted" }
+
+# An image on the web is written by strangers; a local one is a file read,
+# which the battery's `read` rule labels.
+[[policy.tool]]
+name = "host/amp/view_media(path:http://*|https://*)"
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
+
+# --- the orb's network: `appa amp-proxy` checks every other connection ---
+
+# One outbound connection through `appa amp-proxy`, from a process outside
+# SafeBash, such as a server Amp or an MCP server starts. Such a process can
+# send any file in the orb, so the connection forwards the most restricted
+# label the orb's files can carry. A package registry is told only which public
+# packages a process fetches, as with SafeBash. Declare hosts trusted with the
+# orb's data, such as a company package mirror, above the last declaration.
+[[policy.tool]]
+name = "host/amp/appa_network(host:registry.npmjs.org|registry.yarnpkg.com|*.golang.org|*.crates.io|pypi.org|files.pythonhosted.org)"
 
 [[policy.tool]]
-name = "host/amp/Read"
+name = "host/amp/appa_network"
+forwards = { audience = ["self"] }
+requires = { audience = { contains = ["public"] } }
+delta = { trust = "suspicious" }
 
-[[policy.tool]]
-name = "host/amp/read_file(path:*/private/*)"
-delta = { audience = ["internal"] }
-
-[[policy.tool]]
-name = "host/amp/read_file"
-
-# A web request exposes its arguments to the public destination. Its result
-# also lowers trust, so subsequent trusted-only calls stop.
+# Amp runs these requests itself, outside the orb.
 [[policy.tool]]
 name = "host/amp/read_web_page"
 requires = { audience = { contains = ["public"] } }
@@ -30,24 +88,44 @@ name = "host/amp/web_search"
 requires = { audience = { contains = ["public"] } }
 delta = { trust = "suspicious" }
 
+# --- other threads ---
+
+# A message or file sent to another thread leaves this trajectory, like an
+# upload. The receiving thread starts with no label, so only public data may go
+# there. Attached files come from the orb and forward its label, as on the proxy.
 [[policy.tool]]
-name = "host/amp/apply_patch"
-requires = { trust = "trusted" }
+name = "host/amp/send_thread_message(media_paths:*)"
+forwards = { audience = ["self"] }
+requires = { audience = { contains = ["public"] } }
 
 [[policy.tool]]
-name = "host/amp/edit_file"
-requires = { trust = "trusted" }
-
-# Arbitrary shell can both read files and transmit them without an intervening
-# hook. This example permits only this exact diagnostic command, not general shell.
-[[policy.tool]]
-name = "host/amp/shell_command(command:pwd)"
-requires = { trust = "trusted", audience = { contains = ["public"] } }
+name = "host/amp/send_thread_message"
+requires = { audience = { contains = ["public"] } }
 
 [[policy.tool]]
-name = "host/amp/Bash(cmd:pwd)"
-requires = { trust = "trusted", audience = { contains = ["public"] } }
+name = "host/amp/create_thread"
+requires = { audience = { contains = ["public"] } }
+
+# --- tools whose results stay inside the session's trust boundary ---
+
+[[policy.tool]]
+name = "host/amp/ask_user_choice"
+delta = {}
+
+[[policy.tool]]
+name = "host/amp/skill"
+delta = {}
+
+[[policy.tool]]
+name = "host/amp/list_agent_modes"
+delta = {}
 
 [externals]
-timeout_ms = 2000
+timeout_ms = 5000
 max_body_bytes = 65536
+
+[externals.annotators.file-tracker]
+command = ["appa", "file-tracker", "annotate"]
+
+[externals.recorders.file-tracker]
+command = ["appa", "file-tracker", "record"]

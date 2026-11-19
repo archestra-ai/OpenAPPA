@@ -5,7 +5,9 @@ file-tracker. It writes its rules for canonical tools under
 `tool/file-tracker/`, and a client battery's `[aliases.tool.file-tracker]`
 map binds each to the client's own tool. The `claude-code` battery's map binds
 them to `Bash`, `Read`, `Write`, `Edit`, `PowerShell`, `Monitor`, `Grep` and
-`NotebookEdit`. The battery's own map binds `shell` to
+`NotebookEdit`. amppa's example policy, `integrations/amp/appa.toml`, binds
+them to Amp's `appa_safebash`, `Read`, `view_media`, `create_file`, `edit_file`
+and its own shells. The battery's own map binds `shell` to
 `mcp/file-tracker/SafeBash`.
 
 `appa plugin install claude-code` includes this battery on a first install.

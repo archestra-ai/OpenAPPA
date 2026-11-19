@@ -319,6 +319,20 @@ write_trust = "trusted"
 pattern = "*/Library/LaunchAgents/*"
 write_trust = "trusted"
 
+# Amp reads a repository's skills as instructions and runs an orb's setup and resume
+# scripts as code when the orb starts.
+[[path]]
+pattern = "*/.agents/skills/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.agents/setup"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.agents/resume"
+write_trust = "trusted"
+
 # --- the files that can turn the protection off ask the person running the session ---
 # The person's own Claude Code settings can hold credentials in their `env` block, so they
 # are `self` data: the home directory's, and a project's `settings.local.json`, which
@@ -342,6 +356,15 @@ write_attention = ["human-approval"]
 
 [[path]]
 pattern = "*.mcp.json"
+write_attention = ["human-approval"]
+
+# A project's Amp plugins, amppa among them, and its settings, which name its MCP servers.
+[[path]]
+pattern = "*/.amp/plugins/*"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/.amp/settings.json"
 write_attention = ["human-approval"]
 
 [[path]]
@@ -384,6 +407,31 @@ role = "run"
 # Claude Code's own Bash, when `clappa`'s preload adds the same three lists to it.
 [[tool]]
 name = "host/claude-code/Bash"
+role = "run"
+
+# amppa's tools in an Amp orb: Amp's own file tools, and SafeBash, which amppa registers.
+[[tool]]
+name = "host/amp/Read"
+role = "read"
+path = "path"
+
+[[tool]]
+name = "host/amp/view_media"
+role = "read"
+path = "path"
+
+[[tool]]
+name = "host/amp/create_file"
+role = "write"
+path = "path"
+
+[[tool]]
+name = "host/amp/edit_file"
+role = "edit"
+path = "path"
+
+[[tool]]
+name = "host/amp/appa_safebash"
 role = "run"
 
 [[tool]]

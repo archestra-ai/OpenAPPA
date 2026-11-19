@@ -4,6 +4,8 @@
 //! - `annotate` reads one annotation consult on stdin and writes its answer.
 //! - `record` reads one recorder delivery on stdin and writes its acknowledgement.
 //! - `mcp` serves SafeBash as an MCP server on stdio.
+//! - `run` reads one SafeBash call's arguments on stdin, runs it, and writes its result as a
+//!   JSON string: the entry point of a harness plugin that registers SafeBash as its own tool.
 //! - `sandbox` reads one Claude Code `Bash` call's arguments on stdin and writes the
 //!   confinement `clappa`'s preload gives Claude Code's sandbox for that call.
 //! - `labels [<path>...]` lists the labels recorded writes left under each path, and
@@ -51,7 +53,7 @@ pub fn earlier_labels() -> Option<String> {
 const USAGE: &str = "usage: appa file-tracker <command> [--config <file-tracker.toml>]
   labels [<path>...]   list the labels recorded on files under each path (default: .)
   reset <path>...      remove the labels recorded on files under each path
-  annotate | record | mcp | sandbox   the plugin's entry points, run by the runtime and clappa";
+  annotate | record | mcp | run | sandbox   the plugin's entry points, run by the runtime and the host plugins";
 
 /// Run one entry point: `arguments` are what follows `appa file-tracker`.
 pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
@@ -98,6 +100,7 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> ExitCode {
         }),
         "record" => answer(|delivery| record::record(&config, delivery)),
         "mcp" => safebash::serve(&config),
+        "run" => answer(|arguments| safebash::run(&config, arguments).map(serde_json::Value::String)),
         "sandbox" => answer(|arguments| safebash::sandbox(&config, arguments)),
         "labels" => reset::labels(&config, &paths).map(|listing| print!("{listing}")),
         "reset" => reset::reset(&config, &paths).map(|done| print!("{done}")),

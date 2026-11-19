@@ -180,6 +180,9 @@ version = "0.44.0"
 dependencies = [
  "appa-runtime-api",
  "proptest",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
