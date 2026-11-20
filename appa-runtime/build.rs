@@ -2,11 +2,12 @@
 mod batteries_layout;
 #[path = "src/batteries_staging.rs"]
 mod batteries_staging;
+#[path = "src/git_checkout.rs"]
+mod git_checkout;
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=APPA_BATTERIES_SHA256");
@@ -154,10 +155,8 @@ fn batteries_are_dirty(repository: &Path) -> bool {
 }
 
 fn export_committed_repository(repository: &Path, destination: &Path) -> std::io::Result<()> {
-    let mut command = Command::new("git");
+    let mut command = git_checkout::git_in(repository);
     command
-        .arg("-C")
-        .arg(repository)
         // The source archive must carry committed bytes, regardless of Git for Windows' checkout setting.
         .args(["-c", "core.autocrlf=false"])
         .args(["archive", "--format=tar", "HEAD", "--", batteries_staging::SOURCE]);
@@ -207,12 +206,7 @@ fn export_committed_repository(repository: &Path, destination: &Path) -> std::io
 }
 
 fn git(repository: &Path, arguments: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(arguments)
-        .output()
-        .ok()?;
+    let output = git_checkout::git_in(repository).args(arguments).output().ok()?;
     output
         .status
         .success()

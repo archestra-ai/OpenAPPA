@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use appa_package::generation::{
     ArtifactDigest, BUILD_BATTERIES_ARCHIVE, Commit, DESCRIPTOR_FILE, Generation, Platform, REPOSITORY,
@@ -14,6 +13,7 @@ use appa_package::{CATALOG_FILE, Marketplace};
 use serde::Deserialize;
 
 use super::{InstallError, Selection, invalid, io, verify_packages};
+use crate::git_checkout::git_in;
 
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TAG_PAGES: usize = 5;
@@ -450,8 +450,7 @@ fn parse_catalog(catalog: &[u8], marketplace: &Path) -> Result<Marketplace, Inst
 }
 
 fn git_head(root: &Path) -> Option<String> {
-    let output =
-        crate::child_process::output(Command::new("git").arg("-C").arg(root).args(["rev-parse", "HEAD"])).ok()?;
+    let output = crate::child_process::output(git_in(root).args(["rev-parse", "HEAD"])).ok()?;
     output
         .status
         .success()
@@ -462,13 +461,12 @@ fn git_head(root: &Path) -> Option<String> {
 /// HEAD moved after it was checked, exports exactly that commit. The
 /// marketplace tree holds every source `batteries_layout` maps.
 fn export_commit(root: &Path, commit: &Commit, destination: &Path) -> Result<(), InstallError> {
-    let output = crate::child_process::output(
-        Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["-c", "core.autocrlf=false"])
-            .args(["archive", "--format=tar", commit.as_str(), "marketplace"]),
-    )
+    let output = crate::child_process::output(git_in(root).args(["-c", "core.autocrlf=false"]).args([
+        "archive",
+        "--format=tar",
+        commit.as_str(),
+        "marketplace",
+    ]))
     .map_err(|error| io("export the build's commit", root, error))?;
     if !output.status.success() {
         return Err(InstallError::Invalid(format!(
@@ -716,6 +714,7 @@ mod tests {
     use appa_package::generation::Image;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::process::Command;
     use std::thread;
 
     #[test]
@@ -726,27 +725,23 @@ mod tests {
         let head = Commit::parse(&git_head(root).unwrap()).unwrap();
         export_commit(root, &head, &destination).unwrap();
         let path = "marketplace/batteries/archestra/README.md";
-        let committed = crate::child_process::output(Command::new("git").arg("-C").arg(root).args([
-            "cat-file",
-            "blob",
-            &format!("{}:{path}", head.as_str()),
-        ]))
-        .unwrap();
+        let committed =
+            crate::child_process::output(git_in(root).args(["cat-file", "blob", &format!("{}:{path}", head.as_str())]))
+                .unwrap();
         assert!(committed.status.success());
         assert_eq!(fs::read(destination.join(path)).unwrap(), committed.stdout);
     }
 
-    #[test]
-    fn export_commit_exports_the_checked_commit_after_head_moves() {
+    /// A repository whose `marketplace/file` holds each of `versions` in turn,
+    /// one commit each, and those commits in order.
+    fn repository(versions: &[&str]) -> (tempfile::TempDir, Vec<Commit>) {
         let root = tempfile::tempdir().unwrap();
         // No hook or signing setting of the person running the test applies.
         let hooks = tempfile::tempdir().unwrap();
         let hooks_path = format!("core.hooksPath={}", hooks.path().display());
         let git = |args: &[&str]| {
             let output = crate::child_process::output(
-                Command::new("git")
-                    .arg("-C")
-                    .arg(root.path())
+                git_in(root.path())
                     .args(["-c", &hooks_path, "-c", "commit.gpgsign=false"])
                     .args(["-c", "user.name=t", "-c", "user.email=t@t"])
                     .args(args),
@@ -754,19 +749,67 @@ mod tests {
             .unwrap();
             assert!(output.status.success(), "{args:?}");
         };
-        let file = root.path().join("marketplace/file");
         fs::create_dir(root.path().join("marketplace")).unwrap();
         git(&["init", "-q", "--object-format=sha1"]);
-        fs::write(&file, "checked").unwrap();
-        git(&["add", "."]);
-        git(&["commit", "-qm", "checked"]);
-        let checked = Commit::parse(&git_head(root.path()).unwrap()).unwrap();
-        fs::write(&file, "moved").unwrap();
-        git(&["commit", "-qam", "moved"]);
+        let mut commits = Vec::new();
+        for version in versions {
+            fs::write(root.path().join("marketplace/file"), version).unwrap();
+            git(&["add", "."]);
+            git(&["commit", "-qm", version]);
+            commits.push(Commit::parse(&git_head(root.path()).unwrap()).unwrap());
+        }
+        (root, commits)
+    }
+
+    #[test]
+    fn export_commit_exports_the_checked_commit_after_head_moves() {
+        let (root, commits) = repository(&["checked", "moved"]);
         let stage = tempfile::tempdir().unwrap();
         let destination = stage.path().join("source");
-        export_commit(root.path(), &checked, &destination).unwrap();
+        export_commit(root.path(), &commits[0], &destination).unwrap();
         assert_eq!(fs::read(destination.join("marketplace/file")).unwrap(), b"checked");
+    }
+
+    const FOREIGN_GIT_FIXTURE: &str = "installation::acquisition::tests::git_helpers_fixture_under_a_foreign_git_dir";
+
+    /// A caller whose environment names another repository, as a git hook's
+    /// does, still reads and exports the checkout it names. The helpers run in
+    /// a child of this test binary so the variables never touch this process.
+    #[test]
+    fn git_helpers_ignore_a_repository_the_environment_names() {
+        let (root, commits) = repository(&["checkout"]);
+        let (foreign, _) = repository(&["foreign"]);
+        let git_dir = foreign.path().join(".git");
+        let output = crate::child_process::output(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", FOREIGN_GIT_FIXTURE, "--nocapture"])
+                .env("APPA_TEST_GIT_ROOT", root.path())
+                .env("APPA_TEST_GIT_COMMIT", commits[0].as_str())
+                .env("GIT_DIR", &git_dir)
+                .env("GIT_WORK_TREE", foreign.path())
+                .env("GIT_INDEX_FILE", git_dir.join("index"))
+                .env("GIT_OBJECT_DIRECTORY", git_dir.join("objects")),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    #[test]
+    #[ignore = "run by git_helpers_ignore_a_repository_the_environment_names"]
+    fn git_helpers_fixture_under_a_foreign_git_dir() {
+        let (Some(root), Some(commit)) = (
+            std::env::var_os("APPA_TEST_GIT_ROOT"),
+            std::env::var_os("APPA_TEST_GIT_COMMIT"),
+        ) else {
+            return;
+        };
+        let root = Path::new(&root);
+        let commit = Commit::parse(commit.to_str().unwrap()).unwrap();
+        assert_eq!(git_head(root).as_deref(), Some(commit.as_str()));
+        let stage = tempfile::tempdir().unwrap();
+        let destination = stage.path().join("source");
+        export_commit(root, &commit, &destination).unwrap();
+        assert_eq!(fs::read(destination.join("marketplace/file")).unwrap(), b"checkout");
     }
 
     #[test]
