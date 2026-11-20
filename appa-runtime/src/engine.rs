@@ -598,6 +598,9 @@ pub enum EngineRefusal {
     DispatchClosed,
     #[error("the offer is not one this family carries")]
     UnknownOffer,
+    /// The call already carries a current approval another plan recorded.
+    #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
+    ApprovalPending,
     #[error("the fork and the child are already bound elsewhere")]
     Unbindable,
     #[error("the host reused a call id")]
@@ -631,6 +634,7 @@ impl EngineRefusal {
             EngineRefusal::Ended => ReplayRefusalClass("ended"),
             EngineRefusal::DispatchClosed => ReplayRefusalClass("dispatch_closed"),
             EngineRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
+            EngineRefusal::ApprovalPending => ReplayRefusalClass("approval_pending"),
             EngineRefusal::Unbindable => ReplayRefusalClass("unbindable"),
             EngineRefusal::CallIdReused => ReplayRefusalClass("call_id_reused"),
             EngineRefusal::OutcomeMismatch => ReplayRefusalClass("outcome_mismatch"),
@@ -2331,6 +2335,10 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
+    /// The plan's authority answers combine independently of plan order: any deny denies
+    /// the plan, even beside an abstention; otherwise any abstention leaves the offer
+    /// standing; otherwise the authorities not yet answered are consulted, and the plan is
+    /// approved only once every one of them approved.
     fn offer_authorities(
         &self,
         views: &Views,
@@ -2345,12 +2353,9 @@ impl RuntimeEngine {
         let narrows = ReviewedNarrowing::unjudged(narrowing);
         let mut approvals = Vec::new();
         let mut requests = Vec::new();
+        let mut abstained = None;
         for requirement in required {
             let name = requirement.authority.as_str().to_string();
-            let review = AuthorityReview {
-                tool: call.tool().clone(),
-                trajectory_label: views.current_label(),
-            };
             match authority_verdict(evidence, &name) {
                 None => {
                     let registered = registry
@@ -2360,7 +2365,10 @@ impl RuntimeEngine {
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
                         artifact: AuthorityArtifact::of(call, requirement, narrows.as_ref(), chain),
-                        review,
+                        review: AuthorityReview {
+                            tool: call.tool().clone(),
+                            trajectory_label: views.current_label(),
+                        },
                     });
                 }
                 Some((AuthorityVerdict::Approve, review)) => approvals.push(AuthorityEvidence {
@@ -2374,30 +2382,27 @@ impl RuntimeEngine {
                         authority: requirement.authority.clone(),
                     });
                 }
-                Some((AuthorityVerdict::Abstain(Abstention::Unanswered), _)) => {
-                    return AuthorityOutcome::NoAnswer(format!(
-                        "[appa] authority {name} gave no answer; the offer stands and may be executed again"
-                    ));
-                }
-                Some((AuthorityVerdict::Abstain(Abstention::Unreachable), _)) => {
-                    return AuthorityOutcome::NoAnswer(format!(
-                        "[appa] authority {name} cannot be reached from this session, so executing the offer \
-                         again obtains no ruling. Tell the user that the call waits on {name}."
-                    ));
-                }
-                Some((AuthorityVerdict::Abstain(Abstention::Unregistered), _)) => {
-                    return AuthorityOutcome::NoAnswer(format!(
-                        "[appa] this deployment binds no implementation to authority {name}, so executing the \
-                         offer again obtains no ruling. Tell the user that the deployment's configuration must \
-                         bind {name} under [externals.authorities]."
-                    ));
+                Some((AuthorityVerdict::Abstain(abstention), _)) => {
+                    abstained.get_or_insert((name, abstention));
                 }
             }
         }
-        if !requests.is_empty() {
-            return AuthorityOutcome::Consult(requests);
+        match abstained {
+            Some((name, Abstention::Unanswered)) => AuthorityOutcome::NoAnswer(format!(
+                "[appa] authority {name} gave no answer; the offer stands and may be executed again"
+            )),
+            Some((name, Abstention::Unreachable)) => AuthorityOutcome::NoAnswer(format!(
+                "[appa] authority {name} cannot be reached from this session, so executing the offer \
+                 again obtains no ruling. Tell the user that the call waits on {name}."
+            )),
+            Some((name, Abstention::Unregistered)) => AuthorityOutcome::NoAnswer(format!(
+                "[appa] this deployment binds no implementation to authority {name}, so executing the \
+                 offer again obtains no ruling. Tell the user that the deployment's configuration must \
+                 bind {name} under [externals.authorities]."
+            )),
+            None if !requests.is_empty() => AuthorityOutcome::Consult(requests),
+            None => AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals)),
         }
-        AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
     /// The call's block after an offer ended without approval. A denial leads with the
@@ -4188,6 +4193,7 @@ fn outcome_refusal(error: TransitionError) -> EngineRefusal {
 fn offer_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::UnknownOffer | TransitionError::OfferElsewhere => EngineRefusal::UnknownOffer,
+        TransitionError::ApprovalPending => EngineRefusal::ApprovalPending,
         TransitionError::BranchEnded => EngineRefusal::Ended,
         error => EngineRefusal::Invariant {
             detail: format!("deciding an offer: {error}"),

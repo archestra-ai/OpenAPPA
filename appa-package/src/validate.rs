@@ -1086,16 +1086,16 @@ fn string_argv(command: &Value) -> Option<Vec<&str>> {
 fn check_confinement(policy: &Path, declared: &toml::Table, deployment: &Value) -> Result<(), PackageError> {
     let refused = |field: &str| PackageError::PolicyField {
         policy: policy.to_path_buf(),
-        field: format!("deployment.{field}"),
+        field: field.to_owned(),
     };
-    let deployment = deployment.as_table().ok_or_else(|| refused(""))?;
+    let deployment = deployment.as_table().ok_or_else(|| refused("deployment"))?;
     if let Some(field) = deployment.keys().find(|field| field.as_str() != "confined_results") {
-        return Err(refused(field));
+        return Err(refused(&format!("deployment.{field}")));
     }
     let confined = deployment
         .get("confined_results")
         .and_then(Value::as_array)
-        .ok_or_else(|| refused("confined_results"))?;
+        .ok_or_else(|| refused("deployment.confined_results"))?;
     let tools: Vec<&str> = declared
         .get("tool")
         .and_then(Value::as_array)
@@ -1105,7 +1105,7 @@ fn check_confinement(policy: &Path, declared: &toml::Table, deployment: &Value) 
         .map(|name| name.split('(').next().unwrap_or(name))
         .collect();
     for entry in confined {
-        let tool = entry.as_str().ok_or_else(|| refused("confined_results"))?;
+        let tool = entry.as_str().ok_or_else(|| refused("deployment.confined_results"))?;
         if !tools.contains(&tool) {
             return Err(PackageError::PolicyConfinesForeignTool {
                 policy: policy.to_path_buf(),
@@ -2360,6 +2360,15 @@ mod tests {
                 "accepted {what}"
             );
         }
+    }
+
+    #[test]
+    fn a_battery_deployment_that_is_no_table_is_refused_under_its_own_name() {
+        let head = "[policy]\nversion = 2\n\n";
+        assert!(matches!(
+            validate_package(battery(&BATTERY_POLICY.replace(head, "[policy]\nversion = 2\ndeployment = 1\n\n")).path()),
+            Err(PackageError::PolicyField { field, .. }) if field == "deployment"
+        ));
     }
 
     /// A targeted battery with `base` as its base and `multi_user` as its multi-user target policy.

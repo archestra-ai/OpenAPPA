@@ -103,6 +103,7 @@ fn plugin_definitions_under(cache: &Path) -> Vec<PathBuf> {
                 pending.push(path);
             } else if directory.file_name().is_some_and(|name| name == "agents")
                 && path.extension().is_some_and(|extension| extension == "md")
+                && path.is_file()
             {
                 found.push(path);
             }
@@ -111,8 +112,21 @@ fn plugin_definitions_under(cache: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// Discovery saw a regular file, but the path can be swapped for a FIFO
+/// before it is opened: the open does not wait for a writer, and only a
+/// handle on a regular file is read.
 fn finding(path: &Path) -> Option<Finding> {
-    let file = fs::File::open(path).ok()?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut head = Vec::new();
     file.take(DEFINITION_HEAD_BYTES).read_to_end(&mut head).ok()?;
     frontmatter_finding(&String::from_utf8_lossy(&head))
@@ -248,6 +262,50 @@ mod tests {
         assert_eq!(
             declaring_max_turns(None, Some(&claude)),
             vec![(plugin.join("agents/capped.md"), Finding::MaxTurns)]
+        );
+    }
+
+    /// A FIFO named like a definition in the plugin cache is not opened, so no
+    /// writer is waited for; the definitions beside it are still found.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_the_plugin_cache_does_not_block_the_walk() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let claude = root.path().join("claude");
+        let agents = claude.join("plugins/cache/market/tool/1.0/agents");
+        write(&agents.join("capped.md"), "---\nmaxTurns: 2\n---\n");
+        let fifo = std::ffi::CString::new(agents.join("pipe.md").into_os_string().into_encoded_bytes())
+            .expect("a path without NUL");
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let scanned = claude.clone();
+        std::thread::spawn(move || sender.send(declaring_max_turns(None, Some(&scanned))));
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(vec![(agents.join("capped.md"), Finding::MaxTurns)])
+        );
+    }
+
+    /// A definition swapped for a FIFO after discovery saw a regular file is
+    /// opened without waiting for a writer and is not read; a link to a
+    /// regular file is still followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_definition_swapped_for_a_fifo_after_discovery_does_not_block_its_read() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let fifo = root.path().join("swapped.md");
+        let raw =
+            std::ffi::CString::new(fifo.clone().into_os_string().into_encoded_bytes()).expect("a path without NUL");
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        let target = root.path().join("target.md");
+        write(&target, "---\nmaxTurns: 2\n---\n");
+        let link = root.path().join("link.md");
+        std::os::unix::fs::symlink(&target, &link).expect("the definition is linked");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send((finding(&fifo), finding(&link))));
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok((None, Some(Finding::MaxTurns)))
         );
     }
 
