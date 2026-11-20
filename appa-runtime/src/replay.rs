@@ -1029,9 +1029,10 @@ pub enum Format {
 }
 
 /// Every `.appa` file the paths name: a regular file as itself, a directory as its regular
-/// `.appa` files, recursively and sorted, never through a symlinked directory inside it. Each
-/// file once, by what it resolves to, in the order first named. A named path that is neither
-/// a regular file nor a directory is refused, so no read waits on a FIFO's writer.
+/// `.appa` files, recursively and sorted, never through a symlinked directory inside it and
+/// never through a link to a file outside it. Each file once, by what it resolves to, in the
+/// order first named. A named path that is neither a regular file nor a directory is refused,
+/// so no read waits on a FIFO's writer.
 pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1039,7 +1040,9 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         let metadata = std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let found = if metadata.is_dir() {
             let mut found = Vec::new();
-            walk(path, &mut found).map_err(|error| format!("{}: {error}", path.display()))?;
+            std::fs::canonicalize(path)
+                .and_then(|root| walk(path, &root, &mut found))
+                .map_err(|error| format!("{}: {error}", path.display()))?;
             found.sort();
             found
         } else if metadata.is_file() {
@@ -1059,13 +1062,17 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn walk(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// The walk under the canonical `root`: a trace file is taken only when what it resolves to
+/// stays under the root, so a link cannot bring an outside file into the run or its output.
+fn walk(dir: &Path, root: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if entry.file_type()?.is_dir() {
-            walk(&path, into)?;
-        } else if path.extension().is_some_and(|extension| extension == "appa") && path.is_file() {
+            walk(&path, root, into)?;
+        } else if path.extension().is_some_and(|extension| extension == "appa")
+            && std::fs::canonicalize(&path).is_ok_and(|resolved| resolved.starts_with(root) && resolved.is_file())
+        {
             into.push(path);
         }
     }
@@ -1211,6 +1218,24 @@ mod tests {
             reports.iter().map(TraceReport::verdict).collect::<Vec<_>>(),
             vec![Verdict::Ok, Verdict::Ok, Verdict::Ok]
         );
+    }
+
+    /// A link in the tree to a trace outside it is not collected by the walk; the same link
+    /// named outright is the caller's choice and is collected.
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_follows_no_link_out_of_its_tree() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let (tree, outside) = (root.path().join("tree"), root.path().join("outside"));
+        std::fs::create_dir_all(tree.join("nested")).expect("the tree");
+        std::fs::create_dir_all(&outside).expect("the outside dir");
+        std::fs::write(outside.join("secret.appa"), "").expect("the outside file writes");
+        std::fs::write(tree.join("a.appa"), "").expect("the trace writes");
+        std::os::unix::fs::symlink(outside.join("secret.appa"), tree.join("nested/escape.appa")).expect("links");
+        std::os::unix::fs::symlink(tree.join("a.appa"), tree.join("nested/alias.appa")).expect("links");
+        assert_eq!(collect(std::slice::from_ref(&tree)), Ok(vec![tree.join("a.appa")]));
+        let named = tree.join("nested/escape.appa");
+        assert_eq!(collect(std::slice::from_ref(&named)), Ok(vec![named]));
     }
 
     /// A FIFO named like a trace is never collected for reading: the walk passes over it, and
