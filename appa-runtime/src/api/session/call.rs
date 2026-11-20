@@ -285,7 +285,8 @@ impl Session {
     /// loop appended. An approval already recorded stays recorded, and the next proposal of the
     /// call spends it. A stock `approve` authority never denies, so a plan that was not applied
     /// lost a race: another dispatch moved its basis or took its subject. The next proposal
-    /// reads what stands after that, and the rounds bound how often it is tried. Only the
+    /// reads what stands after that, and the rounds bound how often it is tried. An
+    /// operational failure to apply the plan refuses the call, never re-proposes it. Only the
     /// first proposal takes a declaration made ahead: when it took none, the later ones run
     /// outside the invocation, so a declaration made meanwhile waits for the next spawn. A
     /// proposal outside any invocation takes none.
@@ -302,9 +303,12 @@ impl Session {
             let Some(offer) = self.stock_approved_offer(offers)? else {
                 break;
             };
-            let applied = self.on_remedy(offer, RemedyArguments::default(), None, None).await;
-            if !matches!(applied, Ok(RemedyDecision::Authorized { .. })) {
-                tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
+            match self.on_remedy(offer, RemedyArguments::default(), None, None).await {
+                Ok(RemedyDecision::Authorized { .. }) => {}
+                Err(error) if error.is_operational() => return Err(error),
+                applied => {
+                    tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
+                }
             }
             decision = self.propose_once(proposal, took.as_ref().and(invocation)).await?.0;
         }

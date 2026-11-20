@@ -6123,6 +6123,23 @@ async fn a_stock_approve_plan_is_applied_at_the_block() {
     assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
 }
 
+/// A stock approve plan whose application cannot commit refuses the call as the storage
+/// failure it is: the call is not proposed again into an ordinary decision.
+#[tokio::test]
+async fn a_stock_approve_plan_that_cannot_commit_refuses_the_call() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    // The block commits first; the plan's approval is the commit that fails.
+    runtime.store().fail_commit_after(1);
+    let decision = session
+        .on_tool_call_identified(wire(500), Some("host-call-1".to_string()), None, None)
+        .await;
+    assert!(matches!(decision, Err(EventError::Storage(_))), "{decision:?}");
+    assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+}
+
 /// A trust gate the authority covers is released on every call that meets it, since an approval
 /// never raises the label. The tool whose tag the authority excepts stays blocked, with no plan.
 #[tokio::test]
