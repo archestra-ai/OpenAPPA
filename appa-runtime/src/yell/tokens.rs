@@ -56,6 +56,8 @@ pub(crate) enum Class {
     Group,
     Surface,
     Source,
+    /// A context provider: the name one `[externals.context.<name>]` program is bound under.
+    Context,
     /// The selector half of an audience source, wherever it appears.
     ///
     /// In a fact it is what a source *answered*: `includes($argument)` fills the placeholder
@@ -99,12 +101,13 @@ impl Class {
             | Class::Group
             | Class::Surface
             | Class::Source
+            | Class::Context
             | Class::Trust => false,
         }
     }
 
     /// Every class, so that one can be checked against all of them.
-    const ALL: [Class; 18] = [
+    const ALL: [Class; 19] = [
         Class::Trajectory,
         Class::Reader,
         Class::Argument,
@@ -119,6 +122,7 @@ impl Class {
         Class::Group,
         Class::Surface,
         Class::Source,
+        Class::Context,
         Class::Selector,
         Class::Trust,
         Class::Field,
@@ -158,6 +162,7 @@ impl Class {
             Class::Group => "group",
             Class::Surface => "surface",
             Class::Source => "source",
+            Class::Context => "context",
             Class::Selector => "selector",
             Class::Trust => "trust",
             Class::Field => "field",

@@ -904,6 +904,44 @@ mod tests {
         );
     }
 
+    /// A context provider's consult is classified like every other external's, with its name
+    /// numbered among the context providers rather than dropped as drift.
+    #[test]
+    fn a_context_provider_consult_is_classified_not_drift() {
+        use crate::events::{Events, ExternalOutcome, ExternalRole, RecordedEvent, RuntimeEvent};
+        let consult = RecordedEvent {
+            seq: 0,
+            at: std::time::SystemTime::now(),
+            event: RuntimeEvent::External {
+                role: ExternalRole::ContextProvider,
+                name: "github".to_string(),
+                outcome: ExternalOutcome::Answered,
+                duration_ms: 3,
+                offer: None,
+                dispatch: None,
+            },
+        };
+        let source = Source {
+            facts: &[],
+            events: Events {
+                entries: vec![consult],
+                ..Events::default()
+            },
+            trust_chain: Vec::new(),
+            policy: None,
+            vouched: BTreeSet::new(),
+            parents: Vec::new(),
+            replay_refused: None,
+            yelling: None,
+        };
+        let projection = build(source, Mode::Pseudonymized, Budget::default());
+        assert_eq!(projection.unclassified, Vec::new());
+        let Diagnostic::Present(export) = projection.trajectory else {
+            panic!("the source exports");
+        };
+        assert_eq!(export.runtime_events[0].event["name"], Value::from("context-1"));
+    }
+
     /// A caller that cannot fit an export asks for less of it, and the runtime rebuilds under
     /// the smaller bound. The newest facts are the ones a yell is about, so the cut is at the
     /// old end and the export says where it is.
