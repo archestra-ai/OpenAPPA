@@ -217,6 +217,35 @@ fn open_recovered(path: &Path, validate: impl Fn() -> Result<(), InstallError>) 
     Ok(installation)
 }
 
+/// The config a battery change starts from loads. One that includes a
+/// battery the store does not hold as one cannot be changed by a battery
+/// command, which loads it first, so the refusal says to drop the include.
+fn load_for_battery_change(path: &Path) -> Result<(), InstallError> {
+    let error = match crate::config::Config::load_local(path, &[]) {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    let missing = match &error {
+        crate::config::ConfigError::Unreadable { path: file, source }
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            let root = std::path::absolute(path)
+                .ok()
+                .and_then(|absolute| std::fs::canonicalize(absolute.parent()?).ok());
+            root.and_then(|root| Path::new(file).strip_prefix(root).ok().map(Path::to_path_buf))
+                .and_then(|relative| crate::batteries::name_from_include(&relative))
+        }
+        _ => None,
+    };
+    Err(match missing {
+        Some(name) => InstallError::Invalid(format!(
+            "{error}: the store holds no battery {name} as a real directory with a real appa.toml; \
+             remove batteries/{name}/appa.toml from `include` by hand, then rerun"
+        )),
+        None => invalid(error),
+    })
+}
+
 fn package_name(value: &str) -> Result<PackageName, String> {
     PackageName::parse(value).map_err(|error| error.to_string())
 }
@@ -251,9 +280,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
                 path.display()
             )));
         }
-        let installation = open_recovered(&path, || {
-            crate::config::Config::load_local(&path, &[]).map(drop).map_err(invalid)
-        })?;
+        let installation = open_recovered(&path, || load_for_battery_change(&path))?;
         let before = super::required_bytes(installation.config_path())?;
         let current = installation.selection()?.ok_or_else(|| {
             InstallError::Invalid(format!(
@@ -454,9 +481,7 @@ fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Valu
 pub fn remove_battery(args: BatteryRemove) -> ExitCode {
     let result = (|| {
         let path = args.target.path();
-        let installation = open_recovered(&path, || {
-            crate::config::Config::load_local(&path, &[]).map(drop).map_err(invalid)
-        })?;
+        let installation = open_recovered(&path, || load_for_battery_change(&path))?;
         let before = super::required_bytes(installation.config_path())?;
         let mut selection = installation
             .selection()?

@@ -256,7 +256,7 @@ impl Local {
             let reported = errors.iter().any(|error| error.starts_with(&format!("{name}: ")));
             if !reported && !entries.iter().any(|entry| &entry.name == name) {
                 errors.push(format!(
-                    "{name}: the configuration includes this battery, but it is not installed. Run `appa battery install {name}`, or remove it from `include`."
+                    "{name}: the configuration includes this battery, but it is not installed. Remove `batteries/{name}/appa.toml` from `include` by hand, then run `appa battery install {name}` to install it again."
                 ));
             }
         }
