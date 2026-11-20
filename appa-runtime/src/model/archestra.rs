@@ -103,8 +103,8 @@ impl ArchestraBackend {
         .await
     }
 
-    /// One request; the answer text is read to one byte past `max_body_bytes`, enough for
-    /// the caller to call it oversized.
+    /// One request; the answer text is read until a chunk crosses `max_body_bytes`, enough
+    /// for the caller to call it oversized.
     async fn send(&self, kind: ConsultKind, prompt: &ModelPrompt) -> Result<String, NoAnswerReason> {
         let scope = SCOPE.try_with(Clone::clone).ok();
         let body = Request {
