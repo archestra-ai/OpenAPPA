@@ -162,11 +162,15 @@ impl Local {
                 )),
             }
         }
+        let configured = self.configured();
         for name in &self.selected {
             if !entries.iter().any(|entry| &entry.name == name) {
-                errors.push(format!(
-                    "{name}: requested battery is not available in this installation"
-                ));
+                errors.push(match configured.contains(name) {
+                    true => format!(
+                        "{name}: requested battery is not available in this installation, and the configuration includes it. Remove `batteries/{name}/appa.toml` from `include` by hand, then run `appa battery install {name}` to install it again."
+                    ),
+                    false => format!("{name}: requested battery is not available in this installation"),
+                });
             }
         }
         (entries, errors)

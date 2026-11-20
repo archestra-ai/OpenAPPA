@@ -1,8 +1,6 @@
 //! Executables are selected with their batteries archive, never independently.
 
-use std::fs;
-#[cfg(any(not(windows), test))]
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -88,7 +86,7 @@ impl NativeArtifacts {
         fs::create_dir_all(&directory).map_err(|error| io("create native cache", &directory, error))?;
         // The binary runs before its identity is checked, so it comes from
         // the handle that was hashed, never from a second open by name.
-        let snapshot = acquisition::verified_snapshot(&binary_archive, binary_digest)?;
+        let snapshot = acquisition::verified_snapshot(&binary_archive, binary_digest, &directory)?;
         let stage = tempfile::tempdir_in(&directory).map_err(|error| io("stage native binary", &directory, error))?;
         let binary_name = crate::init::paths::appa_filename();
         if cfg!(windows) {

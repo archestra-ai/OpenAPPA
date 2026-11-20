@@ -116,7 +116,7 @@ impl Acquired {
     /// from the caller, not trusted from a neighboring checksum file.
     pub fn import(bundle: &Path, digest: &ArtifactDigest) -> Result<Self, InstallError> {
         let stage = tempfile::tempdir().map_err(|error| io("stage bundle import", bundle, error))?;
-        let snapshot = verified_snapshot(bundle, digest)?;
+        let snapshot = verified_snapshot(bundle, digest, stage.path())?;
         let unpacked = stage.path().join("unpacked");
         fs::create_dir(&unpacked).map_err(|error| io("stage bundle contents", &unpacked, error))?;
         super::archive::extract_bundle_file(snapshot, bundle, &unpacked).map_err(invalid)?;
@@ -604,13 +604,17 @@ pub(super) fn verify_artifact(path: &Path, expected: &ArtifactDigest) -> Result<
 }
 
 /// A private copy of the artifact at `path`, checked against `expected`, as
-/// an anonymous file rewound to its start. The handle that was hashed is the
-/// one returned: no name reaches it, so nothing can replace it between the
-/// check and the read, and nothing of it outlives the process.
-pub(super) fn verified_snapshot(path: &Path, expected: &ArtifactDigest) -> Result<File, InstallError> {
+/// an anonymous file in `directory` rewound to its start. The handle that was
+/// hashed is the one returned: no name reaches it, so nothing can replace it
+/// between the check and the read, and nothing of it outlives the process.
+pub(super) fn verified_snapshot(
+    path: &Path,
+    expected: &ArtifactDigest,
+    directory: &Path,
+) -> Result<File, InstallError> {
     super::require_file_or_absent(path)?;
     let input = super::open_regular(path)?;
-    let mut snapshot = tempfile::tempfile().map_err(|error| io("snapshot artifact", path, error))?;
+    let mut snapshot = tempfile::tempfile_in(directory).map_err(|error| io("snapshot artifact", path, error))?;
     let copied = std::io::copy(&mut input.take(MAX_ARTIFACT_BYTES + 1), &mut snapshot)
         .map_err(|error| io("copy artifact snapshot", path, error))?;
     if copied > MAX_ARTIFACT_BYTES {

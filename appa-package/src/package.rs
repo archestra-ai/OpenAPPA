@@ -367,9 +367,9 @@ pub struct Package {
 
 impl Package {
     /// Read the manifest at `path`: a regular file of at most
-    /// [`MAX_MANIFEST_BYTES`], opened without following a symbolic link and,
-    /// on Unix, without blocking, so a FIFO in its place is refused rather
-    /// than waited on.
+    /// [`MAX_MANIFEST_BYTES`], opened as itself rather than through a link it
+    /// may be and, on Unix, without blocking, so a FIFO in its place is
+    /// refused rather than waited on.
     pub fn read(path: &Path) -> Result<Self, ManifestError> {
         let failed = |source| ManifestError::Read {
             path: path.to_path_buf(),
@@ -379,6 +379,10 @@ impl Package {
         options.read(true);
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        // FILE_FLAG_OPEN_REPARSE_POINT: a link opens as itself, which the
+        // regular-file check below then refuses.
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::custom_flags(&mut options, 0x0020_0000);
         let file = options.open(path).map_err(failed)?;
         if !file.metadata().map_err(failed)?.is_file() {
             return Err(failed(io::Error::new(
