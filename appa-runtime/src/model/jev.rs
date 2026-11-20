@@ -207,13 +207,7 @@ impl JevBackend {
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
         let deadline = started + self.budget;
-        let gate = self.gates.model(AnnotatorBuiltin::Jev);
-        let permit = acquire_within(&gate, deadline, "jev", &consult.name)
-            .await
-            .map_err(|reason| (JevFailure::NoAnswer, reason))?;
-        let labels = self.ask(&body, key, deadline, exchange).await;
-        drop(permit);
-        let labels = labels?;
+        let labels = self.ask(&body, key, deadline, &consult.name, exchange).await?;
         annotation(&labels, declaration)
             .map_err(|detail| (JevFailure::OutsideMandate, NoAnswerReason::MalformedAnswer(detail)))
     }
@@ -221,13 +215,21 @@ impl JevBackend {
     /// Jev's labels: the first attempt that answers them, hedged when an attempt is slow and
     /// retried after a 429, a 5xx or a connection failure while the budget allows. Once an
     /// attempt settles with a 429, no attempt of the consult starts for [`RETRY_BACKOFF`].
+    ///
+    /// One permit of the `jev` gate is held while an attempt is in flight. The wait for it
+    /// spends the same `deadline`.
     async fn ask(
         &self,
         body: &[u8],
         key: &str,
         deadline: Instant,
+        name: &str,
         exchange: &mut Exchange,
     ) -> Result<Labels, (JevFailure, NoAnswerReason)> {
+        let gate = self.gates.model(AnnotatorBuiltin::Jev);
+        let mut permit = acquire_within(&gate, deadline, "jev", name)
+            .await
+            .map_err(|reason| (JevFailure::NoAnswer, reason))?;
         let pool = &self.gates.jev;
         let mut launched: Vec<(Arc<ClientSlot>, Instant, Duration)> = Vec::new();
         let mut in_flight = FuturesUnordered::new();
@@ -290,10 +292,19 @@ impl JevBackend {
                         if !self.may_launch(launched.len(), at, deadline) {
                             break Err((JevFailure::NoAnswer, failed));
                         }
-                        tokio::time::sleep_until(at).await;
-                        // The wake can come late: the budget is checked again before the attempt.
-                        if !self.may_launch(launched.len(), Instant::now(), deadline) {
-                            break Err((JevFailure::NoAnswer, failed));
+                        if at > Instant::now() {
+                            // As in the shared backoff, no permit is held across the pause.
+                            drop(permit);
+                            tokio::time::sleep_until(at).await;
+                            let Ok(reacquired) = acquire_within(&gate, deadline - self.timing.min_attempt, "jev", name).await
+                            else {
+                                break Err((JevFailure::NoAnswer, failed));
+                            };
+                            permit = reacquired;
+                            // The wake can come late: the budget is checked again before the attempt.
+                            if !self.may_launch(launched.len(), Instant::now(), deadline) {
+                                break Err((JevFailure::NoAnswer, failed));
+                            }
                         }
                         launch!(pool.current(&self.url, self.timing.pool_idle_timeout));
                     }
@@ -1348,6 +1359,22 @@ mod tests {
         assert_eq!(stub.requests().len(), 2);
         assert!(stub.gap(0, 1) >= RETRY_BACKOFF, "{:?}", stub.gap(0, 1));
 
+        let (url, stub) = serve(
+            vec![Scripted::Status(429), Scripted::Status(429), Scripted::Answers],
+            vec![],
+        )
+        .await;
+        // No hedge races the retries: each attempt settles on its own status.
+        let unhedged = JevTiming {
+            hedge_delay: Duration::from_secs(5),
+            cold_hedge_delay: Duration::from_secs(5),
+            ..FAST
+        };
+        let (answered, record) = backend(&url, Duration::from_secs(2), unhedged).consult(&call()).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        assert_eq!(attempts(&record), json!(["http_429", "http_429", "ok"]));
+        assert!(stub.gap(1, 2) >= RETRY_BACKOFF, "{:?}", stub.gap(1, 2));
+
         // The budget left after the 429 holds the backoff, but not another attempt after it.
         let timeout = FAST.budget_margin + RETRY_BACKOFF + FAST.min_attempt - Duration::from_millis(10);
         let (url, stub) = serve(vec![Scripted::Status(429), Scripted::Answers], vec![]).await;
@@ -1744,6 +1771,29 @@ mod tests {
         assert_eq!(attempts(&record), json!([]));
         assert_eq!(diagnostics(&record)["error"], "no_answer");
         assert_eq!(stub.requests().len(), 2, "the first consult and its hedge");
+    }
+
+    /// A consult backing off after a 429 holds no permit: a second consult with a budget
+    /// shorter than the backoff takes the one permit and answers meanwhile.
+    #[tokio::test]
+    async fn a_rate_limit_backoff_holds_no_permit() {
+        let (url, stub) = serve(vec![Scripted::Status(429), Scripted::Answers], vec![]).await;
+        let patient = backend_limited(&url, Duration::from_secs(2), 1, FAST);
+        let hasty = JevBackend {
+            budget: Duration::from_millis(300),
+            ..patient.clone()
+        };
+        let consult = call();
+        let late = async {
+            tokio::time::sleep(RETRY_BACKOFF / 5).await;
+            hasty.consult(&consult).await
+        };
+        let ((first, _), (second, _)) = tokio::join!(patient.consult(&consult), late);
+        assert_eq!(first, Ok(jev_annotation()));
+        assert_eq!(second, Ok(jev_annotation()));
+        assert_eq!(stub.requests().len(), 3);
+        // The second consult's request goes out during the backoff, not after the retry.
+        assert!(stub.gap(0, 1) < RETRY_BACKOFF, "{:?}", stub.gap(0, 1));
     }
 
     #[tokio::test]
