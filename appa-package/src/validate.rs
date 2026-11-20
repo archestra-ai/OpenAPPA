@@ -1826,6 +1826,43 @@ mod tests {
         ));
     }
 
+    /// A manifest that is a FIFO, a link or oversized is refused before
+    /// anything waits on it or reads it whole.
+    #[test]
+    fn a_manifest_that_is_not_a_bounded_regular_file_is_refused() {
+        let refused = |directory: &tempfile::TempDir| {
+            let path = directory.path().to_path_buf();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || sender.send(validate_package(&path)).unwrap());
+            let result = receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("validation does not wait on the manifest");
+            matches!(result, Err(PackageError::Manifest(ManifestError::Read { .. })))
+        };
+        let manifest = |directory: &tempfile::TempDir| directory.path().join(MANIFEST_FILE);
+
+        let fifo = battery(BATTERY_POLICY);
+        fs::remove_file(manifest(&fifo)).unwrap();
+        let path = std::ffi::CString::new(manifest(&fifo).into_os_string().into_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+        assert!(refused(&fifo), "a FIFO manifest");
+
+        let linked = battery(BATTERY_POLICY);
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::rename(manifest(&linked), elsewhere.path().join(MANIFEST_FILE)).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join(MANIFEST_FILE), manifest(&linked)).unwrap();
+        assert!(refused(&linked), "a linked manifest");
+
+        let oversized = battery(BATTERY_POLICY);
+        let mut text = fs::read_to_string(manifest(&oversized)).unwrap();
+        text.push_str(&format!(
+            "\n#{}\n",
+            "x".repeat(crate::package::MAX_MANIFEST_BYTES as usize)
+        ));
+        fs::write(manifest(&oversized), text).unwrap();
+        assert!(refused(&oversized), "an oversized manifest");
+    }
+
     #[test]
     fn a_declared_path_that_is_absent_is_refused() {
         let directory = battery(BATTERY_POLICY);

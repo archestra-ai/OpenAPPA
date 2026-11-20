@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
 
 use serde::Deserialize;
@@ -15,6 +16,9 @@ use crate::names::{ExecutableName, Host, NameError, Namespace, PackageName, Rela
 
 /// The manifest file every package carries.
 pub const MANIFEST_FILE: &str = "appa-package.toml";
+
+/// The largest manifest [`Package::read`] reads.
+pub const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 
 /// One of a kagent plugin's named images.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -362,11 +366,36 @@ pub struct Package {
 }
 
 impl Package {
+    /// Read the manifest at `path`: a regular file of at most
+    /// [`MAX_MANIFEST_BYTES`], opened without following a symbolic link and,
+    /// on Unix, without blocking, so a FIFO in its place is refused rather
+    /// than waited on.
     pub fn read(path: &Path) -> Result<Self, ManifestError> {
-        let text = fs::read_to_string(path).map_err(|source| ManifestError::Read {
+        let failed = |source| ManifestError::Read {
             path: path.to_path_buf(),
             source,
-        })?;
+        };
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let file = options.open(path).map_err(failed)?;
+        if !file.metadata().map_err(failed)?.is_file() {
+            return Err(failed(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "it is not a regular file",
+            )));
+        }
+        let mut text = String::new();
+        file.take(MAX_MANIFEST_BYTES + 1)
+            .read_to_string(&mut text)
+            .map_err(failed)?;
+        if text.len() as u64 > MAX_MANIFEST_BYTES {
+            return Err(failed(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("it is larger than {MAX_MANIFEST_BYTES} bytes"),
+            )));
+        }
         Self::parse(&text, path)
     }
 
