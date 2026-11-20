@@ -179,12 +179,10 @@ pub struct Trace {
 }
 
 impl Trace {
-    /// A root no other trace run in this process has, even one with the same path or the
-    /// same displayed path, in this run or an earlier one on the same runtime.
+    /// A root no other trace run has, even one with the same path, in this process or
+    /// another sharing a recorder's persistent store.
     fn root(&self) -> TrajectoryId {
-        static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let ordinal = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        TrajectoryId(format!("replay:{ordinal}:{}", self.path.display()))
+        TrajectoryId(format!("replay:{}:{}", uuid::Uuid::new_v4(), self.path.display()))
     }
 }
 
@@ -1210,6 +1208,37 @@ mod tests {
             reports.iter().map(TraceReport::verdict).collect::<Vec<_>>(),
             vec![Verdict::Ok, Verdict::Ok, Verdict::Ok]
         );
+    }
+
+    /// Two processes replaying the same trace first give it different roots, so runs that
+    /// share a recorder's persistent store never meet on one dispatch key. Each child process
+    /// is this test binary running only this test, printing its first root.
+    #[test]
+    fn the_same_trace_first_in_two_processes_gets_two_roots() {
+        const CHILD: &str = "APPA_REPLAY_ROOT_CHILD";
+        let trace = parsed("mcp/files/read {}\n").expect("the trace parses");
+        if std::env::var_os(CHILD).is_some() {
+            println!("root={}", trace.root().0);
+            return;
+        }
+        let first_root = || {
+            let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+                .args([
+                    "replay::tests::the_same_trace_first_in_two_processes_gets_two_roots",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("the child runs");
+            assert!(output.status.success());
+            String::from_utf8(output.stdout)
+                .expect("UTF-8 output")
+                .lines()
+                .find_map(|line| line.strip_prefix("root=").map(str::to_owned))
+                .expect("the child prints its root")
+        };
+        assert_ne!(first_root(), first_root());
     }
 
     /// An allow that the step did not expect is the mismatch, decided before any result: the
