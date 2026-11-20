@@ -91,6 +91,37 @@ impl Cursors {
     }
 }
 
+/// A family's delivery task's hold on its entry in [`Cursors::running`]. A task that ends
+/// without finishing (it panicked, or its async runtime shut down under it) drops the hold,
+/// which frees the entry, so the family's next append starts a new task.
+struct Running {
+    inner: Arc<Inner>,
+    /// The family whose entry this task holds, until [`Running::finish`] frees it.
+    held: Option<TrajectoryId>,
+}
+
+impl Running {
+    /// Whether the task may end; ending frees the family's entry.
+    fn finish(&mut self) -> bool {
+        let ended = self
+            .held
+            .as_ref()
+            .is_none_or(|root| self.inner.shared.recorder_cursors.finish(root));
+        if ended {
+            self.held = None;
+        }
+        ended
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(root) = self.held.take() {
+            self.inner.shared.recorder_cursors.running().remove(&root);
+        }
+    }
+}
+
 impl Inner {
     /// Deliver `root`'s undelivered records to every recorder its deployment binds, on a task
     /// of its own. Without an async runtime to run on, nothing is delivered now and the next
@@ -107,13 +138,17 @@ impl Inner {
         if !self.shared.recorder_cursors.start(root) {
             return;
         }
-        let (inner, root) = (Arc::clone(self), root.clone());
+        let mut task = Running {
+            inner: Arc::clone(self),
+            held: Some(root.clone()),
+        };
+        let root = root.clone();
         handle.spawn(async move {
             loop {
                 let mut delivered = false;
                 for wait in ATTEMPTS {
                     tokio::time::sleep(wait).await;
-                    if inner.deliver_family(&root).await {
+                    if task.inner.deliver_family(&root).await {
                         delivered = true;
                         break;
                     }
@@ -121,7 +156,7 @@ impl Inner {
                 if !delivered {
                     tracing::warn!(root = %root.0, "recorder delivery gave up; the family's next append retries it");
                 }
-                if inner.shared.recorder_cursors.finish(&root) {
+                if task.finish() {
                     return;
                 }
             }
