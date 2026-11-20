@@ -911,7 +911,7 @@ Standard output yields newline-delimited JSON responses in arrival order:
 | `static` | Tool has a static contract; no annotator was consulted. | |
 | `unresolved` | Tool or argument pattern is not defined in policy. | `reason` |
 
-`--repeat <n>` runs each call `n` times to assess model classification consistency (default: 1). `--concurrency <n>` limits in-flight requests (default: 4).
+`--repeat <n>` runs each call `n` times to assess model classification consistency (default: 1). `n` MUST be at least 1. `--concurrency <n>` limits in-flight requests (default: 4).
 
 Example checking Google Drive tool calls against battery rules:
 

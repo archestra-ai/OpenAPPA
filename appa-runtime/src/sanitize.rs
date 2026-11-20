@@ -106,7 +106,7 @@ async fn ask(runtime: &Runtime, value: &Value, repeat: u32) -> std::io::Result<(
 pub(crate) async fn run(
     config: Config,
     modules: Option<std::path::PathBuf>,
-    repeat: u32,
+    repeat: std::num::NonZeroU32,
     concurrency: std::num::NonZeroUsize,
 ) -> ExitCode {
     let runtime = match Runtime::open_in_memory(config, modules, crate::api::Remedies::Live) {
@@ -131,7 +131,7 @@ pub(crate) async fn run(
     }
     let asks = values
         .iter()
-        .flat_map(|value| (0..repeat).map(move |repeat| (value, repeat)))
+        .flat_map(|value| (0..repeat.get()).map(move |repeat| (value, repeat)))
         .map(|(value, repeat)| ask(&runtime, value, repeat));
     match futures_util::stream::iter(asks)
         .buffer_unordered(concurrency.get())

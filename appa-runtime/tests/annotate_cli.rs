@@ -218,6 +218,23 @@ fn an_unwritable_answer_fails_the_run_before_the_next_consult() {
     assert_eq!(consults, 1);
 }
 
+/// Zero repeats would ask nothing and exit as if every call had been answered.
+#[test]
+fn zero_repeats_are_refused_as_a_usage_error() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(dir.path().join("appa.toml"), POLICY).expect("the policy is written");
+    std::fs::write(dir.path().join("classifier.sh"), CLASSIFIER).expect("the annotator is written");
+    let status = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["runtime", "annotate", "--repeat", "0", "--config"])
+        .arg(dir.path().join("appa.toml"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("appa runs");
+    assert_eq!(status.code(), Some(2));
+}
+
 #[test]
 fn zero_concurrency_is_refused_rather_than_hanging() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
