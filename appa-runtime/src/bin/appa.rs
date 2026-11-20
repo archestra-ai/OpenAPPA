@@ -194,7 +194,7 @@ enum Command {
     /// Run an Amp orb's network proxy: check each outbound connection as a flow of the thread.
     AmpProxy {
         /// Where the proxy listens; point HTTP_PROXY and HTTPS_PROXY here. Loopback only.
-        #[arg(long, default_value = "127.0.0.1:8789")]
+        #[arg(long, default_value = "127.0.0.1:8791")]
         listen: std::net::SocketAddr,
 
         /// The runtime serving `--adapter amp`.
