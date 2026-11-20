@@ -443,6 +443,26 @@ async fn an_unreachable_runtime_exits_2_with_its_stderr_gone() {
     assert_eq!(code, Some(2), "no answer from the runtime must block the action");
 }
 
+/// A session start whose deployment cannot be resolved is blocked, and the block holds
+/// when the stderr its reason goes to has no reader from the start.
+#[cfg(unix)]
+#[test]
+fn an_unresolvable_deployment_exits_2_with_its_stderr_gone() {
+    let (stderr, reader) = std::os::unix::net::UnixStream::pair().expect("a socket pair opens");
+    drop(reader);
+    let mut command = client("http://127.0.0.1:9");
+    command
+        .arg("--ensure-runtime")
+        .env("APPA_DATA_DIR", "")
+        .stderr(std::os::fd::OwnedFd::from(stderr));
+    let child = child_process::spawn(&mut command).expect("the hook client spawns");
+    assert_eq!(
+        finish_output(child, PRE_TOOL_USE).status.code(),
+        Some(2),
+        "an unresolvable deployment must block the action"
+    );
+}
+
 /// A session that names its own runtime posts there, not to the deployment's
 /// endpoint the hook entry carries: the entry's URL refuses every connection,
 /// and the session's answers.
