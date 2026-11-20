@@ -5,7 +5,7 @@
 # name from the python one — the last path segment becomes
 # `golang-adk` — so tag that alias beside appa-kagent-adk.
 # Each FROM and COPY --from pins its base image by digest. The tag beside the digest names the version.
-FROM golang:1.26-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS build
+FROM golang:1.26-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
