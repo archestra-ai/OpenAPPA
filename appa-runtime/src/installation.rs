@@ -548,7 +548,7 @@ impl Installation {
     fn require_version_batteries(&self, selection: &Selection, text: &str) -> Result<(), InstallError> {
         let tree = self.version_batteries(selection);
         for name in includes::included(text)? {
-            if !tree.join(&name).join("appa.toml").is_file() {
+            if crate::batteries::battery_in(&tree, &name).is_none() {
                 return Err(InstallError::Invalid(format!(
                     "the config includes batteries/{name}/appa.toml, and version {} has no battery {name}",
                     selection.commit().as_str()

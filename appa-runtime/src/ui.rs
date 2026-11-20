@@ -135,8 +135,7 @@ impl Local {
             let Some(dir) = self
                 .dirs
                 .iter()
-                .map(|root| root.join(&battery.name))
-                .find(|path| path.join("appa.toml").is_file())
+                .find_map(|root| crate::batteries::battery_in(root, &battery.name))
             else {
                 continue;
             };

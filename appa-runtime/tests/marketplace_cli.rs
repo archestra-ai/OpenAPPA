@@ -751,6 +751,35 @@ fn a_kagent_install_includes_no_battery_and_a_battery_install_includes_one() {
     assert_eq!(listed["result"]["packages"][0]["included"], false);
 }
 
+/// A store battery that is a link to a tree elsewhere is listed as not
+/// stored, as the loader does not find it.
+#[cfg(unix)]
+#[test]
+fn a_linked_store_battery_is_listed_as_not_stored() {
+    let source = tempfile::tempdir().unwrap();
+    let config = stage(source.path(), Some(&[]), &["github"]);
+    let config_name = config.to_str().unwrap();
+    let list = || {
+        let output = run(source.path(), &["battery", "list", "--config", config_name, "--json"]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["result"]["packages"][0]["stored"].clone()
+    };
+    assert!(
+        run(
+            source.path(),
+            &["plugin", "install", "kagent", "--config", config_name, "--json"]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(list(), true);
+    let stored = config.parent().unwrap().join("batteries/github");
+    let elsewhere = source.path().join("elsewhere");
+    std::fs::rename(&stored, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &stored).unwrap();
+    assert_eq!(list(), false);
+}
+
 #[test]
 fn kagent_requires_explicit_config_and_rejects_inapplicable_runtime_before_writes() {
     let root = tempfile::tempdir().unwrap();

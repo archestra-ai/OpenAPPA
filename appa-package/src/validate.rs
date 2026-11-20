@@ -160,19 +160,25 @@ pub enum PackageError {
 }
 
 /// Read `<dir>/appa-package.toml` and refuse a package that is not
-/// distributable: a tree with a symlink or beyond the source caps, a declared
-/// path that is absent or escapes, or a battery policy that reaches outside its
-/// own package.
+/// distributable: a tree with a symlink, the package directory itself
+/// included, or beyond the source caps, a declared path that is absent or
+/// escapes, or a battery policy that reaches outside its own package.
 pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
+    let tree_error = |source| PackageError::Tree {
+        root: dir.to_path_buf(),
+        source,
+    };
+    if std::fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(tree_error(TreeDigestError::UnsupportedEntry {
+            path: dir.to_path_buf(),
+        }));
+    }
     let manifest_path = dir.join(MANIFEST_FILE);
     let mut package = Package::read(&manifest_path)?;
 
     // Symlinks and the source caps are refused by the same walk the digest
     // uses, so a package that validates can be digested and shipped.
-    tree::walk(dir).map_err(|source| PackageError::Tree {
-        root: dir.to_path_buf(),
-        source,
-    })?;
+    tree::walk(dir).map_err(tree_error)?;
 
     let contained = Contained::new(dir, &manifest_path);
     match &mut package.role {
@@ -1800,6 +1806,23 @@ mod tests {
         assert!(matches!(
             validate_package(directory.path()),
             Err(PackageError::Tree { .. })
+        ));
+    }
+
+    #[test]
+    fn a_package_directory_that_is_a_symlink_is_refused() {
+        let directory = battery(BATTERY_POLICY);
+        let beside = tempfile::tempdir().unwrap();
+        let linked = beside.path().join("linked");
+        std::os::unix::fs::symlink(directory.path(), &linked).unwrap();
+
+        assert!(validate_package(directory.path()).is_ok());
+        assert!(matches!(
+            validate_package(&linked),
+            Err(PackageError::Tree {
+                source: TreeDigestError::UnsupportedEntry { .. },
+                ..
+            })
         ));
     }
 

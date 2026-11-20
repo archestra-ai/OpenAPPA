@@ -1142,7 +1142,7 @@ fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde
                 PackageKind::Battery => serde_json::json!({
                     "name": entry.name.as_str(),
                     "included": included.contains(entry.name.as_str()),
-                    "stored": store.join(entry.name.as_str()).join("appa.toml").is_file(),
+                    "stored": crate::batteries::battery_in(&store, entry.name.as_str()).is_some(),
                     "description": package.description,
                 }),
             })
