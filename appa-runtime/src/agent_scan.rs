@@ -103,6 +103,7 @@ fn plugin_definitions_under(cache: &Path) -> Vec<PathBuf> {
                 pending.push(path);
             } else if directory.file_name().is_some_and(|name| name == "agents")
                 && path.extension().is_some_and(|extension| extension == "md")
+                && path.is_file()
             {
                 found.push(path);
             }
@@ -248,6 +249,27 @@ mod tests {
         assert_eq!(
             declaring_max_turns(None, Some(&claude)),
             vec![(plugin.join("agents/capped.md"), Finding::MaxTurns)]
+        );
+    }
+
+    /// A FIFO named like a definition in the plugin cache is not opened, so no
+    /// writer is waited for; the definitions beside it are still found.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_the_plugin_cache_does_not_block_the_walk() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let claude = root.path().join("claude");
+        let agents = claude.join("plugins/cache/market/tool/1.0/agents");
+        write(&agents.join("capped.md"), "---\nmaxTurns: 2\n---\n");
+        let fifo = std::ffi::CString::new(agents.join("pipe.md").into_os_string().into_encoded_bytes())
+            .expect("a path without NUL");
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let scanned = claude.clone();
+        std::thread::spawn(move || sender.send(declaring_max_turns(None, Some(&scanned))));
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok(vec![(agents.join("capped.md"), Finding::MaxTurns)])
         );
     }
 
