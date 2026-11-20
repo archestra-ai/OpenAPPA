@@ -3,9 +3,9 @@
 //! One file is one trace: a root trajectory's tool calls in order, each with the decision it
 //! must get. The runner builds the typed events itself and hands them to the hook dispatcher,
 //! so every step is judged by the production session, engine boundary, and engine over a log
-//! that lives in memory for the run. No tool runs: after an allowed call the runner reports an
-//! empty output, which is the moment the contract's `delta` lands on the trajectory label, so
-//! the next step sees the narrowed trajectory.
+//! that lives in memory for the run. No tool runs: after an allowed call that does not
+//! mismatch its step, the runner reports an empty output, which is the moment the contract's
+//! `delta` lands on the trajectory label, so the next step sees the narrowed trajectory.
 //!
 //! A step expects one of five things. `allow`: the call runs, or the only thing in the way is
 //! the plain narrowing acceptance, which the runner takes as the model would. `withhold`: the
@@ -615,6 +615,11 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         cwd: None,
     };
     let (got, feedback, offers) = match propose(runtime, actor, call).await {
+        // A mismatch ends the file, so the call is never closed: its result cannot land a
+        // `delta`, consult a party, or turn the mismatch into a refusal.
+        Proposed::Allowed(_) if matches!(&step.check, Check::Expect(expect) if !expect.matches(&Got::Allowed)) => {
+            (Got::Allowed, None, Vec::new())
+        }
         Proposed::Allowed(call) => match report_empty_output(runtime, actor, call).await {
             Ok(()) => (Got::Allowed, None, Vec::new()),
             Err(detail) => return StepOutcome::CannotRun(detail),
@@ -1136,6 +1141,43 @@ mod tests {
 
     fn canonical(name: &str) -> StepTool {
         StepTool::Canonical(CanonicalTool::parse(name).expect("a canonical tool id"))
+    }
+
+    /// A deployment over the given `[policy]` body, its log in memory.
+    fn runtime(dir: &tempfile::TempDir, policy: &str) -> Runtime {
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            format!("[policy]\nversion = 2\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n"),
+        )
+        .expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        Runtime::open_in_memory(config, None, Remedies::StandIn).expect("the deployment opens in memory")
+    }
+
+    /// An allow that the step did not expect is the mismatch, decided before any result:
+    /// the call is never closed, so nothing its result does can change the verdict.
+    #[tokio::test]
+    async fn an_unexpected_allow_mismatches_without_closing_the_call() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let runtime = runtime(&dir, "[[policy.tool]]\nname = \"mcp/files/read\"\ndelta = {}\n");
+        let trace = parsed("mcp/files/read {}\nexpect deny\n").expect("the trace parses");
+        let report = run_trace(&runtime, &trace).await;
+        assert_eq!(report.verdict(), Verdict::Failed);
+        assert!(matches!(
+            &report.steps[0].outcome,
+            StepOutcome::Mismatch {
+                got: Got::Allowed,
+                want: Expect::Deny,
+                feedback: None
+            }
+        ));
+        let audit = runtime.audit(&trace.root()).expect("the trajectory is audited");
+        assert!(
+            !audit
+                .iter()
+                .any(|entry| matches!(entry.event, crate::api::AuditEvent::Closed { .. }))
+        );
     }
 
     #[test]
