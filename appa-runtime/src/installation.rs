@@ -563,7 +563,13 @@ impl Installation {
         let store = crate::batteries::store_dir(&self.config);
         crate::batteries::stock(&self.version_batteries(selection), &store)
             .map(|_| ())
-            .map_err(|error| io("fill the battery store", &store, error))
+            .map_err(|error| {
+                let source = match error {
+                    crate::batteries::StockError::Io(source) => source,
+                    not_restored => std::io::Error::other(not_restored),
+                };
+                io("fill the battery store", &store, source)
+            })
     }
 
     /// Activate host support before publishing the selected generation. The

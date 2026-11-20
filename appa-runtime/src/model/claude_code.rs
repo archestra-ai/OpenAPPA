@@ -235,9 +235,10 @@ pub(crate) async fn run_claude_code(
             error = detail.as_deref().unwrap_or(""),
             "claude exited without an answer"
         );
-        return Err(NoAnswerReason::NonSuccess {
-            status: status.code().and_then(|code| u16::try_from(code).ok()).unwrap_or(0),
-            detail,
+        return Err(match status.code().and_then(|code| u16::try_from(code).ok()) {
+            Some(status) => NoAnswerReason::NonSuccess { status, detail },
+            // As for a `command` external: a signal establishes no failure classification.
+            None => NoAnswerReason::Transport,
         });
     }
     let envelope: ClaudeResultEnvelope = serde_json::from_slice(&output).map_err(|_| NoAnswerReason::Malformed)?;
@@ -348,6 +349,17 @@ mod tests {
                 status: 1,
                 detail: None
             })
+        );
+    }
+
+    /// A CLI killed by a signal has no exit status to report, so it fails in transport,
+    /// as a `command` external does, rather than as a made-up status.
+    #[tokio::test]
+    async fn a_claude_killed_by_a_signal_fails_in_transport() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        assert_eq!(
+            fake_consult(dir.path(), "kill -TERM $$").await,
+            Err(NoAnswerReason::Transport)
         );
     }
 

@@ -8,7 +8,7 @@
 //! process never holds an unclassified byte of a session, and the only thing it adds to the
 //! report is the message the person typed.
 
-use std::io::{IsTerminal, Read, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -81,7 +81,11 @@ async fn yell(
     match yes {
         true => println!("Sending it to {destination}."),
         false => {
-            if !confirm(&format!("Share it with {destination}?"), true) {
+            if !confirm(
+                &format!("Share it with {destination}?"),
+                true,
+                &mut std::io::stdin().lock(),
+            ) {
                 println!();
                 println!("Not sent. The report stays at {path}.");
                 return ExitCode::SUCCESS;
@@ -269,7 +273,7 @@ fn message_from(words: &[String]) -> Result<YellMessage, String> {
     let raw = match std::io::stdin().is_terminal() {
         true => {
             println!("{}", bold("What is APPA doing wrong?"));
-            prompt("> ").unwrap_or_default()
+            prompt("> ", &mut std::io::stdin().lock()).unwrap_or_default()
         }
         false => {
             let mut piped = String::new();
@@ -290,35 +294,37 @@ fn ask_pseudonymization() -> Mode {
         "Pseudonymize your policy's names (tools, effects, authorities, sanitizers,\n  \
          trust ranks, audiences) as tokens like tool-1? Your message is never changed.",
         false,
+        &mut std::io::stdin().lock(),
     ) {
         true => Mode::Pseudonymized,
         false => Mode::Baseline,
     }
 }
 
-/// A yes/no question. Anything but an explicit answer takes the caller-supplied default,
-/// including a closed stdin or empty input.
-fn confirm(question: &str, default: bool) -> bool {
+/// A yes/no question. A line ended with Enter that is neither yes nor no, including an empty
+/// one, takes the caller-supplied default. Input that closes before Enter answers no unless
+/// it says yes: nobody is there to accept the default.
+fn confirm(question: &str, default: bool, input: &mut impl BufRead) -> bool {
     let suffix = match default {
         true => "[Y/n]",
         false => "[y/N]",
     };
-    match prompt(&format!("{ASK} {}  {suffix} ", bold(question))) {
-        None => default,
-        Some(answer) => match answer.trim().to_ascii_lowercase().as_str() {
-            "y" | "yes" => true,
-            "n" | "no" => false,
-            _ => default,
-        },
+    let Some(answer) = prompt(&format!("{ASK} {}  {suffix} ", bold(question)), input) else {
+        return false;
+    };
+    match (answer.trim().to_ascii_lowercase().as_str(), answer.ends_with('\n')) {
+        ("y" | "yes", _) => true,
+        ("n" | "no", _) | (_, false) => false,
+        (_, true) => default,
     }
 }
 
 /// One line from the person. `None` when there is nobody there.
-fn prompt(question: &str) -> Option<String> {
+fn prompt(question: &str, input: &mut impl BufRead) -> Option<String> {
     print!("{question}");
     std::io::stdout().flush().ok()?;
     let mut line = String::new();
-    match std::io::stdin().read_line(&mut line) {
+    match input.read_line(&mut line) {
         Ok(0) | Err(_) => None,
         Ok(_) => Some(line),
     }
@@ -343,6 +349,19 @@ mod tests {
             serde_json::to_value(&message).expect("a message serializes"),
             serde_json::json!("the hook blocked")
         );
+    }
+
+    /// Enter takes the default; a closed input is nobody agreeing to anything.
+    #[test]
+    fn a_closed_input_answers_no_and_an_empty_line_the_default() {
+        assert!(!confirm("Share it?", true, &mut &b""[..]));
+        assert!(confirm("Share it?", true, &mut &b"\n"[..]));
+        assert!(!confirm("Share it?", false, &mut &b"\n"[..]));
+        assert!(!confirm("Share it?", true, &mut &b"n\n"[..]));
+        assert!(confirm("Share it?", false, &mut &b"yes"[..]));
+        assert!(!confirm("Share it?", true, &mut &b" "[..]));
+        assert!(!confirm("Share it?", true, &mut &b"maybe"[..]));
+        assert!(confirm("Share it?", true, &mut &b"maybe\n"[..]));
     }
 
     #[test]
