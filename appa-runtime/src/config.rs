@@ -2064,7 +2064,10 @@ fn declared_components(policy: &toml::Value) -> std::collections::BTreeSet<(Stri
 /// targets, and any other file of such a battery is refused: the deployment target
 /// picks its target policy. Any other include composes alone.
 fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<PathBuf>, ConfigError> {
-    let dir = include_path.parent().expect("a canonical file path has a parent");
+    // The filesystem root has no parent: it is in no battery, and the caller's read refuses it.
+    let Some(dir) = include_path.parent() else {
+        return Ok(vec![include_path]);
+    };
     let manifest = dir.join(appa_package::MANIFEST_FILE);
     if !manifest.is_file() {
         return Ok(vec![include_path]);
@@ -3135,6 +3138,24 @@ mod tests {
         assert!(
             matches!(Config::load(&dir.path().join("appa.toml")), Err(ConfigError::IncludedTopLevel { field, .. }) if field == "bundle")
         );
+    }
+
+    /// The filesystem root is a canonical path with no parent to look for a battery
+    /// manifest in.
+    #[cfg(unix)]
+    #[test]
+    fn an_include_that_resolves_to_the_filesystem_root_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            format!("include=['root.toml']\n{BUNDLE_ROOT}"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/", dir.path().join("root.toml")).unwrap();
+        assert!(matches!(
+            Config::load_for_target(&dir.path().join("appa.toml"), &[], BatteryTarget::SingleUser),
+            Err(ConfigError::Unreadable { path, .. }) if path == "/"
+        ));
     }
 
     #[cfg(feature = "daemon")]
