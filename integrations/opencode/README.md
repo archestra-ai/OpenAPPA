@@ -16,8 +16,9 @@ curl -fsSL https://openappa.com/install.sh | sh
 ```
 
 The `appa` executable also serves the file tracker as `appa file-tracker`, so
-it needs no separate install. `srt`, the sandbox for `appa_safebash`, is a
-separate install; see [Sandboxed commands](#sandboxed-commands-appa_safebash).
+it needs no separate install. When npm is on `PATH` and `srt`, the sandbox for
+`appa_safebash`, is not, the install puts `srt` into `appa`'s data directory;
+see [Sandboxed commands](#sandboxed-commands-appa_safebash).
 
 The command retains the verified JavaScript plugin, batteries, and matching
 runtime. It merges the plugin, MCP connection, and `/appa-guide` command into
@@ -310,16 +311,18 @@ Use `opencode run --standalone --auto 'your task'` for a private-server run.
 OpenCode bundles no OS sandbox or network proxy. AppenCode pairs with the
 [Anthropic Sandbox Runtime](https://github.com/anthropic-experimental/sandbox-runtime)
 (`srt`, `@anthropic-ai/sandbox-runtime` 0.0.83), which uses bubblewrap on Linux and
-a filtering HTTP/SOCKS proxy. Install it and bubblewrap on the OpenCode host:
+a filtering HTTP/SOCKS proxy. When npm is on `PATH` and no `srt` is,
+`appa plugin install opencode` installs `srt` into `appa`'s data directory with
+`npm ci`, from a lock file the `appa` executable carries and without install
+scripts, then names anything else the sandbox still needs. On Linux the sandbox
+also needs bubblewrap, socat and ripgrep:
 
 ```sh
-npm install -g @anthropic-ai/sandbox-runtime@0.0.83   # puts srt on PATH
-sudo apt-get install bubblewrap socat ripgrep         # Debian/Ubuntu
+sudo apt-get install bubblewrap socat ripgrep   # Debian/Ubuntu
 ```
 
-`srt` is found on `PATH`, or in `appa`'s data directory, where
-`appa plugin install claude-code` installs it. Without `srt`, `appa_safebash`
-reports what is missing and runs no command. Set `APPA_OPENCODE_SRT`, or the
+`srt` is found on `PATH`, else in `appa`'s data directory. Without `srt`,
+`appa_safebash` reports what is missing and runs no command. Set `APPA_OPENCODE_SRT`, or the
 plugin option `srt`, to select the `srt` that typed `!` commands run in.
 AppenCode is tested on Linux, and typed `!` commands run only on Linux.
 

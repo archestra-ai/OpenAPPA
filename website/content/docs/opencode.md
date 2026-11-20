@@ -45,7 +45,7 @@ curl -fsSL https://openappa.com/install.sh | sh &&
   ~/.local/bin/appa plugin install opencode
 ```
 
-This installs `appa` into `~/.local/bin`, registers the AppenCode plugin and `/appa-guide` command in `~/.config/opencode/opencode.json`, and creates your policy at `~/.config/appa/opencode/appa.toml`.
+This installs `appa` into `~/.local/bin`, registers the AppenCode plugin and `/appa-guide` command in `~/.config/opencode/opencode.json`, and creates your policy at `~/.config/appa/opencode/appa.toml`. When npm is on your `PATH` and `srt` is not, it also installs Anthropic's sandbox runtime `srt`, which `appa_safebash` runs commands in, into `appa`'s data directory.
 
 ### 2. Configure policy for your project
 
