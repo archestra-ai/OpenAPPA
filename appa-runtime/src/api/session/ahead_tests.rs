@@ -685,6 +685,33 @@ async fn a_publish_between_judgment_and_settlement_writes_nothing_and_the_reload
     assert_eq!(ahead(a).settlement(&root(), &host("r1")), Some(AheadOutcome::Applied));
 }
 
+/// A publisher that moves the head under every judgment outruns the publishes one judged
+/// write follows. The write then refuses as the policy move it met, and nothing is written.
+#[test]
+fn a_judged_write_every_publish_outruns_refuses_as_a_policy_move() {
+    let replicas = replicas_serving(Revision::Plain);
+    let session = replicas.a.session(&root(), &root()).expect("the session reattaches");
+    let basis = replicas.a.log_basis(&root());
+    let judged = std::sync::atomic::AtomicU32::new(0);
+    let written = session.append_host_judged::<EventError, ()>(|_| {
+        let round = judged.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        replicas.reload(match round % 2 {
+            0 => Revision::Attesting(1),
+            _ => Revision::Plain,
+        });
+        Ok((
+            Some(HostObservation::TurnEnded {
+                actor: host_actor(&acting()),
+                end_kind: EndKind::Boundary,
+            }),
+            (),
+        ))
+    });
+    assert!(matches!(written, Err(EventError::PolicyMoved { .. })), "{written:?}");
+    assert_eq!(judged.into_inner(), PUBLISHES_FOLLOWED);
+    assert_eq!(replicas.a.log_basis(&root()), basis, "the family did not move");
+}
+
 #[tokio::test]
 async fn a_declaration_that_spends_a_vouch_folds_as_its_release() {
     let key = PermitKey::call("execute_remedy_plan", &serde_json::json!({}));

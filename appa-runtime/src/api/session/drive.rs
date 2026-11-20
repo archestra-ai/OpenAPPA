@@ -205,7 +205,9 @@ impl Session {
         &self,
         derive: impl Fn(&Decided<'_>) -> Result<(Option<appa_eventlog::HostObservation>, Answer), Refusal>,
     ) -> Result<Answer, Refusal> {
-        for _ in 0..PUBLISHES_FOLLOWED {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
             let deployment = self.deployment();
             // Resolved before the step, as a decision's drive does: resolving may read through
             // a connection of its own, which a step holding one must not wait on.
@@ -226,18 +228,16 @@ impl Session {
                 ))
             });
             match written {
-                Err(Judged::Failed(EventError::PolicyMoved { .. })) if self.follow_head(&deployment) => {
-                    tracing::debug!(root = %self.root.0, "a publish moved the head under the judgment: judging again at the head");
+                Err(Judged::Failed(EventError::PolicyMoved { .. }))
+                    if attempt < PUBLISHES_FOLLOWED && self.follow_head(&deployment) =>
+                {
+                    tracing::debug!(root = %self.root.0, attempt, "a publish moved the head under the judgment: judging again at the head");
                 }
                 Ok(answer) => return Ok(answer),
                 Err(Judged::Refused(refusal)) => return Err(refusal),
                 Err(Judged::Failed(error)) => return Err(error.into()),
             }
         }
-        Err(EventError::Contended {
-            attempts: PUBLISHES_FOLLOWED,
-        }
-        .into())
     }
 }
 
