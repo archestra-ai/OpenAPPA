@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.45.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.44.0...v0.45.0) (2026-11-20)
+
+
+### Features
+
+* **amp:** confine an orb's shell, files and egress through APPA ([#956](https://github.com/archestra-ai/OpenAPPA/issues/956)) ([5586115](https://github.com/archestra-ai/OpenAPPA/commit/5586115725d57b0e6186f5930e5ca98b517c2d88))
+* **appa-guide:** teach newcomers APPA while setting it up ([#942](https://github.com/archestra-ai/OpenAPPA/issues/942)) ([161ddc1](https://github.com/archestra-ai/OpenAPPA/commit/161ddc1607733d7ad9ca687e1ab372c22d969e91))
+* **archestra:** rule the MCP server rules tools ([#965](https://github.com/archestra-ai/OpenAPPA/issues/965)) ([b8d63cd](https://github.com/archestra-ai/OpenAPPA/commit/b8d63cdded690af45b87393d33de8e7c472f939a))
+* **engine:** defer a subagent's return to the parent's decision at its stop ([#960](https://github.com/archestra-ai/OpenAPPA/issues/960)) ([077c37e](https://github.com/archestra-ai/OpenAPPA/commit/077c37e298b36d89cb594fc7c02253278942e49b))
+* **opencode:** appa plugin install opencode installs srt ([#968](https://github.com/archestra-ai/OpenAPPA/issues/968)) ([396864a](https://github.com/archestra-ai/OpenAPPA/commit/396864a4d7cde3f3c82de22cfd621fd745d3ae87))
+* **opencode:** sandboxed appa_safebash routed through the file-tracker battery ([#959](https://github.com/archestra-ai/OpenAPPA/issues/959)) ([03fefec](https://github.com/archestra-ai/OpenAPPA/commit/03fefecf89d71fa01f837b5c077f916a1ea3cc9b))
+* **runtime:** let a spawn proposal carry its return declaration ([#947](https://github.com/archestra-ai/OpenAPPA/issues/947)) ([1a2326e](https://github.com/archestra-ai/OpenAPPA/commit/1a2326ed0c8d0574f65e28b75c253a3299a44d15))
+
+
+### Bug Fixes
+
+* **bench:** fail a sanitizer run whose provider never answered, and check the bench in CI ([7daac2d](https://github.com/archestra-ai/OpenAPPA/commit/7daac2dd29622113b6e7ae36494ae78633d84b0b))
+* **bench:** fail sanitizer runs whose provider never answered, and check the bench in CI ([#941](https://github.com/archestra-ai/OpenAPPA/issues/941)) ([7daac2d](https://github.com/archestra-ai/OpenAPPA/commit/7daac2dd29622113b6e7ae36494ae78633d84b0b))
+* **claude-code:** drop the empty BROKEN_RELEASES list ([#961](https://github.com/archestra-ai/OpenAPPA/issues/961)) ([aacc9bc](https://github.com/archestra-ai/OpenAPPA/commit/aacc9bcc487b9cab3564fc37247d573d81ceafb5))
+* **claude-code:** keep protected sessions' shell working across Claude Code updates ([#946](https://github.com/archestra-ai/OpenAPPA/issues/946)) ([b280bed](https://github.com/archestra-ai/OpenAPPA/commit/b280bed9083031a4bae4aedb9ee7d96e563faa8d))
+* **coding:** keep the label on env templates and code named for credentials ([#944](https://github.com/archestra-ai/OpenAPPA/issues/944)) ([573369c](https://github.com/archestra-ai/OpenAPPA/commit/573369ca99dc21b37da7f27080887f328397c439))
+* **images:** Python 3.13.18, Go 1.26.11 and golang.org/x/net v0.62.0 ([#967](https://github.com/archestra-ai/OpenAPPA/issues/967)) ([b2a6b9e](https://github.com/archestra-ai/OpenAPPA/commit/b2a6b9e6458e60a9954b3b94af7e92bad1a7761d))
+* **runtime:** pass Rust 1.100 lints ([#945](https://github.com/archestra-ai/OpenAPPA/issues/945)) ([bbdd38b](https://github.com/archestra-ai/OpenAPPA/commit/bbdd38be3bf4601c6c2d785c0a62480dae7a5384))
+* **runtime:** release a declaring spawn unmarked when the deployment does not control context ([#948](https://github.com/archestra-ai/OpenAPPA/issues/948)) ([a722b9e](https://github.com/archestra-ai/OpenAPPA/commit/a722b9ec774e6e9c8c97d1c0ae06bda4a7e4614a))
+
+
+### Dependencies
+
+* bump archestra-ai/.github/.github/workflows/release-please.yml from 1.17.0 to 1.25.2 ([#950](https://github.com/archestra-ai/OpenAPPA/issues/950)) ([108facb](https://github.com/archestra-ai/OpenAPPA/commit/108facbb3cb30abe2eec6d20bf68df04f08cd9cf))
+* bump archestra-ai/.github/actions/cargo-release-age from 1.13.6 to 1.25.2 ([#951](https://github.com/archestra-ai/OpenAPPA/issues/951)) ([bdeb1ba](https://github.com/archestra-ai/OpenAPPA/commit/bdeb1ba5e2145ec131623d0c6713f74af9d2e299))
+* bump archestra-ai/.github/actions/github-app-token from 1.13.6 to 1.25.2 ([#953](https://github.com/archestra-ai/OpenAPPA/issues/953)) ([3d5f0ba](https://github.com/archestra-ai/OpenAPPA/commit/3d5f0bac405cdb9cd3b789a65ff96c71e23bafc2))
+* bump archestra-ai/.github/actions/google-auth from 1.13.6 to 1.25.2 ([#952](https://github.com/archestra-ai/OpenAPPA/issues/952)) ([6a713f4](https://github.com/archestra-ai/OpenAPPA/commit/6a713f44c491ede6df1a7add8bfae55366540ba9))
+* bump jsonschema from 0.60.2 to 0.61.1 ([#935](https://github.com/archestra-ai/OpenAPPA/issues/935)) ([103ba6e](https://github.com/archestra-ai/OpenAPPA/commit/103ba6ef82fbbf4172fb6330be03130a022f176e))
+* bump next from 16.4.3 to 16.4.5 in /website ([#927](https://github.com/archestra-ai/OpenAPPA/issues/927)) ([827c263](https://github.com/archestra-ai/OpenAPPA/commit/827c263b98324aebe94c2e947ebd7c860bea038a))
+* bump the bun-dependencies group across 2 directories with 6 updates ([#933](https://github.com/archestra-ai/OpenAPPA/issues/933)) ([2dcd085](https://github.com/archestra-ai/OpenAPPA/commit/2dcd0858f6b09bb8cf20bc74f5d51e0e3b522405))
+* bump the OpenCode group across 2 directories with 4 updates ([#954](https://github.com/archestra-ai/OpenAPPA/issues/954)) ([6eec04c](https://github.com/archestra-ai/OpenAPPA/commit/6eec04ce3f2151e619b25b37c166f69a13f3b839))
+
+
+### Miscellaneous Chores
+
+* **vex:** triage critical vulnerabilities of v0.44.0 ([812de54](https://github.com/archestra-ai/OpenAPPA/commit/812de54605f063edf3156ea4597050adda1a8db7))
+* **vex:** triage vulnerabilities of v0.44.0 ([#964](https://github.com/archestra-ai/OpenAPPA/issues/964)) ([812de54](https://github.com/archestra-ai/OpenAPPA/commit/812de54605f063edf3156ea4597050adda1a8db7))
+
 ## [0.44.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.43.1...v0.44.0) (2026-11-18)
 
 
