@@ -119,6 +119,14 @@ const UNMEDIATED_TOOLS: &str = "PowerShell,Monitor,Grep,NotebookEdit";
 /// How long the preload's self-test may take before the session falls back to SafeBash.
 const SELF_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How much of the self-test's stdout is kept and searched for its report; the rest is
+/// read and discarded.
+const SELF_TEST_OUTPUT_LIMIT: usize = 1024 * 1024;
+
+/// How long after the self-test exits its output may take to end. A descendant that still
+/// holds its stdout is not waited for past this.
+const SELF_TEST_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// How a session runs shell commands.
 #[derive(Debug, PartialEq, Eq)]
 enum Shell {
@@ -279,31 +287,73 @@ fn self_test(preload: &Path) -> Result<(), String> {
         .env("CLAUDE_CONFIG_DIR", home.path())
         .env("BUN_OPTIONS", format!("--preload {}", preload.display()))
         .env("APPA_FILE_TRACKER", executable())
-        .env("APPA_CLAUDE_BASH_SELFTEST", "1")
-        .stdin(std::process::Stdio::null())
+        .env("APPA_CLAUDE_BASH_SELFTEST", "1");
+    probe(&mut test, SELF_TEST_TIMEOUT)
+}
+
+/// A thread drains its stdout as it is written, so output past a pipe's capacity cannot
+/// stall it, and keeps at most [`SELF_TEST_OUTPUT_LIMIT`] bytes. After it exits, its
+/// output is awaited for at most [`SELF_TEST_DRAIN_GRACE`], so a descendant still holding
+/// stdout cannot stall the runner; the thread drains that descendant until it lets go.
+fn probe(test: &mut Command, timeout: std::time::Duration) -> Result<(), String> {
+    test.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    let mut child =
-        crate::child_process::spawn(&mut test).map_err(|error| format!("cannot run the self-test: {error}"))?;
-    let deadline = std::time::Instant::now() + SELF_TEST_TIMEOUT;
-    while child.try_wait().map_err(|error| error.to_string())?.is_none() {
+    let mut child = crate::child_process::spawn(test).map_err(|error| format!("cannot run the self-test: {error}"))?;
+    let stdout = child.stdout.take().expect("the self-test's stdout is piped");
+    let (chunks, drained) = std::sync::mpsc::channel();
+    std::thread::spawn(move || drain(stdout, &chunks));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            break status;
+        }
         if std::time::Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
             return Err("the Bash preload's self-test timed out".into());
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let grace = std::time::Instant::now() + SELF_TEST_DRAIN_GRACE;
+    let mut output = Vec::new();
+    while let Ok(chunk) = drained.recv_timeout(grace.saturating_duration_since(std::time::Instant::now())) {
+        output.extend_from_slice(&chunk);
     }
-    let output = child.wait_with_output().map_err(|error| error.to_string())?;
-    let report = String::from_utf8_lossy(&output.stdout);
-    let line = report.lines().find(|line| line.starts_with("appa-claude-bash: "));
-    match (output.status.success(), line) {
+    let report = String::from_utf8_lossy(&output);
+    // Only a whole line is a report: output cut at the limit cannot end in a false `ok`.
+    let line = report
+        .split_inclusive('\n')
+        .filter_map(|line| line.strip_suffix('\n'))
+        .find(|line| line.starts_with("appa-claude-bash: "));
+    match (status.success(), line) {
         (true, Some("appa-claude-bash: ok")) => Ok(()),
         (_, Some(line)) => Err(format!(
             "the Bash preload's self-test failed: {}",
             &line["appa-claude-bash: ".len()..]
         )),
         (_, None) => Err("the Bash preload's self-test did not run".into()),
+    }
+}
+
+/// Read `stdout` to its end, sending on at most [`SELF_TEST_OUTPUT_LIMIT`] bytes of it. Once
+/// the runner stops listening, what remains is read and discarded, so no writer fails on it.
+fn drain(mut stdout: impl Read, chunks: &std::sync::mpsc::Sender<Vec<u8>>) {
+    let mut chunk = [0; 8192];
+    let mut room = SELF_TEST_OUTPUT_LIMIT;
+    loop {
+        match stdout.read(&mut chunk) {
+            Ok(0) => return,
+            Ok(read) => {
+                let kept = read.min(room);
+                room -= kept;
+                if kept > 0 {
+                    let _ = chunks.send(chunk[..kept].to_vec());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
     }
 }
 
@@ -654,6 +704,47 @@ mod tests {
         forward(libc::SIGTERM);
         signals.child(child.id());
         assert_eq!(child.wait().expect("the child is reaped").signal(), Some(libc::SIGTERM));
+    }
+
+    /// A self-test that writes past a pipe's capacity before its report passes, and one that
+    /// leaves a descendant holding its stdout returns while that descendant still runs.
+    #[cfg(unix)]
+    #[test]
+    fn the_self_test_report_is_read_without_waiting_on_its_stdout() {
+        let timeout = std::time::Duration::from_secs(10);
+        let mut loud = Command::new("sh");
+        loud.args(["-c", "head -c 200000 /dev/zero; echo; echo 'appa-claude-bash: ok'"]);
+        assert_eq!(probe(&mut loud, timeout), Ok(()));
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let pid_file = dir.path().join("descendant.pid");
+        let mut lingering = Command::new("sh");
+        lingering
+            .args(["-c", "sleep 30 & echo $! > \"$0\"; echo 'appa-claude-bash: ok'"])
+            .arg(&pid_file);
+        assert_eq!(probe(&mut lingering, timeout), Ok(()));
+        let descendant: libc::pid_t = fs::read_to_string(&pid_file)
+            .expect("the descendant's pid")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let alive = unsafe { libc::kill(descendant, 0) } == 0;
+        unsafe { libc::kill(descendant, libc::SIGKILL) };
+        assert!(alive);
+    }
+
+    /// A report line cut before its newline is no report: output truncated at the limit
+    /// cannot pass as `ok`.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_whole_report_line_passes_the_self_test() {
+        let timeout = std::time::Duration::from_secs(10);
+        let mut cut = Command::new("sh");
+        cut.args(["-c", "printf 'appa-claude-bash: ok'"]);
+        assert!(probe(&mut cut, timeout).is_err());
+        let mut whole = Command::new("sh");
+        whole.args(["-c", "printf 'appa-claude-bash: ok\\n'"]);
+        assert_eq!(probe(&mut whole, timeout), Ok(()));
     }
 
     fn arguments(spelled: &[&str]) -> Vec<OsString> {
