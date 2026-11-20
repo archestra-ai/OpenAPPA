@@ -8,12 +8,13 @@ use crate::external::NoAnswerReason;
 
 /// Spawn `command` as a process tree: confined before it starts, adopted once it has.
 /// A command that does not start is unreachable; a child that cannot be adopted is
-/// refused, and its `kill_on_drop` ends it.
+/// refused, and its `kill_on_drop` ends it. A launch `ready` refuses never starts.
 pub(crate) fn spawn(
     command: &mut tokio::process::Command,
+    ready: impl FnOnce(&mut tokio::process::Command) -> Result<(), NoAnswerReason>,
 ) -> Result<(tokio::process::Child, ProcessTree), NoAnswerReason> {
     confine(command);
-    let child = crate::child_process::spawn_async(command).map_err(|_| NoAnswerReason::Unreachable)?;
+    let child = crate::child_process::spawn_async_when(command, ready)?.map_err(|_| NoAnswerReason::Unreachable)?;
     let tree = ProcessTree::adopt(&child)?;
     Ok((child, tree))
 }
@@ -293,7 +294,8 @@ mod tests {
 
     #[tokio::test]
     async fn killing_the_tree_ends_every_process_holding_the_pipe() {
-        let (mut child, tree) = super::spawn(&mut shell(&format!("{HELPER} {BLOCK}"))).expect("the shell starts");
+        let (mut child, tree) =
+            super::spawn(&mut shell(&format!("{HELPER} {BLOCK}")), |_| Ok(())).expect("the shell starts");
         let mut stdout = child.stdout.take().expect("stdout is piped");
         tree.kill();
         let mut rest = Vec::new();

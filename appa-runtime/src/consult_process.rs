@@ -79,7 +79,15 @@ pub(crate) struct CommandProcess {
 
 impl CommandProcess {
     pub(crate) fn spawn(command: &mut tokio::process::Command) -> Result<CommandProcess, NoAnswerReason> {
-        let (child, tree) = crate::process_tree::spawn(command)?;
+        CommandProcess::spawn_when(command, |_| Ok(()))
+    }
+
+    /// [`CommandProcess::spawn`], refused where `ready` refuses it just before the launch.
+    fn spawn_when(
+        command: &mut tokio::process::Command,
+        ready: impl FnOnce(&mut tokio::process::Command) -> Result<(), NoAnswerReason>,
+    ) -> Result<CommandProcess, NoAnswerReason> {
+        let (child, tree) = crate::process_tree::spawn(command, ready)?;
         Ok(CommandProcess {
             child: Some(child),
             tree: Some(tree),
@@ -307,14 +315,25 @@ async fn run_command_process(
     // afterwards, so a command inherits the variables it reads and no other's, and the
     // budget it has left, so it can answer within it.
     let parent: Vec<_> = std::env::vars_os().collect();
-    let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
     configured
         .env_clear()
         .envs(without_runtime_variables(parent))
-        .envs(credentials)
-        .env(CONSULT_TIMEOUT_VARIABLE, budget.as_millis().to_string());
+        .envs(credentials);
 
-    let mut process = CommandProcess::spawn(&mut configured)?;
+    // A consult already settled starts no child: a resolver with side effects never runs
+    // for an outcome that is known. The check runs at the launch itself, after any wait
+    // for the spawn lock, and the budget the child is told is sampled there.
+    let mut process = CommandProcess::spawn_when(&mut configured, |configured| {
+        let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match (cancelled.try_recv(), budget.is_zero()) {
+            (Err(tokio::sync::oneshot::error::TryRecvError::Empty), false) => {
+                configured.env(CONSULT_TIMEOUT_VARIABLE, budget.as_millis().to_string());
+                Ok(())
+            }
+            (Err(tokio::sync::oneshot::error::TryRecvError::Empty), true) => Err(NoAnswerReason::Timeout),
+            _ => Err(NoAnswerReason::Transport),
+        }
+    })?;
     let tail = process.child_mut().stderr.take().map(stderr_tail);
     let outcome = {
         let (child, tree) = process.parts();
@@ -367,6 +386,39 @@ async fn run_command_process(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A command that names no executable: a consult that tries to start it is unreachable.
+    fn missing_command() -> ResolverCommand {
+        ResolverCommand {
+            argv: vec!["/nonexistent/appa-test-missing-resolver".to_string()],
+            cwd: std::env::temp_dir(),
+            token_env: vec![],
+        }
+    }
+
+    async fn run_missing(
+        deadline: tokio::time::Instant,
+        cancelled: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<Vec<u8>, NoAnswerReason> {
+        run_command_process(missing_command(), vec![], 1024, deadline, cancelled, None, vec![]).await
+    }
+
+    /// A consult cancelled or out of time before its child starts settles without starting
+    /// it: the missing executable is never tried, so the outcome is not `Unreachable`.
+    #[tokio::test]
+    async fn a_consult_settled_before_its_spawn_starts_no_child() {
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        cancel.send(()).expect("the receiver is alive");
+        let later = tokio::time::Instant::now() + Duration::from_secs(30);
+        assert_eq!(run_missing(later, cancelled).await, Err(NoAnswerReason::Transport));
+
+        let (_cancel, pending) = tokio::sync::oneshot::channel();
+        let past = tokio::time::Instant::now();
+        assert_eq!(run_missing(past, pending).await, Err(NoAnswerReason::Timeout));
+
+        let (_cancel, pending) = tokio::sync::oneshot::channel();
+        assert_eq!(run_missing(later, pending).await, Err(NoAnswerReason::Unreachable));
+    }
 
     /// A reader still pending when the wait runs out is aborted rather than left holding
     /// the pipe for as long as the writer lives.
