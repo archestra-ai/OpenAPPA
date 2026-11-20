@@ -13,6 +13,7 @@ missing-symbol = []
 bad-name = []
 dishonest-length = []
 claims-approve = []
+claims-archestra = []
 same-name-sanitizer = []
 
 [lints]

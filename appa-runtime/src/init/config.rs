@@ -2,7 +2,6 @@
 //! is on disk.
 
 use crate::config::{Config, ConfigError};
-use std::fs;
 use std::path::Path;
 
 use super::InitError;
@@ -16,14 +15,6 @@ pub(crate) enum ComposedPolicy {
     /// the file at all. Not knowing is never the same as agreeing: the runtime may be
     /// serving anything, and only a confirmed reload can settle it.
     Unknowable,
-}
-
-/// Remove a file this activation wrote and abandons. Nothing it protects is lost
-/// with it, so a failure is noted beside the error being returned.
-pub(super) fn discard_file(path: &Path) {
-    if let Err(error) = fs::remove_file(path) {
-        tracing::warn!(path = %path.display(), %error, "cannot remove a file the activation abandoned");
-    }
 }
 
 /// The config the runtime will be started against, put through the runtime's
@@ -61,6 +52,7 @@ pub(crate) fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     const SHIPPED: &str = include_str!(concat!(
