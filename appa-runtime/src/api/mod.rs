@@ -425,6 +425,9 @@ pub enum RemedyRefusal {
     Superseded,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,
+    /// Another plan's approval for this exact call still stands, so this plan was not
+    /// applied. Nothing is appended; the call proposed again is checked anew.
+    ApprovalPending,
     /// An annotator the plan consults gave no answer. This attempt committed no engine facts,
     /// did not authorize the call, and did not consume the offer; a retry needs a fresh vouch,
     /// which a control hook writes.
@@ -451,6 +454,10 @@ impl RemedyRefusal {
             Self::AmbiguousReplay => "more than one session declared under this attempt",
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
+            Self::ApprovalPending => {
+                "[appa] Another plan already approved this exact call, so this plan was not applied. Call the \
+                 blocked tool again with the same arguments; it will be checked again."
+            }
             Self::Unanswered { annotator, class } => {
                 return std::borrow::Cow::Owned(format!(
                     "annotator {annotator} gave no answer ({class}), so the plan was not applied. Nothing changed \
@@ -496,6 +503,7 @@ impl From<EventError> for RemedyOutcome {
                 no_answer: Some(class),
                 ..
             } => RemedyRefusal::Unanswered { annotator, class },
+            EventError::ApprovalPending => RemedyRefusal::ApprovalPending,
             error => RemedyRefusal::Runtime {
                 detail: error.to_string(),
             },
@@ -719,6 +727,9 @@ pub(crate) enum EventError {
     OutcomeMismatch,
     #[error("no live offer with this id exists")]
     UnknownOffer,
+    /// The call already carries a current approval another plan recorded. Nothing is appended.
+    #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
+    ApprovalPending,
     /// The declaration ahead an application was for was settled, or no longer applies through
     /// this offer, where the application would commit. Nothing is appended.
     #[error("the return declared ahead was settled or changed while it was applied")]
@@ -842,9 +853,10 @@ impl EventError {
                 RefusalClass::Trajectory
             }
             EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
-            EventError::UnknownOffer | EventError::AheadMoved | EventError::RemedyArguments { .. } => {
-                RefusalClass::Remedy
-            }
+            EventError::UnknownOffer
+            | EventError::ApprovalPending
+            | EventError::AheadMoved
+            | EventError::RemedyArguments { .. } => RefusalClass::Remedy,
             EventError::SpawnNotTaken => RefusalClass::SpawnNotTaken,
             EventError::NotAChild
             | EventError::FanOutUnkeyed
@@ -895,6 +907,7 @@ impl EventError {
             | EventError::UnknownDispatch
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
+            | EventError::ApprovalPending
             | EventError::AheadMoved
             | EventError::NotAChild
             | EventError::SpawnNotTaken
@@ -925,6 +938,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::Ended => EventError::TrajectoryEnded,
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
+            EngineRefusal::ApprovalPending => EventError::ApprovalPending,
             EngineRefusal::Unbindable => EventError::BindingMismatch,
             EngineRefusal::CallIdReused => EventError::CallIdReused,
             EngineRefusal::OutcomeMismatch => EventError::OutcomeMismatch,
