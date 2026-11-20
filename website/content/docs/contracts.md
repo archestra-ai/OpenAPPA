@@ -1657,7 +1657,7 @@ OpenAPPA rejects a response if the service returns an HTTP error, exits with a n
 
 The `claude-code` and `llm` backends dispatch consult requests to language models. OpenAPPA injects fixed instructions and `declaration` constraints into the system prompt, including the label guide for annotators. Call data in `artifact` is sent as user content.
 
-Before dispatching annotator requests to external model providers (`claude-code`, `llm`, or `jev`), OpenAPPA automatically redacts detected credentials in `artifact.args` using the built-in secret detector. Fields matching credential keywords (`password`, `token`, `secret`, `api_key`, `credential`, etc.) or high-entropy tokens are replaced with `[redacted-secret]`. Redaction is best effort. Authority and sanitizer payloads are not redacted, as sanitizers require raw text for processing.
+Before dispatching annotator requests to external model providers (`claude-code`, `llm`, or `jev`), OpenAPPA automatically redacts detected credentials in `artifact.args` using the built-in secret detector. Fields matching credential keywords (`password`, `token`, `secret`, `api_key`, `credential`, etc.) or high-entropy tokens are replaced with `[redacted-secret]`. In nested object keys, OpenAPPA also replaces private keys, URL passwords, known API tokens, and AWS secret keys. Keys that become equal get a `-2`, `-3`, … suffix, so no entry is lost. Redaction is best effort. Authority and sanitizer payloads are not redacted, as sanitizers require raw text for processing.
 
 OpenAPPA checks authority and annotator answers against their permits and assigns sanitized data the declared audience or trust rank. The model is responsible for making the correct judgment or removing the required content.
 

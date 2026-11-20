@@ -2,6 +2,7 @@
 //! over an annotation's call before it leaves for a model provider.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::LazyLock;
 
@@ -202,14 +203,7 @@ pub(crate) fn redact_secrets(input: &str) -> String {
     });
     let masked = mask_keyed_values(&masked);
     let masked = KNOWN_TOKEN.replace_all(&masked, SECRET_PLACEHOLDER);
-    let masked = AWS_SECRET_KEY_RUN.replace_all(&masked, |found: &regex::Captures<'_>| {
-        let run = &found[0];
-        if run.len() == AWS_SECRET_KEY_LENGTH && is_base64_key(run) {
-            SECRET_PLACEHOLDER.to_string()
-        } else {
-            run.to_string()
-        }
-    });
+    let masked = mask_aws_secret_keys(&masked);
     CANDIDATE_RUN
         .replace_all(&masked, |found: &regex::Captures<'_>| {
             let run = &found[0];
@@ -220,6 +214,29 @@ pub(crate) fn redact_secrets(input: &str) -> String {
             }
         })
         .into_owned()
+}
+
+/// An object key through the passes that know a credential by its own shape. The keyed
+/// and entropy passes stay out: a key is a name, and an ordinary name such as
+/// `Customer-Billing-Zone_V2` clears the entropy floor.
+fn redact_key(key: &str) -> String {
+    let masked = PRIVATE_KEY_BLOCK.replace_all(key, SECRET_PLACEHOLDER);
+    let masked = URL_PASSWORD.replace_all(&masked, |found: &regex::Captures<'_>| {
+        format!("{}{SECRET_PLACEHOLDER}@", &found[1])
+    });
+    let masked = KNOWN_TOKEN.replace_all(&masked, SECRET_PLACEHOLDER);
+    mask_aws_secret_keys(&masked).into_owned()
+}
+
+fn mask_aws_secret_keys(text: &str) -> Cow<'_, str> {
+    AWS_SECRET_KEY_RUN.replace_all(text, |found: &regex::Captures<'_>| {
+        let run = &found[0];
+        if run.len() == AWS_SECRET_KEY_LENGTH && is_base64_key(run) {
+            SECRET_PLACEHOLDER.to_string()
+        } else {
+            run.to_string()
+        }
+    })
 }
 
 /// Whether a run the length of an AWS secret access key is one, rather than a path of the
@@ -267,33 +284,70 @@ static SECRET_FIELD: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// An annotation's `args` as they leave for a model provider: every string through
-/// [`redact_secrets`], and the whole value of a field named for a secret replaced. The
-/// complete call's tool `name` leaves as written.
+/// [`redact_secrets`], every object key below the top level through [`redact_key`], and
+/// the whole value of a field named for a secret replaced. Top-level keys are the
+/// declaration's own names, which the provider reads in the declaration as written, so
+/// they leave as written too, and so does the complete call's tool `name`.
 pub(crate) fn redact_args(args: &serde_json::Value) -> serde_json::Value {
-    let mut redacted = redact_value(args);
-    if let (Some(name), serde_json::Value::Object(fields)) =
-        (args.get("name").filter(|name| name.is_string()), &mut redacted)
-    {
-        fields.insert("name".to_string(), name.clone());
+    match args {
+        serde_json::Value::Object(fields) => {
+            let mut redacted: serde_json::Map<String, serde_json::Value> = fields
+                .iter()
+                .map(|(key, value)| (key.clone(), redact_field(key, value)))
+                .collect();
+            if let Some(name) = fields.get("name").filter(|name| name.is_string()) {
+                redacted.insert("name".to_string(), name.clone());
+            }
+            serde_json::Value::Object(redacted)
+        }
+        other => redact_value(other),
     }
-    redacted
 }
 
 fn redact_value(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(text) => serde_json::Value::String(redact_secrets(text)),
-        serde_json::Value::Object(fields) => serde_json::Value::Object(
-            fields
-                .iter()
-                .map(|(key, value)| match SECRET_FIELD.is_match(key) {
-                    true => (key.clone(), serde_json::Value::String(SECRET_PLACEHOLDER.to_string())),
-                    false => (key.clone(), redact_value(value)),
-                })
-                .collect(),
-        ),
+        serde_json::Value::Object(fields) => serde_json::Value::Object(redact_keys(fields)),
         serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(redact_value).collect()),
         other => other.clone(),
     }
+}
+
+fn redact_field(key: &str, value: &serde_json::Value) -> serde_json::Value {
+    match SECRET_FIELD.is_match(key) {
+        true => serde_json::Value::String(SECRET_PLACEHOLDER.to_string()),
+        false => redact_value(value),
+    }
+}
+
+/// Keys that [`redact_key`] leaves alone keep their names; a rewritten key that collides
+/// with one already kept takes its base's next free `-2`, `-3`, … suffix, so every entry
+/// survives, numbered in the map's key order.
+fn redact_keys(fields: &serde_json::Map<String, serde_json::Value>) -> serde_json::Map<String, serde_json::Value> {
+    let (unchanged, rewritten): (Vec<_>, Vec<_>) = fields
+        .iter()
+        .map(|(key, value)| (redact_key(key), key, value))
+        .partition(|(redacted_key, key, _)| redacted_key == *key);
+    let mut redacted: serde_json::Map<String, serde_json::Value> = unchanged
+        .into_iter()
+        .map(|(redacted_key, key, value)| (redacted_key, redact_field(key, value)))
+        .collect();
+    let mut next_suffix: HashMap<String, usize> = HashMap::new();
+    for (base, key, value) in rewritten {
+        let suffix = next_suffix.entry(base.clone()).or_insert(1);
+        let free = loop {
+            let candidate = match *suffix {
+                1 => base.clone(),
+                n => format!("{base}-{n}"),
+            };
+            *suffix += 1;
+            if !redacted.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        redacted.insert(free, redact_field(key, value));
+    }
+    redacted
 }
 
 #[cfg(test)]
@@ -568,6 +622,42 @@ mod tests {
             redact_args(&json!({"query": format!("key {token}"), "established": "internal"})),
             json!({"query": format!("key {masked}"), "established": "internal"}),
             "one value per declared input is redacted the same way"
+        );
+    }
+
+    #[test]
+    fn a_credential_used_as_a_key_is_redacted_and_keys_that_redact_alike_keep_one_entry_each() {
+        let masked = "[redacted-secret]";
+        assert_eq!(
+            redact_args(&json!({
+                "name": "write",
+                "arguments": {
+                    "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789": 1,
+                    "ghp_ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210": 2,
+                    "AKIAIOSFODNN7EXAMPLE": 3,
+                    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY": 4,
+                    format!("{masked}-2"): 5,
+                    "Customer-Billing-Zone_V2": {"configuration_management_enabled": 6},
+                    "https://alice:hunter2@example.com": 7,
+                },
+            })),
+            json!({
+                "name": "write",
+                "arguments": {
+                    masked: 3,
+                    format!("{masked}-2"): masked,
+                    format!("{masked}-3"): 1,
+                    format!("{masked}-4"): 2,
+                    format!("{masked}-5"): 4,
+                    "Customer-Billing-Zone_V2": {"configuration_management_enabled": 6},
+                    format!("https://alice:{masked}@example.com"): 7,
+                },
+            })
+        );
+        assert_eq!(
+            redact_args(&json!({"AKIAIOSFODNN7EXAMPLE": {"AKIAIOSFODNN7EXAMPLE": "write"}})),
+            json!({"AKIAIOSFODNN7EXAMPLE": {masked: "write"}}),
+            "a top-level key is a declared input's name"
         );
     }
 }
