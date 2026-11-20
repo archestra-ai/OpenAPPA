@@ -456,8 +456,8 @@ mod tests {
         );
     }
 
-    /// Baseline is the deployment reading its own rules back, so its own names and its own
-    /// prose are the point of the mode.
+    /// Baseline is the deployment reading its own rules back, so its own names are the point
+    /// of the mode.
     #[test]
     fn baseline_reads_back_the_deployment_s_own_policy() {
         let stripped = stripped(FIXTURE, Mode::Baseline);

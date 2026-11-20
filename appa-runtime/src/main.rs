@@ -102,8 +102,8 @@ enum RuntimeCommand {
     /// No tool runs. See https://openappa.com/contracts#test-an-annotator.
     Annotate {
         /// How many times each call is asked.
-        #[arg(long, default_value_t = 1)]
-        repeat: u32,
+        #[arg(long, default_value = "1")]
+        repeat: std::num::NonZeroU32,
 
         /// How many calls are in flight at once.
         #[arg(long, default_value = "4")]
@@ -113,8 +113,8 @@ enum RuntimeCommand {
     #[command(hide = true)]
     Sanitize {
         /// How many times each value is asked.
-        #[arg(long, default_value_t = 1)]
-        repeat: u32,
+        #[arg(long, default_value = "1")]
+        repeat: std::num::NonZeroU32,
 
         /// How many values are in flight at once.
         #[arg(long, default_value = "4")]
@@ -489,7 +489,12 @@ fn load_config(config_path: &Path, batteries_dir: &[PathBuf]) -> Result<(Config,
 
 /// `appa runtime annotate` and `appa runtime sanitize`: see [`crate::annotate`] and
 /// [`crate::sanitize`].
-async fn ask_offline(command: Offline, args: Args, repeat: u32, concurrency: std::num::NonZeroUsize) -> ExitCode {
+async fn ask_offline(
+    command: Offline,
+    args: Args,
+    repeat: std::num::NonZeroU32,
+    concurrency: std::num::NonZeroUsize,
+) -> ExitCode {
     let config_path = args.config.unwrap_or_else(|| PathBuf::from("appa.toml"));
     let config = match load_config(&config_path, &args.batteries_dir) {
         Ok((config, _)) => config,

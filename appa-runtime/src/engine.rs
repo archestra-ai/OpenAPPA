@@ -1,14 +1,24 @@
 //! The engine boundary: the one module that speaks to `appa-engine`.
 //!
-//! [`RuntimeEngine::rebuild_view`] turns the store's opaque batch rows back into
-//! typed facts and refuses the log before it is trusted: the log opens under
-//! this root's own policy, and
-//! [`appa_engine::engine::Engine::view`] then admits every record through the
-//! engine's one sequential transition validator, so a log whose records could
-//! not have followed one another never reaches a decision. Because
-//! this runtime stores no view and rebuilds from the durable log on every
-//! event, that decode step is the store-reopen trust
-//! gate. [`RuntimeEngine::handle`] then translates one runtime event onto
+//! [`RuntimeEngine::rebuild_view`] refuses the store's decoded log before it is
+//! trusted. A whole replay opens the log under this root's own policy, and
+//! [`appa_engine::engine::Engine::replay`] then admits every engine fact, under
+//! the revision that decided it, through the engine's one sequential
+//! transition validator, so a log whose records could not have followed one
+//! another never reaches a decision.
+//!
+//! The durable log is authoritative and every event reads it. Each engine
+//! keeps a view derived from that log for each of a bounded number of
+//! families, and [`appa_engine::engine::Engine::extend`] advances it through
+//! the same validator over the batches the log accepted since. The advance
+//! trusts that the prefix it matched — lineage, basis, length and last record
+//! — is unchanged; it does not validate that prefix again. Any miss — a
+//! family's first read by this engine (a reload installs a fresh one), an
+//! evicted view, a prefix that no longer matches — and any batch the advance
+//! refuses fall back to a whole replay, so that replay is the store-reopen
+//! trust gate.
+//!
+//! [`RuntimeEngine::handle`] then translates one runtime event onto
 //! [`appa_engine::engine::Engine::handle`], the engine's one mutation
 //! boundary, and translates its typed follow-up back into a delivery. It
 //! returns one decision: an optional fact batch to append under
@@ -814,8 +824,9 @@ impl<'a> PolicyEngine<'a> {
 /// The one engine boundary the session drives: the immutable
 /// registry-backed decision core, plus the reads of one rebuilt view
 /// the runtime needs to route an event. It owns every judgment and
-/// every fact; the runtime holds no engine state, and offers are the
-/// engine's own durable facts. A family decides at its deployment's head
+/// every fact; the durable log is the only engine state, and offers are the
+/// engine's own durable facts. The views it keeps per family are derived from
+/// that log, and a whole replay rebuilds any of them. A family decides at its deployment's head
 /// revision, so the deciding engine arrives per event as a [`PolicyEngine`].
 pub struct RuntimeEngine {
     engine: Engine,
@@ -1180,18 +1191,6 @@ impl RuntimeEngine {
     /// Only while it does is the denied call's repeat answered from the record.
     pub(crate) fn denial_stands(&self, view: &EngineView, batch: &ProposalBatchId) -> bool {
         self.engine.denial_stands(view, batch)
-    }
-
-    /// Whether executing this offer replays its recorded end: the execution re-answers from
-    /// the record and appends nothing, so a delivery retry of it spends nothing twice.
-    pub(crate) fn offer_replays(&self, view: &EngineView, trajectory: &TrajectoryId, offer: &OfferId) -> bool {
-        let Some(engine_offer) = parse_offer(offer) else {
-            return false;
-        };
-        matches!(
-            self.engine.offer_consults(view, trajectory, &engine_offer),
-            Ok(OfferConsult::Replay(_))
-        )
     }
 
     /// Where one fork stands in the rebuilt view. The runtime uses it

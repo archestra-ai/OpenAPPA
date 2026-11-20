@@ -949,6 +949,11 @@ external_table!(
     "RuntimeEvent::External(audience_source)",
     Class::Source
 );
+external_table!(
+    EXTERNAL_CONTEXT,
+    "RuntimeEvent::External(context_provider)",
+    Class::Context
+);
 
 static CONTROL_CALL: Table = Table {
     name: "ControlCall",
@@ -995,6 +1000,7 @@ pub(crate) fn event_table(event: &Value) -> Option<&'static Table> {
             "sanitizer" => Some(&EXTERNAL_SANITIZER),
             "annotator" => Some(&EXTERNAL_ANNOTATOR),
             "audience_source" => Some(&EXTERNAL_SOURCE),
+            "context_provider" => Some(&EXTERNAL_CONTEXT),
             _ => None,
         },
         "control" => Some(&CONTROL_EVENT),
@@ -1065,6 +1071,7 @@ mod tests {
                 ExternalRole::AudienceSource,
                 ExternalOutcome::NoAnswer(NoAnswerClass::ModulePanicked),
             ),
+            external(ExternalRole::ContextProvider, ExternalOutcome::Answered),
             RuntimeEvent::Control {
                 call: ControlCall::Remedy {
                     offer: "f610dbd5610171965d4de357b2e0acbe".to_string(),
