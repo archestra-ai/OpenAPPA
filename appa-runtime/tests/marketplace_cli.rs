@@ -342,6 +342,58 @@ fn plugin_removal_reports_completed_recovery_before_an_idle_result() {
     }
 }
 
+/// A switch interrupted after its config was written leaves a config that
+/// includes a battery the store does not hold yet. Each command that changes
+/// the selection finishes that switch before it loads the config.
+#[test]
+fn selection_commands_finish_an_interrupted_switch_before_loading_the_config() {
+    let commands: [(&[&str], bool); 3] = [
+        (&["battery", "install", "github"], true),
+        (&["battery", "remove", "github"], false),
+        (&["plugin", "install", "kagent"], true),
+    ];
+    for (command, included) in commands {
+        let root = tempfile::tempdir().unwrap();
+        let config = stage(root.path(), Some(&[]), &["github"]);
+        let state = root.path().join("config/.appa/appa.toml");
+        let active = state.join("active.json");
+        let previous: serde_json::Value = serde_json::from_slice(&std::fs::read(&active).unwrap()).unwrap();
+        let mut selection = previous.clone();
+        selection["batteries"] = serde_json::json!(["github"]);
+        let before = std::fs::read(&config).unwrap();
+        let after = [b"include = ['batteries/github/appa.toml']\n".as_slice(), &before].concat();
+        let journal = state.join("transaction.json");
+        std::fs::write(
+            &journal,
+            serde_json::to_vec(&serde_json::json!({
+                "before":before,"after":after,"selection":selection,
+                "activation":"none","previous":previous
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&config, &after).unwrap();
+        std::fs::remove_dir_all(root.path().join("config/batteries")).unwrap();
+        let args = [command, &["--config", config.to_str().unwrap(), "--json"]].concat();
+        let output = run(root.path(), &args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!journal.exists());
+        let selected: serde_json::Value = serde_json::from_slice(&std::fs::read(&active).unwrap()).unwrap();
+        assert_eq!(
+            selected["batteries"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("github")),
+            included,
+            "{args:?}"
+        );
+    }
+}
+
 #[test]
 fn plugin_removal_requires_the_selected_native_artifact_before_changing_state() {
     let root = tempfile::tempdir().unwrap();

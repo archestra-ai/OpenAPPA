@@ -201,6 +201,24 @@ fn purge_plugin(args: PluginRemove) -> ExitCode {
     finish(&args.target, "plugin.purge".into(), result)
 }
 
+/// Opens the installation, finishes an interrupted switch, and validates the
+/// config. A switch interrupted after its config was written can leave an
+/// include that only its recovery stocks, so with a pending journal the
+/// config is validated after recovery. Without one, an invalid config is
+/// refused before any installation state is created.
+fn open_recovered(path: &Path, validate: impl Fn() -> Result<(), InstallError>) -> Result<Installation, InstallError> {
+    let interrupted = matches!(Installation::inspect(path), Err(InstallError::Recovery { .. }));
+    if !interrupted {
+        validate()?;
+    }
+    let installation = Installation::open(path)?;
+    installation.recover_config()?;
+    if interrupted {
+        validate()?;
+    }
+    Ok(installation)
+}
+
 fn package_name(value: &str) -> Result<PackageName, String> {
     PackageName::parse(value).map_err(|error| error.to_string())
 }
@@ -235,9 +253,9 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
                 path.display()
             )));
         }
-        crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
-        let installation = Installation::open(&path)?;
-        installation.recover_config()?;
+        let installation = open_recovered(&path, || {
+            crate::config::Config::load_local(&path, &[]).map(drop).map_err(invalid)
+        })?;
         let before = super::required_bytes(installation.config_path())?;
         let current = installation.selection()?.ok_or_else(|| {
             InstallError::Invalid(format!(
@@ -438,9 +456,9 @@ fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Valu
 pub fn remove_battery(args: BatteryRemove) -> ExitCode {
     let result = (|| {
         let path = args.target.path();
-        crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
-        let installation = Installation::open(&path)?;
-        installation.recover_config()?;
+        let installation = open_recovered(&path, || {
+            crate::config::Config::load_local(&path, &[]).map(drop).map_err(invalid)
+        })?;
         let before = super::required_bytes(installation.config_path())?;
         let mut selection = installation
             .selection()?
@@ -678,11 +696,10 @@ pub fn install(mut args: Install) -> ExitCode {
         if name == "opencode" {
             args.target.config = Some(path.clone());
         }
-        if path.exists() {
-            crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
-        }
-        let installation = Installation::open(&path)?;
-        installation.recover_config()?;
+        let installation = open_recovered(&path, || match path.exists() {
+            true => crate::config::Config::load_local(&path, &[]).map(drop).map_err(invalid),
+            false => Ok(()),
+        })?;
         let before = super::optional_bytes(installation.config_path())?;
         // Asked before the slow acquisition, so the person is not kept waiting to
         // answer, and before any state changes, so a closed terminal changes nothing.
