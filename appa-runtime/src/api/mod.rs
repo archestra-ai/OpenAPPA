@@ -1262,9 +1262,10 @@ pub struct Reloaded {
     pub policy_key: String,
     pub policy_identity: String,
     pub policy_revision: u64,
-    /// `false` when the line's head already stood at the new file's revision, so nothing was
-    /// published: the reload still ran every gate, and swapped an equal deployment. `true` when
-    /// the reload published the file as the line's next revision.
+    /// `true` when the installed revision differs from the one this runtime served before the
+    /// swap, whether or not this reload published it. `false` when the serving revision did not
+    /// move: the reload still ran every gate and swapped the deployment in, whose externals and
+    /// reporting may differ.
     pub changed: bool,
 }
 
@@ -1491,8 +1492,10 @@ struct Shared {
     line: DeploymentName,
     /// Engines compiled from stored revisions: the replay-only engines of revisions a family's
     /// log was decided under, and the head's engine compiled with a family's opening inventory.
-    /// Entries remain until this runtime is dropped. Hosts with frequent publishes or many lines
-    /// must account for that process-memory growth; stored revisions remain replayable on restart.
+    /// Each successful [`Runtime::install`] clears the map. A resolution already made keeps its
+    /// engines' `Arc`s and decides without recompiling. A later resolution that misses the map
+    /// compiles again: a replay-only engine from the file the store holds for its revision, the
+    /// deciding engine from the serving deployment's file.
     revisions: std::sync::Mutex<std::collections::BTreeMap<RevisionKey, Arc<RuntimeEngine>>>,
     modules: crate::builtins::ModuleRegistry,
     /// What this runtime did, as opposed to what the engine decided: bounded, in this
@@ -3204,11 +3207,6 @@ impl Runtime {
         // The vouch is only read here: the claim spends it where the claim lands. Taking it
         // first would write a release that also ends a running execution's claim, because
         // one session's attempts are one actor.
-        //
-        // A daemon replays an ended offer for its recorded pursuer without spending a vouch:
-        // an MCP delivery retry carries no attempt identity to tell it from another attempt.
-        // An embedded host deduplicates its own retries, so a spent offer answers no other
-        // attempt of it.
         let (acting, admission) = match (expected_actor, self.peek_vouched(&PermitKey::offer(&quoted))) {
             (Some(expected), Ok((actor, _))) if actor != *expected => {
                 return RemedyOutcome::Refused {
@@ -3221,9 +3219,6 @@ impl Runtime {
                     fresh: strict_freshness,
                 },
             ),
-            (Some(expected), Err(_)) if !strict_freshness && self.replays_ended_offer(expected, &quoted) => {
-                (expected.clone(), Admission::Open)
-            }
             (_, Err(_)) => {
                 return RemedyOutcome::Refused {
                     reason: RemedyRefusal::Unvouched,
@@ -3276,8 +3271,8 @@ impl Runtime {
 }
 
 /// Who executes a remedy. An embedded host names the actor it authenticated and how it
-/// renders; it is held to the offer being current. The daemon relays the peer's elicitation
-/// and the actor the connection vouches for, if any.
+/// renders; it is held to the offer being current. The daemon relays the peer's elicitation;
+/// the vouch names its actor.
 enum RemedyCaller<'a> {
     Embedded {
         actor: &'a Actor,
@@ -3932,22 +3927,6 @@ impl Runtime {
         self.read_offer(root, quoted, |standing| Some((standing.offer, standing.pursuer)))
     }
 
-    /// Is this quoted offer one the family records as ended, pursued by this actor?
-    /// Executing an ended offer re-answers from the record and spends nothing, which is what
-    /// a delivery retry of it needs; anything else — a live offer, another actor's offer —
-    /// still stands behind its vouch.
-    fn replays_ended_offer(&self, actor: &Actor, quoted: &OfferId) -> bool {
-        self.read_offer(&actor.root, quoted, |standing| {
-            Some(
-                standing.pursuer == *acting_trajectory(actor)
-                    && standing
-                        .engine
-                        .offer_replays(standing.view, &standing.pursuer, &standing.offer),
-            )
-        })
-        .unwrap_or(false)
-    }
-
     /// Record that this trajectory stands behind this key, for the request
     /// that runs it. `ruling` is a person's answer the harness obtained
     /// through its own review channel; it rides the vouch and is spent
@@ -3979,6 +3958,19 @@ impl Runtime {
         )
     }
 
+    /// Who currently stands behind this key, without spending the standing.
+    fn peek_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+        if PermitKey::parse(&key.wire()).as_ref() != Some(key) {
+            return Err(Unvouched::Nobody);
+        }
+        let root = self.sole_holder(key)?;
+        let log = self.inner.log(&root).map_err(|_| Unvouched::Nobody)?;
+        if self.live_holder(key, Some(&root))?.is_some() {
+            return Err(Unvouched::Ambiguous);
+        }
+        reduced(&log).vouched(key)
+    }
+
     /// The trajectory vouched for this key, taken once, with the ruling its harness
     /// attached.
     ///
@@ -3996,19 +3988,6 @@ impl Runtime {
     /// A read that fails answers nobody. A partial view of who stands behind a key cannot
     /// tell a lone holder from one of two, so authorizing from it would answer the ambiguous
     /// case with one session's standing.
-    /// Who currently stands behind this key, without spending the standing.
-    fn peek_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
-        if PermitKey::parse(&key.wire()).as_ref() != Some(key) {
-            return Err(Unvouched::Nobody);
-        }
-        let root = self.sole_holder(key)?;
-        let log = self.inner.log(&root).map_err(|_| Unvouched::Nobody)?;
-        if self.live_holder(key, Some(&root))?.is_some() {
-            return Err(Unvouched::Ambiguous);
-        }
-        reduced(&log).vouched(key)
-    }
-
     #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         self.take_vouched_from(key, None)
@@ -4743,12 +4722,16 @@ fn inventory_digest(inventory: &appa_runtime_api::inventory::ToolInventory) -> S
     crate::engine::policy_file_key(&bytes)
 }
 
-/// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
+/// The `[policy]` table of a policy file, with the key of the bytes it came from.
 ///
-/// A trajectory's own bytes rather than the deployment's current ones wherever there is a
-/// trajectory: the log pins its policy file, so a reload since the session opened does not
-/// rewrite the rules a report explains. The key comes from the same bytes, so the document and
-/// its fingerprint are one snapshot.
+/// A report passes the bytes the reporting view serves when it projects, with or without a
+/// trajectory: every family follows its deployment rather than the file it opened with, and the
+/// trust chain and vouched tool names the same report carries come from that same serving
+/// deployment, or are empty when it does not resolve for the family (a publish that outran the
+/// projection, for one). A batch stamped with an earlier revision was decided under that
+/// revision's file, which the report does not carry, and its numeric ranks keep that
+/// revision's chain. The key comes from the same bytes, so the document and its fingerprint
+/// are one snapshot.
 #[cfg(feature = "daemon")]
 fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
     let text = std::str::from_utf8(bytes).ok()?;
