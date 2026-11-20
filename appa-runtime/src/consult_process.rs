@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::config::ResolverCommand;
 use crate::external::{Diagnostics, MAX_DIAGNOSTIC_BYTES, NoAnswerReason, RECORD_READ_GRACE, Transcript};
-use crate::process_tree::ProcessTree;
+use crate::process_tree::{Launch, ProcessTree};
 
 /// A command consult's stdout on a successful exit, and the transcript a record asked for.
 pub(crate) struct CommandRun {
@@ -82,10 +82,10 @@ impl CommandProcess {
         CommandProcess::spawn_when(command, |_| Ok(()))
     }
 
-    /// [`CommandProcess::spawn`], refused where `ready` refuses it just before the launch.
+    /// [`CommandProcess::spawn`], refused where `ready` refuses it at a [`Launch`].
     fn spawn_when(
         command: &mut tokio::process::Command,
-        ready: impl FnOnce(&mut tokio::process::Command) -> Result<(), NoAnswerReason>,
+        ready: impl FnMut(Launch<'_>) -> Result<(), NoAnswerReason>,
     ) -> Result<CommandProcess, NoAnswerReason> {
         let (child, tree) = crate::process_tree::spawn(command, ready)?;
         Ok(CommandProcess {
@@ -349,17 +349,23 @@ async fn run_command_process(
 
     // A consult already settled starts no child: a resolver with side effects never runs
     // for an outcome that is known. The check runs at the launch itself, after any wait
-    // for the spawn lock, and the budget the child is told is sampled there.
-    let mut process = CommandProcess::spawn_when(&mut configured, |configured| {
+    // for the spawn lock, and again where a child created suspended would run. The budget
+    // the child is told is sampled at the spawn.
+    let mut process = CommandProcess::spawn_when(&mut configured, |launch| {
         let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         match (cancelled.try_recv(), budget.is_zero()) {
-            (Err(tokio::sync::oneshot::error::TryRecvError::Empty), false) => {
-                configured.env(CONSULT_TIMEOUT_VARIABLE, budget.as_millis().to_string());
-                Ok(())
-            }
-            (Err(tokio::sync::oneshot::error::TryRecvError::Empty), true) => Err(NoAnswerReason::Timeout),
-            _ => Err(NoAnswerReason::Transport),
+            (Err(tokio::sync::oneshot::error::TryRecvError::Empty), false) => {}
+            (Err(tokio::sync::oneshot::error::TryRecvError::Empty), true) => return Err(NoAnswerReason::Timeout),
+            _ => return Err(NoAnswerReason::Transport),
         }
+        match launch {
+            Launch::Spawn(configured) => {
+                configured.env(CONSULT_TIMEOUT_VARIABLE, budget.as_millis().to_string());
+            }
+            #[cfg(windows)]
+            Launch::Resume => {}
+        }
+        Ok(())
     })?;
     let tail = process.child_mut().stderr.take().map(stderr_tail);
     let outcome = {

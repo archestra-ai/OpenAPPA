@@ -6,16 +6,33 @@
 
 use crate::external::NoAnswerReason;
 
+/// Where a launch may still be refused.
+pub(crate) enum Launch<'a> {
+    /// Just before the spawn, where the command may still be configured.
+    Spawn(&'a mut tokio::process::Command),
+    /// The child is created suspended in its job, and has not run yet.
+    #[cfg(windows)]
+    Resume,
+}
+
 /// Spawn `command` as a process tree: confined before it starts, adopted once it has.
 /// A command that does not start is unreachable; a child that cannot be adopted is
-/// refused, and its `kill_on_drop` ends it. A launch `ready` refuses never starts.
+/// refused, and its `kill_on_drop` ends it. A launch `ready` refuses at any [`Launch`]
+/// never runs, and is refused with its reason.
 pub(crate) fn spawn(
     command: &mut tokio::process::Command,
-    ready: impl FnOnce(&mut tokio::process::Command) -> Result<(), NoAnswerReason>,
+    mut ready: impl FnMut(Launch<'_>) -> Result<(), NoAnswerReason>,
 ) -> Result<(tokio::process::Child, ProcessTree), NoAnswerReason> {
     confine(command);
-    let child = crate::child_process::spawn_async_when(command, ready)?.map_err(|_| NoAnswerReason::Unreachable)?;
+    let child = crate::child_process::spawn_async_when(command, |command| ready(Launch::Spawn(command)))?
+        .map_err(|_| NoAnswerReason::Unreachable)?;
     let tree = ProcessTree::adopt(&child)?;
+    #[cfg(windows)]
+    {
+        // The job's termination ends a refused child while it is still suspended.
+        ready(Launch::Resume).inspect_err(|_| tree.kill())?;
+        tree.resume(&child)?;
+    }
     Ok((child, tree))
 }
 
@@ -59,6 +76,16 @@ impl ProcessTree {
                 NoAnswerReason::Transport
             })
         }
+    }
+
+    /// Let the suspended child run: everything it starts joins the job too.
+    #[cfg(windows)]
+    fn resume(&self, child: &tokio::process::Child) -> Result<(), NoAnswerReason> {
+        windows::resume(child).map_err(|error| {
+            tracing::warn!(%error, "the consult process could not be resumed in its job");
+            self.kill();
+            NoAnswerReason::Transport
+        })
     }
 
     /// End the child and every descendant. Cleanup runs after every outcome, so a
@@ -143,21 +170,23 @@ mod windows {
         let process = child
             .raw_handle()
             .ok_or_else(|| io::Error::other("the child has already been reaped"))?;
-        let pid = child
-            .id()
-            .ok_or_else(|| io::Error::other("the child has already been reaped"))?;
         let job = owned(unsafe { CreateJobObjectW(null(), null()) })?;
         kill_on_close(&job)?;
         if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        let tree = ProcessTree {
+        Ok(ProcessTree {
             root: duplicate(process)?,
             job,
-        };
-        // Once in the job, the child may run: everything it starts joins the job too.
-        resume_only_thread(pid).inspect_err(|_| kill(&tree.job))?;
-        Ok(tree)
+        })
+    }
+
+    /// Once in the job, the child may run.
+    pub(super) fn resume(child: &tokio::process::Child) -> io::Result<()> {
+        let pid = child
+            .id()
+            .ok_or_else(|| io::Error::other("the child has already been reaped"))?;
+        resume_only_thread(pid)
     }
 
     pub(super) fn kill(job: &OwnedHandle) {
@@ -304,5 +333,34 @@ mod tests {
             .expect("no process of the tree keeps the pipe open")
             .expect("the pipe reads to its end");
         tree.root_exited().await.expect("the root's exit is observed");
+    }
+
+    /// A launch refused while the child is suspended in its job is refused with its reason,
+    /// and the child never runs. The same launch unrefused runs, so the check can fail.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_launch_refused_before_its_child_resumes_never_runs() {
+        use super::Launch;
+        use crate::external::NoAnswerReason;
+
+        let marker = |name: &str| std::env::temp_dir().join(format!("appa-{name}-{}", std::process::id()));
+        let (refused, resumed) = (marker("refused"), marker("resumed"));
+        let writes = |path: &std::path::Path| shell(&format!("echo ran > \"{}\"", path.display()));
+
+        let outcome = super::spawn(&mut writes(&refused), |launch| match launch {
+            Launch::Spawn(_) => Ok(()),
+            Launch::Resume => Err(NoAnswerReason::Timeout),
+        });
+        assert_eq!(outcome.err(), Some(NoAnswerReason::Timeout));
+
+        let (mut child, _tree) = super::spawn(&mut writes(&resumed), |_| Ok(())).expect("the shell starts");
+        let status = tokio::time::timeout(WITHIN, child.wait())
+            .await
+            .expect("the shell exits")
+            .expect("the exit is observed");
+        assert!(status.success());
+        assert!(resumed.exists());
+        assert!(!refused.exists());
+        let _ = std::fs::remove_file(&resumed);
     }
 }
