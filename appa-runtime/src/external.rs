@@ -1177,6 +1177,7 @@ mod tests {
                 artifact: AnnotationArtifact {
                     args,
                     context: Default::default(),
+                    tool_name: crate::consult::ToolNameAuthor::Policy,
                 },
             },
         }
