@@ -4140,6 +4140,11 @@ fn control_spelling(naming: ToolNaming, presentation: &EmbeddedPresentationOptio
     }
 }
 
+/// The feedback on a staged tool result or child return. Its offers follow the line
+/// `To accept this change and receive the output:`, one `  - <control>(offer_id: "<id>")`
+/// line each. That call line is part of the contract on [`remedy_lines`], and here the text
+/// is the only carrier: `HookDecision::ReplaceOutput` and `HookDecision::Block` name no
+/// offers as data.
 fn stage_feedback(
     headline: &str,
     residual: &appa_engine::check::Narrowing,
@@ -4857,6 +4862,35 @@ struct RemedyRenderContext<'a> {
     presentation: &'a EmbeddedPresentationOptions,
 }
 
+/// The lines under the block's `Continue:` heading, one remedy each.
+///
+/// Without a display plan, two of these shapes are a wire contract, not only prose:
+///
+/// ```text
+///   - <action>:
+///     <control>(offer_id: "<id>")
+///   - Run <tool> first; it clears: <gaps>.
+/// ```
+///
+/// The first is an executable offer that declares no return; `<action>` is one line, `<id>`
+/// is the offer's lowercase hex id, and any further line of the offer is indented four
+/// spaces. The second is redispatch advice, which carries no offer. A staged result quotes
+/// its offers with the same call line (`stage_feedback`).
+///
+/// Consumers that see only this text find offers by the first shape. These are the
+/// scripted models that stand in for an LLM (`integrations/kagent/tests/conftest.py`,
+/// `integrations/kagent/e2e/marketplace/fixtures.py`,
+/// `marketplace/plugins/claude-code/claude_model_fixture.py`,
+/// `bench/saber/tests/test_runner.py`) and the plugin tests that read a denial message
+/// (`integrations/amp/amppa.test.ts`, `integrations/opencode/appencode.test.ts`,
+/// `integrations/opencode/foreground.test.ts`, `integrations/opencode/smoke/run.py`). The
+/// scripts choose an offer by words of its `<action>`, which stay the runtime's wording and
+/// are not part of this contract. The tau-bench harness reads the `Continue:` heading
+/// and the second shape (`bench/taubench/src/appa_taubench/native.py`, `bench.py`), because
+/// no decision carries redispatch advice as data. A host that holds the decision reads offer
+/// ids from `HookDecision::DenyCall::offers` instead of this text; the Python binding passes
+/// them on as `offer_ids`.
+/// `the_remedy_lines_are_a_contract_that_scripted_models_parse` pins these shapes.
 fn remedy_lines(
     planned: &PlannedBlock,
     offers: &[(OfferId, PlanId)],
@@ -6387,6 +6421,129 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The remedy lines are the wire format of every scripted model that stands in for an LLM
+    /// (`remedy_lines` names them). A rewording may change any `<action>`; it may not change
+    /// the lines around it.
+    #[test]
+    fn the_remedy_lines_are_a_contract_that_scripted_models_parse() {
+        use appa_engine::check::Narrowing;
+        use appa_engine::label::{Audience, Label};
+
+        let narrowing = Narrowing {
+            from: Label::new(Trust::new(2), Audience::public()),
+            to: Label::new(Trust::new(0), Audience::public()),
+        };
+        let accept = |id, required| {
+            RemedyPlan::Executable(ExecutableRemedyPlan {
+                id: PlanId::new(id),
+                steps: vec![RemedyStep::Accept(narrowing.clone())],
+                required,
+            })
+        };
+        let planned = PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: Some(narrowing.clone()),
+            },
+            plans: vec![
+                accept(1, Vec::new()),
+                accept(
+                    2,
+                    vec![appa_engine::plan::RequiredRuling {
+                        authority: appa_engine::names::AuthorityName::new("officer"),
+                        covers: Vec::new(),
+                    }],
+                ),
+                RemedyPlan::Redispatch(
+                    appa_engine::plan::RedispatchPlan::new(
+                        ToolName::new("log_verification"),
+                        vec![Gap::Prior(EffectKind::new("identity.verified"))],
+                    )
+                    .expect("a prior gap is one of the redispatch shapes"),
+                ),
+            ],
+            fork_advice: None,
+            narrowing_impact: None,
+        };
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let text = block_feedback(
+            &planned,
+            &[
+                (OfferId("0123456789abcdef".to_string()), PlanId::new(1)),
+                (OfferId("fedcba9876543210".to_string()), PlanId::new(2)),
+            ],
+            policy.engine().registry(),
+            &ReturnBounds {
+                label: Label::top(),
+                lowest: Trust::new(0),
+            },
+            ToolNaming::AsAuthored,
+            "send_mail",
+            None,
+            &EmbeddedPresentationOptions::default(),
+        )
+        .text;
+
+        // Only the shape is the contract; `<action>` and the offer's further lines are the
+        // runtime's wording, which this test leaves free.
+        let continued = text
+            .split("\nContinue:\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("the offers follow a Continue: heading: {text}"));
+        let mut remedies: Vec<Vec<&str>> = Vec::new();
+        for line in continued.lines().take_while(|line| line.starts_with("  ")) {
+            match line.strip_prefix("  - ") {
+                Some(_) => remedies.push(vec![line]),
+                None => remedies
+                    .last_mut()
+                    .unwrap_or_else(|| panic!("a continuation line follows a remedy: {text}"))
+                    .push(line),
+            }
+        }
+        assert_eq!(remedies.len(), 3, "two offers and one redispatch: {text}");
+        for (remedy, id) in remedies.iter().zip(["0123456789abcdef", "fedcba9876543210"]) {
+            let action = &remedy[0]["  - ".len()..];
+            assert!(
+                action.ends_with(':') && !action.trim_end_matches(':').is_empty(),
+                "the action line ends with a colon: {text}"
+            );
+            assert_eq!(
+                remedy.get(1).copied(),
+                Some(format!("    execute_remedy_plan(offer_id: \"{id}\")").as_str()),
+                "the call line follows the action line: {text}"
+            );
+            assert!(
+                remedy[2..].iter().all(|line| line.starts_with("    ")),
+                "further lines of an offer are indented four spaces: {text}"
+            );
+        }
+        assert_eq!(
+            remedies[1].len(),
+            3,
+            "the approval offer carries one further line: {text}"
+        );
+        assert_eq!(
+            remedies[2],
+            ["  - Run log_verification first; it clears: requires a prior identity.verified effect."],
+            "{text}"
+        );
+
+        let staged = super::stage_feedback(
+            "[appa] Blocked: this result cannot be delivered yet.",
+            &narrowing,
+            &[OfferId("0123456789abcdef".to_string())],
+            &TrustChain::new(Vec::new()),
+            ToolNaming::AsAuthored,
+            &EmbeddedPresentationOptions::default(),
+        );
+        assert!(
+            staged.ends_with(
+                "\nTo accept this change and receive the output:\n  - execute_remedy_plan(offer_id: \"0123456789abcdef\")"
+            ),
+            "{staged}"
+        );
     }
 
     #[test]
