@@ -306,6 +306,12 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
         .map_err(|error| io("run selected binary", binary, error))?;
     let deadline = Instant::now() + timeout;
     let status = loop {
+        #[cfg(not(windows))]
+        let status = process.child.try_wait();
+        #[cfg(windows)]
+        let status = process.try_wait();
+        let status = status.map_err(|error| io("wait for selected binary", binary, error))?;
+        // Sampled after the wait, so the sample after exit sees all the command wrote.
         if stdout
             .metadata()
             .map_err(|error| io("inspect native output", binary, error))?
@@ -325,19 +331,11 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
                 reason: "selected binary output exceeded its byte limit; owned subprocesses were stopped".into(),
             });
         }
-        #[cfg(not(windows))]
-        let status = process.child.try_wait();
-        #[cfg(windows)]
-        let status = process.try_wait();
-        if let Some(status) = status.map_err(|error| io("wait for selected binary", binary, error))? {
+        if let Some(status) = status {
             if !status.success() {
                 process
                     .terminate()
                     .map_err(|error| io("stop failed native command", binary, error))?;
-            }
-            #[cfg(not(windows))]
-            {
-                process.completed = true;
             }
             break status;
         }
@@ -383,21 +381,14 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
             ),
         });
     }
+    // Descendants may include the runtime. Release them only after the
+    // successful command's captured result passes validation.
+    #[cfg(not(windows))]
+    {
+        process.completed = true;
+    }
     #[cfg(windows)]
     {
-        // Descendants may include the runtime. Release them only after the
-        // successful command's captured result passes validation.
-        if stderr
-            .metadata()
-            .map_err(|error| io("inspect native diagnostics", binary, error))?
-            .len()
-            > 65536
-        {
-            return Err(InstallError::Recovery {
-                path: binary.to_owned(),
-                reason: "selected binary diagnostics exceeded their byte limit".into(),
-            });
-        }
         process.complete().map_err(|error| InstallError::Recovery {
             path: binary.to_owned(),
             reason: format!("could not release the successful native command's runtime: {error}"),
