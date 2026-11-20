@@ -55,16 +55,23 @@ impl Session {
     /// worth running once more, or the child's own answer.
     /// A fan-out spawn's child names the prompt its spawn was released under, and binds there.
     pub(crate) fn open_late(&self, child: TrajectoryId, prompt: Option<&PromptKey>) -> Result<LateOpen, EventError> {
-        match self.liveness_of(&child)? {
-            Liveness::Unopened => {
-                let id = child.clone();
-                self.bind_child(id, |context| match prompt {
-                    Some(prompt) => context.fan_out_fork(&child, prompt),
-                    None => context.in_flight_fork(&child),
-                })
-                .map(|_| LateOpen::Opened)
+        if self.liveness_of(&child)? != Liveness::Unopened {
+            return Ok(LateOpen::AlreadyOpen);
+        }
+        // Read again in the guarded bind: a start that lands first is not addressed again.
+        let bound = self.bind_child(child.clone(), |context| {
+            if context.engine().liveness(context.view, &child) != Liveness::Unopened {
+                return Err(EventError::TrajectoryExists);
             }
-            Liveness::Live | Liveness::Ended => Ok(LateOpen::AlreadyOpen),
+            match prompt {
+                Some(prompt) => context.fan_out_fork(&child, prompt),
+                None => context.in_flight_fork(&child),
+            }
+        });
+        match bound {
+            Ok(_) => Ok(LateOpen::Opened),
+            Err(EventError::TrajectoryExists) => Ok(LateOpen::AlreadyOpen),
+            Err(error) => Err(error),
         }
     }
 
