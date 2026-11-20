@@ -11,10 +11,10 @@ sharing tool, first match wins:
 | Class | Tools | Adds | Requires |
 | --- | --- | --- | --- |
 | Own surfaces | `search_tools`, `search_files`, `load_skill`, `ask_user`, `todo_write`, `whoami`, `validate_guardrails_policy`, `resolve_openappa_yell`, credential setup cards, `cancel_agent_run` and other writes that carry no session data | nothing | nothing |
-| Organization records | configuration, rosters, the guardrails policy and its previews, yells, consults, files, apps, run state, `list_llm_sessions`, `list_openappa_operations` | `internal` | nothing |
+| Organization records | configuration, rosters, the guardrails policy and its previews, an MCP server's own rules, their previews and pull request state, yells, consults, files, apps, run state, `list_llm_sessions`, `list_openappa_operations` | `internal` | nothing |
 | Text strangers write | `query_knowledge_sources`, `get_schedule_trigger_run_transcript`, `list_llm_interactions`, `get_llm_interaction`, `get_llm_session_logs` | `internal`, `suspicious` | nothing |
 | Control plane | deletes and unassigns, guardrails publishes, repository connection and sync, credential bindings, schedule controls, team changes, limits, tool assignments | nothing | `trusted` |
-| Read or run by others, or read back as trusted | agents, gateways, MCP servers, hooks, skills, plugins, apps and app specs, knowledge base updates, scheduled tasks, run posts, credential transfers, persistent file writes, `propose_tuner_suggestion` | nothing | `trusted`, `internal` |
+| Read or run by others, or read back as trusted | agents, gateways, MCP servers, hooks, skills, plugins, apps and app specs, knowledge base updates, scheduled tasks, run posts, credential transfers, persistent file writes, `propose_tuner_suggestion`, `propose_guardrails_server_rules_change` | nothing | `trusted`, `internal` |
 | Runs | `start_agent_run`, `steer_agent_run` (and their Archestra 1.4 names), workspace writes and uploads | nothing | `internal` |
 | Shares | `publish_app` by `scope`, `update_knowledge_connector` by `visibility` or a sent `team_ids`, `add_team_member` | nothing | `trusted` and `internal` / `@archestra:team/<team>` / `@archestra:user/$user` |
 | Sandbox | `run_command` | the `archestra.run-command` Annotator | |

@@ -88,7 +88,10 @@ annotator = "archestra.run-command"
 # nothing and sends nothing. A publish, a repository connection, a sync or a
 # credential binding changes the guardrails of every session. A tuner
 # suggestion reaches the admins' inbox, and its policy change becomes the
-# guardrails of every session once an admin applies it ---
+# guardrails of every session once an admin applies it. One MCP server's own
+# rules are read, previewed and followed like the policy; proposing a change
+# to them opens a pull request the organization reads, which becomes the
+# guardrails of that server's tools once merged ---
 
 [[policy.tool]]
 name = "mcp/archestra/get_guardrails_policy"
@@ -116,6 +119,18 @@ delta = { audience = ["internal"] }
 
 [[policy.tool]]
 name = "mcp/archestra/get_guardrails_policy_change_status"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_guardrails_server_rules"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/preview_guardrails_server_rules_change"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/archestra/get_guardrails_server_rules_change_status"
 delta = { audience = ["internal"] }
 
 [[policy.tool]]
@@ -178,6 +193,11 @@ requires = { trust = "trusted" }
 
 [[policy.tool]]
 name = "mcp/archestra/propose_tuner_suggestion"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/archestra/propose_guardrails_server_rules_change"
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["internal"] } }
 
