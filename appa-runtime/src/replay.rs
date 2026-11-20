@@ -1064,16 +1064,20 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 
 /// The walk under the canonical `root`: a trace file is taken only when what it resolves to
 /// stays under the root, so a link cannot bring an outside file into the run or its output.
+/// A trace that does not resolve, such as a dangling link, fails the walk rather than leave
+/// the run.
 fn walk(dir: &Path, root: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if entry.file_type()?.is_dir() {
             walk(&path, root, into)?;
-        } else if path.extension().is_some_and(|extension| extension == "appa")
-            && std::fs::canonicalize(&path).is_ok_and(|resolved| resolved.starts_with(root) && resolved.is_file())
-        {
-            into.push(path);
+        } else if path.extension().is_some_and(|extension| extension == "appa") {
+            let resolved = std::fs::canonicalize(&path)
+                .map_err(|error| std::io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
+            if resolved.starts_with(root) && resolved.is_file() {
+                into.push(path);
+            }
         }
     }
     Ok(())
@@ -1263,6 +1267,17 @@ mod tests {
         );
         let named = tree.join("nested/escape.appa");
         assert_eq!(collect(std::slice::from_ref(&named)), Ok(vec![named]));
+    }
+
+    /// A trace link in the tree that resolves to nothing fails the collection: the run does
+    /// not pass without it.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_trace_link_fails_the_collection() {
+        let tree = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(tree.path().join("a.appa"), "").expect("the trace writes");
+        std::os::unix::fs::symlink(tree.path().join("gone.trace"), tree.path().join("dangling.appa")).expect("links");
+        assert!(collect(&[tree.path().to_path_buf()]).is_err());
     }
 
     /// A collected trace swapped for a FIFO before its read is refused at once, without
