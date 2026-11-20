@@ -710,6 +710,49 @@ async fn a_completed_read_replays_its_receipt_after_a_reload_refuses_the_tool() 
     assert!(matches!(changed, Err(EmbeddedPeerError::Refused(_))), "{changed:?}");
 }
 
+/// A completed read replays its stored receipt to the exact call that made it after a reload
+/// ranks its stored label differently than its dispatch held it, though the tool stays fit.
+#[tokio::test]
+async fn a_completed_read_replays_its_receipt_after_a_reload_reranks_its_label() {
+    let (dir, runtime) = runtime();
+    start(&runtime).await;
+    assert!(matches!(
+        release(&runtime, None, "send", "send-1").await,
+        HookDecision::AllowCall { .. }
+    ));
+    let notice = runtime
+        .send_embedded_peer(&family(), &family(), &family(), None, "send-1", "hello")
+        .expect("the send records");
+    let arguments = json!({"message_id": notice.id.as_str()});
+    let read = runtime
+        .read_embedded_peer(&actor(None), "read-1", &notice.id, call("read", arguments.clone()))
+        .await
+        .expect("the read admits");
+    let delivered = HookDecision::DeliverValue {
+        value: "hello".to_string(),
+    };
+    assert_eq!(read.decision, delivered);
+
+    let path = dir.path().join("reranked.toml");
+    std::fs::write(
+        &path,
+        POLICY.replace(
+            "version = 2\n",
+            "version = 2\ntrust_chain = [\"suspicious\", \"vetted\", \"trusted\"]\n",
+        ),
+    )
+    .expect("the reranked policy writes");
+    runtime
+        .reload(Config::load(&path).expect("the reranked policy loads"))
+        .expect("the reload installs");
+
+    let retry = runtime
+        .read_embedded_peer(&actor(None), "read-1", &notice.id, call("read", arguments))
+        .await
+        .expect("the exact retry replays its receipt");
+    assert_eq!(retry.decision, delivered);
+}
+
 const SCRUBBED_POLICY: &str = r#"
 [policy]
 version = 2

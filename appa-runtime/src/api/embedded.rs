@@ -243,18 +243,13 @@ impl Runtime {
         let recipient = super::acting_trajectory(actor);
         named_id(&call, id)?;
         let arguments = call_fingerprint(&call);
-        let fitness = self.read_tool_preserves_source_label(&actor.root, &call)?;
         // An exact retry of a completed read gets its receipt even when its tool is no
-        // longer fit for a new read.
-        if let Some(row) = self
-            .inner
-            .store
-            .embedded_read_receipt(&actor.root, id.as_str(), recipient, &call_id, &arguments)
-            .map_err(store_error)?
-        {
-            return stored_outcome(&row);
+        // longer fit for a new read, or its held label no longer matches its dispatch's.
+        if let Err(unfit) = self.read_tool_preserves_source_label(&actor.root, &call)? {
+            return self
+                .completed_receipt(&actor.root, id, recipient, &call_id, &arguments)?
+                .ok_or(unfit);
         }
-        fitness?;
         let loaded = self
             .inner
             .store
@@ -270,17 +265,20 @@ impl Runtime {
             .trust_chain(&self.inner.deployment(), &log)
             .map_err(peer_error)?;
         let message = held_message(&loaded, &chain);
-        if matches!(prior_call(&log, recipient, &call_id, &message), PriorCall::Foreign) {
-            return Err(refused("this call id is already a different dispatch"));
-        }
+        let prior = prior_call(&log, recipient, &call_id, &message);
         drop(log);
+        if matches!(prior, PriorCall::Foreign) {
+            return self
+                .completed_receipt(&actor.root, id, recipient, &call_id, &arguments)?
+                .ok_or_else(|| refused("this call id is already a different dispatch"));
+        }
         let claim = self
             .inner
             .store
             .claim_embedded_read(&actor.root, id.as_str(), recipient, &call_id, &arguments)
             .map_err(store_error)?;
         let claim = match claim {
-            ReadTake::Done(row) => return stored_outcome(&row),
+            ReadTake::Done(row) => return self.replay_receipt(&actor.root, &row),
             ReadTake::Ready(claim) => claim,
             ReadTake::Busy => return Err(refused("this call id is not waiting to read this message")),
             ReadTake::Missing => return Err(refused("no peer message with this id is held for this recipient")),
@@ -310,6 +308,32 @@ impl Runtime {
         }
         self.store_decision(&actor.root, id, &call_id, generation, &outcome, &claim.row)?;
         Ok(outcome)
+    }
+
+    fn completed_receipt(
+        &self,
+        root: &TrajectoryId,
+        id: &EmbeddedPeerId,
+        recipient: &TrajectoryId,
+        call_id: &str,
+        arguments: &str,
+    ) -> Result<Option<EmbeddedHookOutcome>, EmbeddedPeerError> {
+        self.inner
+            .store
+            .embedded_read_receipt(root, id.as_str(), recipient, call_id, arguments)
+            .map_err(store_error)?
+            .map(|row| self.replay_receipt(root, &row))
+            .transpose()
+    }
+
+    /// A stored receipt, served only while this view still serves the family's policy: the
+    /// read may have completed under a revision this view has not reached.
+    fn replay_receipt(&self, root: &TrajectoryId, row: &EmbeddedRow) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
+        let log = self.inner.log(root).map_err(peer_error)?;
+        self.inner
+            .resolve_policy(&self.inner.deployment(), &log)
+            .map_err(peer_error)?;
+        stored_outcome(row)
     }
 
     fn release_if_unopened(
