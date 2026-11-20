@@ -428,6 +428,21 @@ async fn an_unreachable_runtime_exits_2() {
     assert_eq!(code, 2, "no answer from the runtime must block the action");
 }
 
+/// The block holds when its reason has nowhere to go: a stderr whose reader is gone still
+/// leaves the exit code the harness reads as a block.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_runtime_exits_2_with_its_stderr_gone() {
+    let url = refused_url().await;
+    let code = tokio::task::spawn_blocking(move || {
+        let mut child = child_process::spawn(&mut client_heard(&url)).expect("the hook client spawns");
+        drop(child.stderr.take().expect("the child has a stderr pipe"));
+        finish_output(child, PRE_TOOL_USE).status.code()
+    })
+    .await
+    .expect("the blocking task joins");
+    assert_eq!(code, Some(2), "no answer from the runtime must block the action");
+}
+
 /// A session that names its own runtime posts there, not to the deployment's
 /// endpoint the hook entry carries: the entry's URL refuses every connection,
 /// and the session's answers.

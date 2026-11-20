@@ -68,8 +68,14 @@ fn post(endpoint: &Endpoint, event: &[u8], deadline: &Deadline) -> Result<Answer
 
 /// The blocking hook outcome. Claude Code reads stderr as the reason it blocked.
 fn block(failure: &str) -> ExitCode {
-    eprintln!("OpenAPPA hook blocked: {failure}");
+    note(format_args!("OpenAPPA hook blocked: {failure}"));
     ExitCode::from(2)
+}
+
+/// Best effort: a stderr that is gone must not panic the client out of the exit code it
+/// owes the harness — a panic exits 101, which Claude Code does not read as a block.
+fn note(line: std::fmt::Arguments<'_>) {
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 /// Preserve the status while surfacing the runtime's own diagnostic. Claude Code displays
@@ -224,7 +230,7 @@ fn parsed<T, E: std::fmt::Display>(var: &str, value: OsString, parse: impl FnOnc
         None => Err("the value is not UTF-8".to_string()),
     };
     parsed
-        .inspect_err(|error| eprintln!("OpenAPPA hook ignored {var}: {error}"))
+        .inspect_err(|error| note(format_args!("OpenAPPA hook ignored {var}: {error}")))
         .ok()
 }
 
@@ -251,8 +257,7 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
                 decides,
             ),
             Decides::Nothing => {
-                // Best effort: a stderr that is gone must not turn this into a failure.
-                let _ = writeln!(std::io::stderr(), "OpenAPPA could not read the turn end: {error}");
+                note(format_args!("OpenAPPA could not read the turn end: {error}"));
                 ExitCode::SUCCESS
             }
         };
@@ -293,7 +298,7 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
     if let HookEvent::Prompt { .. } = &event
         && let Some(refusal) = crate::agent_scan::refusal()
     {
-        eprintln!("{refusal}");
+        note(format_args!("{refusal}"));
         return ExitCode::from(2);
     }
     // A parsed event that cannot cross the wire is still an event to answer: it is handed
@@ -324,10 +329,10 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
         // The runtime refused the stop that carries the withheld return: it carries nothing
         // to check, and holding it would hold the subagent in a stop no return can pass.
         (_, false) if ends_unchecked(&event) => {
-            eprintln!(
+            note(format_args!(
                 "OpenAPPA hook let the withheld return end the subagent: {}",
                 refusal(&answer)
-            );
+            ));
             ExitCode::SUCCESS
         }
         (answered, false) => {
@@ -395,8 +400,7 @@ fn carry_out(codec: &Codec, host: &[u8], event: &HookEvent, refused: Refused, fa
 /// never received. The blocking exit is what is left to say so — it surfaces the failure on
 /// stderr and stops the turn rather than reporting a withholding that did not happen.
 fn withhold(withholding: &serde_json::Value, failure: &str) -> ExitCode {
-    // Best effort: a stderr that is gone must not stop the withholding reaching stdout.
-    let _ = writeln!(std::io::stderr(), "OpenAPPA hook withheld the result: {failure}");
+    note(format_args!("OpenAPPA hook withheld the result: {failure}"));
     match print(withholding) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => block(&format!("{failure}; the withholding could not be written: {error}")),
@@ -420,13 +424,15 @@ enum Unanswered<'a> {
 /// rendering and exits zero, while everything else blocks by the exit code alone.
 fn unanswered(codec: &Codec, hook: Unanswered<'_>, failure: &str, decides: Decides) -> ExitCode {
     if decides == Decides::Nothing {
-        eprintln!("OpenAPPA runtime did not answer the turn end: {failure}");
+        note(format_args!("OpenAPPA runtime did not answer the turn end: {failure}"));
         return ExitCode::SUCCESS;
     }
     if let Unanswered::Event(_, event) = hook
         && ends_unchecked(event)
     {
-        eprintln!("OpenAPPA hook let the withheld return end the subagent: {failure}");
+        note(format_args!(
+            "OpenAPPA hook let the withheld return end the subagent: {failure}"
+        ));
         return ExitCode::SUCCESS;
     }
     match withholding(codec, hook, failure) {
