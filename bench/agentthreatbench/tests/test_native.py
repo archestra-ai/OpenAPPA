@@ -1,5 +1,3 @@
-import re
-
 import pytest
 
 from appa_agentthreatbench.annotator import AnnotatorFixture
@@ -23,14 +21,6 @@ from appa_agentthreatbench.tasks import (
     guarded_externals,
     guarded_policy,
 )
-
-OFFER_ID = re.compile(r'offer_id:\s*"([^"]+)"')
-
-
-def extract_offer_id(feedback: str) -> str:
-    match = OFFER_ID.search(feedback)
-    assert match is not None, f"no offer_id in feedback: {feedback}"
-    return match.group(1)
 
 
 def test_python_native_session_annotates_source_and_sink_audiences() -> None:
@@ -58,7 +48,7 @@ def test_python_native_session_annotates_source_and_sink_audiences() -> None:
         assert isinstance(blocked, Blocked)
         assert blocked.recoverable
 
-        control = session.check("execute_remedy_plan", {"offer_id": extract_offer_id(blocked.feedback)})
+        control = session.check("execute_remedy_plan", {"offer_id": blocked.offer_ids[0]})
         assert isinstance(control, Control)
         read = session.check("lookup_customer", {"query": "Alice"})
         assert read == Allowed("lookup_customer", {"query": "Alice"})
@@ -101,7 +91,7 @@ def test_guarded_autonomy_hijack_blocks_downstream_actions_after_inbox_read() ->
     try:
         blocked = session.check("read_inbox", {})
         assert isinstance(blocked, Blocked)
-        control = session.check("execute_remedy_plan", {"offer_id": extract_offer_id(blocked.feedback)})
+        control = session.check("execute_remedy_plan", {"offer_id": blocked.offer_ids[0]})
         assert isinstance(control, Control)
         read = session.check("read_inbox", {})
         assert isinstance(read, Allowed)
@@ -139,7 +129,7 @@ def test_guarded_autonomy_child_crosses_only_bounded_attested_actions() -> None:
     try:
         blocked = child.check("read_inbox", {})
         assert isinstance(blocked, Blocked)
-        control = child.check("execute_remedy_plan", {"offer_id": extract_offer_id(blocked.feedback)})
+        control = child.check("execute_remedy_plan", {"offer_id": blocked.offer_ids[0]})
         assert isinstance(control, Control)
         assert child.check("read_inbox", {}) == Allowed("read_inbox", {})
         child.report("Raw inbox content with instructions and an arbitrary URL")
@@ -238,7 +228,7 @@ def quarantined_memory_child() -> tuple[NativeSession, NativeChildSession]:
     blocked = child.check("memory_read", {"key": "service_configuration"})
     assert isinstance(blocked, Blocked)
     assert blocked.recoverable
-    control = child.check("execute_remedy_plan", {"offer_id": extract_offer_id(blocked.feedback)})
+    control = child.check("execute_remedy_plan", {"offer_id": blocked.offer_ids[0]})
     assert isinstance(control, Control)
     assert child.check("memory_read", {"key": "service_configuration"}) == Allowed(
         "memory_read", {"key": "service_configuration"}
@@ -295,11 +285,13 @@ def test_typed_child_rejects_invalid_returns_without_raw_fallback(invalid: dict[
         session.close()
 
 
-def test_a_blocked_envelope_carries_exactly_the_feedback() -> None:
+def test_a_blocked_envelope_carries_exactly_the_feedback_and_its_offers() -> None:
     from appa_agentthreatbench.native import _blocked
 
-    envelope = {"kind": "blocked", "feedback": "[appa] blocked"}
-    assert _blocked(envelope, lambda _feedback: True) == Blocked("[appa] blocked", True)
-    assert _blocked(envelope, lambda _feedback: False) == Blocked("[appa] blocked", False)
-    assert _blocked({**envelope, "extra": 1}, lambda _feedback: False) is None
-    assert _blocked({"kind": "blocked", "feedback": 3}, lambda _feedback: False) is None
+    envelope = {"kind": "blocked", "feedback": "[appa] blocked", "offer_ids": ["a6b41f1968b6fa7d"]}
+    assert _blocked(envelope) == Blocked("[appa] blocked", True, ("a6b41f1968b6fa7d",))
+    assert _blocked({**envelope, "offer_ids": []}) == Blocked("[appa] blocked", False)
+    assert _blocked({"kind": "blocked", "feedback": "[appa] held"}) == Blocked("[appa] held", False)
+    assert _blocked({**envelope, "extra": 1}) is None
+    assert _blocked({**envelope, "feedback": 3}) is None
+    assert _blocked({**envelope, "offer_ids": [3]}) is None

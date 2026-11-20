@@ -1,5 +1,4 @@
 import json
-import re
 
 import pytest
 from tau2.environment.tool import as_tool
@@ -113,15 +112,6 @@ def wrapper_session(monkeypatch, *responses) -> FrameworkSession:
     )
 
 
-REMEDY_OFFER = re.compile(r'offer_id:\s*"([^"]+)"')
-
-
-def remedy_offer_id(feedback: str) -> str | None:
-    """Return the offer a block surfaced, if the policy minted one."""
-    match = REMEDY_OFFER.search(feedback)
-    return None if match is None else match.group(1)
-
-
 def test_framework_session_checks_then_reports_the_real_tool_result() -> None:
     tools = [as_tool(read_record), as_tool(write_record)]
     session = FrameworkSession(POLICY, tools, "read my record")
@@ -131,8 +121,8 @@ def test_framework_session_checks_then_reports_the_real_tool_result() -> None:
         narrowing = session.check("read_record", {"record_id": "one"})
         assert isinstance(narrowing, Blocked)
         assert narrowing.recoverable
-        offer = remedy_offer_id(narrowing.feedback)
-        assert offer is not None
+        [offer] = narrowing.offer_ids
+        assert f'offer_id: "{offer}"' in narrowing.feedback
 
         control = session.check("execute_remedy_plan", {"offer_id": offer})
         assert isinstance(control, Blocked)
@@ -194,7 +184,7 @@ def test_discoverable_calls_are_checked_logically_and_rewrapped(monkeypatch, log
 
 
 def test_blocked_discoverable_call_never_becomes_a_tau_dispatch(monkeypatch) -> None:
-    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": "no"})
+    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": "no", "offer_ids": []})
     try:
         assert session.check(
             DISCOVERABLE_WRAPPER,
@@ -206,23 +196,23 @@ def test_blocked_discoverable_call_never_becomes_a_tau_dispatch(monkeypatch) -> 
 
 
 def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> None:
-    # Only the `Continue:` heading and a quoted `offer_id` mark a next step.
-    # The prose around them is the runtime's, so these fixtures leave it out.
+    # Only an offer id and the `Continue:` heading mark a next step. The prose
+    # around them is the runtime's, so these fixtures leave it out.
     # An executable offer: the model accepts it with the control tool.
     offered = '[appa] Blocked.\n\nContinue:\n  - …:\n    execute_remedy_plan(offer_id: "a6b41f1968b6fa7d")'
-    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": offered})
+    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": offered, "offer_ids": ["a6b41f1968b6fa7d"]})
     try:
         decision = session.check(
             DISCOVERABLE_WRAPPER,
             {"agent_tool_name": "read_record", "arguments": '{"record_id":"one"}'},
         )
-        assert decision == Blocked(offered, recoverable=True)
+        assert decision == Blocked(offered, recoverable=True, offer_ids=("a6b41f1968b6fa7d",))
     finally:
         session.close()
 
     # A redispatch remedy: the model runs the named tool and proposes again.
     redispatch = "[appa] Blocked.\n\nContinue:\n  - …"
-    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": redispatch})
+    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": redispatch, "offer_ids": []})
     try:
         decision = session.check(
             DISCOVERABLE_WRAPPER,
@@ -234,7 +224,7 @@ def test_native_block_marks_a_named_next_step_as_recoverable(monkeypatch) -> Non
 
     # A gap with no remedy is terminal: no authority may waive a trust floor.
     terminal = "[appa] Blocked.\n\nWhy:\n  - …"
-    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": terminal})
+    session = wrapper_session(monkeypatch, {"kind": "blocked", "feedback": terminal, "offer_ids": []})
     try:
         assert session.check(
             DISCOVERABLE_WRAPPER,
