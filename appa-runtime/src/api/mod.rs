@@ -1386,6 +1386,7 @@ impl Prepared {
                     naming: self.naming,
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
                     spawn_holds: spawn_hold::SpawnHolds::default(),
+                    launches: launch::Launches::default(),
                 }),
                 store,
                 transcriber: None,
@@ -1510,6 +1511,7 @@ struct Shared {
     /// only; after a restart the next proposal reports it again.
     working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
     spawn_holds: spawn_hold::SpawnHolds,
+    launches: launch::Launches,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
