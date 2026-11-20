@@ -116,18 +116,7 @@ impl Acquired {
     /// from the caller, not trusted from a neighboring checksum file.
     pub fn import(bundle: &Path, digest: &ArtifactDigest) -> Result<Self, InstallError> {
         let stage = tempfile::tempdir().map_err(|error| io("stage bundle import", bundle, error))?;
-        // Hash and unpack a private snapshot, not two separate opens of a
-        // caller-owned path that could change after its digest was checked.
-        super::require_file_or_absent(bundle)?;
-        let input = super::open_regular(bundle)?;
-        let mut snapshot =
-            tempfile::NamedTempFile::new_in(stage.path()).map_err(|error| io("snapshot bundle", bundle, error))?;
-        let copied = std::io::copy(&mut std::io::Read::take(input, MAX_ARTIFACT_BYTES + 1), &mut snapshot)
-            .map_err(|error| io("copy bundle snapshot", bundle, error))?;
-        if copied > MAX_ARTIFACT_BYTES {
-            return Err(InstallError::Invalid("bundle exceeds its byte limit".into()));
-        }
-        verify_artifact(snapshot.path(), digest)?;
+        let snapshot = verified_snapshot(bundle, digest, stage.path())?;
         let unpacked = stage.path().join("unpacked");
         fs::create_dir(&unpacked).map_err(|error| io("stage bundle contents", &unpacked, error))?;
         super::archive::extract_bundle_archive(snapshot.path(), &unpacked).map_err(invalid)?;
@@ -614,6 +603,30 @@ pub(super) fn verify_artifact(path: &Path, expected: &ArtifactDigest) -> Result<
         )));
     }
     Ok(())
+}
+
+/// A private copy of the artifact at `path`, in `directory`, checked against
+/// `expected`. Read the copy, not `path`: the path could change after its
+/// digest was checked.
+pub(super) fn verified_snapshot(
+    path: &Path,
+    expected: &ArtifactDigest,
+    directory: &Path,
+) -> Result<tempfile::NamedTempFile, InstallError> {
+    super::require_file_or_absent(path)?;
+    let input = super::open_regular(path)?;
+    let mut snapshot =
+        tempfile::NamedTempFile::new_in(directory).map_err(|error| io("snapshot artifact", path, error))?;
+    let copied = std::io::copy(&mut input.take(MAX_ARTIFACT_BYTES + 1), &mut snapshot)
+        .map_err(|error| io("copy artifact snapshot", path, error))?;
+    if copied > MAX_ARTIFACT_BYTES {
+        return Err(InstallError::Invalid(format!(
+            "{} exceeds its byte limit",
+            path.display()
+        )));
+    }
+    verify_artifact(snapshot.path(), expected)?;
+    Ok(snapshot)
 }
 
 pub(super) fn validate_revision(revision: &str) -> Result<(), InstallError> {

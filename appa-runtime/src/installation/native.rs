@@ -82,17 +82,19 @@ impl NativeArtifacts {
         let batteries_digest = &archives[&generation.batteries_archive()];
         let binary_archive = installation.state.join("artifacts").join(binary_digest.hex());
         let batteries_archive = installation.state.join("artifacts").join(batteries_digest.hex());
-        acquisition::verify_artifact(&binary_archive, binary_digest)?;
         acquisition::verify_artifact(&batteries_archive, batteries_digest)?;
         let directory = installation.state.join("native");
         require_directory_or_absent(&directory)?;
         fs::create_dir_all(&directory).map_err(|error| io("create native cache", &directory, error))?;
+        // The binary runs before its identity is checked, so it comes from
+        // the verified copy, never from a second read of the cached archive.
+        let binary_archive = acquisition::verified_snapshot(&binary_archive, binary_digest, &directory)?;
         let stage = tempfile::tempdir_in(&directory).map_err(|error| io("stage native binary", &directory, error))?;
         let binary_name = crate::init::paths::appa_filename();
         if cfg!(windows) {
-            extract_windows_binary(&binary_archive, &stage.path().join(binary_name))?;
+            extract_windows_binary(binary_archive.path(), &stage.path().join(binary_name))?;
         } else {
-            super::archive::extract_bundle_archive(&binary_archive, stage.path()).map_err(invalid)?;
+            super::archive::extract_bundle_archive(binary_archive.path(), stage.path()).map_err(invalid)?;
         }
         let entries: Vec<_> = fs::read_dir(stage.path())
             .map_err(|error| io("inspect binary archive", stage.path(), error))?
