@@ -8,11 +8,13 @@
 //! the next step sees the narrowed trajectory.
 //!
 //! A step expects one of five things. `allow`: the call runs, or the only thing in the way is
-//! the plain narrowing acceptance, which the runner takes as the model would. `authority`: the
-//! call is blocked and the offer names an authority; the runner takes it. `sanitizer`: the call
-//! is blocked and the offer names a sanitizer; the runner takes it. `deny`: the call is blocked
-//! and nothing is offered. Taking an offer goes through the runtime's own remedy path, and the
-//! trace continues from the call it released.
+//! the plain narrowing acceptance, which the runner takes as the model would. `withhold`: the
+//! call is blocked and the offer runs it without returning its result; the runner takes it.
+//! `authority`: the call is blocked and the offer names an authority; the runner takes it.
+//! `sanitizer`: the call is blocked and the offer names a sanitizer; the runner takes it.
+//! `deny`: the call is blocked and nothing is offered. Taking an offer goes through the
+//! runtime's own remedy path. A remedy that releases the call is followed by the released call,
+//! and the trace continues from it; a remedy that answers with a value releases no call.
 //!
 //! Who answers a taken authority or sanitizer offer is the run's [`Remedies`]. By default a
 //! stand-in does, in process: every authority approves, and every sanitizer returns the value
@@ -193,8 +195,8 @@ pub struct SyntaxError {
 /// or `appa/do_something` and `{`, one `key: <JSON value>` per line, `}`, then optionally
 /// `expect allow`, `expect withhold`, `expect deny`, `expect authority [name]`, or
 /// `expect sanitizer [name]`. A step without an `expect` line is observed; the next call or the
-/// end of the file follows its `}`. Blank lines and lines whose first character is `#` are
-/// skipped anywhere.
+/// end of the file follows its `}`. Blank lines and lines whose first non-whitespace character
+/// is `#` are skipped anywhere.
 pub fn parse(path: &Path, text: &str) -> Result<Trace, SyntaxError> {
     let mut parser = Parser {
         path,
@@ -704,8 +706,9 @@ fn recognized(runtime: &Runtime, actor: &Actor, offers: Vec<OfferedRemedy>) -> V
 }
 
 /// Take an offer the way the model does — the remedy tool, then the call proposed exactly as
-/// the remedy authorized it — and close the call with an empty output. Answers the released
-/// arguments when they differ from `proposed`.
+/// the remedy authorized it — and close the call with an empty output. A remedy that answers
+/// with a value releases no call, so nothing is proposed. Answers the released arguments when
+/// they differ from `proposed`.
 async fn take_offer(
     runtime: &Runtime,
     actor: &Actor,
