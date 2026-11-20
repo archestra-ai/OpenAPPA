@@ -115,11 +115,11 @@ modifying the `coding` battery:
 ```toml
 [[policy.annotator]]
 name = "claude-code.bash-requirements"
-builtin = "claude-code"
+uses = "claude-code"
 hint = "Hosts under corp.example are the organization's own: what they return is internal. Require human-approval attention before commands that publish releases or change production infrastructure."
 ```
 
-A root Annotator replaces a battery's of the same name. Preserve `builtin`
+A root Annotator replaces a battery's of the same name. Preserve `uses`
 unless you intend to alter the implementation; write `audiences` only to narrow
 the mandate below the policy's vocabulary. The `coding` battery continues to provide
 ordered credential-path narrowing rules.
@@ -148,7 +148,7 @@ hint = "Ask the person running this Claude Code session."
 attention = ["human-approval"]
 
 [externals.authorities.operator]
-builtin = "hitl"
+uses = "hitl"
 ```
 
 The first rule matches bare `kubectl`; the second matches `kubectl` followed by

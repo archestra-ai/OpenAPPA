@@ -817,7 +817,7 @@ pub enum LoadError {
     )]
     InputSanitizerTrust(String),
     #[error(
-        "sanitizer attest-schema declares an audience mandate: the reserved builtin vouches the channel shape, and structure claims only trust"
+        "sanitizer attest-schema declares an audience mandate: the reserved sanitizer vouches the channel shape, and structure claims only trust"
     )]
     AttestSchemaAudienceMandate,
     #[error(
@@ -825,7 +825,7 @@ pub enum LoadError {
     )]
     AttestSchemaNotOutput,
     #[error(
-        "sanitizer attest-schema declares a scope: a child return originates from no tool, so the reserved builtin is unscoped"
+        "sanitizer attest-schema declares a scope: a child return originates from no tool, so the reserved sanitizer is unscoped"
     )]
     AttestSchemaScoped,
     #[error("provider-run tool {tool} declares {construct}: a provider-run contract may declare only a static delta")]

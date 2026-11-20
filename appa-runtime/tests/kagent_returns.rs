@@ -69,7 +69,7 @@ timeout_ms = 2000
 max_body_bytes = 65536
 
 [externals.sanitizers.scrub]
-builtin = "redact-email"
+uses = "redact-email"
 "#;
 
 /// The served adapter prefixes the wire ids: `s1` is the root and `c1` is its child.

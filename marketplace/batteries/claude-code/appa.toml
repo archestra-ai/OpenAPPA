@@ -44,7 +44,7 @@ version = 2
 # labels the call before it runs, as the `coding` battery's shell Annotator does.
 [[policy.annotator]]
 name = "claude-code.monitor-requirements"
-builtin = "claude-code"
+uses = "claude-code"
 
 [[policy.tool]]
 name = "host/claude-code/Monitor"

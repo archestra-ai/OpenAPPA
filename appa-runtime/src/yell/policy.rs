@@ -138,7 +138,9 @@ static SANITIZER: Table = Table {
         // Which surfaces this sanitizer binds to.
         ("on", Rule::Elements(Class::Surface)),
         ("hint", Rule::Never),
-        // A model transport's name, as an Annotator's `builtin` is: engine vocabulary.
+        // A model transport's name, as an Annotator's `uses` is: engine vocabulary.
+        ("uses", Rule::Keep),
+        // The same, under the key's earlier spelling, which the loader still reads.
         ("builtin", Rule::Keep),
         ("tags", Rule::Elements(Class::Tag)),
         ("permits", Rule::Table(&SANITIZER_PERMITS)),
@@ -152,6 +154,8 @@ static ANNOTATOR: Table = Table {
         ("hint", Rule::Never),
         // A stock transport's name: `claude-code`, `llm`. Engine vocabulary, not the
         // deployment's.
+        ("uses", Rule::Keep),
+        // The same, under the key's earlier spelling, which the loader still reads.
         ("builtin", Rule::Keep),
         // Consult inputs: each key is an input name this Annotator reads, each value a
         // `$tool_call` source expression naming an argument.

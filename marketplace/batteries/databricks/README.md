@@ -69,7 +69,7 @@ rule beyond its name.
 
 *Databricks SQL* — `execute_sql` runs whatever statement the agent
 writes. No static rule can tell a read from a write, so the annotator
-`databricks.sql-statement` (`builtin = "claude-code"`) classifies each
+`databricks.sql-statement` (`uses = "claude-code"`) classifies each
 call before it runs, inside the vocabulary a static rule could write:
 
 | statement | requires | returns | records |
@@ -174,7 +174,7 @@ hint = "Review the exact SQL statement."
 permits = { trust_below = "trusted", attention = ["databricks-review"] }
 
 [externals.authorities.databricks-operator]
-builtin = "hitl"
+uses = "hitl"
 ```
 
 ## Limits
@@ -246,6 +246,6 @@ When the deployment binds a sanitizer below, the battery confines the results of
 
 A sanitizer settles one dimension of a narrowing. When a read narrows both trust and audience, the other dimension stays a narrowing, which the agent accepts. A sanitizer never clears a requirement, such as a review mark.
 
-The model for each sanitizer is configured in the deployment, not in the battery. A sanitizer runs only when the root config binds it under `[externals.sanitizers]`: for example `builtin = "llm"` with an `[externals.llm]` profile, `builtin = "claude-code"` where the `claude` CLI is installed, or a `url`. The default config of the Claude Code plugin binds every battery sanitizer to `claude-code`, so in `clappa` sessions it is active once the battery is installed. A sanitizer that the root does not bind is not offered, and the results that only it covers are not confined. The battery then decides as it would without sanitizers.
+The model for each sanitizer is configured in the deployment, not in the battery. A sanitizer runs only when the root config binds it under `[externals.sanitizers]`: for example `uses = "llm"` with an `[externals.llm]` profile, `uses = "claude-code"` where the `claude` CLI is installed, or a `url`. The default config of the Claude Code plugin binds every battery sanitizer to `claude-code`, so in `clappa` sessions it is active once the battery is installed. A sanitizer that the root does not bind is not offered, and the results that only it covers are not confined. The battery then decides as it would without sanitizers.
 
 APPA does not verify what the model removed: binding a sanitizer registers it as trusted. A root rule for a tool takes precedence over the battery's rule, and a root rule without the battery's tag offers no sanitizer. To change a sanitizer's hint, declare a `[[policy.sanitizer]]` with the same name in the root config. The root declaration replaces the battery's whole, so copy its `on`, `tags`, and `permits`.

@@ -88,7 +88,8 @@ pub(crate) struct RawAnnotator {
     pub(crate) implementation: Option<toml::Value>,
     /// The stock model transport this Annotator carries: `"claude-code"` or `"llm"`. An
     /// Annotator without it is bound by the deployment under `[externals.annotators]`.
-    pub(crate) builtin: Option<String>,
+    #[serde(alias = "builtin")]
+    pub(crate) uses: Option<String>,
     /// The consult inputs, each a `$tool_call` source. Omitted sends the complete call.
     pub(crate) inputs: Option<BTreeMap<String, String>>,
     /// The trust ranks a produced annotation may write. Omitted admits every chain rank.
@@ -224,8 +225,8 @@ pub(crate) struct RawSanitizer {
     pub(crate) hint: Option<String>,
     /// The model transport this Sanitizer carries: `"claude-code"` or `"llm"`. A Sanitizer
     /// that names one takes no deployment binding, as an Annotator that names one does.
-    #[serde(default)]
-    pub(crate) builtin: Option<String>,
+    #[serde(default, alias = "builtin")]
+    pub(crate) uses: Option<String>,
     #[serde(default)]
     pub(crate) tags: Vec<String>,
     pub(crate) permits: RawSanitizerPermits,

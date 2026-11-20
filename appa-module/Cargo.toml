@@ -1,5 +1,5 @@
 [package]
-name = "appa-builtin"
+name = "appa-module"
 version.workspace = true
 edition.workspace = true
 publish = false

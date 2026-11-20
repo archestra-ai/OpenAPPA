@@ -39,14 +39,14 @@ SHIPPED_MAX_BODY_BYTES = 65536
 class Backend:
     """Who answers every sanitizer of the bench policy, under which limits."""
 
-    builtin: str  # "claude-code", "llm", or "identity" (the no-rewrite stand-in)
+    uses: str  # "claude-code", "llm", or "identity" (the no-rewrite stand-in)
     model: str | None = None
     provider: str | None = None
     url: str | None = None
     # The directory of the real `claude` executable, put first on the runtime's PATH. Never
     # written into the deployment or the summary: a run directory holds no local path.
     claude_dir: str | None = None
-    # The model table's `timeout_ms`; `None` keeps the runtime's default for the builtin.
+    # The model table's `timeout_ms`; `None` keeps the runtime's default for the uses.
     consult_timeout_ms: int | None = None
     max_concurrent: int | None = None
     max_body_bytes: int = SHIPPED_MAX_BODY_BYTES
@@ -84,21 +84,21 @@ def deployment(backend: Backend) -> str:
     ]
     for name in sanitizers():
         lines += ["", f"[externals.sanitizers.{_toml_string(name)}]"]
-        if backend.builtin == "identity":
+        if backend.uses == "identity":
             lines.append(f"command = [{', '.join(_toml_string(part) for part in IDENTITY_COMMAND)}]")
         else:
-            lines.append(f"builtin = {_toml_string(backend.builtin)}")
+            lines.append(f"uses = {_toml_string(backend.uses)}")
     limits = []
     if backend.consult_timeout_ms is not None:
         limits.append(f"timeout_ms = {backend.consult_timeout_ms}")
     if backend.max_concurrent is not None:
         limits.append(f"max_concurrent = {backend.max_concurrent}")
-    if backend.builtin == "claude-code":
+    if backend.uses == "claude-code":
         lines += ["", "[externals.claude_code]"]
         if backend.model is not None:
             lines.append(f"model = {_toml_string(backend.model)}")
         lines += limits
-    elif backend.builtin == "llm":
+    elif backend.uses == "llm":
         lines += [
             "",
             "[externals.llm]",
@@ -147,7 +147,7 @@ def ask(
     """
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    if backend.builtin == "identity":
+    if backend.uses == "identity":
         (output / IDENTITY_SCRIPT).write_text(IDENTITY_SANITIZER)
     for include, shipped in included().items():
         (output / include).parent.mkdir(parents=True, exist_ok=True)

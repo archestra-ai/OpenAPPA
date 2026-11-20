@@ -1,4 +1,4 @@
-//! The model builtins.
+//! The models.
 //!
 //! - `claude-code`, `llm` and, with the `archestra` feature, `archestra` answer a rendered
 //!   [`ModelPrompt`].
@@ -14,7 +14,7 @@ pub(crate) mod llm;
 
 use std::time::Duration;
 
-use appa_policy::AnnotatorBuiltin;
+use appa_policy::AnnotatorUses;
 use claude_code::ClaudeCodeBackend;
 use llm::LlmBackend;
 
@@ -41,7 +41,7 @@ pub(crate) enum PromptModel {
 /// Each call of `send` makes one request and returns the model's answer text.
 ///
 /// - **Budget.** One deadline, `budget` from now, covers the whole consult: waits for a
-///   permit of `builtin`'s gate, every attempt, and every backoff.
+///   permit of `uses`'s gate, every attempt, and every backoff.
 /// - **Concurrency.** Each attempt holds one gate permit. The permit is released before the
 ///   backoff and acquired again for the next attempt.
 /// - **Retries.** A transport failure, a 429 or a 5xx is retried after [`RETRY_BACKOFF`].
@@ -55,7 +55,7 @@ pub(crate) enum PromptModel {
 /// `name` identifies the Annotator in log messages.
 pub(crate) async fn consult_with_retries<S, Fut>(
     gates: &ConsultGates,
-    builtin: AnnotatorBuiltin,
+    uses: AnnotatorUses,
     budget: Duration,
     max_body_bytes: usize,
     name: &str,
@@ -67,10 +67,10 @@ where
     Fut: Future<Output = Result<String, NoAnswerReason>>,
 {
     let deadline = tokio::time::Instant::now() + budget;
-    let gate = gates.model(builtin);
+    let gate = gates.model(uses);
     let mut attempts = 1;
     loop {
-        let permit = acquire_within(&gate, deadline, builtin.wire_name(), name).await?;
+        let permit = acquire_within(&gate, deadline, uses.wire_name(), name).await?;
         let answered = attempt(send(), deadline, max_body_bytes, seen.as_deref_mut()).await;
         drop(permit);
         let retryable = matches!(

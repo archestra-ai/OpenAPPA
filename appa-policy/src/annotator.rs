@@ -10,12 +10,12 @@ use crate::convert::{parse_annotator_audiences, parse_hint, parse_trust, refuse_
 use crate::error::ConfigError;
 use crate::raw::RawAnnotator;
 
-/// The stock annotators an `[[annotator]]` may name on its declaration with `builtin`: the
+/// The implementations an `[[annotator]]` may name on its declaration with `uses`: the
 /// model transports and TypeSafe's Jev classifier. Closed: the runtime compiles each in. An
 /// Annotator that names one takes no deployment binding; every other Annotator is bound by
 /// the deployment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnnotatorBuiltin {
+pub enum AnnotatorUses {
     ClaudeCode,
     Llm,
     Jev,
@@ -25,45 +25,39 @@ pub enum AnnotatorBuiltin {
     Archestra,
 }
 
-impl AnnotatorBuiltin {
+impl AnnotatorUses {
     #[cfg(not(feature = "archestra"))]
-    pub const ALL: [AnnotatorBuiltin; 3] = [
-        AnnotatorBuiltin::ClaudeCode,
-        AnnotatorBuiltin::Llm,
-        AnnotatorBuiltin::Jev,
-    ];
+    pub const ALL: [AnnotatorUses; 3] = [AnnotatorUses::ClaudeCode, AnnotatorUses::Llm, AnnotatorUses::Jev];
     #[cfg(feature = "archestra")]
-    pub const ALL: [AnnotatorBuiltin; 4] = [
-        AnnotatorBuiltin::ClaudeCode,
-        AnnotatorBuiltin::Llm,
-        AnnotatorBuiltin::Jev,
-        AnnotatorBuiltin::Archestra,
+    pub const ALL: [AnnotatorUses; 4] = [
+        AnnotatorUses::ClaudeCode,
+        AnnotatorUses::Llm,
+        AnnotatorUses::Jev,
+        AnnotatorUses::Archestra,
     ];
 
     /// The name a policy writes: `claude-code`, `llm`, `jev`, or `archestra`.
     pub const fn wire_name(self) -> &'static str {
         match self {
-            AnnotatorBuiltin::ClaudeCode => "claude-code",
-            AnnotatorBuiltin::Llm => "llm",
-            AnnotatorBuiltin::Jev => "jev",
+            AnnotatorUses::ClaudeCode => "claude-code",
+            AnnotatorUses::Llm => "llm",
+            AnnotatorUses::Jev => "jev",
             #[cfg(feature = "archestra")]
-            AnnotatorBuiltin::Archestra => "archestra",
+            AnnotatorUses::Archestra => "archestra",
         }
     }
 
-    fn parse(name: &str) -> Option<AnnotatorBuiltin> {
-        AnnotatorBuiltin::ALL
-            .into_iter()
-            .find(|builtin| builtin.wire_name() == name)
+    fn parse(name: &str) -> Option<AnnotatorUses> {
+        AnnotatorUses::ALL.into_iter().find(|uses| uses.wire_name() == name)
     }
 
-    /// The builtin a `[[sanitizer]]` may name on its declaration: a model transport, which
+    /// The implementation a `[[sanitizer]]` may name on its declaration: a model transport, which
     /// rewrites a value by the sanitizer's `hint`. Jev classifies calls and rewrites nothing.
-    pub(crate) fn parse_sanitizer(name: &str) -> Option<AnnotatorBuiltin> {
-        AnnotatorBuiltin::ALL
+    pub(crate) fn parse_sanitizer(name: &str) -> Option<AnnotatorUses> {
+        AnnotatorUses::ALL
             .into_iter()
-            .filter(|builtin| *builtin != AnnotatorBuiltin::Jev)
-            .find(|builtin| builtin.wire_name() == name)
+            .filter(|uses| *uses != AnnotatorUses::Jev)
+            .find(|uses| uses.wire_name() == name)
     }
 }
 
@@ -111,12 +105,12 @@ impl ToolCallSource {
 }
 
 /// One registered `[[annotator]]` as the runtime consumes it: the deployer's instruction,
-/// the stock builtin it names, if any, and the input mapping its consult artifacts carry.
+/// the model it names, if any, and the input mapping its consult artifacts carry.
 /// An empty mapping sends the complete call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnnotatorBinding {
     pub hint: Option<Hint>,
-    pub builtin: Option<AnnotatorBuiltin>,
+    pub uses: Option<AnnotatorUses>,
     pub inputs: BTreeMap<String, ToolCallSource>,
 }
 
@@ -134,13 +128,13 @@ pub(crate) fn compile_annotators(
         }
         let name = AnnotatorName::new(annotator.name);
         refuse_inline_binding("annotator", name.as_str(), annotator.implementation.as_ref())?;
-        let builtin = match annotator.builtin {
-            Some(builtin) => match AnnotatorBuiltin::parse(&builtin) {
-                Some(builtin) => Some(builtin),
+        let uses = match annotator.uses {
+            Some(uses) => match AnnotatorUses::parse(&uses) {
+                Some(uses) => Some(uses),
                 None => {
-                    return Err(ConfigError::UnknownAnnotatorBuiltin {
+                    return Err(ConfigError::UnknownAnnotatorUses {
                         name: name.as_str().to_string(),
-                        builtin,
+                        uses,
                     });
                 }
             },
@@ -181,7 +175,7 @@ pub(crate) fn compile_annotators(
                 .effects
                 .map(|effects| effects.into_iter().map(EffectKind::new).collect()),
         });
-        annotators.insert(name, AnnotatorBinding { hint, builtin, inputs });
+        annotators.insert(name, AnnotatorBinding { hint, uses, inputs });
     }
     Ok((annotators, annotator_declarations))
 }

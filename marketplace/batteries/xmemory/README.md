@@ -108,7 +108,7 @@ hint = "Review the exact xmemory change."
 permits = { trust_below = "trusted", attention = ["xmemory-review"] }
 
 [externals.authorities.xmemory-operator]
-builtin = "hitl"
+uses = "hitl"
 ```
 
 ## Limits

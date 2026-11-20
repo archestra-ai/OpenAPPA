@@ -1,4 +1,4 @@
-//! appa-builtin — the author surface for builtin modules.
+//! appa-module — the author surface for modules loaded from `--modules-dir`.
 
 use serde::Deserialize;
 
@@ -13,7 +13,7 @@ pub const KIND_SANITIZER: u32 = 2;
 
 pub const STATUS_OK: u32 = 0;
 pub const STATUS_INVALID_INPUT: u32 = 1;
-pub const STATUS_BUILTIN_ERROR: u32 = 2;
+pub const STATUS_MODULE_ERROR: u32 = 2;
 pub const STATUS_PANICKED: u32 = 3;
 pub const STATUS_OUTPUT_TOO_LARGE: u32 = 4;
 
@@ -34,7 +34,7 @@ pub struct DescriptorV1 {
 /// (`{"version":1,"kind","name","declaration","artifact"}`), with the
 /// transport framing already stripped.
 #[derive(Debug, Clone, PartialEq)]
-pub struct BuiltinInput {
+pub struct ModuleInput {
     /// The registered component under consult (e.g. the authority name
     /// from the deployment's externals configuration) — one module may
     /// back several components and distinguish them here.
@@ -52,19 +52,19 @@ pub struct BuiltinInput {
 /// module-side; it never crosses the boundary.
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
-pub struct BuiltinError {
+pub struct ModuleError {
     message: String,
 }
 
-impl BuiltinError {
-    pub fn new(message: impl Into<String>) -> BuiltinError {
-        BuiltinError {
+impl ModuleError {
+    pub fn new(message: impl Into<String>) -> ModuleError {
+        ModuleError {
             message: message.into(),
         }
     }
 }
 
-pub type BuiltinFn = fn(&BuiltinInput) -> Result<serde_json::Value, BuiltinError>;
+pub type ModuleFn = fn(&ModuleInput) -> Result<serde_json::Value, ModuleError>;
 
 #[derive(Deserialize)]
 struct RequestEnvelope {
@@ -96,7 +96,7 @@ pub mod __support {
     /// panic, or a stack overflow still terminates the process, so a
     /// module crate MUST keep the default `panic = "unwind"` profile.
     pub unsafe fn answer(
-        func: BuiltinFn,
+        func: ModuleFn,
         expected_kind: u32,
         input_ptr: *const u8,
         input_len: usize,
@@ -159,7 +159,7 @@ pub mod __support {
         a.start < b.end && b.start < a.end
     }
 
-    fn run(func: BuiltinFn, expected_kind: u32, input: &[u8], output: &mut [u8]) -> (u32, usize) {
+    fn run(func: ModuleFn, expected_kind: u32, input: &[u8], output: &mut [u8]) -> (u32, usize) {
         let envelope: RequestEnvelope = match serde_json::from_slice(input) {
             Ok(envelope) => envelope,
             Err(_) => return (STATUS_INVALID_INPUT, 0),
@@ -175,14 +175,14 @@ pub mod __support {
         if envelope.kind != expected_wire {
             return (STATUS_INVALID_INPUT, 0);
         }
-        let builtin_input = BuiltinInput {
+        let module_input = ModuleInput {
             component: envelope.name,
             declaration: envelope.declaration,
             artifact: envelope.artifact,
         };
-        let answer = match func(&builtin_input) {
+        let answer = match func(&module_input) {
             Ok(answer) => answer,
-            Err(_) => return (STATUS_BUILTIN_ERROR, 0),
+            Err(_) => return (STATUS_MODULE_ERROR, 0),
         };
         let mut cursor = std::io::Cursor::new(output);
         if serde_json::to_writer(&mut cursor, &answer).is_err() {
@@ -194,35 +194,35 @@ pub mod __support {
 }
 
 #[macro_export]
-macro_rules! export_builtin_authority {
+macro_rules! export_module_authority {
     ($name:literal, $func:path) => {
-        $crate::__export_builtin!($name, $func, $crate::KIND_AUTHORITY);
+        $crate::__export_module!($name, $func, $crate::KIND_AUTHORITY);
     };
 }
 
 #[macro_export]
-macro_rules! export_builtin_sanitizer {
+macro_rules! export_module_sanitizer {
     ($name:literal, $func:path) => {
-        $crate::__export_builtin!($name, $func, $crate::KIND_SANITIZER);
+        $crate::__export_module!($name, $func, $crate::KIND_SANITIZER);
     };
 }
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __export_builtin {
+macro_rules! __export_module {
     ($name:literal, $func:path, $kind:expr) => {
         #[unsafe(export_name = "appa_builtin_abi_version")]
-        pub extern "C" fn __appa_builtin_abi_version() -> u32 {
+        pub extern "C" fn __appa_module_abi_version() -> u32 {
             $crate::ABI_VERSION
         }
 
         #[unsafe(export_name = "appa_builtin_descriptor_v1")]
-        pub extern "C" fn __appa_builtin_descriptor_v1() -> $crate::DescriptorV1 {
+        pub extern "C" fn __appa_module_descriptor_v1() -> $crate::DescriptorV1 {
             $crate::__support::descriptor($name, $kind)
         }
 
         #[unsafe(export_name = "appa_builtin_answer_v1")]
-        pub unsafe extern "C" fn __appa_builtin_answer_v1(
+        pub unsafe extern "C" fn __appa_module_answer_v1(
             input_ptr: *const u8,
             input_len: usize,
             output_ptr: *mut u8,
@@ -248,9 +248,9 @@ macro_rules! __export_builtin {
 mod tests {
     use super::*;
 
-    fn echo(input: &BuiltinInput) -> Result<serde_json::Value, BuiltinError> {
+    fn echo(input: &ModuleInput) -> Result<serde_json::Value, ModuleError> {
         match input.artifact.get("mode").and_then(|mode| mode.as_str()) {
-            Some("error") => Err(BuiltinError::new("declined")),
+            Some("error") => Err(ModuleError::new("declined")),
             Some("panic") => panic!("a deliberate test panic"),
             _ => Ok(serde_json::json!({
                 "component": input.component,
@@ -260,13 +260,13 @@ mod tests {
         }
     }
 
-    export_builtin_sanitizer!("test-echo", echo);
+    export_module_sanitizer!("test-echo", echo);
 
     fn call(request: &[u8], capacity: usize) -> (u32, Vec<u8>) {
         let mut output = vec![0u8; capacity];
         let mut written: usize = usize::MAX;
         let status = unsafe {
-            __appa_builtin_answer_v1(
+            __appa_module_answer_v1(
                 request.as_ptr(),
                 request.len(),
                 output.as_mut_ptr(),
@@ -292,8 +292,8 @@ mod tests {
 
     #[test]
     fn the_exported_version_and_descriptor_identify_the_module() {
-        assert_eq!(__appa_builtin_abi_version(), ABI_VERSION);
-        let descriptor = __appa_builtin_descriptor_v1();
+        assert_eq!(__appa_module_abi_version(), ABI_VERSION);
+        let descriptor = __appa_module_descriptor_v1();
         let name = unsafe { std::slice::from_raw_parts(descriptor.name_ptr, descriptor.name_len) };
         assert_eq!(name, b"test-echo");
         assert_eq!(descriptor.kind, KIND_SANITIZER);
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn every_failure_reports_its_status_and_no_bytes() {
         let (status, body) = call(&request(serde_json::json!({"mode": "error"})), 4096);
-        assert_eq!((status, body.len()), (STATUS_BUILTIN_ERROR, 0));
+        assert_eq!((status, body.len()), (STATUS_MODULE_ERROR, 0));
 
         let (status, body) = call(&request(serde_json::json!({"mode": "panic"})), 4096);
         assert_eq!((status, body.len()), (STATUS_PANICKED, 0));
@@ -350,7 +350,7 @@ mod tests {
                 panic!("the payload's destructor panics");
             }
         }
-        fn detonate(_input: &BuiltinInput) -> Result<serde_json::Value, BuiltinError> {
+        fn detonate(_input: &ModuleInput) -> Result<serde_json::Value, ModuleError> {
             std::panic::panic_any(DropBomb);
         }
         let request = request(serde_json::json!({}));
@@ -377,16 +377,15 @@ mod tests {
         let mut written: usize = 0;
 
         let status =
-            unsafe { __appa_builtin_answer_v1(std::ptr::null(), 8, output.as_mut_ptr(), output.len(), &mut written) };
-        assert_eq!(status, STATUS_INVALID_INPUT);
-
-        let status = unsafe {
-            __appa_builtin_answer_v1(request.as_ptr(), request.len(), std::ptr::null_mut(), 64, &mut written)
-        };
+            unsafe { __appa_module_answer_v1(std::ptr::null(), 8, output.as_mut_ptr(), output.len(), &mut written) };
         assert_eq!(status, STATUS_INVALID_INPUT);
 
         let status =
-            unsafe { __appa_builtin_answer_v1(request.as_ptr(), request.len(), std::ptr::null_mut(), 0, &mut written) };
+            unsafe { __appa_module_answer_v1(request.as_ptr(), request.len(), std::ptr::null_mut(), 64, &mut written) };
+        assert_eq!(status, STATUS_INVALID_INPUT);
+
+        let status =
+            unsafe { __appa_module_answer_v1(request.as_ptr(), request.len(), std::ptr::null_mut(), 0, &mut written) };
         assert_eq!((status, written), (STATUS_OUTPUT_TOO_LARGE, 0));
     }
 
@@ -396,7 +395,7 @@ mod tests {
         arena.resize(arena.len() + 64, 0);
         let len = arena.len();
         let mut written: usize = 0;
-        let status = unsafe { __appa_builtin_answer_v1(arena.as_ptr(), len, arena.as_mut_ptr(), len, &mut written) };
+        let status = unsafe { __appa_module_answer_v1(arena.as_ptr(), len, arena.as_mut_ptr(), len, &mut written) };
         assert_eq!(status, STATUS_INVALID_INPUT);
     }
 
@@ -405,7 +404,7 @@ mod tests {
         let request = request(serde_json::json!({}));
         let mut output = vec![0u8; 64];
         let status = unsafe {
-            __appa_builtin_answer_v1(
+            __appa_module_answer_v1(
                 request.as_ptr(),
                 request.len(),
                 output.as_mut_ptr(),

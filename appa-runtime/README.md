@@ -120,13 +120,13 @@ max_body_bytes = 65536
 
 Implementation bindings live in `[externals]`: one
 `[externals.<kind>.<name>]` entry per registered authority, sanitizer,
-or membership resolver, and per annotator that names no `builtin` on
+or membership resolver, and per annotator that names no `uses` on
 its declaration — bound to a `url` or a `command`, or, for authorities
-and sanitizers, a `builtin` (stock, a model transport, or a module from
+and sanitizers, a `uses` (stock, a model transport, or a module from
 `--modules-dir`). An annotator or a sanitizer can instead name a model
-transport on its own declaration with `builtin = "claude-code"` or
-`builtin = "llm"` (and `builtin = "archestra"` in an Archestra build); a
-bound entry for a declaration that names a builtin refuses to start.
+transport on its own declaration with `uses = "claude-code"` or
+`uses = "llm"` (and `uses = "archestra"` in an Archestra build); a
+bound entry for a declaration that names `uses` refuses to start.
 An authority may stay unbound and then returns no answer; every other
 registered name needs its entry. An entry no declaration
 registers refuses to start, except a sanitizer entry: it stays idle, so a

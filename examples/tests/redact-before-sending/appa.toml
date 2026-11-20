@@ -37,4 +37,4 @@ timeout_ms = 2000
 max_body_bytes = 65536
 
 [externals.sanitizers.redactor]
-builtin = "redact-email"
+uses = "redact-email"

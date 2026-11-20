@@ -39,4 +39,4 @@ review_timeout_ms = 600000
 max_body_bytes = 1048576
 
 [externals.authorities.linear-operator]
-builtin = "hitl"
+uses = "hitl"

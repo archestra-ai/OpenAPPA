@@ -17,7 +17,7 @@ timeout_ms = 30000
 max_body_bytes = 1048576
 
 [externals.authorities.monday-operator]
-builtin = "hitl"
+uses = "hitl"
 
 # This fixed roster is only a replay fixture, never a monday ACL resolver.
 [externals.audience.replay]

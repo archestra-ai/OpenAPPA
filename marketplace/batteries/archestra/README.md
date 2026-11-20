@@ -51,8 +51,8 @@ unbound run can return trusted; through the LLM Proxy, the run's return
 crossing labels it.
 
 `run_command` routes to the `archestra.run-command` Annotator, declared
-here with `builtin = "claude-code"`. An Archestra root redeclares it with
-`builtin = "archestra"`, so the annotator model answers it.
+here with `uses = "claude-code"`. An Archestra root redeclares it with
+`uses = "archestra"`, so the annotator model answers it.
 
 A team list names one collection per team, and OpenAPPA reads at most 100
 of them per call.

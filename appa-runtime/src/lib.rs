@@ -52,7 +52,6 @@ pub mod ui;
 mod batteries_layout;
 #[cfg(feature = "daemon")]
 mod batteries_staging;
-mod builtins;
 pub mod child_process;
 mod consult;
 mod consult_process;
@@ -69,4 +68,5 @@ mod telemetry;
 #[cfg(test)]
 mod test_support;
 mod transcriber;
+mod uses;
 pub mod yell;

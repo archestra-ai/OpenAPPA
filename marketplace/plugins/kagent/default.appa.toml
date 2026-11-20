@@ -21,7 +21,7 @@
 # as `agent/<namespace>/<name>`.
 #
 # The policy runs without model keys: it declares no sanitizer and no
-# model-builtin annotator, so every decision is structural.
+# annotator that uses a model, so every decision is structural.
 
 [policy]
 version = 2
@@ -125,7 +125,7 @@ review_timeout_ms = 600000
 max_body_bytes = 65536
 
 [externals.authorities.oncall]
-builtin = "hitl"
+uses = "hitl"
 
 # The github battery's multi-user target, which this shared runtime composes
 # (`APPA_BATTERY_TARGET=multi-user`), sends its member lookups to this roster.

@@ -48,7 +48,7 @@ timeout_ms = 5000
 max_body_bytes = 65536
 
 [externals.sanitizers.redact-secrets]
-builtin = "redact-secrets"
+uses = "redact-secrets"
 "#
         ),
     )
