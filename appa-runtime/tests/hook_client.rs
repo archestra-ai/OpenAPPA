@@ -328,6 +328,34 @@ async fn a_refused_turn_end_still_prints_nothing_and_exits_0() {
     assert_eq!(stdout, "", "a turn end prints no decision");
 }
 
+/// The client with a directory for its stdin, so the read of the hook event fails.
+#[cfg(unix)]
+fn run_with_unreadable_stdin(command: &mut Command) -> (i32, String) {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let stdin = std::fs::File::open(dir.path()).expect("a directory opens for reading");
+    let output = child_process::spawn(command.stdin(stdin))
+        .expect("the hook client spawns")
+        .wait_with_output()
+        .expect("the hook client finishes");
+    (
+        output.status.code().expect("the hook client exits with a code"),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+/// A hook event that cannot be read is no reason to hold the actor in a finished turn,
+/// while a hook that authorizes something still blocks on it.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_event_never_blocks_a_turn_end() {
+    let url = "http://127.0.0.1:1";
+    assert_eq!(
+        run_with_unreadable_stdin(client(url).arg("--turn-end")),
+        (0, String::new())
+    );
+    assert_eq!(run_with_unreadable_stdin(&mut client(url)).0, 2);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_runtime_exits_2() {
     let url = refused_url().await;
