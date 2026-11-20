@@ -241,7 +241,14 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
     let codec = appa_adapter_claude_code::codec();
     let mut host_event = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
-        return block(&format!("the hook event could not be read: {error}"));
+        return match decides {
+            Decides::Authorization => block(&format!("the hook event could not be read: {error}")),
+            Decides::Nothing => {
+                // Best effort: a stderr that is gone must not turn this into a failure.
+                let _ = writeln!(std::io::stderr(), "OpenAPPA could not read the turn end: {error}");
+                ExitCode::SUCCESS
+            }
+        };
     }
     if let Some(deployment) = ensure {
         let executable = match std::env::current_exe() {
