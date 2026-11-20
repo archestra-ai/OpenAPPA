@@ -47,6 +47,11 @@ fn settings_path() -> Result<PathBuf, InstallError> {
     Ok(directory.join("opencode.json"))
 }
 
+/// The record of what APPA registered in the OpenCode settings at `settings`.
+fn receipt_path(settings: &Path) -> PathBuf {
+    settings.with_file_name(".appa-opencode.json")
+}
+
 fn endpoint() -> Result<Endpoint, InstallError> {
     Endpoint::parse(
         &super::archive::debug_override("APPA_OPENCODE_ENDPOINT").unwrap_or_else(|| "http://127.0.0.1:8789".into()),
@@ -105,7 +110,7 @@ impl Profile {
                 "OpenCode settings must contain an object, a plugins array, and object-valued commands and mcp.servers",
             ));
         }
-        let receipt: Option<Receipt> = optional_bytes(&path.with_file_name(".appa-opencode.json"))?
+        let receipt: Option<Receipt> = optional_bytes(&receipt_path(&path))?
             .as_deref()
             .map(serde_json::from_slice)
             .transpose()
@@ -334,7 +339,7 @@ pub(super) fn activate(installation: &Installation, selection: &Selection) -> Re
     reconcile_policy(&endpoint, &installation.config, &composed).map_err(invalid)?;
     // Write ownership before registration. Recovery accepts either complete
     // profile after a crash between these two atomic writes.
-    let receipt_path = path.with_file_name(".appa-opencode.json");
+    let receipt_file = receipt_path(&path);
     if profile
         .receipt
         .as_ref()
@@ -345,7 +350,7 @@ pub(super) fn activate(installation: &Installation, selection: &Selection) -> Re
             current: registration,
             previous: profile.receipt.as_ref().map(|receipt| receipt.current.clone()),
         };
-        atomic_write(&receipt_path, &serde_json::to_vec(&receipt).map_err(invalid)?)?;
+        atomic_write(&receipt_file, &serde_json::to_vec(&receipt).map_err(invalid)?)?;
     }
     profile.write()?;
     Ok(())
@@ -377,8 +382,8 @@ pub(super) fn remove(config: &Path) -> Result<(), InstallError> {
         }
     }
     profile.write()?;
-    fs::remove_file(path.with_file_name(".appa-opencode.json"))
-        .map_err(|error| io("remove OpenCode receipt", &path, error))
+    let receipt = receipt_path(&path);
+    fs::remove_file(&receipt).map_err(|error| io("remove OpenCode receipt", &receipt, error))
 }
 
 #[derive(Args)]
