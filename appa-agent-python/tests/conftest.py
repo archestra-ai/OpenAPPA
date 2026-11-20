@@ -88,11 +88,11 @@ def accept_narrowing(branch, tool: str, arguments: dict | None = None) -> dict:
     """Run a call whose read narrows the branch, taking the offer it surfaces.
 
     A narrowing call is refused until the branch accepts it, so a caller that
-    wants the read takes the offer the refusal quotes and proposes again.
+    wants the read takes the offer the refusal names and proposes again.
     """
     refused = decision(branch.check(tool, arguments))
     assert refused["kind"] == "blocked", refused
-    offer = offer_id(refused["feedback"])
+    offer = refused["offer_ids"][0]
     taken = decision(branch.check("execute_remedy_plan", {"offer_id": offer}))
     assert taken["kind"] == "control", taken
     return decision(branch.check(tool, arguments))
@@ -104,14 +104,7 @@ def declare_spawn(session, arguments: dict) -> dict:
     re-proposed spawn's decision, released with its fork binding."""
     refused = decision(session.check("delegate", arguments, spawn=True))
     assert refused["kind"] == "blocked", refused
-    offer = offer_id(refused["feedback"])
+    offer = refused["offer_ids"][0]
     taken = decision(session.check("execute_remedy_plan", {"offer_id": offer, "label": {}}))
     assert taken["kind"] == "control", taken
     return decision(session.check("delegate", arguments, spawn=True))
-
-
-def offer_id(feedback: str) -> str:
-    _, _, after = feedback.partition('offer_id: "')
-    identifier, quote, _ = after.partition('"')
-    assert quote, f"no offer id in feedback: {feedback}"
-    return identifier
