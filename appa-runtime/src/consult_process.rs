@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::ResolverCommand;
+use crate::config::{PLATFORM_NAME_CASE, RUNTIME_VARIABLE_PREFIX, ResolverCommand};
 use crate::external::{Diagnostics, MAX_DIAGNOSTIC_BYTES, NoAnswerReason, RECORD_READ_GRACE, Transcript};
 use crate::process_tree::{Launch, ProcessTree};
 
@@ -285,28 +285,7 @@ pub(crate) fn without_runtime_variables(
 ) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {
     parent
         .into_iter()
-        .filter(|(key, _)| !in_runtime_namespace(key, PLATFORM_NAME_CASE))
-}
-
-/// How the platform's environment compares variable names.
-enum NameCase {
-    Exact,
-    /// Windows: `appa_token` and `APPA_TOKEN` name one variable.
-    AsciiInsensitive,
-}
-
-const PLATFORM_NAME_CASE: NameCase = match cfg!(windows) {
-    true => NameCase::AsciiInsensitive,
-    false => NameCase::Exact,
-};
-
-fn in_runtime_namespace(key: &std::ffi::OsStr, case: NameCase) -> bool {
-    let prefix = crate::config::RUNTIME_VARIABLE_PREFIX.as_bytes();
-    let head = key.as_encoded_bytes().get(..prefix.len());
-    match case {
-        NameCase::Exact => head == Some(prefix),
-        NameCase::AsciiInsensitive => head.is_some_and(|head| head.eq_ignore_ascii_case(prefix)),
-    }
+        .filter(|(key, _)| !PLATFORM_NAME_CASE.in_namespace(key, RUNTIME_VARIABLE_PREFIX))
 }
 
 async fn run_command_process(
@@ -424,6 +403,7 @@ mod tests {
     /// credential is the runtime's own, and stays out of the child.
     #[test]
     fn the_runtime_namespace_follows_the_platforms_name_case() {
+        use crate::config::NameCase;
         use std::ffi::OsStr;
         for (key, exact, insensitive) in [
             ("APPA_TOKEN", true, true),
@@ -434,9 +414,13 @@ mod tests {
             ("PATH", false, false),
             ("", false, false),
         ] {
-            assert_eq!(in_runtime_namespace(OsStr::new(key), NameCase::Exact), exact, "{key}");
             assert_eq!(
-                in_runtime_namespace(OsStr::new(key), NameCase::AsciiInsensitive),
+                NameCase::Exact.in_namespace(OsStr::new(key), RUNTIME_VARIABLE_PREFIX),
+                exact,
+                "{key}"
+            );
+            assert_eq!(
+                NameCase::AsciiInsensitive.in_namespace(OsStr::new(key), RUNTIME_VARIABLE_PREFIX),
                 insensitive,
                 "{key}"
             );

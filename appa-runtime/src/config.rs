@@ -91,6 +91,31 @@ pub(crate) const RUNTIME_VARIABLE_PREFIX: &str = "APPA_";
 /// become a way to hand a subprocess a secret this runtime holds.
 pub(crate) const PROVIDER_CREDENTIAL_PREFIX: &str = "APPA_PROVIDER_";
 
+/// How the platform's environment compares variable names.
+#[derive(Clone, Copy)]
+pub(crate) enum NameCase {
+    Exact,
+    /// Windows: `appa_token` and `APPA_TOKEN` name one variable.
+    AsciiInsensitive,
+}
+
+pub(crate) const PLATFORM_NAME_CASE: NameCase = match cfg!(windows) {
+    true => NameCase::AsciiInsensitive,
+    false => NameCase::Exact,
+};
+
+impl NameCase {
+    /// Whether `name` lies in the namespace `prefix` opens, as names compare under `self`.
+    pub(crate) fn in_namespace(self, name: &std::ffi::OsStr, prefix: &str) -> bool {
+        let prefix = prefix.as_bytes();
+        let head = name.as_encoded_bytes().get(..prefix.len());
+        match self {
+            NameCase::Exact => head == Some(prefix),
+            NameCase::AsciiInsensitive => head.is_some_and(|head| head.eq_ignore_ascii_case(prefix)),
+        }
+    }
+}
+
 /// The effective policy file: deterministic TOML bytes after includes
 /// compose, and the policy value parsed from those bytes. The stored
 /// value and bytes always describe the same deployment.
@@ -2974,7 +2999,7 @@ fn resolve_llm(raw: RawLlm, keys: KeySource<'_>) -> Result<LlmProfile, ConfigErr
     let url = raw.url.map(|url| validated_url(SECTION, SECTION, url)).transpose()?;
     let key = raw
         .token_env
-        .map(|var| endpoint_token_variable(SECTION, SECTION, var))
+        .map(|var| endpoint_token_variable(SECTION, SECTION, var, PLATFORM_NAME_CASE))
         .transpose()?
         .map(|var| ProfileKey::read(var, keys));
     Ok(LlmProfile {
@@ -3039,7 +3064,7 @@ fn resolve_token(
             });
         }
     };
-    let var = endpoint_token_variable(section, name, var)?;
+    let var = endpoint_token_variable(section, name, var, PLATFORM_NAME_CASE)?;
     let KeySource::Lookup(lookup) = keys else {
         return Ok(Some(EndpointToken::Deferred));
     };
@@ -3054,8 +3079,13 @@ fn resolve_token(
 }
 
 /// A variable a bearer token this runtime sends itself may come from: an `APPA_*` one
-/// outside the provider namespace a command child inherits.
-fn endpoint_token_variable(section: &'static str, name: &str, var: String) -> Result<String, ConfigError> {
+/// outside the provider namespace a command child inherits, however `case` spells it.
+fn endpoint_token_variable(
+    section: &'static str,
+    name: &str,
+    var: String,
+    case: NameCase,
+) -> Result<String, ConfigError> {
     if !var.starts_with(RUNTIME_VARIABLE_PREFIX) {
         return Err(ConfigError::ForeignSecretVariable {
             section,
@@ -3063,7 +3093,7 @@ fn endpoint_token_variable(section: &'static str, name: &str, var: String) -> Re
             var,
         });
     }
-    if var.starts_with(PROVIDER_CREDENTIAL_PREFIX) {
+    if case.in_namespace(std::ffi::OsStr::new(&var), PROVIDER_CREDENTIAL_PREFIX) {
         return Err(ConfigError::ChildCredentialVariable {
             section,
             name: name.to_string(),
@@ -3374,6 +3404,36 @@ mod tests {
             parse_with(&empty, |_| Some(String::new())),
             Err(ConfigError::MissingSecret { .. }),
         ));
+    }
+
+    /// Where names ignore case, so does the provider namespace a sent token may not name:
+    /// `APPA_provider_X` is the variable `APPA_PROVIDER_X` a command child inherits.
+    #[test]
+    fn a_sent_token_stays_out_of_the_provider_namespace_however_it_is_spelled() {
+        #[derive(Debug, PartialEq)]
+        enum Verdict {
+            Sent,
+            Foreign,
+            Provider,
+        }
+        let verdict = |var: &str, case| match endpoint_token_variable("authorities", "security", var.to_string(), case)
+        {
+            Ok(_) => Verdict::Sent,
+            Err(ConfigError::ForeignSecretVariable { .. }) => Verdict::Foreign,
+            Err(ConfigError::ChildCredentialVariable { .. }) => Verdict::Provider,
+            Err(other) => panic!("{var}: {other}"),
+        };
+        for (var, exact, insensitive) in [
+            ("APPA_AUTHORITY_TOKEN", Verdict::Sent, Verdict::Sent),
+            ("APPA_PROVIDERX_TOKEN", Verdict::Sent, Verdict::Sent),
+            ("APPA_PROVIDER_AUTHORITY_TOKEN", Verdict::Provider, Verdict::Provider),
+            ("APPA_provider_AUTHORITY_TOKEN", Verdict::Sent, Verdict::Provider),
+            ("APPA_Provider_Token", Verdict::Sent, Verdict::Provider),
+            ("HOME", Verdict::Foreign, Verdict::Foreign),
+        ] {
+            assert_eq!(verdict(var, NameCase::Exact), exact, "{var}");
+            assert_eq!(verdict(var, NameCase::AsciiInsensitive), insensitive, "{var}");
+        }
     }
 
     /// A command's `token_env` is the mirror of a URL's: nothing is sent, one variable is
