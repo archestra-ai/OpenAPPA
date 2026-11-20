@@ -210,7 +210,7 @@ impl Acquired {
         match commit {
             Some(commit) if git_head(root).as_deref() == Some(commit.as_str()) => {
                 let repository = stage.join("repository");
-                export_commit(root, &repository)?;
+                export_commit(root, &commit, &repository)?;
                 let marketplace = repository.join("marketplace");
                 let catalog = parse_catalog(&write_catalog(&marketplace)?, &marketplace)?;
                 Ok((Some(commit), marketplace, catalog))
@@ -428,7 +428,7 @@ fn source_at_commit(commit: &Commit, stage: &Path) -> Result<PathBuf, InstallErr
             &commit.as_str()[..12],
             root.display()
         );
-        export_commit(root, &repository)?;
+        export_commit(root, commit, &repository)?;
         return Ok(repository);
     }
     let url = format!("{}/{commit}.tar.gz", super::archive::source_archive_base_url());
@@ -469,15 +469,16 @@ fn git_head(root: &Path) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Committed content only, so a dirty checkout exports exactly its HEAD. The
+/// Committed content only, of the named commit: a dirty checkout, or one whose
+/// HEAD moved after it was checked, exports exactly that commit. The
 /// marketplace tree holds every source `batteries_layout` maps.
-fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
+fn export_commit(root: &Path, commit: &Commit, destination: &Path) -> Result<(), InstallError> {
     let output = crate::child_process::output(
         Command::new("git")
             .arg("-C")
             .arg(root)
             .args(["-c", "core.autocrlf=false"])
-            .args(["archive", "--format=tar", "HEAD", "marketplace"]),
+            .args(["archive", "--format=tar", commit.as_str(), "marketplace"]),
     )
     .map_err(|error| io("export the build's commit", root, error))?;
     if !output.status.success() {
@@ -709,16 +710,50 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let stage = tempfile::tempdir().unwrap();
         let destination = stage.path().join("source");
-        export_commit(root, &destination).unwrap();
+        let head = Commit::parse(&git_head(root).unwrap()).unwrap();
+        export_commit(root, &head, &destination).unwrap();
         let path = "marketplace/batteries/archestra/README.md";
         let committed = crate::child_process::output(Command::new("git").arg("-C").arg(root).args([
             "cat-file",
             "blob",
-            &format!("HEAD:{path}"),
+            &format!("{}:{path}", head.as_str()),
         ]))
         .unwrap();
         assert!(committed.status.success());
         assert_eq!(fs::read(destination.join(path)).unwrap(), committed.stdout);
+    }
+
+    #[test]
+    fn export_commit_exports_the_checked_commit_after_head_moves() {
+        let root = tempfile::tempdir().unwrap();
+        // No hook or signing setting of the person running the test applies.
+        let hooks = tempfile::tempdir().unwrap();
+        let hooks_path = format!("core.hooksPath={}", hooks.path().display());
+        let git = |args: &[&str]| {
+            let output = crate::child_process::output(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(root.path())
+                    .args(["-c", &hooks_path, "-c", "commit.gpgsign=false"])
+                    .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                    .args(args),
+            )
+            .unwrap();
+            assert!(output.status.success(), "{args:?}");
+        };
+        let file = root.path().join("marketplace/file");
+        fs::create_dir(root.path().join("marketplace")).unwrap();
+        git(&["init", "-q", "--object-format=sha1"]);
+        fs::write(&file, "checked").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "checked"]);
+        let checked = Commit::parse(&git_head(root.path()).unwrap()).unwrap();
+        fs::write(&file, "moved").unwrap();
+        git(&["commit", "-qam", "moved"]);
+        let stage = tempfile::tempdir().unwrap();
+        let destination = stage.path().join("source");
+        export_commit(root.path(), &checked, &destination).unwrap();
+        assert_eq!(fs::read(destination.join("marketplace/file")).unwrap(), b"checked");
     }
 
     #[test]
