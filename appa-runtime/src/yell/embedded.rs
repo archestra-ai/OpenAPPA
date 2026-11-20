@@ -46,11 +46,8 @@ pub async fn send(runtime: &Arc<Runtime>, request: Request) -> Result<String, St
         "The reporting receiver must be HTTPS, or HTTP to a loopback address, without credentials".to_string()
     })?;
     let (acting, _) = runtime
-        .take_vouched(&args.ticket())
+        .take_vouched_by(&args.ticket(), &request.actor)
         .map_err(|_| "No unambiguous released yell call exists for this request".to_string())?;
-    if acting != request.actor {
-        return Err("The yell call belongs to a different session".into());
-    }
     let report = ReportRequest {
         message,
         author: Author::Agent,
@@ -182,6 +179,28 @@ mod tests {
         request.endpoint = "http://example.com/".into();
         assert!(send(&runtime, request).await.is_err());
         assert!(runtime.take_vouched(&ticket).is_ok(), "the release is still there");
+    }
+
+    /// A request under another session, or another actor in this one, cannot spend this
+    /// actor's release.
+    #[tokio::test]
+    async fn a_cross_session_request_leaves_the_release_unspent() {
+        let runtime = runtime(true);
+        let request = request();
+        release(&runtime, &request).await;
+        let mut foreign_root = super::tests::request();
+        foreign_root.actor.root = TrajectoryId("other-session".into());
+        let mut foreign_child = super::tests::request();
+        foreign_child.actor.child = Some(TrajectoryId("a-subagent".into()));
+        for foreign in [foreign_root, foreign_child] {
+            assert!(send(&runtime, foreign).await.is_err());
+        }
+        let ticket = YellArgs {
+            message: request.message.clone(),
+            with_trajectory: request.with_trajectory,
+        }
+        .ticket();
+        assert_eq!(runtime.take_vouched(&ticket).map(|(actor, _)| actor), Ok(request.actor));
     }
 
     #[tokio::test]

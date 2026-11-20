@@ -26,16 +26,6 @@ const ENDPOINT: &str = match option_env!("APPA_YELL_COMPILED_ENDPOINT") {
     None => "",
 };
 
-/// One place a report may be sent, resolved before the person is asked to approve sending.
-///
-/// Parsed rather than kept as a string, because the consent question has to name it and the
-/// name has to be the destination: `https://approved.example@evil.example/` displays as one
-/// host and connects to another. A URL that carries credentials is refused outright — a
-/// receiver needs none — so what the prompt prints is what the request reaches.
-///
-/// The two variants are not decoration. A proxy between here and a real receiver is a normal
-/// way to reach the internet and is honoured; a proxy between here and this same machine is
-/// never right, and would relay a report that was only ever meant to cross a socket.
 /// Where a receiver's address came from, so the question before sending can say when an
 /// override rather than the compiled-in destination is in effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +34,19 @@ pub(crate) enum Source {
     Environment,
 }
 
+/// One place a report may be sent.
+///
+/// Parsed rather than kept as a string, and a URL that carries credentials is refused
+/// outright — a receiver needs none — so the host an address reads as is the host the request
+/// reaches: `https://approved.example@evil.example/` reads as one host and connects to another.
+/// No prompt shows the address: the CLI's question names only its [`Source`], `--yes` skips
+/// that question, and an agent's report is sent without one.
+///
+/// The two variants are not decoration. A proxy between here and a real receiver is a normal
+/// way to reach the internet and is honoured; a proxy between here and this same machine is
+/// never right, and would relay a report that was only ever meant to cross a socket. Only a
+/// plain `http://` loopback address is [`Receiver::Loopback`] and bypasses proxies; an
+/// `https://` address is [`Receiver::Secure`] and keeps the proxy settings even on loopback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Receiver {
     /// A real receiver, always over TLS.

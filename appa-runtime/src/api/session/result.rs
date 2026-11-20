@@ -293,8 +293,12 @@ impl Session {
                             }
                             (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
                                 None => SpawnPlan::Outcome,
+                                // A failure repeating the crossed return closes as the host reported it.
                                 Some(said) if context.latest_return(child).as_deref() == Some(said.as_str()) => {
-                                    SpawnPlan::Replay
+                                    match outcome {
+                                        ToolOutcome::Failure { .. } => SpawnPlan::Outcome,
+                                        _ => SpawnPlan::Replay,
+                                    }
                                 }
                                 Some(_) => SpawnPlan::Withheld,
                             },
@@ -311,10 +315,17 @@ impl Session {
                                 fork: fork.clone(),
                                 child: child.clone(),
                             },
+                            // A withheld message still closes as the failure the host reported, in
+                            // the runtime's words: none of the host's bytes cross with the close.
                             SpawnPlan::Replay | SpawnPlan::Withheld => EngineEvent::ToolOutcome {
                                 dispatch,
-                                outcome: ToolOutcome::Success {
-                                    body: OutcomeBody::Unavailable,
+                                outcome: match &outcome {
+                                    ToolOutcome::Failure { .. } => ToolOutcome::Failure {
+                                        message: UNCHECKED_RETURN.to_string(),
+                                    },
+                                    _ => ToolOutcome::Success {
+                                        body: OutcomeBody::Unavailable,
+                                    },
                                 },
                                 evidence,
                                 entropy: fresh_entropy(),

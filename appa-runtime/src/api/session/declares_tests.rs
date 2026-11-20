@@ -635,6 +635,17 @@ async fn a_deferred_return_declared_on_a_spawn_without_a_call_id_is_refused_and_
 }
 
 #[tokio::test]
+async fn a_declaring_spawn_with_an_empty_call_id_is_refused_and_writes_nothing() {
+    let Deployed { runtime, .. } = deployed(false);
+    let opened = runtime.inner.log(&root()).expect("the log reads");
+    let refused = declaring(&runtime, call("fetch", 1), "", as_spoken()).await;
+    assert!(matches!(refused, Err(EventError::CallIdReused)), "{refused:?}");
+    let after = runtime.inner.log(&root()).expect("the log reads");
+    assert_eq!(after.basis(), opened.basis());
+    assert_eq!(after.host_records(), opened.host_records());
+}
+
+#[tokio::test]
 async fn a_spawn_proposed_with_a_deferred_return_is_released_under_it() {
     let Deployed { runtime, .. } = deployed(false);
     binding(deferring(&runtime, call("fetch", 1), "toolu-1").await);
