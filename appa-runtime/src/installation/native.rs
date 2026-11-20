@@ -87,14 +87,14 @@ impl NativeArtifacts {
         require_directory_or_absent(&directory)?;
         fs::create_dir_all(&directory).map_err(|error| io("create native cache", &directory, error))?;
         // The binary runs before its identity is checked, so it comes from
-        // the verified copy, never from a second read of the cached archive.
-        let binary_archive = acquisition::verified_snapshot(&binary_archive, binary_digest, &directory)?;
+        // the handle that was hashed, never from a second open by name.
+        let snapshot = acquisition::verified_snapshot(&binary_archive, binary_digest)?;
         let stage = tempfile::tempdir_in(&directory).map_err(|error| io("stage native binary", &directory, error))?;
         let binary_name = crate::init::paths::appa_filename();
         if cfg!(windows) {
-            extract_windows_binary(binary_archive.path(), &stage.path().join(binary_name))?;
+            extract_windows_binary(snapshot, &stage.path().join(binary_name))?;
         } else {
-            super::archive::extract_bundle_archive(binary_archive.path(), stage.path()).map_err(invalid)?;
+            super::archive::extract_bundle_file(snapshot, &binary_archive, stage.path()).map_err(invalid)?;
         }
         let entries: Vec<_> = fs::read_dir(stage.path())
             .map_err(|error| io("inspect binary archive", stage.path(), error))?
@@ -186,8 +186,8 @@ fn sync_binary(path: &Path) -> Result<(), InstallError> {
         .map_err(|error| io("sync binary", path, error))
 }
 
-fn extract_windows_binary(archive: &Path, target: &Path) -> Result<(), InstallError> {
-    let mut archive = zip::ZipArchive::new(open_regular(archive)?)
+fn extract_windows_binary(archive: File, target: &Path) -> Result<(), InstallError> {
+    let mut archive = zip::ZipArchive::new(archive)
         .map_err(|error| InstallError::Invalid(format!("invalid runtime ZIP: {error}")))?;
     if archive.len() != 1 {
         return Err(InstallError::Invalid(
@@ -413,7 +413,7 @@ mod tests {
             zip.write_all(b"verified executable bytes").unwrap();
             zip.finish().unwrap();
             let target = root.path().join("appa.exe");
-            let result = extract_windows_binary(&archive, &target);
+            let result = extract_windows_binary(File::open(&archive).unwrap(), &target);
             assert_eq!(result.is_ok(), name == "appa.exe");
             if result.is_ok() {
                 sync_binary(&target).unwrap();

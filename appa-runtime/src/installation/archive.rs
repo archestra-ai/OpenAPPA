@@ -168,21 +168,42 @@ pub(crate) fn download_bounded(url: &str, destination: &Path, max_bytes: u64) ->
 /// uncompressed bytes are capped. Modes come from the install, not from the
 /// archive.
 pub(crate) fn extract_archive(archive: &Path, destination: &Path) -> Result<(), ArchiveError> {
-    extract_bounded(archive, destination, MAX_UNCOMPRESSED_BYTES, MAX_ENTRIES)
+    extract_bounded(
+        open(archive)?,
+        archive,
+        destination,
+        MAX_UNCOMPRESSED_BYTES,
+        MAX_ENTRIES,
+    )
 }
 
 pub(crate) fn extract_bundle_archive(archive: &Path, destination: &Path) -> Result<(), ArchiveError> {
+    extract_bundle_file(open(archive)?, archive, destination)
+}
+
+/// [`extract_bundle_archive`] from an open `file`, the very handle that was
+/// hashed; `label` names it in refusals.
+pub(crate) fn extract_bundle_file(file: fs::File, label: &Path, destination: &Path) -> Result<(), ArchiveError> {
     // A complete marketplace may already use its entry allowance. The bundle
     // adds a separately bounded custom-file snapshot, descriptor, selection,
     // config, artifact files and directories.
-    extract_bounded(archive, destination, 512 * 1024 * 1024, MAX_ENTRIES * 2 + 32)
+    extract_bounded(file, label, destination, 512 * 1024 * 1024, MAX_ENTRIES * 2 + 32)
 }
 
-fn extract_bounded(archive: &Path, destination: &Path, max_bytes: u64, max_entries: usize) -> Result<(), ArchiveError> {
-    let file = fs::File::open(archive).map_err(|source| ArchiveError::Read {
+fn open(archive: &Path) -> Result<fs::File, ArchiveError> {
+    fs::File::open(archive).map_err(|source| ArchiveError::Read {
         path: archive.to_path_buf(),
         source,
-    })?;
+    })
+}
+
+fn extract_bounded(
+    file: fs::File,
+    archive: &Path,
+    destination: &Path,
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<(), ArchiveError> {
     // Include headers/padding in a second bound, including PAX records the tar
     // reader consumes internally before yielding a regular entry.
     let decoded = std::io::Read::take(
