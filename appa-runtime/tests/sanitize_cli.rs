@@ -144,13 +144,8 @@ fn a_value_is_asked_once_per_repeat() {
 /// Zero repeats would ask nothing and exit as if every value had been answered.
 #[test]
 fn zero_repeats_are_refused_as_a_usage_error() {
-    let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    std::fs::write(dir.path().join("appa.toml"), POLICY).expect("the policy is written");
-    std::fs::write(dir.path().join("redactor.sh"), REDACTOR).expect("the sanitizer is written");
     let status = Command::new(env!("CARGO_BIN_EXE_appa"))
-        .args(["runtime", "sanitize", "--repeat", "0", "--config"])
-        .arg(dir.path().join("appa.toml"))
-        .current_dir(dir.path())
+        .args(["runtime", "sanitize", "--repeat", "0"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
