@@ -29,9 +29,11 @@ pub(crate) fn spawn(
     let tree = ProcessTree::adopt(&child)?;
     #[cfg(windows)]
     {
-        // The job's termination ends a refused child while it is still suspended.
+        let thread = tree.suspended_thread(&child)?;
+        // The last check before the child runs. The job's termination ends a refused
+        // child while it is still suspended.
         ready(Launch::Resume).inspect_err(|_| tree.kill())?;
-        tree.resume(&child)?;
+        tree.resume(&thread)?;
     }
     Ok((child, tree))
 }
@@ -78,14 +80,26 @@ impl ProcessTree {
         }
     }
 
+    /// The suspended child's one thread, opened to resume it.
+    #[cfg(windows)]
+    fn suspended_thread(
+        &self,
+        child: &tokio::process::Child,
+    ) -> Result<std::os::windows::io::OwnedHandle, NoAnswerReason> {
+        windows::only_thread(child).map_err(|error| self.not_resumed(error))
+    }
+
     /// Let the suspended child run: everything it starts joins the job too.
     #[cfg(windows)]
-    fn resume(&self, child: &tokio::process::Child) -> Result<(), NoAnswerReason> {
-        windows::resume(child).map_err(|error| {
-            tracing::warn!(%error, "the consult process could not be resumed in its job");
-            self.kill();
-            NoAnswerReason::Transport
-        })
+    fn resume(&self, thread: &std::os::windows::io::OwnedHandle) -> Result<(), NoAnswerReason> {
+        windows::resume(thread).map_err(|error| self.not_resumed(error))
+    }
+
+    #[cfg(windows)]
+    fn not_resumed(&self, error: std::io::Error) -> NoAnswerReason {
+        tracing::warn!(%error, "the consult process could not be resumed in its job");
+        self.kill();
+        NoAnswerReason::Transport
     }
 
     /// End the child and every descendant. Cleanup runs after every outcome, so a
@@ -182,11 +196,11 @@ mod windows {
     }
 
     /// Once in the job, the child may run.
-    pub(super) fn resume(child: &tokio::process::Child) -> io::Result<()> {
-        let pid = child
-            .id()
-            .ok_or_else(|| io::Error::other("the child has already been reaped"))?;
-        resume_only_thread(pid)
+    pub(super) fn resume(thread: &OwnedHandle) -> io::Result<()> {
+        if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub(super) fn kill(job: &OwnedHandle) {
@@ -240,7 +254,10 @@ mod windows {
 
     /// A process created suspended has exactly one thread, which has not run yet.
     /// Anything else means the pid is not the child this tree adopted.
-    fn resume_only_thread(pid: u32) -> io::Result<()> {
+    pub(super) fn only_thread(child: &tokio::process::Child) -> io::Result<OwnedHandle> {
+        let pid = child
+            .id()
+            .ok_or_else(|| io::Error::other("the child has already been reaped"))?;
         let snapshot = owned(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
         let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
         entry.dwSize = size_of::<THREADENTRY32>() as u32;
@@ -258,11 +275,7 @@ mod windows {
                 threads.len()
             )));
         };
-        let thread = owned(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread) })?;
-        if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        owned(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread) })
     }
 }
 
