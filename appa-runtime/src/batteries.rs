@@ -35,7 +35,7 @@ pub fn default_search_path(config: &Path) -> Vec<PathBuf> {
 /// one of them complete, or for the moment between the two renames no
 /// store at all, and nothing else stays in it. A tree without batteries
 /// leaves no store. The names stocked, sorted.
-pub(crate) fn stock(tree: &Path, store: &Path) -> Result<Vec<String>, StockError> {
+pub fn stock(tree: &Path, store: &Path) -> Result<Vec<String>, StockError> {
     let mut names = match names_in(tree) {
         Ok(names) => names,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
@@ -69,7 +69,7 @@ pub(crate) fn stock(tree: &Path, store: &Path) -> Result<Vec<String>, StockError
 
 /// Why a store was not replaced.
 #[derive(Debug, Error)]
-pub(crate) enum StockError {
+pub enum StockError {
     #[error(transparent)]
     Io(#[from] io::Error),
     /// The new store could not take the earlier one's place, and the earlier
