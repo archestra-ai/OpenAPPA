@@ -1917,9 +1917,10 @@ fn named_include_files(
 }
 
 /// One include entry, as authored: a spelling this runtime resolves beside the root
-/// config, or hands to a host that holds the battery under it. Neither reads a spelling
-/// that starts elsewhere or leaves the root. [`edit::add_include`] refuses an entry here
-/// before it writes one, so a document the editor wrote is one a loader reads.
+/// config, or hands to a host that holds the battery under it. The hosted loader refuses
+/// an absolute spelling and any `..` component; a local root refuses an absolute spelling,
+/// and its single-file entries may hold `..`. [`edit::add_include`] refuses an entry here
+/// before it writes one.
 pub(crate) fn refuse_include_entry(entry: &str) -> Result<(), ConfigError> {
     let path = Path::new(entry);
     if path.is_absolute() {

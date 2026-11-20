@@ -120,9 +120,14 @@ mod variant {
     }
 }
 
-#[cfg(feature = "claims-approve")]
+#[cfg(any(feature = "claims-approve", feature = "claims-archestra"))]
 mod variant {
     use super::RawDescriptor;
+
+    #[cfg(feature = "claims-approve")]
+    static CLAIMED: (&[u8], u32) = (b"approve", 1);
+    #[cfg(feature = "claims-archestra")]
+    static CLAIMED: (&[u8], u32) = (b"archestra", 2);
 
     #[unsafe(export_name = "appa_builtin_abi_version")]
     pub extern "C" fn version() -> u32 {
@@ -131,11 +136,11 @@ mod variant {
 
     #[unsafe(export_name = "appa_builtin_descriptor_v1")]
     pub extern "C" fn descriptor() -> RawDescriptor {
-        static NAME: &[u8] = b"approve";
+        let (name, kind) = CLAIMED;
         RawDescriptor {
-            name_ptr: NAME.as_ptr(),
-            name_len: NAME.len(),
-            kind: 1,
+            name_ptr: name.as_ptr(),
+            name_len: name.len(),
+            kind,
         }
     }
 

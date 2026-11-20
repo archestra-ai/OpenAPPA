@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use super::endpoint::Endpoint;
 use super::paths::DeploymentPaths;
-use super::{CLAPPA, InitError, appa_filename, deployment_paths, file_before, mcp, settings, skill, write_state};
+use super::{CLAPPA, InitError, appa_filename, deployment_paths, file_before, mcp, settings, skill, write_state_as};
+use crate::installation::StagedMode;
 use crate::runtime_start::{StopError, Stopped};
 use crate::runtime_url::RuntimeTarget;
 
@@ -103,7 +104,7 @@ fn remove_profile(paths: &DeploymentPaths, endpoint: &Endpoint) -> Result<(), In
     // Disable the protected entrypoint before unregistering its hooks. A crash
     // must not leave a working-looking clappa that starts unprotected Claude.
     if launcher_before.is_some() {
-        write_state(&launcher, REMOVING.as_bytes())?;
+        write_state_as(&launcher, REMOVING.as_bytes(), StagedMode::Executable)?;
     }
     settings::remove_hooks(paths, &deployed)?;
     if let mcp::Registered::Ours { .. } = registered {

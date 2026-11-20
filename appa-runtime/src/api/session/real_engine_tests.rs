@@ -4779,6 +4779,67 @@ async fn a_spawn_result_for_a_returned_child_replays_its_return_and_withholds_an
     );
 }
 
+/// A failed spawn result naming its returned child and carrying `said`: what it is answered,
+/// and how the family's dispatches closed.
+async fn failed_spawn_result_saying(said: &str) -> (SpawnResultDecision, Vec<appa_engine::fact::CloseOutcome>) {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+    session
+        .on_child_start(child("c1"), SpawnRef::InFlight)
+        .expect("the child opens")
+        .on_child_end(Some("all done".to_string()))
+        .await
+        .expect("the child's own end crosses");
+
+    let decision = session
+        .on_spawn_result(
+            fetch(serde_json::json!({"a": 1})),
+            ToolOutcome::Failure {
+                message: "boom".to_string(),
+            },
+            Some(child("c1")),
+            Some(said.to_string()),
+        )
+        .await
+        .expect("the failure is decided");
+    assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+    let closes = runtime
+        .log_facts(&root())
+        .into_iter()
+        .filter_map(|fact| match fact {
+            appa_engine::fact::Fact::DispatchClosed { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .collect();
+    (decision, closes)
+}
+
+#[tokio::test]
+async fn a_failed_spawn_result_naming_its_returned_child_closes_the_spawn_as_failed() {
+    let (decision, closes) = failed_spawn_result_saying("all done").await;
+    assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+    assert!(
+        matches!(closes.as_slice(), [appa_engine::fact::CloseOutcome::Failure]),
+        "got {closes:?}"
+    );
+
+    let (decision, closes) = failed_spawn_result_saying("words the child never returned").await;
+    assert!(
+        matches!(
+            decision,
+            SpawnResultDecision::Return(ChildReturnDecision::Blocked { .. })
+        ),
+        "a message the child never returned is still withheld, got {decision:?}"
+    );
+    assert!(
+        matches!(closes.as_slice(), [appa_engine::fact::CloseOutcome::Failure]),
+        "got {closes:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_spawn_result_naming_another_child_crosses_nothing_and_closes_the_spawn() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -6422,4 +6483,35 @@ async fn an_empty_crossing_child_turn_stays_open_and_a_root_cannot_end_as_a_chil
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn a_root_stopping_as_a_child_is_refused_and_its_open_call_stays_open() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    assert!(matches!(
+        session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
+        Ok(ToolCallDecision::Allow { .. })
+    ));
+    let basis = runtime.inner.log(&root()).expect("the log reads").basis();
+
+    let refused = session.on_child_end(Some("done".to_string())).await;
+    assert!(matches!(refused, Err(EventError::NotAChild)), "got {refused:?}");
+    assert!(dispatch_open(&runtime, &root()), "the root's call is still open");
+    assert_eq!(runtime.inner.log(&root()).expect("the log reads").basis(), basis);
+}
+
+#[tokio::test]
+async fn an_unopened_child_stopping_is_answered_as_a_spawn_not_taken() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    runtime.create_session(root(), None).expect("a fresh id opens");
+    let unopened = runtime.session(&root(), &child("c1")).expect("the session attaches");
+
+    let refused = unopened.on_child_end(Some("done".to_string())).await;
+    assert!(matches!(refused, Err(EventError::SpawnNotTaken)), "got {refused:?}");
+    assert!(!opened(&runtime, &child("c1")));
 }
