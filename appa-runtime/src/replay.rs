@@ -178,8 +178,12 @@ pub struct Trace {
 }
 
 impl Trace {
+    /// A root no other trace run in this process has, even one with the same path or the
+    /// same displayed path, in this run or an earlier one on the same runtime.
     fn root(&self) -> TrajectoryId {
-        TrajectoryId(format!("replay:{}", self.path.display()))
+        static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let ordinal = RUN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        TrajectoryId(format!("replay:{ordinal}:{}", self.path.display()))
     }
 }
 
@@ -555,11 +559,10 @@ impl TraceReport {
 
 /// Run every trace at once, each in its own trajectory, and answer in the order given.
 pub async fn run(runtime: &Runtime, traces: &[Trace]) -> Vec<TraceReport> {
-    futures_util::future::join_all(traces.iter().map(|trace| run_trace(runtime, trace))).await
+    futures_util::future::join_all(traces.iter().map(|trace| run_trace(runtime, trace, trace.root()))).await
 }
 
-async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
-    let root = trace.root();
+async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> TraceReport {
     let actor = Actor {
         root: root.clone(),
         child: None,
@@ -1155,6 +1158,25 @@ mod tests {
         Runtime::open_in_memory(config, None, Remedies::StandIn).expect("the deployment opens in memory")
     }
 
+    /// The same trace run twice, in one run or in two runs on one runtime, runs each time in
+    /// a trajectory of its own: none sees another's narrowing read before its email.
+    #[tokio::test]
+    async fn a_trace_run_twice_runs_in_two_trajectories() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let runtime = runtime(
+            &dir,
+            "[[policy.tool]]\nname = \"mcp/files/read\"\ndelta = { audience = [\"hr\"] }\n\n\
+             [[policy.tool]]\nname = \"mcp/mail/send\"\nrequires = { audience = { contains = [\"public\"] } }\ndelta = {}\n",
+        );
+        let trace = parsed("mcp/mail/send {}\nexpect allow\n\nmcp/files/read {}\nexpect allow\n").expect("parses");
+        let mut reports = run(&runtime, &[trace.clone(), trace.clone()]).await;
+        reports.extend(run(&runtime, &[trace]).await);
+        assert_eq!(
+            reports.iter().map(TraceReport::verdict).collect::<Vec<_>>(),
+            vec![Verdict::Ok, Verdict::Ok, Verdict::Ok]
+        );
+    }
+
     /// An allow that the step did not expect is the mismatch, decided before any result:
     /// the call is never closed, so nothing its result does can change the verdict.
     #[tokio::test]
@@ -1162,7 +1184,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir");
         let runtime = runtime(&dir, "[[policy.tool]]\nname = \"mcp/files/read\"\ndelta = {}\n");
         let trace = parsed("mcp/files/read {}\nexpect deny\n").expect("the trace parses");
-        let report = run_trace(&runtime, &trace).await;
+        let root = trace.root();
+        let report = run_trace(&runtime, &trace, root.clone()).await;
         assert_eq!(report.verdict(), Verdict::Failed);
         assert!(matches!(
             &report.steps[0].outcome,
@@ -1172,7 +1195,7 @@ mod tests {
                 feedback: None
             }
         ));
-        let audit = runtime.audit(&trace.root()).expect("the trajectory is audited");
+        let audit = runtime.audit(&root).expect("the trajectory is audited");
         assert!(
             !audit
                 .iter()
