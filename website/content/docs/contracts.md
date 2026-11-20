@@ -948,7 +948,7 @@ Without the token, the `org` line is a `no_answer` with the program's error:
 {"id":"org","repeat":0,"latency_ms":67,"outcome":"no_answer","annotator":"google-workspace.drive-readers","reason":"non_success status=1 detail=\"google-workspace.drive-readers: APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN is not set\""}
 ```
 
-The command exits with status 0 after testing all input calls, regardless of individual outcomes. It exits with a non-zero status if the policy fails to load or if input JSON is malformed.
+The command exits with status 0 after testing all input calls and writing every response, regardless of individual outcomes. It exits with a non-zero status if the policy fails to load or if input JSON is malformed. It also exits with a non-zero status if a response cannot be written, for example when the reader closes standard output (`| head -n 1`). It then cancels in-flight requests and tests no further calls.
 
 ## Recorders
 

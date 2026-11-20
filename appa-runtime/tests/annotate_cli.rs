@@ -214,3 +214,52 @@ fn zero_concurrency_is_refused_rather_than_hanging() {
     };
     assert!(!status.success());
 }
+
+#[test]
+fn a_closed_reader_ends_the_run_before_the_queued_calls_are_asked() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let asked = dir.path().join("asked.log");
+    std::fs::write(dir.path().join("appa.toml"), POLICY).expect("the policy is written");
+    // Slow enough that the reader closes before the second answer is written.
+    let classifier = format!(
+        "cat > /dev/null; echo asked >> '{}'; sleep 0.2\n{CLASSIFIER}",
+        asked.display()
+    );
+    std::fs::write(dir.path().join("classifier.sh"), classifier).expect("the annotator is written");
+    let calls: String = (0..8)
+        .map(|n| {
+            format!("{{\"id\": \"{n}\", \"tool\": \"fetch\", \"arguments\": {{\"url\": \"https://a.example/{n}\"}}}}\n")
+        })
+        .collect();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["runtime", "annotate", "--concurrency", "1", "--config"])
+        .arg(dir.path().join("appa.toml"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("appa starts");
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(calls.as_bytes())
+        .expect("the calls are written");
+    let mut first = String::new();
+    std::io::BufRead::read_line(
+        &mut std::io::BufReader::new(child.stdout.take().expect("stdout is piped")),
+        &mut first,
+    )
+    .expect("the first answer is read");
+    assert!(first.contains("\"outcome\":\"answer\""), "{first}");
+    let status = child.wait().expect("appa exits");
+    let asked = std::fs::read_to_string(&asked)
+        .expect("the annotator was asked")
+        .lines()
+        .count();
+    assert!(asked < 8, "every queued call was still asked after the reader closed");
+    assert!(
+        !status.success(),
+        "a run that could not write its answers reports a failure"
+    );
+}
