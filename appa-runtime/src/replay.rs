@@ -1028,9 +1028,10 @@ pub enum Format {
     Json,
 }
 
-/// Every `.appa` file the paths name: a file as itself, a directory as its `.appa` files,
-/// recursively and sorted, never through a symlinked directory inside it. Each file once, by
-/// what it resolves to, in the order first named.
+/// Every `.appa` file the paths name: a regular file as itself, a directory as its regular
+/// `.appa` files, recursively and sorted, never through a symlinked directory inside it. Each
+/// file once, by what it resolves to, in the order first named. A named path that is neither
+/// a regular file nor a directory is refused, so no read waits on a FIFO's writer.
 pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1041,8 +1042,10 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
             walk(path, &mut found).map_err(|error| format!("{}: {error}", path.display()))?;
             found.sort();
             found
-        } else {
+        } else if metadata.is_file() {
             vec![path.clone()]
+        } else {
+            return Err(format!("{}: not a regular file or a directory", path.display()));
         };
         for file in found {
             if seen.insert(std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone())) {
@@ -1062,7 +1065,7 @@ fn walk(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
         let path = entry.path();
         if entry.file_type()?.is_dir() {
             walk(&path, into)?;
-        } else if path.extension().is_some_and(|extension| extension == "appa") && !path.is_dir() {
+        } else if path.extension().is_some_and(|extension| extension == "appa") && path.is_file() {
             into.push(path);
         }
     }
@@ -1208,6 +1211,23 @@ mod tests {
             reports.iter().map(TraceReport::verdict).collect::<Vec<_>>(),
             vec![Verdict::Ok, Verdict::Ok, Verdict::Ok]
         );
+    }
+
+    /// A FIFO named like a trace is never collected for reading: the walk passes over it, and
+    /// naming it is refused.
+    #[cfg(unix)]
+    #[test]
+    fn collection_takes_no_fifo() {
+        let tree = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(tree.path().join("a.appa"), "").expect("the trace writes");
+        let fifo = tree.path().join("pipe.appa");
+        let raw = std::ffi::CString::new(fifo.clone().into_os_string().into_encoded_bytes()).expect("no NUL");
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            collect(&[tree.path().to_path_buf()]),
+            Ok(vec![tree.path().join("a.appa")])
+        );
+        assert!(collect(&[fifo]).is_err());
     }
 
     /// Two processes replaying the same trace first give it different roots, so runs that
