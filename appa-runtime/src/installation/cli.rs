@@ -201,6 +201,58 @@ fn purge_plugin(args: PluginRemove) -> ExitCode {
     finish(&args.target, "plugin.purge".into(), result)
 }
 
+/// Opens the installation, finishes an interrupted switch, and validates the
+/// config, all under the installation lock: a switch interrupted after its
+/// config was written can leave an include that only its recovery stocks,
+/// and another install can leave one at any moment before the lock is held.
+/// Only a first setup, with no installation state yet, also validates before
+/// the lock, so an invalid config creates no state.
+fn open_recovered(path: &Path, validate: impl Fn() -> Result<(), InstallError>) -> Result<Installation, InstallError> {
+    if !Installation::state_directory(path)?.exists() {
+        validate()?;
+    }
+    let installation = Installation::open(path)?;
+    installation.recover_config()?;
+    validate()?;
+    Ok(installation)
+}
+
+/// The config a battery change starts from loads. One that includes a
+/// battery the store does not hold as one cannot be changed by a battery
+/// command, which loads it first, so the refusal says how to get past it:
+/// dropping the include by hand is the removal itself when `removing` names
+/// that battery, and otherwise is followed by installing it again, so its
+/// policy comes back.
+fn load_for_battery_change(path: &Path, removing: Option<&PackageName>) -> Result<(), InstallError> {
+    let error = match crate::config::Config::load_local(path, &[]) {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+    let missing = match &error {
+        crate::config::ConfigError::Unreadable { path: file, source }
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            let root = std::path::absolute(path)
+                .ok()
+                .and_then(|absolute| std::fs::canonicalize(absolute.parent()?).ok());
+            root.and_then(|root| Path::new(file).strip_prefix(root).ok().map(Path::to_path_buf))
+                .and_then(|relative| crate::batteries::name_from_include(&relative))
+        }
+        _ => None,
+    };
+    let Some(name) = missing else {
+        return Err(invalid(error));
+    };
+    let next = match removing.is_some_and(|removed| removed.as_str() == name) {
+        true => "which drops its policy, then rerun to finish removing it".to_owned(),
+        false => format!("run `appa battery install {name}` to install it again with its policy, then rerun"),
+    };
+    Err(InstallError::Invalid(format!(
+        "{error}: the store holds no battery {name} as a real directory with a real appa.toml; \
+         remove batteries/{name}/appa.toml from `include` by hand, {next}"
+    )))
+}
+
 fn package_name(value: &str) -> Result<PackageName, String> {
     PackageName::parse(value).map_err(|error| error.to_string())
 }
@@ -235,9 +287,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
                 path.display()
             )));
         }
-        crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
-        let installation = Installation::open(&path)?;
-        installation.recover_config()?;
+        let installation = open_recovered(&path, || load_for_battery_change(&path, None))?;
         let before = super::required_bytes(installation.config_path())?;
         let current = installation.selection()?.ok_or_else(|| {
             InstallError::Invalid(format!(
@@ -438,9 +488,7 @@ fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Valu
 pub fn remove_battery(args: BatteryRemove) -> ExitCode {
     let result = (|| {
         let path = args.target.path();
-        crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
-        let installation = Installation::open(&path)?;
-        installation.recover_config()?;
+        let installation = open_recovered(&path, || load_for_battery_change(&path, Some(&args.name)))?;
         let before = super::required_bytes(installation.config_path())?;
         let mut selection = installation
             .selection()?
@@ -678,11 +726,10 @@ pub fn install(mut args: Install) -> ExitCode {
         if name == "opencode" {
             args.target.config = Some(path.clone());
         }
-        if path.exists() {
-            crate::config::Config::load_local(&path, &[]).map_err(invalid)?;
-        }
-        let installation = Installation::open(&path)?;
-        installation.recover_config()?;
+        let installation = open_recovered(&path, || match path.exists() {
+            true => crate::config::Config::load_local(&path, &[]).map(drop).map_err(invalid),
+            false => Ok(()),
+        })?;
         let before = super::optional_bytes(installation.config_path())?;
         // Asked before the slow acquisition, so the person is not kept waiting to
         // answer, and before any state changes, so a closed terminal changes nothing.
@@ -1125,7 +1172,7 @@ fn listing(kind: PackageKind, target: &Target) -> Result<(Option<Version>, serde
                 PackageKind::Battery => serde_json::json!({
                     "name": entry.name.as_str(),
                     "included": included.contains(entry.name.as_str()),
-                    "stored": store.join(entry.name.as_str()).join("appa.toml").is_file(),
+                    "stored": crate::batteries::battery_in(&store, entry.name.as_str()).is_some(),
                     "description": package.description,
                 }),
             })

@@ -135,8 +135,7 @@ impl Local {
             let Some(dir) = self
                 .dirs
                 .iter()
-                .map(|root| root.join(&battery.name))
-                .find(|path| path.join("appa.toml").is_file())
+                .find_map(|root| crate::batteries::battery_in(root, &battery.name))
             else {
                 continue;
             };
@@ -163,11 +162,15 @@ impl Local {
                 )),
             }
         }
+        let configured = self.configured();
         for name in &self.selected {
             if !entries.iter().any(|entry| &entry.name == name) {
-                errors.push(format!(
-                    "{name}: requested battery is not available in this installation"
-                ));
+                errors.push(match configured.contains(name) {
+                    true => format!(
+                        "{name}: requested battery is not available in this installation, and the configuration includes it. Remove `batteries/{name}/appa.toml` from `include` by hand, then run `appa battery install {name}` to install it again."
+                    ),
+                    false => format!("{name}: requested battery is not available in this installation"),
+                });
             }
         }
         (entries, errors)
@@ -257,7 +260,7 @@ impl Local {
             let reported = errors.iter().any(|error| error.starts_with(&format!("{name}: ")));
             if !reported && !entries.iter().any(|entry| &entry.name == name) {
                 errors.push(format!(
-                    "{name}: the configuration includes this battery, but it is not installed. Run `appa battery install {name}`, or remove it from `include`."
+                    "{name}: the configuration includes this battery, but it is not installed. Remove `batteries/{name}/appa.toml` from `include` by hand, then run `appa battery install {name}` to install it again."
                 ));
             }
         }
