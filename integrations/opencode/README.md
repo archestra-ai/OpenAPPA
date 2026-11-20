@@ -238,8 +238,9 @@ test -e "$HOME/.config/appa/file-tracker.toml" || \
 Review the policy and `file-tracker.toml` before use. File tools and
 `appa_safebash` use the `file-tracker` Annotator and recorder: files under
 `private/` start as internal, `.env*` as self, writes to instruction files
-such as `AGENTS.md`, hooks and credentials require trust, and a written file
-keeps the writing trajectory's Label. A command that reaches a host requires
+such as `AGENTS.md`, hooks and credentials require trust, writes to
+`opencode.json`, `.opencode/` and `~/.config/opencode/` require human
+approval, and a written file keeps the writing trajectory's Label. A command that reaches a host requires
 trust, because it can install or fetch code it chooses. Web requests, and
 commands that reach a host other than a package registry, require public
 audience. The file tracker reads `~/.config/appa/file-tracker.toml` for the

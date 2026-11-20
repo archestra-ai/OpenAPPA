@@ -405,6 +405,21 @@ write_attention = ["human-approval"]
 pattern = "*/.amp/settings.json"
 write_attention = ["human-approval"]
 
+# OpenCode's settings, which register its plugins, AppenCode among them, and its MCP servers,
+# and its configuration directories, whose plugins run when OpenCode starts and whose agents
+# and commands it loads as instructions.
+[[path]]
+pattern = "*/opencode.json*"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/.opencode/*"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/.config/opencode/*"
+write_attention = ["human-approval"]
+
 [[path]]
 pattern = "*/appa/appa.toml"
 write_attention = ["human-approval"]
