@@ -288,7 +288,7 @@ pub(crate) fn branches(
         .collect()
 }
 
-/// How long ago the chosen trajectory was last active, or why none was chosen.
+/// The root of the recently active family, or why none was chosen.
 pub(crate) fn resolve(recent: crate::events::Recent) -> Result<TrajectoryId, OmittedReason> {
     match recent {
         crate::events::Recent::One { root, age } if age <= RECENT_WINDOW => Ok(TrajectoryId(root)),
@@ -1048,8 +1048,8 @@ mod tests {
     ///
     /// This match is the compile-time half of the gate. The walk is deny-by-default, so an
     /// unclassified variant is safe — it carries nothing — but safe is not the same as
-    /// reported, and a recorded session only ever produces a handful of the twenty-three. Add
-    /// a variant to the engine and this stops compiling, which is the moment to add its table.
+    /// reported, and a recorded session only ever produces a handful of them. Add a variant to
+    /// the engine and this stops compiling, which is the moment to add its table.
     fn variant(fact: &Fact) -> &'static str {
         match fact {
             Fact::TrajectoryOpened(_) => "TrajectoryOpened",
