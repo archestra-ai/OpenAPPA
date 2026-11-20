@@ -939,17 +939,7 @@ pub(crate) fn render_server_coverage(
 /// rather than one sentence quoting both. Terminal output is not markdown, so
 /// neither is wrapped in backticks.
 fn guide_next(style: Style) -> String {
-    let sandbox = match appa_file_tracker::prepare_sandbox() {
-        Ok(None) => String::new(),
-        Ok(Some(installed)) => format!(
-            "\n\n{}",
-            style.detail(&format!(
-                "Installed Anthropic's sandbox runtime for SafeBash at {}",
-                installed.display()
-            ))
-        ),
-        Err(missing) => format!("\n\n{}", style.detail(&missing)),
-    };
+    let sandbox = sandbox_note(style, "SafeBash");
     format!(
         "\n{}\n{}\n\n{}\n{}{sandbox}",
         crate::style::lead("Next, start a protected session:"),
@@ -957,6 +947,22 @@ fn guide_next(style: Style) -> String {
         crate::style::lead("Then, inside it, check your MCP servers and tune the defaults:"),
         style.commands(&["/appa-guide".to_owned()]),
     )
+}
+
+/// The sandbox runtime `srt` that `tool` runs commands in, made ready now: a line saying it
+/// was installed or what is still missing, or nothing when it was already ready.
+fn sandbox_note(style: Style, tool: &str) -> String {
+    match appa_file_tracker::prepare_sandbox() {
+        Ok(None) => String::new(),
+        Ok(Some(installed)) => format!(
+            "\n\n{}",
+            style.detail(&format!(
+                "Installed Anthropic's sandbox runtime for {tool} at {}",
+                installed.display()
+            ))
+        ),
+        Err(missing) => format!("\n\n{}", style.detail(&missing)),
+    }
 }
 
 /// A release build carries the tag whose generation the marketplace can fetch.
@@ -1494,7 +1500,12 @@ fn finish(
             // reported, so this is the one moment it is not in the way.
             .and_then(|()| writeln!(output, "\n{}", crate::mascot::happy(style)))
             .and_then(|()| match plugin {
-                "opencode" => writeln!(output, "Run `appa opencode setup --config {}` from the project to configure, then start a fresh OpenCode session.\n", shell_word(&receipt.deployment.display().to_string())),
+                "opencode" => writeln!(
+                    output,
+                    "Run `appa opencode setup --config {}` from the project to configure, then start a fresh OpenCode session.{}\n",
+                    shell_word(&receipt.deployment.display().to_string()),
+                    sandbox_note(style, "appa_safebash"),
+                ),
                 _ => writeln!(output, "{}\n", guide_next(style)),
             })
         }

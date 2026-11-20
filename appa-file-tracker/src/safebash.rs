@@ -196,7 +196,7 @@ fn program(config: &Config) -> Result<PathBuf, String> {
         (Some(found), _) => Ok(found),
         (None, true) => Err(
             "SafeBash runs shell commands in Anthropic's sandbox runtime `srt`, which is not installed; \
-             `appa plugin install claude-code` installs it when npm is on PATH, or install it with: \
+             `appa plugin install claude-code` or `appa plugin install opencode` installs it when npm is on PATH, or install it with: \
              npm install -g @anthropic-ai/sandbox-runtime"
                 .to_string(),
         ),
@@ -293,7 +293,7 @@ pub fn install_runtime(config: &Config) -> Result<Option<PathBuf>, String> {
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => {
                 "npm is not installed, so `appa` cannot install Anthropic's sandbox runtime `srt` \
-                 for SafeBash; install Node.js 22.12 or later, then run `appa plugin install claude-code` again"
+                 for SafeBash; install Node.js 22.12 or later, then run `appa plugin install claude-code` or `appa plugin install opencode` again"
                     .to_string()
             }
             _ => format!("cannot run npm: {error}"),
