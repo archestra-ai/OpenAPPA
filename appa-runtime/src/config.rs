@@ -615,8 +615,9 @@ pub(crate) const JEV_URL_VARIABLE: &str = "APPA_PROVIDER_JEV_API_URL";
 const JEV_SECTION: &str = "jev";
 
 /// How a bound component the runtime does not answer itself is reached: an HTTP endpoint
-/// or a local command. Every section accepts both; an Annotator and a context provider
-/// accept nothing else, since a stock Annotator is named on its policy declaration.
+/// or a local command. Every section accepts both; a context provider and a recorder accept
+/// nothing else, and neither does an Annotator, since a stock Annotator is named on its
+/// policy declaration.
 #[derive(Debug, Clone)]
 pub enum Transport {
     Url(Endpoint),
@@ -929,7 +930,7 @@ pub enum ConfigError {
     },
 }
 
-/// The five sections a component binds under. Every section takes a URL or a command;
+/// The six sections a component binds under. Every section takes a URL or a command;
 /// which builtin names a section accepts is the one difference, and the audience section
 /// alone takes a `readers` roster and a `lookup` redirect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2065,7 +2066,10 @@ fn declared_components(policy: &toml::Value) -> std::collections::BTreeSet<(Stri
 /// targets, and any other file of such a battery is refused: the deployment target
 /// picks its target policy. Any other include composes alone.
 fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<PathBuf>, ConfigError> {
-    let dir = include_path.parent().expect("a canonical file path has a parent");
+    // The filesystem root has no parent: it is in no battery, and the caller's read refuses it.
+    let Some(dir) = include_path.parent() else {
+        return Ok(vec![include_path]);
+    };
     let manifest = dir.join(appa_package::MANIFEST_FILE);
     if !manifest.is_file() {
         return Ok(vec![include_path]);
@@ -2484,22 +2488,22 @@ fn compose_included_confinement(
 ) -> Result<Vec<(String, Vec<String>)>, ConfigError> {
     let refused = |field: &str| ConfigError::IncludedPolicyField {
         path: include_path.display().to_string(),
-        field: format!("deployment.{field}"),
+        field: field.to_owned(),
     };
-    let deployment = deployment.as_table().ok_or_else(|| refused(""))?;
+    let deployment = deployment.as_table().ok_or_else(|| refused("deployment"))?;
     if let Some(field) = deployment.keys().find(|field| field.as_str() != "confined_results") {
-        return Err(refused(field));
+        return Err(refused(&format!("deployment.{field}")));
     }
     let confined: Vec<String> = deployment
         .get("confined_results")
         .and_then(toml::Value::as_array)
-        .ok_or_else(|| refused("confined_results"))?
+        .ok_or_else(|| refused("deployment.confined_results"))?
         .iter()
         .map(|entry| {
             entry
                 .as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| refused("confined_results"))
+                .ok_or_else(|| refused("deployment.confined_results"))
         })
         .collect::<Result<_, _>>()?;
     let declared: std::collections::BTreeSet<&str> = included_policy
@@ -2520,11 +2524,11 @@ fn compose_included_confinement(
         .entry("deployment".to_string())
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
-        .ok_or_else(|| refused(""))?
+        .ok_or_else(|| refused("deployment"))?
         .entry("confined_results".to_string())
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
-        .ok_or_else(|| refused("confined_results"))?;
+        .ok_or_else(|| refused("deployment.confined_results"))?;
     let mut tagged = Vec::new();
     for tool in confined {
         if !destination.iter().any(|entry| entry.as_str() == Some(&tool)) {
@@ -2658,11 +2662,14 @@ fn split_context(raw: BTreeMap<String, RawContextBinding>) -> Result<SplitContex
 
 type SplitContext = (BTreeMap<String, RawBinding>, BTreeMap<ContextProviderName, ContextHint>);
 
-/// An annotator or context-provider binding after its section refused every `builtin` at parse.
+/// An annotator, context-provider or recorder binding after its section refused every `builtin`
+/// at parse.
 fn transport_only(implementation: Implementation) -> Transport {
     match implementation {
         Implementation::Transport(transport) => transport,
-        Implementation::Builtin(_) => unreachable!("the annotators and context sections refuse every builtin"),
+        Implementation::Builtin(_) => {
+            unreachable!("the annotators, context and recorders sections refuse every builtin")
+        }
     }
 }
 
@@ -3147,6 +3154,24 @@ mod tests {
         assert!(
             matches!(Config::load(&dir.path().join("appa.toml")), Err(ConfigError::IncludedTopLevel { field, .. }) if field == "bundle")
         );
+    }
+
+    /// The filesystem root is a canonical path with no parent to look for a battery
+    /// manifest in.
+    #[cfg(unix)]
+    #[test]
+    fn an_include_that_resolves_to_the_filesystem_root_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            format!("include=['root.toml']\n{BUNDLE_ROOT}"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/", dir.path().join("root.toml")).unwrap();
+        assert!(matches!(
+            Config::load_for_target(&dir.path().join("appa.toml"), &[], BatteryTarget::SingleUser),
+            Err(ConfigError::Unreadable { path, .. }) if path == "/"
+        ));
     }
 
     #[cfg(feature = "daemon")]
@@ -5745,6 +5770,41 @@ mod tests {
         }
         let root = format!("{HOSTED_ROOT}[policy.deployment]\nhint = \"The root's own hosts.\"\n");
         assert!(hosted_composed(&root, &[]).is_ok(), "the root declares it");
+    }
+
+    #[test]
+    fn a_hosted_battery_s_deployment_that_is_no_table_is_refused_under_its_own_name() {
+        assert!(matches!(
+            hosted_composed(
+                HOSTED_ROOT,
+                &[HostedBattery {
+                    name: "fetcher",
+                    base: "[policy]\nversion = 2\ndeployment = 1\n",
+                    target: None,
+                    token_env: &[],
+                }],
+            ),
+            Err(ConfigError::IncludedPolicyField { field, .. }) if field == "deployment"
+        ));
+    }
+
+    #[test]
+    fn a_confining_battery_under_a_root_deployment_that_is_no_table_is_refused_under_that_name() {
+        let root = "[policy]\nversion = 2\ndeployment = 1\n[[policy.tool]]\nname = \"root__read\"\ndelta = {}\n";
+        let confining = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"fetch\"\ndelta = {}\n[policy.deployment]\n\
+                         confined_results = [\"fetch\"]\n";
+        assert!(matches!(
+            hosted_composed(
+                root,
+                &[HostedBattery {
+                    name: "fetcher",
+                    base: confining,
+                    target: None,
+                    token_env: &[],
+                }],
+            ),
+            Err(ConfigError::IncludedPolicyField { field, .. }) if field == "deployment"
+        ));
     }
 
     #[test]
