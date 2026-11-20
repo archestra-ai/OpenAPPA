@@ -1016,7 +1016,8 @@ pub enum Format {
 }
 
 /// Every `.appa` file the paths name: a file as itself, a directory as its `.appa` files,
-/// recursively and sorted. Each file once, in the order first named.
+/// recursively and sorted, never through a symlinked directory inside it. Each file once, by
+/// what it resolves to, in the order first named.
 pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1031,7 +1032,7 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
             vec![path.clone()]
         };
         for file in found {
-            if seen.insert(file.clone()) {
+            if seen.insert(std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone())) {
                 files.push(file);
             }
         }
@@ -1044,10 +1045,11 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
 
 fn walk(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
             walk(&path, into)?;
-        } else if path.extension().is_some_and(|extension| extension == "appa") {
+        } else if path.extension().is_some_and(|extension| extension == "appa") && !path.is_dir() {
             into.push(path);
         }
     }
@@ -1156,6 +1158,24 @@ mod tests {
         .expect("the fixture writes");
         let config = Config::load(&path).expect("the fixture validates");
         Runtime::open_in_memory(config, None, Remedies::StandIn).expect("the deployment opens in memory")
+    }
+
+    /// A linked directory inside the tree is not entered, whether it leads back up the tree
+    /// or out of it, and a file reached through a link to it is collected once.
+    #[cfg(unix)]
+    #[test]
+    fn collection_enters_no_symlinked_directory_and_takes_each_file_once() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let (tree, outside) = (root.path().join("tree"), root.path().join("outside"));
+        std::fs::create_dir_all(&outside).expect("the outside dir");
+        std::fs::create_dir_all(&tree).expect("the tree");
+        std::fs::write(outside.join("b.appa"), "").expect("the trace writes");
+        std::fs::write(tree.join("a.appa"), "").expect("the trace writes");
+        std::os::unix::fs::symlink(tree.join("a.appa"), tree.join("link.appa")).expect("links");
+        std::os::unix::fs::symlink(&tree, tree.join("loop")).expect("links");
+        std::os::unix::fs::symlink(&outside, tree.join("out")).expect("links");
+        std::os::unix::fs::symlink(&outside, tree.join("out.appa")).expect("links");
+        assert_eq!(collect(std::slice::from_ref(&tree)), Ok(vec![tree.join("a.appa")]));
     }
 
     /// The same trace run twice, in one run or in two runs on one runtime, runs each time in
