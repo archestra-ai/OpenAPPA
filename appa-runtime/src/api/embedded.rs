@@ -243,8 +243,8 @@ impl Runtime {
         let recipient = super::acting_trajectory(actor);
         named_id(&call, id)?;
         let arguments = call_fingerprint(&call);
-        // An exact retry of a completed read gets its receipt even when its tool is no
-        // longer fit for a new read, or its held label no longer matches its dispatch's.
+        // An exact retry of a completed read gets its receipt without a claim, even when its
+        // tool is no longer fit for a new read or its held label no longer matches its dispatch's.
         if let Err(unfit) = self.read_tool_preserves_source_label(&actor.root, &call)? {
             return self
                 .completed_receipt(&actor.root, id, recipient, &call_id, &arguments)?
@@ -259,19 +259,22 @@ impl Runtime {
         if loaded.recipient != recipient.as_str() {
             return Err(refused("no peer message with this id is held for this recipient"));
         }
+        if loaded.status == EmbeddedStatus::Read
+            && loaded.read_call_id.as_deref() == Some(call_id.as_str())
+            && let Some(outcome) = self.completed_receipt(&actor.root, id, recipient, &call_id, &arguments)?
+        {
+            return Ok(outcome);
+        }
         let log = self.inner.log(&actor.root).map_err(peer_error)?;
         let chain = self
             .inner
             .trust_chain(&self.inner.deployment(), &log)
             .map_err(peer_error)?;
         let message = held_message(&loaded, &chain);
-        let prior = prior_call(&log, recipient, &call_id, &message);
-        drop(log);
-        if matches!(prior, PriorCall::Foreign) {
-            return self
-                .completed_receipt(&actor.root, id, recipient, &call_id, &arguments)?
-                .ok_or_else(|| refused("this call id is already a different dispatch"));
+        if matches!(prior_call(&log, recipient, &call_id, &message), PriorCall::Foreign) {
+            return Err(refused("this call id is already a different dispatch"));
         }
+        drop(log);
         let claim = self
             .inner
             .store
