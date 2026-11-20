@@ -16,6 +16,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
+use tempfile::TempDir;
+use thiserror::Error;
 
 /// The store of the deployment whose root config is `config`.
 pub fn store_dir(config: &Path) -> PathBuf {
@@ -33,11 +35,11 @@ pub fn default_search_path(config: &Path) -> Vec<PathBuf> {
 /// one of them complete, or for the moment between the two renames no
 /// store at all, and nothing else stays in it. A tree without batteries
 /// leaves no store. The names stocked, sorted.
-pub fn stock(tree: &Path, store: &Path) -> io::Result<Vec<String>> {
+pub fn stock(tree: &Path, store: &Path) -> Result<Vec<String>, StockError> {
     let mut names = match names_in(tree) {
         Ok(names) => names,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
     names.sort();
     let beside = store.parent().unwrap_or(Path::new(""));
@@ -60,20 +62,45 @@ pub fn stock(tree: &Path, store: &Path) -> io::Result<Vec<String>> {
         return Ok(names);
     }
     let retired = tempfile::Builder::new().prefix(".batteries-").tempdir_in(beside)?;
-    let parked = retired.path().join("batteries");
-    fs::rename(store, &parked)?;
-    if let Err(error) = fs::rename(&staged, store) {
-        // The earlier store comes back when the new one cannot take its
-        // place; both temporary directories go with the return.
-        return Err(match fs::rename(&parked, store) {
-            Ok(()) => error,
-            Err(restore) => io::Error::new(
-                error.kind(),
-                format!("{error}; and the earlier store was not restored: {restore}"),
-            ),
-        });
-    }
+    fs::rename(store, retired.path().join(PARKED))?;
+    promote(&staged, store, retired)?;
     Ok(names)
+}
+
+/// Why a store was not replaced.
+#[derive(Debug, Error)]
+pub enum StockError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// The new store could not take the earlier one's place, and the earlier
+    /// one could not return to it: it stays at `parked`, the only copy left.
+    #[error("{promote}; the earlier store was not restored and stays at {}: {restore}", parked.display())]
+    NotRestored {
+        parked: PathBuf,
+        promote: io::Error,
+        restore: io::Error,
+    },
+}
+
+/// The name of the earlier store inside its retired directory.
+const PARKED: &str = "batteries";
+
+/// Rename `staged` to the vacated `store`, the earlier store parked as
+/// [`PARKED`] in `retired`. That copy goes with `retired` once the new one
+/// is in, comes back when the new one cannot take its place, and is kept
+/// when it cannot come back either.
+fn promote(staged: &Path, store: &Path, retired: TempDir) -> Result<(), StockError> {
+    let Err(promote) = fs::rename(staged, store) else {
+        return Ok(());
+    };
+    match fs::rename(retired.path().join(PARKED), store) {
+        Ok(()) => Err(StockError::Io(promote)),
+        Err(restore) => Err(StockError::NotRestored {
+            parked: retired.keep().join(PARKED),
+            promote,
+            restore,
+        }),
+    }
 }
 
 /// One battery the runtime can name: its directory name and the tool
@@ -369,6 +396,27 @@ mod tests {
         );
         assert!(!store.exists(), "a version without batteries leaves no store");
         assert_eq!(fs::read_dir(config_dir.path()).unwrap().count(), 0);
+    }
+
+    /// A store that reappears once the earlier one is parked refuses both the
+    /// new store and the earlier one's return; the earlier copy stays parked.
+    #[test]
+    fn a_store_that_cannot_be_restored_stays_parked() {
+        let beside = tempfile::tempdir().expect("config dir");
+        let store = beside.path().join("batteries");
+        let staged = beside.path().join("staged");
+        write_battery(&staged, "slack", &["new"]);
+        let retired = tempfile::Builder::new()
+            .prefix(".batteries-")
+            .tempdir_in(beside.path())
+            .expect("retired");
+        write_battery(&retired.path().join(PARKED), "slack", &["old"]);
+        fs::write(&store, "an interloper in the store's place").expect("interloper");
+
+        let Err(StockError::NotRestored { parked, .. }) = promote(&staged, &store, retired) else {
+            panic!("neither the new store nor the earlier one can take the interloper's place");
+        };
+        assert_eq!(tools_in(&parked.join("slack/appa.toml")), vec!["old"]);
     }
 
     fn write_battery(root: &Path, name: &str, tools: &[&str]) {
