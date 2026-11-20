@@ -51,11 +51,13 @@ fn main() {
     if committed.exists() {
         fs::remove_dir_all(&committed).expect("remove the previous committed batteries source");
     }
-    let identity_source = if commit.is_some() && !dirty {
-        export_committed_repository(repository, &committed).expect("export the committed batteries source");
-        committed.as_path()
-    } else {
-        repository
+    // The commit stamped above is the one archived, not wherever HEAD is by now.
+    let identity_source = match (&commit, dirty) {
+        (Some(commit), false) => {
+            export_committed_repository(repository, commit, &committed).expect("export the committed batteries source");
+            committed.as_path()
+        }
+        _ => repository,
     };
     batteries_staging::stage_repository(identity_source, &staged)
         .expect("stage the batteries source for build identity");
@@ -154,12 +156,12 @@ fn batteries_are_dirty(repository: &Path) -> bool {
     git(repository, &arguments).is_none_or(|output| !output.trim().is_empty())
 }
 
-fn export_committed_repository(repository: &Path, destination: &Path) -> std::io::Result<()> {
+fn export_committed_repository(repository: &Path, commit: &str, destination: &Path) -> std::io::Result<()> {
     let mut command = git_checkout::git_in(repository);
     command
         // The source archive must carry committed bytes, regardless of Git for Windows' checkout setting.
         .args(["-c", "core.autocrlf=false"])
-        .args(["archive", "--format=tar", "HEAD", "--", batteries_staging::SOURCE]);
+        .args(["archive", "--format=tar", commit, "--", batteries_staging::SOURCE]);
     let output = command.output()?;
     if !output.status.success() {
         return Err(std::io::Error::other(
