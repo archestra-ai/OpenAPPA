@@ -1178,18 +1178,6 @@ impl RuntimeEngine {
         self.engine.denial_stands(view, batch)
     }
 
-    /// Whether executing this offer replays its recorded end: the execution re-answers from
-    /// the record and appends nothing, so a delivery retry of it spends nothing twice.
-    pub(crate) fn offer_replays(&self, view: &EngineView, trajectory: &TrajectoryId, offer: &OfferId) -> bool {
-        let Some(engine_offer) = parse_offer(offer) else {
-            return false;
-        };
-        matches!(
-            self.engine.offer_consults(view, trajectory, &engine_offer),
-            Ok(OfferConsult::Replay(_))
-        )
-    }
-
     /// Where one fork stands in the rebuilt view. The runtime uses it
     /// to find the family's forks still open for binding, and the child
     /// a spawn's fork was bound to when that spawn's result arrives.

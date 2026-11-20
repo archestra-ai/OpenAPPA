@@ -3204,11 +3204,6 @@ impl Runtime {
         // The vouch is only read here: the claim spends it where the claim lands. Taking it
         // first would write a release that also ends a running execution's claim, because
         // one session's attempts are one actor.
-        //
-        // A daemon replays an ended offer for its recorded pursuer without spending a vouch:
-        // an MCP delivery retry carries no attempt identity to tell it from another attempt.
-        // An embedded host deduplicates its own retries, so a spent offer answers no other
-        // attempt of it.
         let (acting, admission) = match (expected_actor, self.peek_vouched(&PermitKey::offer(&quoted))) {
             (Some(expected), Ok((actor, _))) if actor != *expected => {
                 return RemedyOutcome::Refused {
@@ -3221,9 +3216,6 @@ impl Runtime {
                     fresh: strict_freshness,
                 },
             ),
-            (Some(expected), Err(_)) if !strict_freshness && self.replays_ended_offer(expected, &quoted) => {
-                (expected.clone(), Admission::Open)
-            }
             (_, Err(_)) => {
                 return RemedyOutcome::Refused {
                     reason: RemedyRefusal::Unvouched,
@@ -3276,8 +3268,8 @@ impl Runtime {
 }
 
 /// Who executes a remedy. An embedded host names the actor it authenticated and how it
-/// renders; it is held to the offer being current. The daemon relays the peer's elicitation
-/// and the actor the connection vouches for, if any.
+/// renders; it is held to the offer being current. The daemon relays the peer's elicitation;
+/// the vouch names its actor.
 enum RemedyCaller<'a> {
     Embedded {
         actor: &'a Actor,
@@ -3930,22 +3922,6 @@ impl Runtime {
     /// trajectory that may execute it.
     pub(crate) fn resolve_in(&self, root: &TrajectoryId, quoted: &OfferId) -> Option<(OfferId, TrajectoryId)> {
         self.read_offer(root, quoted, |standing| Some((standing.offer, standing.pursuer)))
-    }
-
-    /// Is this quoted offer one the family records as ended, pursued by this actor?
-    /// Executing an ended offer re-answers from the record and spends nothing, which is what
-    /// a delivery retry of it needs; anything else — a live offer, another actor's offer —
-    /// still stands behind its vouch.
-    fn replays_ended_offer(&self, actor: &Actor, quoted: &OfferId) -> bool {
-        self.read_offer(&actor.root, quoted, |standing| {
-            Some(
-                standing.pursuer == *acting_trajectory(actor)
-                    && standing
-                        .engine
-                        .offer_replays(standing.view, &standing.pursuer, &standing.offer),
-            )
-        })
-        .unwrap_or(false)
     }
 
     /// Record that this trajectory stands behind this key, for the request
