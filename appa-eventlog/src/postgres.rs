@@ -1033,6 +1033,16 @@ impl PostgresStore {
         stored.map(StoredEmbedded::decode).transpose()
     }
 
+    /// The row a peer read may replay its receipt from; an encrypted view shares no peer data.
+    pub(crate) fn load_shared_embedded_peer(&self, root: &str, id: &str) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+        if self.cipher.is_encrypted() {
+            return Err(EmbeddedError::Storage(
+                "peer sharing is unavailable for an encrypted storage view".into(),
+            ));
+        }
+        self.load_embedded_peer(root, id)
+    }
+
     pub(crate) fn expire_embedded_inbox(&self, root: &str, now: i64) -> Result<(), EmbeddedError> {
         let root = root.to_owned();
         self.query(move |client| {

@@ -658,6 +658,58 @@ async fn a_noop_arrival_returns_the_body_and_a_narrowing_read_folds_only_the_chi
     );
 }
 
+/// A completed read replays its stored receipt to the exact call that made it, even after a
+/// reload makes the read tool unfit for a new peer read.
+#[tokio::test]
+async fn a_completed_read_replays_its_receipt_after_a_reload_refuses_the_tool() {
+    let (dir, runtime) = runtime();
+    start(&runtime).await;
+    assert!(matches!(
+        release(&runtime, None, "send", "send-1").await,
+        HookDecision::AllowCall { .. }
+    ));
+    let notice = runtime
+        .send_embedded_peer(&family(), &family(), &family(), None, "send-1", "hello")
+        .expect("the send records");
+    let arguments = json!({"message_id": notice.id.as_str()});
+    let read = runtime
+        .read_embedded_peer(&actor(None), "read-1", &notice.id, call("read", arguments.clone()))
+        .await
+        .expect("the read admits");
+    let delivered = HookDecision::DeliverValue {
+        value: "hello".to_string(),
+    };
+    assert_eq!(read.decision, delivered);
+
+    let path = dir.path().join("narrowing.toml");
+    std::fs::write(
+        &path,
+        POLICY.replace(
+            "name = \"read\"\ndelta = {}",
+            "name = \"read\"\ndelta = { audience = [\"internal\"] }",
+        ),
+    )
+    .expect("the narrowing policy writes");
+    runtime
+        .reload(Config::load(&path).expect("the narrowing policy loads"))
+        .expect("the reload installs");
+
+    let retry = runtime
+        .read_embedded_peer(&actor(None), "read-1", &notice.id, call("read", arguments))
+        .await
+        .expect("the exact retry replays its receipt");
+    assert_eq!(retry.decision, delivered);
+    let changed = runtime
+        .read_embedded_peer(
+            &actor(None),
+            "read-1",
+            &notice.id,
+            call("read", json!({"message_id": notice.id.as_str(), "extra": true})),
+        )
+        .await;
+    assert!(matches!(changed, Err(EmbeddedPeerError::Refused(_))), "{changed:?}");
+}
+
 const SCRUBBED_POLICY: &str = r#"
 [policy]
 version = 2

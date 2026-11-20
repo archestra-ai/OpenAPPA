@@ -242,8 +242,19 @@ impl Runtime {
         let call_id = bounded(call_id, "call id")?;
         let recipient = super::acting_trajectory(actor);
         named_id(&call, id)?;
-        self.read_tool_preserves_source_label(&actor.root, &call)?;
         let arguments = call_fingerprint(&call);
+        let fitness = self.read_tool_preserves_source_label(&actor.root, &call)?;
+        // An exact retry of a completed read gets its receipt even when its tool is no
+        // longer fit for a new read.
+        if let Some(row) = self
+            .inner
+            .store
+            .embedded_read_receipt(&actor.root, id.as_str(), recipient, &call_id, &arguments)
+            .map_err(store_error)?
+        {
+            return stored_outcome(&row);
+        }
+        fitness?;
         let loaded = self
             .inner
             .store
@@ -478,7 +489,7 @@ impl Runtime {
         let call_id = bounded(call_id, "call id")?;
         let recipient = super::acting_trajectory(actor);
         named_id(&call, id)?;
-        self.read_tool_preserves_source_label(&actor.root, &call)?;
+        self.read_tool_preserves_source_label(&actor.root, &call)??;
         let arguments = call_fingerprint(&call);
         let loaded = self
             .inner
@@ -518,43 +529,48 @@ impl Runtime {
             .await
     }
 
+    /// Whether `call`'s tool is fit for a new peer read under the family's policy. The outer
+    /// error is this view refusing the family's policy; the inner one is an unfit tool.
     fn read_tool_preserves_source_label(
         &self,
         family: &TrajectoryId,
         call: &ProposedCall,
-    ) -> Result<(), EmbeddedPeerError> {
+    ) -> Result<Result<(), EmbeddedPeerError>, EmbeddedPeerError> {
         let log = self.inner.log(family).map_err(peer_error)?;
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log).map_err(peer_error)?;
-        let registry = policy.engine().registry();
-        let name = appa_engine::value::ToolName::new(&call.tool);
-        if registry.classify(&name) != Some(appa_engine::registry::ToolKind::Declared) {
-            return Err(refused("a peer read needs an exact declared tool with an empty delta"));
-        }
-        let variants: Vec<_> = registry.variants(&name).collect();
-        if variants.is_empty() || variants.iter().any(|declaration| declaration.declared().is_none()) {
-            return Err(refused("a peer read cannot use an annotator"));
-        }
-        if variants.iter().any(|declaration| {
-            declaration
-                .declared()
-                .is_none_or(|annotation| !annotation.delta.is_none())
-        }) {
-            return Err(refused("a peer read tool must declare an empty delta"));
-        }
-        // The engine offers an output sanitizer only on a confined result, judged on the
-        // concrete call name, so an unconfined read delivers the stored body under its source
-        // label whatever sanitizers are scoped.
-        let profile = registry.profile();
-        if profile.confines_result(&name)
-            || variants
-                .iter()
-                .any(|declaration| profile.confines_result(declaration.name()))
-        {
-            return Err(refused("a peer read tool's result must not be confined"));
-        }
-        Ok(())
+        Ok(read_tool_fit(policy.engine().registry(), call))
     }
+}
+
+fn read_tool_fit(registry: &appa_engine::registry::Registry, call: &ProposedCall) -> Result<(), EmbeddedPeerError> {
+    let name = appa_engine::value::ToolName::new(&call.tool);
+    if registry.classify(&name) != Some(appa_engine::registry::ToolKind::Declared) {
+        return Err(refused("a peer read needs an exact declared tool with an empty delta"));
+    }
+    let variants: Vec<_> = registry.variants(&name).collect();
+    if variants.is_empty() || variants.iter().any(|declaration| declaration.declared().is_none()) {
+        return Err(refused("a peer read cannot use an annotator"));
+    }
+    if variants.iter().any(|declaration| {
+        declaration
+            .declared()
+            .is_none_or(|annotation| !annotation.delta.is_none())
+    }) {
+        return Err(refused("a peer read tool must declare an empty delta"));
+    }
+    // The engine offers an output sanitizer only on a confined result, judged on the
+    // concrete call name, so an unconfined read delivers the stored body under its source
+    // label whatever sanitizers are scoped.
+    let profile = registry.profile();
+    if profile.confines_result(&name)
+        || variants
+            .iter()
+            .any(|declaration| profile.confines_result(declaration.name()))
+    {
+        return Err(refused("a peer read tool's result must not be confined"));
+    }
+    Ok(())
 }
 
 fn governed_delivery(row: &EmbeddedRow, admitted: &str) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
