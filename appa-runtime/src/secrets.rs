@@ -283,25 +283,33 @@ static SECRET_FIELD: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a fixed pattern")
 });
 
-/// An annotation's `args` as they leave for a model provider: every string through
-/// [`redact_secrets`], every object key below the top level through [`redact_key`], and
-/// the whole value of a field named for a secret replaced. Top-level keys are the
-/// declaration's own names, which the provider reads in the declaration as written, so
-/// they leave as written too, and so does the complete call's tool `name`.
+/// An annotation's declared inputs, or its context, as they leave for a model provider:
+/// every string through [`redact_secrets`], every object key below the top level through
+/// [`redact_key`], and the whole value of a field named for a secret replaced. Top-level
+/// keys are the declaration's own names, which the provider reads in the declaration as
+/// written, so they leave as written too.
 pub(crate) fn redact_args(args: &serde_json::Value) -> serde_json::Value {
     match args {
-        serde_json::Value::Object(fields) => {
-            let mut redacted: serde_json::Map<String, serde_json::Value> = fields
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
                 .iter()
                 .map(|(key, value)| (key.clone(), redact_field(key, value)))
-                .collect();
-            if let Some(name) = fields.get("name").filter(|name| name.is_string()) {
-                redacted.insert("name".to_string(), name.clone());
-            }
-            serde_json::Value::Object(redacted)
-        }
+                .collect(),
+        ),
         other => redact_value(other),
     }
+}
+
+/// An annotation's complete call as it leaves for a model provider: [`redact_args`], with
+/// the tool `name` left as written.
+pub(crate) fn redact_call(call: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = redact_args(call);
+    if let (Some(name), serde_json::Value::Object(fields)) =
+        (call.get("name").filter(|name| name.is_string()), &mut redacted)
+    {
+        fields.insert("name".to_string(), name.clone());
+    }
+    redacted
 }
 
 fn redact_value(value: &serde_json::Value) -> serde_json::Value {
@@ -583,7 +591,7 @@ mod tests {
         let token = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
         let masked = "[redacted-secret]";
         assert_eq!(
-            redact_args(&json!({
+            redact_call(&json!({
                 "name": "mcp__claude_ai_Google_Drive__search_files",
                 "description": format!("uses {token}"),
                 "arguments": {
@@ -623,13 +631,18 @@ mod tests {
             json!({"query": format!("key {masked}"), "established": "internal"}),
             "one value per declared input is redacted the same way"
         );
+        assert_eq!(
+            redact_args(&json!({"name": token, "query": "x"})),
+            json!({"name": masked, "query": "x"}),
+            "a declared input named `name` is no tool name"
+        );
     }
 
     #[test]
     fn a_credential_used_as_a_key_is_redacted_and_keys_that_redact_alike_keep_one_entry_each() {
         let masked = "[redacted-secret]";
         assert_eq!(
-            redact_args(&json!({
+            redact_call(&json!({
                 "name": "write",
                 "arguments": {
                     "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789": 1,

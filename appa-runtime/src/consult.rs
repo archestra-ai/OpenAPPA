@@ -895,10 +895,12 @@ const ANNOTATION_ANSWER: &str = concat!(
 );
 
 impl ModelPrompt {
-    /// An annotation's `args` and `context` go through [`crate::secrets::redact_args`]; a
-    /// sanitizer sees the value it rewrites, and the consult record keeps both whole. `None`
-    /// for an audience or context consult: no model serves a directory read or a provider's
-    /// finding, and the configuration refuses the binding before a consult can reach here.
+    /// An annotation's `args` go through [`crate::secrets::redact_call`] when they are the
+    /// complete call and [`crate::secrets::redact_args`] when they are declared inputs, and
+    /// its `context` through the latter; a sanitizer sees the value it rewrites, and the
+    /// consult record keeps both whole. `None` for an audience or context consult: no model
+    /// serves a directory read or a provider's finding, and the configuration refuses the
+    /// binding before a consult can reach here.
     pub fn new(consult: &Consult) -> Option<ModelPrompt> {
         let (preamble, schema) = match &consult.body {
             ConsultBody::Authority { .. } => (AUTHORITY_PREAMBLE.to_string(), authority_schema()),
@@ -912,7 +914,10 @@ impl ModelPrompt {
         let declaration = consult.declaration_json();
         let artifact = match &consult.body {
             ConsultBody::Annotation { declaration, artifact } => {
-                let args = crate::secrets::redact_args(&artifact.args);
+                let args = match declaration.inputs.is_empty() {
+                    true => crate::secrets::redact_call(&artifact.args),
+                    false => crate::secrets::redact_args(&artifact.args),
+                };
                 let context = crate::secrets::redact_args(
                     &serde_json::to_value(&artifact.context).expect("context serializes: it holds JSON"),
                 );
@@ -1823,6 +1828,26 @@ mod tests {
                 .expect("the input is JSON"),
             serde_json::json!({"args": {"command": "pwd"}, "context": {}}),
             "declared inputs leave as `args`"
+        );
+        let token = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let named_name = Consult {
+            body: ConsultBody::Annotation {
+                declaration: AnnotationDeclaration {
+                    inputs: vec!["name".to_string()],
+                    ..declaration.clone()
+                },
+                artifact: AnnotationArtifact {
+                    args: serde_json::json!({"name": token}),
+                    context: AnnotationContext::new(Default::default()),
+                },
+            },
+            ..consult.clone()
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&ModelPrompt::new(&named_name).expect("renders").input)
+                .expect("the input is JSON"),
+            serde_json::json!({"args": {"name": "[redacted-secret]"}, "context": {}}),
+            "a declared input named `name` leaves redacted: only the complete call keeps its tool name"
         );
         let sanitizer = Consult {
             name: "scrub".to_string(),
