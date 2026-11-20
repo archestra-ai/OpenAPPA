@@ -5728,6 +5728,25 @@ mod tests {
     }
 
     #[test]
+    fn a_confining_battery_under_a_root_deployment_that_is_no_table_is_refused_under_that_name() {
+        let root = "[policy]\nversion = 2\ndeployment = 1\n[[policy.tool]]\nname = \"root__read\"\ndelta = {}\n";
+        let confining = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"fetch\"\ndelta = {}\n[policy.deployment]\n\
+                         confined_results = [\"fetch\"]\n";
+        assert!(matches!(
+            hosted_composed(
+                root,
+                &[HostedBattery {
+                    name: "fetcher",
+                    base: confining,
+                    target: None,
+                    token_env: &[],
+                }],
+            ),
+            Err(ConfigError::IncludedPolicyField { field, .. }) if field == "deployment"
+        ));
+    }
+
+    #[test]
     fn composed_bytes_are_stable_and_standalone() {
         let dir = tempfile::tempdir().expect("temp directory");
         let first = dir.path().join("first.toml");
