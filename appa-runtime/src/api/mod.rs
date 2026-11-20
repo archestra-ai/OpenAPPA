@@ -1262,9 +1262,10 @@ pub struct Reloaded {
     pub policy_key: String,
     pub policy_identity: String,
     pub policy_revision: u64,
-    /// `false` when the line's head already stood at the new file's revision, so nothing was
-    /// published: the reload still ran every gate, and swapped an equal deployment. `true` when
-    /// the reload published the file as the line's next revision.
+    /// `true` when the installed revision differs from the one this runtime served before the
+    /// swap, whether or not this reload published it. `false` when the serving revision did not
+    /// move: the reload still ran every gate and swapped the deployment in, whose externals and
+    /// reporting may differ.
     pub changed: bool,
 }
 
@@ -1491,8 +1492,10 @@ struct Shared {
     line: DeploymentName,
     /// Engines compiled from stored revisions: the replay-only engines of revisions a family's
     /// log was decided under, and the head's engine compiled with a family's opening inventory.
-    /// Entries remain until this runtime is dropped. Hosts with frequent publishes or many lines
-    /// must account for that process-memory growth; stored revisions remain replayable on restart.
+    /// Each successful [`Runtime::install`] clears the map. A resolution already made keeps its
+    /// engines' `Arc`s and decides without recompiling. A later resolution that misses the map
+    /// compiles again: a replay-only engine from the file the store holds for its revision, the
+    /// deciding engine from the serving deployment's file.
     revisions: std::sync::Mutex<std::collections::BTreeMap<RevisionKey, Arc<RuntimeEngine>>>,
     modules: crate::builtins::ModuleRegistry,
     /// What this runtime did, as opposed to what the engine decided: bounded, in this
@@ -3955,6 +3958,19 @@ impl Runtime {
         )
     }
 
+    /// Who currently stands behind this key, without spending the standing.
+    fn peek_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+        if PermitKey::parse(&key.wire()).as_ref() != Some(key) {
+            return Err(Unvouched::Nobody);
+        }
+        let root = self.sole_holder(key)?;
+        let log = self.inner.log(&root).map_err(|_| Unvouched::Nobody)?;
+        if self.live_holder(key, Some(&root))?.is_some() {
+            return Err(Unvouched::Ambiguous);
+        }
+        reduced(&log).vouched(key)
+    }
+
     /// The trajectory vouched for this key, taken once, with the ruling its harness
     /// attached.
     ///
@@ -3972,19 +3988,6 @@ impl Runtime {
     /// A read that fails answers nobody. A partial view of who stands behind a key cannot
     /// tell a lone holder from one of two, so authorizing from it would answer the ambiguous
     /// case with one session's standing.
-    /// Who currently stands behind this key, without spending the standing.
-    fn peek_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
-        if PermitKey::parse(&key.wire()).as_ref() != Some(key) {
-            return Err(Unvouched::Nobody);
-        }
-        let root = self.sole_holder(key)?;
-        let log = self.inner.log(&root).map_err(|_| Unvouched::Nobody)?;
-        if self.live_holder(key, Some(&root))?.is_some() {
-            return Err(Unvouched::Ambiguous);
-        }
-        reduced(&log).vouched(key)
-    }
-
     #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         // The spelling is read before the store is asked anything. An MCP request names the
