@@ -12,7 +12,8 @@
 //!
 //! An ask waits for its consult gate inside the consult's own deadline, so `--concurrency`
 //! bounds how many values are in flight at once. The first answer that cannot be written
-//! ends the run with a failure: the consults still in flight are dropped, and none starts.
+//! ends the run with a failure: no further ask is scheduled, and the asks in flight are
+//! dropped.
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -140,7 +141,11 @@ pub(crate) async fn run(
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("appa runtime sanitize: an answer could not be written: {error}");
+            // Standard error may share the closed pipe; the exit status carries the failure.
+            let _ = writeln!(
+                std::io::stderr(),
+                "appa runtime sanitize: an answer could not be written: {error}"
+            );
             ExitCode::FAILURE
         }
     }
