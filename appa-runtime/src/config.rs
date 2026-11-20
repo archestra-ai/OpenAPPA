@@ -1858,7 +1858,8 @@ impl<'a> IncludeGlob<'a> {
             }
             // The entry's own type, which a symbolic link does not pass on.
             let kind = item.file_type().map_err(|source| unreadable(&item.path(), source))?;
-            if kind.is_file() && self.matches_a_battery_only_as_found(source_dir, &name) {
+            if kind.is_file() {
+                self.refuse_a_battery_not_found(source_dir, &name)?;
                 names.push(name);
             }
         }
@@ -1879,12 +1880,19 @@ impl<'a> IncludeGlob<'a> {
     }
 
     /// A match the entry would name as a battery, `batteries/<name>/appa.toml`,
-    /// is one only where [`crate::batteries::battery_in`] finds that battery
-    /// beside the root config, as a single-file entry is.
-    fn matches_a_battery_only_as_found(&self, source_dir: &Path, name: &str) -> bool {
+    /// is refused unless [`crate::batteries::battery_in`] finds that battery
+    /// beside the root config, as a single-file entry is: its policy is not
+    /// dropped without a word.
+    fn refuse_a_battery_not_found(&self, source_dir: &Path, name: &str) -> Result<(), ConfigError> {
         let entry = format!("{}/{name}", self.folder);
-        crate::batteries::name_from_include(Path::new(&entry))
-            .is_none_or(|battery| crate::batteries::battery_in(&source_dir.join("batteries"), &battery).is_some())
+        match crate::batteries::name_from_include(Path::new(&entry)) {
+            Some(battery) if crate::batteries::battery_in(&source_dir.join("batteries"), &battery).is_none() => {
+                Err(self.invalid(&format!(
+                    "it matches {entry}, and battery {battery} is not a real directory with a real appa.toml"
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -3942,9 +3950,9 @@ mod tests {
         );
     }
 
-    /// A glob over a store battery that is a link matches no battery file:
-    /// one to a tree inside the root config's folder matches nothing it would
-    /// name as the battery, and one leading out of it is refused.
+    /// A glob over a store battery that is a link is refused, whether the
+    /// link stays inside the root config's folder or leads out of it; a glob
+    /// over a real battery folder that matches nothing still loads.
     #[cfg(unix)]
     #[test]
     fn a_battery_glob_does_not_follow_a_link_in_the_store() {
@@ -3971,13 +3979,12 @@ mod tests {
             Config::load_from(&dir.path().join("appa.toml"), &[])
         };
 
-        let config = root("batteries/slack/*.toml").expect("a glob matching nothing loads");
+        for linked in ["batteries/slack/*.toml", "batteries/github/*.toml"] {
+            assert!(matches!(root(linked), Err(ConfigError::GlobInclude { .. })), "{linked}");
+        }
+        std::fs::create_dir_all(dir.path().join("batteries/empty")).expect("real battery folder");
+        let config = root("batteries/empty/*.toml").expect("a glob matching nothing loads");
         assert!(config.included_batteries().is_empty());
-        assert!(config.policy_file().value().get("tool").is_none());
-        assert!(matches!(
-            root("batteries/github/*.toml"),
-            Err(ConfigError::GlobInclude { .. })
-        ));
     }
 
     #[test]
