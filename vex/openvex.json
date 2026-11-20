@@ -3,7 +3,280 @@
   "@id": "https://github.com/archestra-ai/OpenAPPA/blob/main/vex/openvex.json",
   "author": "Archestra (https://archestra.ai)",
   "role": "Document Creator",
-  "timestamp": "2026-11-19T00:00:00Z",
-  "version": 1,
-  "statements": []
+  "timestamp": "2026-11-20T01:22:09Z",
+  "version": 12,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-10536"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7?arch=amd64&distro=debian-13.6"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7?arch=amd64&distro=debian-13.6&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The use-after-free needs CURLOPT_STREAM_DEPENDS(_E) followed by curl_easy_reset(). The only libcurl user in the image is /usr/bin/curl, which does not import curl_easy_reset and whose tool source (curl 8.14.1 src/) never sets CURLOPT_STREAM_DEPENDS; libcurl itself never calls curl_easy_reset."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-111497"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/libbrotlicommon1@1.2.0-r3?arch=x86_64&distro=wolfi-20230201&upstream=brotli"
+            },
+            {
+              "@id": "pkg:apk/wolfi/libbrotlienc1@1.2.0-r3?arch=x86_64&distro=wolfi-20230201&upstream=brotli"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The overflow is in the Brotli decoder (c/dec/decode.c), which Brotli's build compiles only into libbrotlidec. /usr/lib/libbrotlicommon.so.1.2.0 and /usr/lib/libbrotlienc.so.1.2.0 in the image define no BrotliDecoder* symbols; libbrotlidec1 is not covered by this statement."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-12087"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The out-of-bounds read is in Socket::pack_ip_mreq_source(). The images run Python (or the appa binary), and no file in them calls pack_ip_mreq_source; it appears only in perl-base's own Socket.pm and Socket.so."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-18924"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/curl@8.21.0-r1?arch=x86_64&distro=wolfi-20230201"
+            },
+            {
+              "@id": "pkg:apk/wolfi/libcurl-openssl4@8.21.0-r1?arch=x86_64&distro=wolfi-20230201&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "libcurl only accepts HTTP/2 server push when the application sets CURLMOPT_PUSHFUNCTION; otherwise it advertises SETTINGS_ENABLE_PUSH=0 and refuses pushes (lib/http2.c). The libcurl users in the image, /usr/bin/curl (curl 8.21.0 src/) and git 2.55.0's http helpers, never set CURLMOPT_PUSHFUNCTION."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-18924"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7?arch=amd64&distro=debian-13.6"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7?arch=amd64&distro=debian-13.6&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "libcurl only accepts HTTP/2 server push when the application sets CURLMOPT_PUSHFUNCTION; otherwise it advertises SETTINGS_ENABLE_PUSH=0 and refuses pushes (lib/http2.c). The only libcurl user in the image, /usr/bin/curl, does not import curl_multi_setopt and its tool source never sets CURLMOPT_PUSHFUNCTION."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-19445"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:generic/python@3.13.13"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The crash needs a Python TLS server whose sni_callback replaces SSLSocket.context. No Python code shipped in the image sets sni_callback or calls set_servername_callback; only the standard library's ssl.py defines them."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-57433"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The flaw is in the Storable module, which Debian ships in libperl5.40, not perl-base. These images contain no Storable.pm or Storable.so."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-8376"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The overflow only affects 32-bit perl builds. These images are linux/amd64 and ship a 64-bit perl (/usr/bin/perl is ELF64 x86-64; Config ptrsize=8, ivsize=8)."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-92388"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/curl@8.21.0-r1?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw needs an FTP wildcard transfer (CURLOPT_WILDCARDMATCH). The curl tool (curl 8.21.0 src/) never sets CURLOPT_WILDCARDMATCH, and the other libcurl users in the image, git 2.55.0's http helpers, do not either."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-92388"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7?arch=amd64&distro=debian-13.6"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7?arch=amd64&distro=debian-13.6&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw needs an FTP wildcard transfer (CURLOPT_WILDCARDMATCH). The only libcurl user in the image is /usr/bin/curl, whose tool source (curl 8.14.1 src/) never sets CURLOPT_WILDCARDMATCH."
+    },
+    {
+      "vulnerability": {
+        "name": "GHSA-w7jw-789q-3m8p"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:npm/shell-quote@1.8.3"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T01:22:09Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The only user of shell-quote in the image is /opt/sandbox-runtime (srt), which calls quote() with arrays of strings only (paths, flags and the command string) and never calls parse(); the object-token (.op) branch of quote() that the advisory concerns is never reached."
+    }
+  ]
 }

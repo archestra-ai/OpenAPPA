@@ -18,7 +18,7 @@
 #
 # Each FROM pins its base image by digest. The tag beside the digest names the version.
 
-FROM rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS builder
+FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY appa-example-agent appa-example-agent
@@ -51,7 +51,7 @@ COPY website/public/brand/openappa-lockup-dark.svg website/public/brand/openappa
 COPY receiver/appa-yell/salt.txt receiver/appa-yell/salt.txt
 RUN cargo build --release --locked --package appa
 
-FROM python:3.13-slim@sha256:9d2e5553305c7c7b0097999bb17187c69b921ccd6bc9d40e4bb5ebe652c00285
+FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \

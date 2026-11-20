@@ -4,11 +4,14 @@ Every consult ends one of three ways a session can observe:
 
 - `derived`: the session admits the derivation in place of the value, relabelled by the
   sanitizer's `permits`. The block lifts.
-- `withheld`: no answer, or an answer the session does not take. The offer fails and the
-  block stays; the value never crosses. `reason` says why: `timeout`, `oversized` (the
-  answer exceeded `max_body_bytes`), `malformed`, `rejected`, and so on.
-- `unresolved`: the harness asked something the policy cannot answer. This is a harness
-  error and invalidates the run.
+- `withheld`: no answer within the sanitizer's limits, or an answer the session does not
+  take. The offer fails and the block stays; the value never crosses. `reason` says why:
+  `timeout`, `oversized` (the answer exceeded `max_body_bytes`), `malformed`, or `rejected`.
+- `unresolved`: nothing measured the sanitizer. The policy cannot answer what the harness
+  asked, or the backend failed to answer at all: a provider that refused the call
+  (`non_success`, such as an exhausted credit balance or a `claude` CLI that did not start)
+  or was never reached (`transport`). A session would fail closed here too, but scoring it
+  as stopped would credit the sanitizer with an outage. This invalidates the run.
 
 A derivation is then scored by substring over its spans, case-insensitively: a `drop`
 span that appears survived; a `keep` span that does not appear was lost.
@@ -44,10 +47,17 @@ class Scored:
     wrapped: bool
 
 
+#: The reasons a consult is withheld for: each measures the sanitizer under its limits. Any
+#: other reason is the backend failing to answer, and leaves the consult `unresolved`.
+WITHHELD_REASONS = ("timeout", "oversized", "malformed", "rejected")
+
+
 def score(case: Case, row: dict) -> Scored:
     outcome = row["outcome"]
     status = {"derived": "derived", "rejected": "withheld", "no_answer": "withheld"}.get(outcome, "unresolved")
     reason = {"rejected": "rejected", "no_answer": row.get("reason"), "unresolved": row.get("reason")}.get(outcome)
+    if status == "withheld" and _reason_class(reason) not in WITHHELD_REASONS:
+        status = "unresolved"
     survived: tuple[str, ...] = ()
     lost: tuple[str, ...] = ()
     wrapped = False
@@ -70,7 +80,8 @@ def score(case: Case, row: dict) -> Scored:
         repeat=row["repeat"],
         latency_ms=row["latency_ms"],
         status=status,
-        reason=_reason_class(reason) if status != "derived" else None,
+        # An unresolved row keeps the backend's own words, such as "Credit balance is too low".
+        reason=reason if status == "unresolved" else _reason_class(reason),
         survived=survived,
         lost=lost,
         drop_total=len(case.drop),
