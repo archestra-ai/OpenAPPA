@@ -20,7 +20,7 @@
 mod questions;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
@@ -231,6 +231,9 @@ impl JevBackend {
             .await
             .map_err(|reason| (JevFailure::NoAnswer, reason))?;
         let pool = &self.gates.jev;
+        // Each attempt's error status from the moment its headers arrive, while its body is
+        // still read for the record: the deadline does not hide a status already known.
+        let error_statuses: [OnceLock<u16>; MAX_ATTEMPTS] = std::array::from_fn(|_| OnceLock::new());
         let mut launched: Vec<(Arc<ClientSlot>, Instant, Duration)> = Vec::new();
         let mut in_flight = FuturesUnordered::new();
         macro_rules! launch {
@@ -240,7 +243,15 @@ impl JevBackend {
                     true => self.timing.hedge_delay,
                     false => self.timing.cold_hedge_delay,
                 };
-                in_flight.push(self.attempt(launched.len(), Arc::clone(&slot), body.to_vec(), key, deadline));
+                let index = launched.len();
+                in_flight.push(self.attempt(
+                    index,
+                    Arc::clone(&slot),
+                    body.to_vec(),
+                    key,
+                    deadline,
+                    &error_statuses[index],
+                ));
                 launched.push((slot, Instant::now(), patience));
                 exchange.attempts.push(None);
             }};
@@ -314,7 +325,33 @@ impl JevBackend {
                         launch!(pool.fresh(&self.url, self.timing.pool_idle_timeout));
                     }
                 }
-                _ = tokio::time::sleep_until(deadline) => break Err((JevFailure::NoAnswer, NoAnswerReason::Timeout)),
+                _ = tokio::time::sleep_until(deadline) => {
+                    // An attempt whose error status arrived settles as that status. The
+                    // consult is that status only when no attempt is left unanswered.
+                    let mut unanswered = false;
+                    let mut status_at_deadline = None;
+                    for ((outcome, error_status), (slot, at, patience)) in
+                        exchange.attempts.iter_mut().zip(&error_statuses).zip(&launched)
+                    {
+                        match (*outcome, error_status.get()) {
+                            (Some(_), _) => {}
+                            (None, Some(&status)) => {
+                                *outcome = Some(AttemptOutcome::Http(status));
+                                exchange.last = Some((status, Vec::new()));
+                                status_at_deadline = Some(status);
+                                if at.elapsed() > *patience {
+                                    pool.evict(slot);
+                                }
+                            }
+                            (None, None) => unanswered = true,
+                        }
+                    }
+                    let reason = match (unanswered, status_at_deadline) {
+                        (false, Some(status)) => NoAnswerReason::NonSuccess { status, detail: None },
+                        _ => NoAnswerReason::Timeout,
+                    };
+                    break Err((JevFailure::NoAnswer, reason));
+                }
             }
         };
         // What is still in flight lost the race or ran out the budget. A connection that
@@ -349,15 +386,23 @@ impl JevBackend {
         body: Vec<u8>,
         key: &str,
         deadline: Instant,
+        error_status: &OnceLock<u16>,
     ) -> Attempted {
-        let reply = self.exchange(&slot.client, body, key, deadline).await;
+        let reply = self.exchange(&slot.client, body, key, deadline, error_status).await;
         if !matches!(reply, Reply::Connection) {
             *slot.answered.lock().expect("the slot mutex is never poisoned") = Some(Instant::now());
         }
         Attempted { index, reply }
     }
 
-    async fn exchange(&self, client: &reqwest::Client, body: Vec<u8>, key: &str, deadline: Instant) -> Reply {
+    async fn exchange(
+        &self,
+        client: &reqwest::Client,
+        body: Vec<u8>,
+        key: &str,
+        deadline: Instant,
+        error_status: &OnceLock<u16>,
+    ) -> Reply {
         let sent = client
             .post(&self.url)
             .bearer_auth(key)
@@ -372,6 +417,7 @@ impl JevBackend {
         let cap = self.max_body_bytes as u64;
         let mut body = Vec::new();
         if !response.status().is_success() {
+            let _ = error_status.set(status);
             // The status is the outcome; the body is read for the record alone, and never
             // past the deadline, where the status would be lost to a timeout.
             let read_until = deadline.min(Instant::now() + RECORD_READ_GRACE);
@@ -1466,7 +1512,8 @@ mod tests {
     }
 
     /// An error status that lands with less than the record-read grace left is still that
-    /// status: its body is read only until the deadline, not past it into a timeout.
+    /// status: its body is read only until the deadline, not past it into a timeout, and the
+    /// deadline itself settles an attempt whose status has arrived as that status.
     #[tokio::test]
     async fn an_error_status_near_the_deadline_is_still_that_status() {
         const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
@@ -1502,6 +1549,7 @@ mod tests {
             })
         );
         assert_eq!(record.http_status, Some(503));
+        assert_eq!(attempts(&record), json!(["http_503"]));
     }
 
     #[tokio::test]
