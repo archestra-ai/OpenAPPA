@@ -1338,6 +1338,29 @@ impl LogStore {
         }
     }
 
+    /// The completed read's row when this exact call made it: the same recipient, call id
+    /// and arguments, with a stored receipt. Reads only; a claim decides everything else.
+    pub fn embedded_read_receipt(
+        &self,
+        root: &TrajectoryId,
+        id: &str,
+        recipient: &TrajectoryId,
+        call_id: &str,
+        arguments: &str,
+    ) -> Result<Option<EmbeddedRow>, EmbeddedError> {
+        let row = match &self.store {
+            Store::Sqlite(sqlite) => sqlite.load_embedded_peer(root.as_str(), id)?,
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.load_shared_embedded_peer(root.as_str(), id)?,
+        };
+        Ok(row.filter(|row| row.recipient == recipient.as_str()).and_then(|row| {
+            match embedded::classify_read(&row, call_id, arguments) {
+                Some(ReadTake::Done(row)) => Some(row),
+                _ => None,
+            }
+        }))
+    }
+
     /// Null bodies of held and direct rows that can no longer be returned. Proof rows stay.
     /// A completed read receipt is not unread inbox data and is left alone.
     pub fn expire_embedded_inbox(&self, root: &TrajectoryId, now: SystemTime) -> Result<(), EmbeddedError> {
