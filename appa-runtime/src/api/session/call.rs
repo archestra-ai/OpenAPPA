@@ -458,17 +458,13 @@ impl Session {
         Ok(policy.engine().names_tool(tool))
     }
 
-    /// Close one call this trajectory has open as one that did not run.
+    /// Close one call this trajectory has open as `Indeterminate`: a released
+    /// call that got no outcome before its turn or its child ended.
     /// The dispatch is re-read from the view on every replay, so a
     /// contended append never closes an occurrence the winning writer
-    /// already closed. Both callers reach here the same way: a released
-    /// call that got no outcome before its turn or its child ended. A
-    /// staged derivation opens nothing and so has nothing to close.
-    pub(super) async fn abandon_dispatch(
-        &self,
-        dispatch: appa_engine::value::DispatchId,
-        outcome: &ToolOutcome,
-    ) -> Result<EngineDecision, EventError> {
+    /// already closed. A staged derivation opens nothing and so has
+    /// nothing to close.
+    pub(super) async fn abandon_dispatch(&self, dispatch: appa_engine::value::DispatchId) -> Result<(), EventError> {
         self.drive_with_evidence(
             move |context, evidence| {
                 if !context.open_dispatches().iter().any(|open| open.id == dispatch) {
@@ -476,7 +472,7 @@ impl Session {
                 }
                 Ok(EngineEvent::ToolOutcome {
                     dispatch: dispatch.clone(),
-                    outcome: outcome.clone(),
+                    outcome: ToolOutcome::Indeterminate,
                     evidence,
                     entropy: fresh_entropy(),
                 })
@@ -486,6 +482,7 @@ impl Session {
             Occasion::Other,
         )
         .await
+        .map(|_| ())
     }
 }
 
