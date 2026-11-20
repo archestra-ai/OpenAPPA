@@ -56,7 +56,10 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         }
     };
     let root = hook_root(&event).clone();
+    // The dispatcher refuses a call with an empty id; nothing that call carries lands first.
+    let refused_at_dispatch = matches!(&event, HookEvent::ToolCall { call_id: Some(id), .. } if id.is_empty());
     if let Some(inventory) = inventory
+        && !refused_at_dispatch
         && let Err(answered) = observed(runtime, adapter, &event, &root, &inventory)
     {
         return answered;
@@ -1840,6 +1843,7 @@ mod tests {
             assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
             assert_eq!(hook(&runtime, &json(&prompt())).await, (200, serde_json::json!({})));
             let before = runtime.audit(&root);
+            let basis = runtime.log_basis(&root);
 
             let refused = hook(&runtime, &json(&proposal)).await;
             assert_eq!(
@@ -1847,6 +1851,7 @@ mod tests {
                 "{proposal}"
             );
             assert_eq!(runtime.audit(&root), before, "the refusal appended nothing: {proposal}");
+            assert_eq!(runtime.log_basis(&root), basis, "the log took no append: {proposal}");
             assert!(
                 !closed_as_unknown(&runtime),
                 "the interrupted call stays open: {proposal}"
@@ -1855,6 +1860,37 @@ mod tests {
                 runtime.prompted(&actor),
                 "the prompt's mark survives for the next proposal: {proposal}"
             );
+        }
+    }
+
+    /// A served proposal with an empty call id is refused before the inventory it carries
+    /// lands: an open trajectory's log takes no append, and a missing root is not created.
+    #[tokio::test]
+    async fn an_empty_call_id_is_refused_before_its_inventory_is_observed() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let opening = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"open","inventory":{"tools":[{"name":"Bash","tool":"Bash"}],"sources":[{"server":"builtin","status":"complete","dynamic":false}]}}"#;
+        let (status, reply) = answer(&runtime, &adapter, PrincipalSource::None, opening).await;
+        assert_eq!(status, 200, "the session opens: {reply}");
+        let open = TrajectoryId("cc:open".to_string());
+        let basis = runtime.log_basis(&open);
+
+        for (root_id, root) in [
+            ("open", open.clone()),
+            ("absent", TrajectoryId("cc:absent".to_string())),
+        ] {
+            let proposal = format!(
+                r#"{{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"{root_id}","call_id":"","tool":"Read","spawn":false,"arguments":{{"file_path":"a"}},"inventory":{{"tools":[{{"name":"Read","tool":"Read"}}],"sources":[{{"server":"builtin","status":"complete","dynamic":false}}]}}}}"#
+            );
+            let (_, reply) = answer(&runtime, &adapter, PrincipalSource::None, proposal.as_bytes()).await;
+            assert_eq!(reply["decision"], "deny_call", "{root_id}: {reply}");
+            assert_eq!(
+                runtime.log_basis(&open),
+                basis,
+                "{root_id}: the refusal appended nothing"
+            );
+            assert_eq!(runtime.status(&root).is_some(), root == open, "{root_id}: {reply}");
         }
     }
 
