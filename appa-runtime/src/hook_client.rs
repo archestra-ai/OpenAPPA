@@ -241,8 +241,15 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
     let codec = appa_adapter_claude_code::codec();
     let mut host_event = Vec::new();
     if let Err(error) = std::io::stdin().read_to_end(&mut host_event) {
+        // A read can fail after the whole event arrived: what did arrive goes to the same
+        // withholding as bytes that never parsed.
         return match decides {
-            Decides::Authorization => block(&format!("the hook event could not be read: {error}")),
+            Decides::Authorization => unanswered(
+                &codec,
+                Unanswered::Unparsed(&host_event),
+                &format!("the hook event could not be read: {error}"),
+                decides,
+            ),
             Decides::Nothing => {
                 // Best effort: a stderr that is gone must not turn this into a failure.
                 let _ = writeln!(std::io::stderr(), "OpenAPPA could not read the turn end: {error}");
@@ -388,7 +395,8 @@ fn carry_out(codec: &Codec, host: &[u8], event: &HookEvent, refused: Refused, fa
 /// never received. The blocking exit is what is left to say so — it surfaces the failure on
 /// stderr and stops the turn rather than reporting a withholding that did not happen.
 fn withhold(withholding: &serde_json::Value, failure: &str) -> ExitCode {
-    eprintln!("OpenAPPA hook withheld the result: {failure}");
+    // Best effort: a stderr that is gone must not stop the withholding reaching stdout.
+    let _ = writeln!(std::io::stderr(), "OpenAPPA hook withheld the result: {failure}");
     match print(withholding) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => block(&format!("{failure}; the withholding could not be written: {error}")),
