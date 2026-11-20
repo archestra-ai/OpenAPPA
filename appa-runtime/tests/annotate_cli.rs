@@ -200,17 +200,19 @@ fn an_unwritable_answer_fails_the_run_before_the_next_consult() {
         .arg(dir.path().join("appa.toml"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("appa starts");
+    // Standard error closes too: the failure is the exit status, never a panic's.
     drop(child.stdout.take());
+    drop(child.stderr.take());
     child
         .stdin
         .take()
         .expect("stdin is piped")
         .write_all(calls.as_bytes())
         .expect("the calls are written");
-    assert!(!child.wait().expect("appa exits").success());
+    assert_eq!(child.wait().expect("appa exits").code(), Some(1));
     let consults = std::fs::read_to_string(&asked)
         .expect("the annotator was asked")
         .lines()
