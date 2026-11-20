@@ -44,7 +44,9 @@ pub(crate) enum Source {
 ///
 /// The two variants are not decoration. A proxy between here and a real receiver is a normal
 /// way to reach the internet and is honoured; a proxy between here and this same machine is
-/// never right, and would relay a report that was only ever meant to cross a socket.
+/// never right, and would relay a report that was only ever meant to cross a socket. Only a
+/// plain `http://` loopback address is [`Receiver::Loopback`] and bypasses proxies; an
+/// `https://` address is [`Receiver::Secure`] and keeps the proxy settings even on loopback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Receiver {
     /// A real receiver, always over TLS.

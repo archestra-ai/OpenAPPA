@@ -4724,9 +4724,11 @@ fn inventory_digest(inventory: &appa_runtime_api::inventory::ToolInventory) -> S
 /// A report passes the bytes the reporting view serves when it projects, with or without a
 /// trajectory: every family follows its deployment rather than the file it opened with, and the
 /// trust chain and vouched tool names the same report carries come from that same serving
-/// deployment. A batch stamped with an earlier revision was decided under that revision's file,
-/// which the report does not carry, and its numeric ranks keep that revision's chain. The key
-/// comes from the same bytes, so the document and its fingerprint are one snapshot.
+/// deployment, or are empty when it does not resolve for the family (a publish that outran the
+/// projection, for one). A batch stamped with an earlier revision was decided under that
+/// revision's file, which the report does not carry, and its numeric ranks keep that
+/// revision's chain. The key comes from the same bytes, so the document and its fingerprint
+/// are one snapshot.
 #[cfg(feature = "daemon")]
 fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
     let text = std::str::from_utf8(bytes).ok()?;

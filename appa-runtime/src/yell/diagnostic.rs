@@ -181,8 +181,9 @@ pub(crate) struct Export {
     /// refuses is exactly the thing worth reporting — but nothing derived from a view is.
     pub(crate) replay_refused: Option<ReplayRefusalClass>,
     /// The serving policy's trust ranks, lowest first, so a reader can read the numeric ranks
-    /// the facts carry. A fact decided under an earlier revision numbers its ranks by that
-    /// revision's chain, which may differ.
+    /// the facts carry. Empty when the serving policy does not resolve for the family. A fact
+    /// decided under an earlier revision numbers its ranks by that revision's chain, which may
+    /// differ.
     pub(crate) trust_chain: Vec<String>,
     pub(crate) facts: Vec<FactEntry>,
     pub(crate) runtime_events: Vec<EventEntry>,
