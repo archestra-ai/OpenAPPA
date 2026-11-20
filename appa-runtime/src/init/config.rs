@@ -2,7 +2,6 @@
 //! is on disk.
 
 use crate::config::{Config, ConfigError};
-use std::fs;
 use std::path::Path;
 
 use super::InitError;
@@ -21,7 +20,7 @@ pub(crate) enum ComposedPolicy {
 /// Remove a file this activation wrote and abandons. Nothing it protects is lost
 /// with it, so a failure is noted beside the error being returned.
 pub(super) fn discard_file(path: &Path) {
-    if let Err(error) = fs::remove_file(path) {
+    if let Err(error) = super::remove_if_present(path) {
         tracing::warn!(path = %path.display(), %error, "cannot remove a file the activation abandoned");
     }
 }
@@ -61,6 +60,7 @@ pub(crate) fn verify_config(path: &Path) -> Result<ComposedPolicy, InitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     const SHIPPED: &str = include_str!(concat!(

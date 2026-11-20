@@ -560,10 +560,13 @@ fn install_runtime(source: &Path, target: &Path, compensation: &mut Compensation
         })?;
     }
     let temporary = target.with_extension(format!("installing-{}", std::process::id()));
-    fs::copy(source, &temporary).map_err(|source| InitError::InstallRuntime {
-        path: target.to_path_buf(),
-        source,
-    })?;
+    if let Err(source) = fs::copy(source, &temporary) {
+        discard_file(&temporary);
+        return Err(InitError::InstallRuntime {
+            path: target.to_path_buf(),
+            source,
+        });
+    }
     let permissions = fs::metadata(source)
         .and_then(|metadata| {
             let permissions = metadata.permissions();
