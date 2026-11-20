@@ -279,10 +279,10 @@ pub fn resolve(
     let resolve_name = |name: &str, server: Option<&str>| -> Result<Option<Vec<String>>, String> {
         let (name, selector) = bare(name);
         if name == "*" {
-            return if server.is_some() {
-                Err("a wildcard annotator cannot select one server".into())
-            } else {
-                Ok(Some(vec!["*".into()]))
+            return match (server, selector) {
+                (Some(_), _) => Err("a wildcard annotator cannot select one server".into()),
+                (None, "") => Ok(Some(vec!["*".into()])),
+                (None, _) => Err("a wildcard annotator cannot select call arguments".into()),
             };
         }
         if let Some(server) = server {
@@ -677,6 +677,22 @@ mod tests {
             .report
             .is_valid()
         );
+    }
+
+    /// The engine refuses a wildcard with an argument selector, so resolution does not
+    /// serve one as the bare wildcard.
+    #[test]
+    fn a_wildcard_with_an_argument_selector_is_refused() {
+        let authored: toml::Value = toml::from_str("[[tool]]\nname = '*(path:x)'\nannotator = 'classify'").unwrap();
+        let resolved = resolve(
+            &authored,
+            appa_adapter_kagent::adapter(),
+            &inventory(&[("read", "mcp:demo/read")]),
+            &crate::config::Aliases::default(),
+        );
+        assert_eq!(resolved.report.errors.len(), 1);
+        assert!(!resolved.report.wildcard);
+        assert_eq!(resolved.policy["tool"].as_array().map(Vec::len), Some(0));
     }
 
     #[test]
