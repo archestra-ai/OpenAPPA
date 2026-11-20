@@ -23,9 +23,12 @@ GIT_URL = f"https://github.com/{SOURCE}.git"
 MANIFEST = "platform/archestra-rs/openappa-rs/Cargo.toml"
 LOCK = "platform/archestra-rs/Cargo.lock"
 FILES = (MANIFEST, LOCK)
-# Archestra's codegen check requires a byte-for-byte copy of the pinned core.
-GUIDE = "platform/backend/src/skills/appa-guide.core.generated.md"
-CORE = "integrations/appa-guide/references/core.md"
+# Archestra's codegen check requires byte-for-byte copies of these pinned
+# OpenAPPA files (Archestra path -> OpenAPPA path).
+GENERATED = {
+    "platform/backend/src/skills/appa-guide.core.generated.md": "integrations/appa-guide/references/core.md",
+    "platform/backend/src/skills/appa-guide.contracts.generated.md": "website/content/docs/contracts.md",
+}
 VERSION = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
 SHA = re.compile(r"[0-9a-f]{40}")
 MARKER = re.compile(r"<!-- appa-archestra-update: (v" + VERSION + r") ([0-9a-f]{40}) ([0-9]+) -->")
@@ -160,10 +163,11 @@ def validate_lock(text: str, candidate: dict):
         raise ValueError("Cargo.lock is missing an embedded runtime dependency")
 
 
-def guide(source: Path, commit: str) -> str:
-    result = subprocess.run(["git", "-C", str(source), "cat-file", "blob", f"{sha(commit)}:{CORE}"], capture_output=True)
+def generated(source: Path, commit: str, path: str) -> str:
+    origin = GENERATED[path]
+    result = subprocess.run(["git", "-C", str(source), "cat-file", "blob", f"{sha(commit)}:{origin}"], capture_output=True)
     if result.returncode:
-        raise ValueError(f"release commit has no {CORE} for Archestra's generated appa-guide core")
+        raise ValueError(f"release commit has no {origin} for Archestra's {path}")
     return result.stdout.decode()
 
 
@@ -183,7 +187,7 @@ def prepare(args):
     candidate = release(api, args.source, args.tag, args.expected_sha)
     if git(args.target, "status", "--porcelain"):
         raise ValueError("target checkout must be clean")
-    managed = FILES + ((GUIDE,) if (args.target / GUIDE).is_file() else ())
+    managed = FILES + tuple(p for p in GENERATED if (args.target / p).is_file())
     originals = {path: (args.target / path).read_bytes().decode() for path in managed}
     old = pin(originals[MANIFEST])
     if not newer(args.source, old, candidate):
@@ -194,12 +198,12 @@ def prepare(args):
     # upstream's changed dependency graph and checksums rather than editing them.
     subprocess.run(["cargo", "update", "--manifest-path", "archestra-rs/Cargo.toml", "-p", "appa"], cwd=args.target / "platform", check=True)
     validate_lock((args.target / LOCK).read_text(), candidate)
-    if GUIDE in managed:
-        (args.target / GUIDE).write_bytes(guide(args.source, candidate["sha"]).encode())
+    for path in managed[len(FILES):]:
+        (args.target / path).write_bytes(generated(args.source, candidate["sha"], path).encode())
     files = {p: (args.target / p).read_bytes().decode() for p in managed}
     changed = set(git(args.target, "diff", "--name-only").splitlines())
     if changed != set(FILES) | {p for p in managed if p not in FILES and files[p] != originals[p]}:
-        raise ValueError("Cargo update must change only the embedded manifest, workspace lockfile, and generated appa-guide core")
+        raise ValueError("Cargo update must change only the embedded manifest, workspace lockfile, and generated appa-guide files")
     args.bundle.parent.mkdir(parents=True, exist_ok=True)
     args.bundle.write_text(json.dumps({"release": candidate, "previous": old, "base": git(args.target, "rev-parse", "HEAD"), "original_hashes": {p: digest(t) for p, t in originals.items()}, "files": files}, indent=2) + "\n")
     output("changed", "true")
@@ -237,7 +241,7 @@ def publish(args):
     read_api = GitHub(os.environ.get("GH_READ_TOKEN", ""))
     candidate = release(read_api, args.source, bundle["release"]["tag"], bundle["release"]["sha"])
     paths = tuple(bundle["files"])
-    if (candidate != bundle["release"] or set(paths) not in (set(FILES), {*FILES, GUIDE})
+    if (candidate != bundle["release"] or not set(FILES) <= set(paths) <= {*FILES, *GENERATED}
             or set(bundle["original_hashes"]) != set(paths)):
         raise ValueError("prepared update has unexpected release metadata or files")
     if type(bundle.get("compile_passed")) is not bool:
@@ -266,19 +270,21 @@ def publish(args):
     if not newer(args.source, pin(current_manifest), candidate):
         print("Archestra already contains this release or a newer OpenAPPA revision")
         return
-    for path in (*FILES, GUIDE):
+    for path in (*FILES, *GENERATED):
         for ref in (bundle["base"], "main"):
-            current = api.content(path, ref, missing_ok=path == GUIDE)
+            current = api.content(path, ref, missing_ok=path in GENERATED)
             if (None if current is None else digest(current)) != bundle["original_hashes"].get(path):
                 raise ValueError("Archestra's embedded dependencies changed during validation; rerun the workflow")
     if bundle["files"][MANIFEST] != updated_manifest(current_manifest, candidate) or pin(current_manifest) != bundle["previous"]:
         raise ValueError("prepared manifest is not the verified release update")
     validate_lock(bundle["files"][LOCK], candidate)
-    if GUIDE in paths and bundle["files"][GUIDE] != guide(args.source, candidate["sha"]):
-        raise ValueError("prepared appa-guide core is not the verified release's core.md")
-    refreshed = GUIDE in paths and digest(bundle["files"][GUIDE]) != bundle["original_hashes"][GUIDE]
+    copies = [p for p in paths if p in GENERATED]
+    for path in copies:
+        if bundle["files"][path] != generated(args.source, candidate["sha"], path):
+            raise ValueError(f"prepared {path} is not the verified release's {GENERATED[path]}")
+    refreshed = tuple(p for p in copies if digest(bundle["files"][p]) != bundle["original_hashes"][p])
     base = api.request(f'/repos/{TARGET}/git/commits/{bundle["base"]}')
-    tree = api.request(f"/repos/{TARGET}/git/trees", {"base_tree": base["tree"]["sha"], "tree": [{"path": p, "mode": "100644", "type": "blob", "content": bundle["files"][p]} for p in FILES + ((GUIDE,) if refreshed else ())]}, method="POST")
+    tree = api.request(f"/repos/{TARGET}/git/trees", {"base_tree": base["tree"]["sha"], "tree": [{"path": p, "mode": "100644", "type": "blob", "content": bundle["files"][p]} for p in FILES + refreshed]}, method="POST")
     message = f'chore(deps): bump OpenAPPA to {candidate["tag"]}\n\nOpenAPPA release: {candidate["id"]}\nSource commit: {candidate["sha"]}'
     commit = api.request(f"/repos/{TARGET}/git/commits", {"message": message, "tree": tree["sha"], "parents": [bundle["base"]]}, method="POST")
     ref_path = f"/repos/{TARGET}/git/ref/heads/{branch}"
@@ -301,7 +307,7 @@ def publish(args):
     body = (f'Adopt OpenAPPA [{candidate["tag"]}]({candidate["url"]}), release ID `{candidate["id"]}`, '
             f'pinned to [`{candidate["sha"]}`](https://github.com/{SOURCE}/commit/{candidate["sha"]}).\n\n'
             f'Previous source: `{bundle["previous"]}`. [Source comparison](https://github.com/{SOURCE}/compare/{bundle["previous"]}...{candidate["sha"]}).\n\n'
-            f'Cargo regenerated the Rust workspace lockfile.{" The generated appa-guide core was copied from the release." if refreshed else ""} {check_result}{run_link} '
+            f'Cargo regenerated the Rust workspace lockfile.{" The generated appa-guide files were copied from the release." if refreshed else ""} {check_result}{run_link} '
             'Archestra runs its native runtime/PostgreSQL regression suite on this PR.\n\n'
             '**Human review and merge are required.** Review compatibility, transitive dependency changes, and the native test results before marking this draft ready. '
             'This automation does not approve, enable auto-merge, enqueue, or merge the PR.\n\n'
