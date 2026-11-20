@@ -202,20 +202,18 @@ fn purge_plugin(args: PluginRemove) -> ExitCode {
 }
 
 /// Opens the installation, finishes an interrupted switch, and validates the
-/// config. A switch interrupted after its config was written can leave an
-/// include that only its recovery stocks, so with a pending journal the
-/// config is validated after recovery. Without one, an invalid config is
-/// refused before any installation state is created.
+/// config, all under the installation lock: a switch interrupted after its
+/// config was written can leave an include that only its recovery stocks,
+/// and another install can leave one at any moment before the lock is held.
+/// Only a first setup, with no installation state yet, also validates before
+/// the lock, so an invalid config creates no state.
 fn open_recovered(path: &Path, validate: impl Fn() -> Result<(), InstallError>) -> Result<Installation, InstallError> {
-    let interrupted = matches!(Installation::inspect(path), Err(InstallError::Recovery { .. }));
-    if !interrupted {
+    if !Installation::state_directory(path)?.exists() {
         validate()?;
     }
     let installation = Installation::open(path)?;
     installation.recover_config()?;
-    if interrupted {
-        validate()?;
-    }
+    validate()?;
     Ok(installation)
 }
 
