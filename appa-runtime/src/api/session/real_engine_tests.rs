@@ -6484,3 +6484,34 @@ async fn an_empty_crossing_child_turn_stays_open_and_a_root_cannot_end_as_a_chil
             .is_ok()
     );
 }
+
+#[tokio::test]
+async fn a_root_stopping_as_a_child_is_refused_and_its_open_call_stays_open() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    assert!(matches!(
+        session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
+        Ok(ToolCallDecision::Allow { .. })
+    ));
+    let basis = runtime.inner.log(&root()).expect("the log reads").basis();
+
+    let refused = session.on_child_end(Some("done".to_string())).await;
+    assert!(matches!(refused, Err(EventError::NotAChild)), "got {refused:?}");
+    assert!(dispatch_open(&runtime, &root()), "the root's call is still open");
+    assert_eq!(runtime.inner.log(&root()).expect("the log reads").basis(), basis);
+}
+
+#[tokio::test]
+async fn an_unopened_child_stopping_is_answered_as_a_spawn_not_taken() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    runtime.create_session(root(), None).expect("a fresh id opens");
+    let unopened = runtime.session(&root(), &child("c1")).expect("the session attaches");
+
+    let refused = unopened.on_child_end(Some("done".to_string())).await;
+    assert!(matches!(refused, Err(EventError::SpawnNotTaken)), "got {refused:?}");
+    assert!(!opened(&runtime, &child("c1")));
+}
