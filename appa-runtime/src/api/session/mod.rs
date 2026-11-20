@@ -223,11 +223,8 @@ impl Session {
     /// another writer closed first is skipped.
     async fn close_unreported(&self, open: Vec<OpenDispatch>, closed: &str) -> Result<(), EventError> {
         for dispatch in open {
-            match self
-                .abandon_dispatch(dispatch.id.clone(), &ToolOutcome::Indeterminate)
-                .await
-            {
-                Ok(_) => {
+            match self.abandon_dispatch(dispatch.id.clone()).await {
+                Ok(()) => {
                     tracing::debug!(
                         trajectory = %self.trajectory.0,
                         dispatch = ?dispatch.id,

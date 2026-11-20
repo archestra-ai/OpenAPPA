@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::{env, ffi::OsString, iter};
@@ -194,7 +195,7 @@ enum Command {
     /// Run an Amp orb's network proxy: check each outbound connection as a flow of the thread.
     AmpProxy {
         /// Where the proxy listens; point HTTP_PROXY and HTTPS_PROXY here. Loopback only.
-        #[arg(long, default_value = "127.0.0.1:8789")]
+        #[arg(long, default_value = "127.0.0.1:8791")]
         listen: std::net::SocketAddr,
 
         /// The runtime serving `--adapter amp`.
@@ -367,7 +368,8 @@ fn main() -> ExitCode {
                 true => match appa_runtime::runtime_start::Deployment::installed(config, data_dir) {
                     Ok(deployment) => Some(deployment),
                     Err(error) => {
-                        eprintln!("OpenAPPA hook blocked: {error}");
+                        // Best effort: a panic on a gone stderr exits 101, which is no block.
+                        let _ = writeln!(std::io::stderr(), "OpenAPPA hook blocked: {error}");
                         return ExitCode::from(2);
                     }
                 },

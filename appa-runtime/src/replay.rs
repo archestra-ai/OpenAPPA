@@ -3,16 +3,19 @@
 //! One file is one trace: a root trajectory's tool calls in order, each with the decision it
 //! must get. The runner builds the typed events itself and hands them to the hook dispatcher,
 //! so every step is judged by the production session, engine boundary, and engine over a log
-//! that lives in memory for the run. No tool runs: after an allowed call the runner reports an
-//! empty output, which is the moment the contract's `delta` lands on the trajectory label, so
-//! the next step sees the narrowed trajectory.
+//! that lives in memory for the run. No tool runs: after an allowed call that does not
+//! mismatch its step, the runner reports an empty output, which is the moment the contract's
+//! `delta` lands on the trajectory label, so the next step sees the narrowed trajectory. An
+//! allowed call that mismatches its step is closed as indeterminate.
 //!
 //! A step expects one of five things. `allow`: the call runs, or the only thing in the way is
-//! the plain narrowing acceptance, which the runner takes as the model would. `authority`: the
-//! call is blocked and the offer names an authority; the runner takes it. `sanitizer`: the call
-//! is blocked and the offer names a sanitizer; the runner takes it. `deny`: the call is blocked
-//! and nothing is offered. Taking an offer goes through the runtime's own remedy path, and the
-//! trace continues from the call it released.
+//! the plain narrowing acceptance, which the runner takes as the model would. `withhold`: the
+//! call is blocked and the offer runs it without returning its result; the runner takes it.
+//! `authority`: the call is blocked and the offer names an authority; the runner takes it.
+//! `sanitizer`: the call is blocked and the offer names a sanitizer; the runner takes it.
+//! `deny`: the call is blocked and nothing is offered. Taking an offer goes through the
+//! runtime's own remedy path. A remedy that releases the call is followed by the released call,
+//! and the trace continues from it; a remedy that answers with a value releases no call.
 //!
 //! Who answers a taken authority or sanitizer offer is the run's [`Remedies`]. By default a
 //! stand-in does, in process: every authority approves, and every sanitizer returns the value
@@ -176,8 +179,10 @@ pub struct Trace {
 }
 
 impl Trace {
+    /// A root no other trace run has, even one with the same path, in this process or
+    /// another sharing a recorder's persistent store.
     fn root(&self) -> TrajectoryId {
-        TrajectoryId(format!("replay:{}", self.path.display()))
+        TrajectoryId(format!("replay:{}:{}", uuid::Uuid::new_v4(), self.path.display()))
     }
 }
 
@@ -193,8 +198,8 @@ pub struct SyntaxError {
 /// or `appa/do_something` and `{`, one `key: <JSON value>` per line, `}`, then optionally
 /// `expect allow`, `expect withhold`, `expect deny`, `expect authority [name]`, or
 /// `expect sanitizer [name]`. A step without an `expect` line is observed; the next call or the
-/// end of the file follows its `}`. Blank lines and lines whose first character is `#` are
-/// skipped anywhere.
+/// end of the file follows its `}`. Blank lines and lines whose first non-whitespace character
+/// is `#` are skipped anywhere.
 pub fn parse(path: &Path, text: &str) -> Result<Trace, SyntaxError> {
     let mut parser = Parser {
         path,
@@ -553,11 +558,10 @@ impl TraceReport {
 
 /// Run every trace at once, each in its own trajectory, and answer in the order given.
 pub async fn run(runtime: &Runtime, traces: &[Trace]) -> Vec<TraceReport> {
-    futures_util::future::join_all(traces.iter().map(|trace| run_trace(runtime, trace))).await
+    futures_util::future::join_all(traces.iter().map(|trace| run_trace(runtime, trace, trace.root()))).await
 }
 
-async fn run_trace(runtime: &Runtime, trace: &Trace) -> TraceReport {
-    let root = trace.root();
+async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> TraceReport {
     let actor = Actor {
         root: root.clone(),
         child: None,
@@ -613,6 +617,12 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         cwd: None,
     };
     let (got, feedback, offers) = match propose(runtime, actor, call).await {
+        // A mismatch ends the file, so the call never succeeds: its result cannot land a
+        // `delta`, consult a party, or turn the mismatch into a refusal.
+        Proposed::Allowed(call) if matches!(&step.check, Check::Expect(expect) if !expect.matches(&Got::Allowed)) => {
+            close_unrun(runtime, actor, call).await;
+            (Got::Allowed, None, Vec::new())
+        }
         Proposed::Allowed(call) => match report_empty_output(runtime, actor, call).await {
             Ok(()) => (Got::Allowed, None, Vec::new()),
             Err(detail) => return StepOutcome::CannotRun(detail),
@@ -693,6 +703,19 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
     }
 }
 
+/// Close a released call that will not run as indeterminate, so nothing it holds open, such as
+/// a recorder's reservation, outlives the step. The step's verdict stands whatever the close
+/// answers.
+async fn close_unrun(runtime: &Runtime, actor: &Actor, call: ProposedCall) {
+    let event = HookEvent::ToolResult {
+        actor: actor.clone(),
+        call,
+        call_id: None,
+        outcome: ToolOutcome::Indeterminate,
+    };
+    let _ = hooks::handle(runtime, event).await;
+}
+
 /// The offers a block makes, each with whom taking it involves. An id the runtime no longer
 /// recognizes is dropped.
 fn recognized(runtime: &Runtime, actor: &Actor, offers: Vec<OfferedRemedy>) -> Vec<(OfferKind, OfferId)> {
@@ -704,8 +727,9 @@ fn recognized(runtime: &Runtime, actor: &Actor, offers: Vec<OfferedRemedy>) -> V
 }
 
 /// Take an offer the way the model does — the remedy tool, then the call proposed exactly as
-/// the remedy authorized it — and close the call with an empty output. Answers the released
-/// arguments when they differ from `proposed`.
+/// the remedy authorized it — and close the call with an empty output. A remedy that answers
+/// with a value releases no call, so nothing is proposed. Answers the released arguments when
+/// they differ from `proposed`.
 async fn take_offer(
     runtime: &Runtime,
     actor: &Actor,
@@ -1004,8 +1028,11 @@ pub enum Format {
     Json,
 }
 
-/// Every `.appa` file the paths name: a file as itself, a directory as its `.appa` files,
-/// recursively and sorted. Each file once, in the order first named.
+/// Every `.appa` file the paths name: a regular file as itself, a directory as its regular
+/// `.appa` files, recursively and sorted, never through a symlinked directory inside it and
+/// never through a link to a file outside it. Each file once, by what it resolves to, in the
+/// order first named. A named path that is neither a regular file nor a directory is refused,
+/// so no read waits on a FIFO's writer.
 pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1013,14 +1040,18 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         let metadata = std::fs::metadata(path).map_err(|error| format!("{}: {error}", path.display()))?;
         let found = if metadata.is_dir() {
             let mut found = Vec::new();
-            walk(path, &mut found).map_err(|error| format!("{}: {error}", path.display()))?;
+            std::fs::canonicalize(path)
+                .and_then(|root| walk(path, &root, &mut found))
+                .map_err(|error| format!("{}: {error}", path.display()))?;
             found.sort();
             found
-        } else {
+        } else if metadata.is_file() {
             vec![path.clone()]
+        } else {
+            return Err(format!("{}: not a regular file or a directory", path.display()));
         };
         for file in found {
-            if seen.insert(file.clone()) {
+            if seen.insert(std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone())) {
                 files.push(file);
             }
         }
@@ -1031,16 +1062,47 @@ pub fn collect(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     Ok(files)
 }
 
-fn walk(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
+/// The walk under the canonical `root`: a trace file is taken only when what it resolves to
+/// stays under the root, so a link cannot bring an outside file into the run or its output.
+/// A trace that does not resolve, such as a dangling link, fails the walk rather than leave
+/// the run.
+fn walk(dir: &Path, root: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk(&path, into)?;
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            walk(&path, root, into)?;
         } else if path.extension().is_some_and(|extension| extension == "appa") {
-            into.push(path);
+            let resolved = std::fs::canonicalize(&path)
+                .map_err(|error| std::io::Error::new(error.kind(), format!("{}: {error}", path.display())))?;
+            if resolved.starts_with(root) && resolved.is_file() {
+                into.push(path);
+            }
         }
     }
     Ok(())
+}
+
+/// A trace's text, read through a handle that is a regular file: the path can change after
+/// collection, and the open waits on no FIFO's writer.
+fn read_trace(path: &Path) -> std::io::Result<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut file, &mut text)?;
+    Ok(text)
 }
 
 /// The `appa replay` command: parse every trace, open the deployment over an in-memory log,
@@ -1070,7 +1132,7 @@ pub fn main(
     let mut traces = Vec::new();
     let mut refused = false;
     for file in &files {
-        match std::fs::read_to_string(file) {
+        match read_trace(file) {
             Ok(text) => match parse(file, &text) {
                 Ok(trace) => traces.push(trace),
                 Err(error) => {
@@ -1133,6 +1195,188 @@ mod tests {
 
     fn canonical(name: &str) -> StepTool {
         StepTool::Canonical(CanonicalTool::parse(name).expect("a canonical tool id"))
+    }
+
+    /// A deployment over the given `[policy]` body, its log in memory.
+    fn runtime(dir: &tempfile::TempDir, policy: &str) -> Runtime {
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            format!("[policy]\nversion = 2\n{policy}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n"),
+        )
+        .expect("the fixture writes");
+        let config = Config::load(&path).expect("the fixture validates");
+        Runtime::open_in_memory(config, None, Remedies::StandIn).expect("the deployment opens in memory")
+    }
+
+    /// A linked directory inside the tree is not entered, whether it leads back up the tree
+    /// or out of it, and a file reached through a link to it is collected once.
+    #[cfg(unix)]
+    #[test]
+    fn collection_enters_no_symlinked_directory_and_takes_each_file_once() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let (tree, outside) = (root.path().join("tree"), root.path().join("outside"));
+        std::fs::create_dir_all(&outside).expect("the outside dir");
+        std::fs::create_dir_all(&tree).expect("the tree");
+        std::fs::write(outside.join("b.appa"), "").expect("the trace writes");
+        std::fs::write(tree.join("a.appa"), "").expect("the trace writes");
+        std::os::unix::fs::symlink(tree.join("a.appa"), tree.join("link.appa")).expect("links");
+        std::os::unix::fs::symlink(&tree, tree.join("loop")).expect("links");
+        std::os::unix::fs::symlink(&outside, tree.join("out")).expect("links");
+        std::os::unix::fs::symlink(&outside, tree.join("out.appa")).expect("links");
+        assert_eq!(collect(std::slice::from_ref(&tree)), Ok(vec![tree.join("a.appa")]));
+    }
+
+    /// The same trace run twice, in one run or in two runs on one runtime, runs each time in
+    /// a trajectory of its own: none sees another's narrowing read before its email.
+    #[tokio::test]
+    async fn a_trace_run_twice_runs_in_two_trajectories() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let runtime = runtime(
+            &dir,
+            "[[policy.tool]]\nname = \"mcp/files/read\"\ndelta = { audience = [\"hr\"] }\n\n\
+             [[policy.tool]]\nname = \"mcp/mail/send\"\nrequires = { audience = { contains = [\"public\"] } }\ndelta = {}\n",
+        );
+        let trace = parsed("mcp/mail/send {}\nexpect allow\n\nmcp/files/read {}\nexpect allow\n").expect("parses");
+        let mut reports = run(&runtime, &[trace.clone(), trace.clone()]).await;
+        reports.extend(run(&runtime, &[trace]).await);
+        assert_eq!(
+            reports.iter().map(TraceReport::verdict).collect::<Vec<_>>(),
+            vec![Verdict::Ok, Verdict::Ok, Verdict::Ok]
+        );
+    }
+
+    /// A link in the tree to a trace outside it is not collected by the walk, while a link to
+    /// a file inside it is; the outside link named outright is the caller's choice and is
+    /// collected.
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_follows_no_link_out_of_its_tree() {
+        let root = tempfile::tempdir().expect("a temp dir");
+        let (tree, outside) = (root.path().join("tree"), root.path().join("outside"));
+        std::fs::create_dir_all(tree.join("nested")).expect("the tree");
+        std::fs::create_dir_all(&outside).expect("the outside dir");
+        std::fs::write(outside.join("secret.appa"), "").expect("the outside file writes");
+        std::fs::write(tree.join("a.appa"), "").expect("the trace writes");
+        std::fs::write(tree.join("target.trace"), "").expect("the aliased trace writes");
+        std::os::unix::fs::symlink(outside.join("secret.appa"), tree.join("nested/escape.appa")).expect("links");
+        std::os::unix::fs::symlink(tree.join("target.trace"), tree.join("nested/alias.appa")).expect("links");
+        assert_eq!(
+            collect(std::slice::from_ref(&tree)),
+            Ok(vec![tree.join("a.appa"), tree.join("nested/alias.appa")])
+        );
+        let named = tree.join("nested/escape.appa");
+        assert_eq!(collect(std::slice::from_ref(&named)), Ok(vec![named]));
+    }
+
+    /// A trace link in the tree that resolves to nothing fails the collection: the run does
+    /// not pass without it.
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_trace_link_fails_the_collection() {
+        let tree = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(tree.path().join("a.appa"), "").expect("the trace writes");
+        std::os::unix::fs::symlink(tree.path().join("gone.trace"), tree.path().join("dangling.appa")).expect("links");
+        assert!(collect(&[tree.path().to_path_buf()]).is_err());
+    }
+
+    /// A collected trace swapped for a FIFO before its read is refused at once, without
+    /// waiting for a writer; a regular file reads through a link.
+    #[cfg(unix)]
+    #[test]
+    fn a_trace_swapped_for_a_fifo_after_collection_does_not_block_its_read() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let fifo = dir.path().join("swapped.appa");
+        let raw = std::ffi::CString::new(fifo.clone().into_os_string().into_encoded_bytes()).expect("no NUL");
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        std::fs::write(dir.path().join("target.appa"), "mcp/files/read {}\n").expect("the trace writes");
+        let link = dir.path().join("link.appa");
+        std::os::unix::fs::symlink(dir.path().join("target.appa"), &link).expect("links");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send((read_trace(&fifo).ok(), read_trace(&link).ok())));
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok((None, Some("mcp/files/read {}\n".to_string())))
+        );
+    }
+
+    /// A FIFO named like a trace is never collected for reading: the walk passes over it, and
+    /// naming it is refused.
+    #[cfg(unix)]
+    #[test]
+    fn collection_takes_no_fifo() {
+        let tree = tempfile::tempdir().expect("a temp dir");
+        std::fs::write(tree.path().join("a.appa"), "").expect("the trace writes");
+        let fifo = tree.path().join("pipe.appa");
+        let raw = std::ffi::CString::new(fifo.clone().into_os_string().into_encoded_bytes()).expect("no NUL");
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            collect(&[tree.path().to_path_buf()]),
+            Ok(vec![tree.path().join("a.appa")])
+        );
+        assert!(collect(&[fifo]).is_err());
+    }
+
+    /// Two processes replaying the same trace first give it different roots, so runs that
+    /// share a recorder's persistent store never meet on one dispatch key. Each child process
+    /// is this test binary running only this test, printing its first root.
+    #[test]
+    fn the_same_trace_first_in_two_processes_gets_two_roots() {
+        const CHILD: &str = "APPA_REPLAY_ROOT_CHILD";
+        let trace = parsed("mcp/files/read {}\n").expect("the trace parses");
+        if std::env::var_os(CHILD).is_some() {
+            println!("\nroot={}", trace.root().0);
+            return;
+        }
+        let first_root = || {
+            let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+                .args([
+                    "replay::tests::the_same_trace_first_in_two_processes_gets_two_roots",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .expect("the child runs");
+            assert!(output.status.success());
+            String::from_utf8(output.stdout)
+                .expect("UTF-8 output")
+                .lines()
+                .find_map(|line| line.strip_prefix("root=").map(str::to_owned))
+                .expect("the child prints its root")
+        };
+        assert_ne!(first_root(), first_root());
+    }
+
+    /// An allow that the step did not expect is the mismatch, decided before any result: the
+    /// call closes as indeterminate, never as run, so nothing its result does can change the
+    /// verdict and nothing it holds stays open.
+    #[tokio::test]
+    async fn an_unexpected_allow_mismatches_and_closes_the_call_unrun() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let runtime = runtime(&dir, "[[policy.tool]]\nname = \"mcp/files/read\"\ndelta = {}\n");
+        let trace = parsed("mcp/files/read {}\nexpect deny\n").expect("the trace parses");
+        let root = trace.root();
+        let report = run_trace(&runtime, &trace, root.clone()).await;
+        assert_eq!(report.verdict(), Verdict::Failed);
+        assert!(matches!(
+            &report.steps[0].outcome,
+            StepOutcome::Mismatch {
+                got: Got::Allowed,
+                want: Expect::Deny,
+                feedback: None
+            }
+        ));
+        let closes: Vec<_> = runtime
+            .audit(&root)
+            .expect("the trajectory is audited")
+            .into_iter()
+            .filter_map(|entry| match entry.event {
+                crate::api::AuditEvent::Closed { outcome } => Some(outcome),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closes, vec![crate::api::DispatchOutcome::Unknown]);
     }
 
     #[test]

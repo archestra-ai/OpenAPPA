@@ -11,7 +11,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{InstallError, Installation, Selection, atomic_write, invalid, io, native, optional_bytes};
+use super::{InstallError, Installation, Selection, atomic_write, invalid, io, native, optional_bytes, sync_directory};
 use crate::init::endpoint::{
     Endpoint, EndpointOwner, endpoint_health, endpoint_owner, reconcile_policy, verify_runtime_deployment,
 };
@@ -34,9 +34,10 @@ pub(super) fn config_path() -> Result<PathBuf, InstallError> {
 }
 
 fn settings_path() -> Result<PathBuf, InstallError> {
-    let directory = std::env::var_os("OPENCODE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or(config_home()?.join("opencode"));
+    let directory = match std::env::var_os("OPENCODE_CONFIG_DIR") {
+        Some(directory) => PathBuf::from(directory),
+        None => config_home()?.join("opencode"),
+    };
     let directory =
         std::path::absolute(&directory).map_err(|error| io("resolve OpenCode directory", &directory, error))?;
     if directory.join("opencode.jsonc").exists() {
@@ -45,6 +46,11 @@ fn settings_path() -> Result<PathBuf, InstallError> {
         ));
     }
     Ok(directory.join("opencode.json"))
+}
+
+/// The record of what APPA registered in the OpenCode settings at `settings`.
+fn receipt_path(settings: &Path) -> PathBuf {
+    settings.with_file_name(".appa-opencode.json")
 }
 
 fn endpoint() -> Result<Endpoint, InstallError> {
@@ -105,7 +111,7 @@ impl Profile {
                 "OpenCode settings must contain an object, a plugins array, and object-valued commands and mcp.servers",
             ));
         }
-        let receipt: Option<Receipt> = optional_bytes(&path.with_file_name(".appa-opencode.json"))?
+        let receipt: Option<Receipt> = optional_bytes(&receipt_path(&path))?
             .as_deref()
             .map(serde_json::from_slice)
             .transpose()
@@ -334,7 +340,7 @@ pub(super) fn activate(installation: &Installation, selection: &Selection) -> Re
     reconcile_policy(&endpoint, &installation.config, &composed).map_err(invalid)?;
     // Write ownership before registration. Recovery accepts either complete
     // profile after a crash between these two atomic writes.
-    let receipt_path = path.with_file_name(".appa-opencode.json");
+    let receipt_file = receipt_path(&path);
     if profile
         .receipt
         .as_ref()
@@ -345,7 +351,7 @@ pub(super) fn activate(installation: &Installation, selection: &Selection) -> Re
             current: registration,
             previous: profile.receipt.as_ref().map(|receipt| receipt.current.clone()),
         };
-        atomic_write(&receipt_path, &serde_json::to_vec(&receipt).map_err(invalid)?)?;
+        atomic_write(&receipt_file, &serde_json::to_vec(&receipt).map_err(invalid)?)?;
     }
     profile.write()?;
     Ok(())
@@ -355,8 +361,11 @@ pub(super) fn remove(config: &Path) -> Result<(), InstallError> {
     let path = settings_path()?;
     let _lock = profile_lock(&path)?;
     let mut profile = Profile::read(config)?;
+    let directory = path.parent().expect("settings have a directory");
+    // An unlink an interrupted removal left unsynced must be durable before the
+    // journal is marked clean, or the receipt can come back.
     let Some(receipt) = &profile.receipt else {
-        return Ok(());
+        return sync_directory(directory);
     };
     if let Some(plugins) = profile.settings["plugins"].as_array() {
         let kept: Vec<_> = plugins
@@ -377,8 +386,9 @@ pub(super) fn remove(config: &Path) -> Result<(), InstallError> {
         }
     }
     profile.write()?;
-    fs::remove_file(path.with_file_name(".appa-opencode.json"))
-        .map_err(|error| io("remove OpenCode receipt", &path, error))
+    let receipt = receipt_path(&path);
+    fs::remove_file(&receipt).map_err(|error| io("remove OpenCode receipt", &receipt, error))?;
+    sync_directory(directory)
 }
 
 #[derive(Args)]
@@ -404,7 +414,10 @@ pub fn setup(args: Setup) -> ExitCode {
         let native = native::NativeArtifacts::prepare(&installation, selection.generation(), selection.platform)?;
         let binary = native.binary().to_path_buf();
         let config = installation.config.clone();
-        let project = args.project.unwrap_or(std::env::current_dir().map_err(invalid)?);
+        let project = match args.project {
+            Some(project) => project,
+            None => std::env::current_dir().map_err(invalid)?,
+        };
         let marketplace = acquired.marketplace().to_path_buf();
         drop(installation);
         let runtime = tokio::runtime::Runtime::new().map_err(invalid)?;

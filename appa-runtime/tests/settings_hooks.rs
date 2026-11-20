@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use crate::common;
 use crate::common::init_fixture;
+use appa_runtime::child_process;
 use common::http;
 use init_fixture::{Fixture, executable};
 
@@ -68,19 +69,20 @@ fn the_written_entries_run_the_deployed_binary_and_post_to_the_deployment_endpoi
             .iter()
             .map(|argument| argument.as_str().expect("an argument"))
             .collect();
-        let mut child = Command::new(hook["command"].as_str().expect("a command"))
-            .args(&args)
-            .env("PATH", &path)
-            // Hostile values for every variable an entry must ignore.
-            .env("APPA_BIN", &poison)
-            .env("APPA_INSTALL_DIR", &poison_dir)
-            .env("APPA_GATE", "1")
-            .env_remove("APPA_RUNTIME_URL")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap_or_else(|error| panic!("the {event} entry spawns: {error}"));
+        let mut child = child_process::spawn(
+            Command::new(hook["command"].as_str().expect("a command"))
+                .args(&args)
+                .env("PATH", &path)
+                // Hostile values for every variable an entry must ignore.
+                .env("APPA_BIN", &poison)
+                .env("APPA_INSTALL_DIR", &poison_dir)
+                .env("APPA_GATE", "1")
+                .env_remove("APPA_RUNTIME_URL")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap_or_else(|error| panic!("the {event} entry spawns: {error}"));
         // A gated hook the client translates and posts; a hook it cannot parse
         // blocks before any request, which would prove nothing about the endpoint.
         let _ = child.stdin.as_mut().expect("the child has a stdin pipe").write_all(

@@ -54,17 +54,43 @@ impl Session {
     /// dispatcher whether the refused event was the missing start's, and is
     /// worth running once more, or the child's own answer.
     /// A fan-out spawn's child names the prompt its spawn was released under, and binds there.
+    ///
+    /// A publish between attempts can leave this view behind a start that opened the child at
+    /// the head; the whole attempt, first read included, is then made again there.
     pub(crate) fn open_late(&self, child: TrajectoryId, prompt: Option<&PromptKey>) -> Result<LateOpen, EventError> {
-        match self.liveness_of(&child)? {
-            Liveness::Unopened => {
-                let id = child.clone();
-                self.bind_child(id, |context| match prompt {
-                    Some(prompt) => context.fan_out_fork(&child, prompt),
-                    None => context.in_flight_fork(&child),
-                })
-                .map(|_| LateOpen::Opened)
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let deployment = self.deployment();
+            match self.open_late_at_snapshot(&child, prompt) {
+                Err(EventError::PolicyMoved { .. })
+                    if attempt < PUBLISHES_FOLLOWED && self.follow_head(&deployment) =>
+                {
+                    tracing::debug!(root = %self.root.0, attempt, "a publish moved the head under a late open: opening again at the head");
+                }
+                opened => return opened,
             }
-            Liveness::Live | Liveness::Ended => Ok(LateOpen::AlreadyOpen),
+        }
+    }
+
+    fn open_late_at_snapshot(&self, child: &TrajectoryId, prompt: Option<&PromptKey>) -> Result<LateOpen, EventError> {
+        if self.liveness_of(child)? != Liveness::Unopened {
+            return Ok(LateOpen::AlreadyOpen);
+        }
+        // Read again in the guarded bind: a start that lands first is not addressed again.
+        let bound = self.bind_child(child.clone(), |context| {
+            if context.engine().liveness(context.view, child) != Liveness::Unopened {
+                return Err(EventError::TrajectoryExists);
+            }
+            match prompt {
+                Some(prompt) => context.fan_out_fork(child, prompt),
+                None => context.in_flight_fork(child),
+            }
+        });
+        match bound {
+            Ok(_) => Ok(LateOpen::Opened),
+            Err(EventError::TrajectoryExists) => Ok(LateOpen::AlreadyOpen),
+            Err(error) => Err(error),
         }
     }
 

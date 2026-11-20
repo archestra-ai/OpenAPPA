@@ -1,8 +1,6 @@
 //! Executables are selected with their batteries archive, never independently.
 
-use std::fs;
-#[cfg(any(not(windows), test))]
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -82,17 +80,19 @@ impl NativeArtifacts {
         let batteries_digest = &archives[&generation.batteries_archive()];
         let binary_archive = installation.state.join("artifacts").join(binary_digest.hex());
         let batteries_archive = installation.state.join("artifacts").join(batteries_digest.hex());
-        acquisition::verify_artifact(&binary_archive, binary_digest)?;
         acquisition::verify_artifact(&batteries_archive, batteries_digest)?;
         let directory = installation.state.join("native");
         require_directory_or_absent(&directory)?;
         fs::create_dir_all(&directory).map_err(|error| io("create native cache", &directory, error))?;
+        // The binary runs before its identity is checked, so it comes from
+        // the handle that was hashed, never from a second open by name.
+        let snapshot = acquisition::verified_snapshot(&binary_archive, binary_digest, &directory)?;
         let stage = tempfile::tempdir_in(&directory).map_err(|error| io("stage native binary", &directory, error))?;
         let binary_name = crate::init::paths::appa_filename();
         if cfg!(windows) {
-            extract_windows_binary(&binary_archive, &stage.path().join(binary_name))?;
+            extract_windows_binary(snapshot, &stage.path().join(binary_name))?;
         } else {
-            super::archive::extract_bundle_archive(&binary_archive, stage.path()).map_err(invalid)?;
+            super::archive::extract_bundle_file(snapshot, &binary_archive, stage.path()).map_err(invalid)?;
         }
         let entries: Vec<_> = fs::read_dir(stage.path())
             .map_err(|error| io("inspect binary archive", stage.path(), error))?
@@ -184,8 +184,8 @@ fn sync_binary(path: &Path) -> Result<(), InstallError> {
         .map_err(|error| io("sync binary", path, error))
 }
 
-fn extract_windows_binary(archive: &Path, target: &Path) -> Result<(), InstallError> {
-    let mut archive = zip::ZipArchive::new(open_regular(archive)?)
+fn extract_windows_binary(archive: File, target: &Path) -> Result<(), InstallError> {
+    let mut archive = zip::ZipArchive::new(archive)
         .map_err(|error| InstallError::Invalid(format!("invalid runtime ZIP: {error}")))?;
     if archive.len() != 1 {
         return Err(InstallError::Invalid(
@@ -306,6 +306,12 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
         .map_err(|error| io("run selected binary", binary, error))?;
     let deadline = Instant::now() + timeout;
     let status = loop {
+        #[cfg(not(windows))]
+        let status = process.child.try_wait();
+        #[cfg(windows)]
+        let status = process.try_wait();
+        let status = status.map_err(|error| io("wait for selected binary", binary, error))?;
+        // Sampled after the wait, so the sample after exit sees all the command wrote.
         if stdout
             .metadata()
             .map_err(|error| io("inspect native output", binary, error))?
@@ -325,19 +331,11 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
                 reason: "selected binary output exceeded its byte limit; owned subprocesses were stopped".into(),
             });
         }
-        #[cfg(not(windows))]
-        let status = process.child.try_wait();
-        #[cfg(windows)]
-        let status = process.try_wait();
-        if let Some(status) = status.map_err(|error| io("wait for selected binary", binary, error))? {
+        if let Some(status) = status {
             if !status.success() {
                 process
                     .terminate()
                     .map_err(|error| io("stop failed native command", binary, error))?;
-            }
-            #[cfg(not(windows))]
-            {
-                process.completed = true;
             }
             break status;
         }
@@ -383,21 +381,14 @@ fn invoke(binary: &Path, arguments: &[&std::ffi::OsStr], timeout: Duration) -> R
             ),
         });
     }
+    // Descendants may include the runtime. Release them only after the
+    // successful command's captured result passes validation.
+    #[cfg(not(windows))]
+    {
+        process.completed = true;
+    }
     #[cfg(windows)]
     {
-        // Descendants may include the runtime. Release them only after the
-        // successful command's captured result passes validation.
-        if stderr
-            .metadata()
-            .map_err(|error| io("inspect native diagnostics", binary, error))?
-            .len()
-            > 65536
-        {
-            return Err(InstallError::Recovery {
-                path: binary.to_owned(),
-                reason: "selected binary diagnostics exceeded their byte limit".into(),
-            });
-        }
         process.complete().map_err(|error| InstallError::Recovery {
             path: binary.to_owned(),
             reason: format!("could not release the successful native command's runtime: {error}"),
@@ -420,7 +411,7 @@ mod tests {
             zip.write_all(b"verified executable bytes").unwrap();
             zip.finish().unwrap();
             let target = root.path().join("appa.exe");
-            let result = extract_windows_binary(&archive, &target);
+            let result = extract_windows_binary(File::open(&archive).unwrap(), &target);
             assert_eq!(result.is_ok(), name == "appa.exe");
             if result.is_ok() {
                 sync_binary(&target).unwrap();
