@@ -1,0 +1,102 @@
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+# --- inputs from outside the trajectory: web pages, inbound mail, workspace files ---
+
+[[tool]]
+name = "web.search"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "web.open"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "email.list"
+delta = { trust = "suspicious" }
+
+[[tool]]
+name = "email.read"
+delta = { trust = "suspicious" }
+
+# Credential files are the requester's own (`self`) data.
+[[tool]]
+name = "fs.read(path:*secret*)"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[tool]]
+name = "fs.read(path:*credential*)"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[tool]]
+name = "fs.read(path:*api_key*)"
+delta = { trust = "suspicious", audience = ["self"] }
+
+[[tool]]
+name = "fs.read"
+delta = { trust = "suspicious" }
+
+# --- egress: a single address inside the organization may receive internal data;
+#     any other recipient is outside it and needs an operator's approval ---
+
+[[tool]]
+name = 'email.send(to:*\,*)'
+requires = { attention = ["operator-approval"] }
+delta = {}
+
+[[tool]]
+name = "email.send(to:*;*)"
+requires = { attention = ["operator-approval"] }
+delta = {}
+
+[[tool]]
+name = "email.send(to:* *)"
+requires = { attention = ["operator-approval"] }
+delta = {}
+
+[[tool]]
+name = "email.send(to:*@corp.invalid)"
+requires = { audience = { contains = ["internal"] } }
+delta = {}
+
+[[tool]]
+name = "email.send"
+requires = { attention = ["operator-approval"] }
+delta = {}
+
+[[tool]]
+name = "http.post"
+requires = { attention = ["operator-approval"] }
+delta = {}
+
+# --- local side effects: credential files need approval; the rest need a trusted trajectory ---
+
+[[tool]]
+name = "fs.write(path:*secret*)"
+requires = { attention = ["operator-approval"] }
+delta = {}
+
+[[tool]]
+name = "fs.delete(path:*secret*)"
+requires = { attention = ["operator-approval"] }
+delta = {}
+
+[[tool]]
+name = "fs.write"
+requires = { trust = "trusted" }
+delta = {}
+
+[[tool]]
+name = "fs.delete"
+requires = { trust = "trusted" }
+delta = {}
+
+[[tool]]
+name = "shell.run"
+requires = { trust = "trusted" }
+delta = {}
+
+[[authority]]
+name = "operator"
+hint = "Approve only a call the operator asked for."
+permits = { attention = ["operator-approval"] }
