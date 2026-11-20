@@ -1168,11 +1168,41 @@ max_body_bytes = 65536
         let direct = runtime
             .send_embedded_peer(&family(), &family(), &family(), None, "send-1", "direct-secret")
             .expect("the direct send records");
+        let received = runtime
+            .receive_embedded_peer(&family(), &family(), &direct.id, &family(), &direct.digest)
+            .expect("the fresh message is received");
+        assert_eq!(
+            received,
+            EmbeddedPeerArrival::Direct {
+                id: direct.id.clone(),
+                body: "direct-secret".to_string(),
+            }
+        );
+        let stored = runtime
+            .inner
+            .store
+            .load_embedded_peer(&family(), direct.id.as_str())
+            .expect("the row loads")
+            .expect("the row is stored");
+        assert_eq!(
+            (stored.status, stored.body.as_deref()),
+            (EmbeddedStatus::Direct, Some("direct-secret"))
+        );
         runtime
             .inner
             .store
             .testing_expire_embedded(&family(), direct.id.as_str())
             .expect("the direct row expires");
+        let unpurged = runtime
+            .inner
+            .store
+            .load_embedded_peer(&family(), direct.id.as_str())
+            .expect("the row loads")
+            .expect("the row is stored");
+        assert!(
+            matches!(direct_body(&unpurged), Err(EmbeddedPeerError::Refused(_))),
+            "an expired body the purge has not reached is not returned"
+        );
         let expired = runtime.receive_embedded_peer(&family(), &family(), &direct.id, &family(), &direct.digest);
         assert!(
             expired.is_err(),
@@ -1185,7 +1215,61 @@ max_body_bytes = 65536
             .expect("the row loads")
             .expect("the proof row stays");
         assert!(purged.body.is_none(), "the expired direct body is nulled");
+        assert_eq!(purged.status, EmbeddedStatus::Direct);
         assert_eq!(purged.digest, direct.digest.to_string());
+
+        let released = crate::hooks::handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: Actor {
+                    root: family(),
+                    child: None,
+                },
+                call: ProposedCall {
+                    tool: "send".to_string(),
+                    arguments: RawValue::from_string("{}".to_string()).expect("json"),
+                    cwd: None,
+                },
+                call_id: Some("send-3".to_string()),
+                spawn: None,
+                prompt: None,
+                ruling: None,
+                declares: None,
+            },
+        )
+        .await;
+        assert!(matches!(released, HookDecision::AllowCall { .. }), "{released:?}");
+        let held = runtime
+            .send_embedded_peer(&family(), &family(), &family(), None, "send-3", "held-secret")
+            .expect("the held send records");
+        let stored = runtime
+            .inner
+            .store
+            .load_embedded_peer(&family(), held.id.as_str())
+            .expect("the row loads")
+            .expect("the row is stored");
+        assert_eq!(
+            (stored.status, stored.body.as_deref()),
+            (EmbeddedStatus::Held, Some("held-secret"))
+        );
+        runtime
+            .inner
+            .store
+            .testing_expire_embedded(&family(), held.id.as_str())
+            .expect("the held row expires");
+        let expired = runtime.receive_embedded_peer(&family(), &family(), &held.id, &family(), &held.digest);
+        assert!(
+            expired.is_err(),
+            "an expired held body is not returned, got {expired:?}"
+        );
+        let purged = runtime
+            .inner
+            .store
+            .load_embedded_peer(&family(), held.id.as_str())
+            .expect("the row loads")
+            .expect("the proof row stays");
+        assert!(purged.body.is_none(), "the expired held body is nulled");
+        assert_eq!(purged.status, EmbeddedStatus::Held, "an expired message is not taken");
 
         let released = crate::hooks::handle(
             &runtime,
