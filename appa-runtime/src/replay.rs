@@ -1079,6 +1079,28 @@ fn walk(dir: &Path, root: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()>
     Ok(())
 }
 
+/// A trace's text, read through a handle that is a regular file: the path can change after
+/// collection, and the open waits on no FIFO's writer.
+fn read_trace(path: &Path) -> std::io::Result<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let mut file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut file, &mut text)?;
+    Ok(text)
+}
+
 /// The `appa replay` command: parse every trace, open the deployment over an in-memory log,
 /// run, print, and exit.
 pub fn main(
@@ -1106,7 +1128,7 @@ pub fn main(
     let mut traces = Vec::new();
     let mut refused = false;
     for file in &files {
-        match std::fs::read_to_string(file) {
+        match read_trace(file) {
             Ok(text) => match parse(file, &text) {
                 Ok(trace) => traces.push(trace),
                 Err(error) => {
@@ -1220,8 +1242,9 @@ mod tests {
         );
     }
 
-    /// A link in the tree to a trace outside it is not collected by the walk; the same link
-    /// named outright is the caller's choice and is collected.
+    /// A link in the tree to a trace outside it is not collected by the walk, while a link to
+    /// a file inside it is; the outside link named outright is the caller's choice and is
+    /// collected.
     #[cfg(unix)]
     #[test]
     fn the_walk_follows_no_link_out_of_its_tree() {
@@ -1231,11 +1254,35 @@ mod tests {
         std::fs::create_dir_all(&outside).expect("the outside dir");
         std::fs::write(outside.join("secret.appa"), "").expect("the outside file writes");
         std::fs::write(tree.join("a.appa"), "").expect("the trace writes");
+        std::fs::write(tree.join("target.trace"), "").expect("the aliased trace writes");
         std::os::unix::fs::symlink(outside.join("secret.appa"), tree.join("nested/escape.appa")).expect("links");
-        std::os::unix::fs::symlink(tree.join("a.appa"), tree.join("nested/alias.appa")).expect("links");
-        assert_eq!(collect(std::slice::from_ref(&tree)), Ok(vec![tree.join("a.appa")]));
+        std::os::unix::fs::symlink(tree.join("target.trace"), tree.join("nested/alias.appa")).expect("links");
+        assert_eq!(
+            collect(std::slice::from_ref(&tree)),
+            Ok(vec![tree.join("a.appa"), tree.join("nested/alias.appa")])
+        );
         let named = tree.join("nested/escape.appa");
         assert_eq!(collect(std::slice::from_ref(&named)), Ok(vec![named]));
+    }
+
+    /// A collected trace swapped for a FIFO before its read is refused at once, without
+    /// waiting for a writer; a regular file reads through a link.
+    #[cfg(unix)]
+    #[test]
+    fn a_trace_swapped_for_a_fifo_after_collection_does_not_block_its_read() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let fifo = dir.path().join("swapped.appa");
+        let raw = std::ffi::CString::new(fifo.clone().into_os_string().into_encoded_bytes()).expect("no NUL");
+        assert_eq!(unsafe { libc::mkfifo(raw.as_ptr(), 0o600) }, 0);
+        std::fs::write(dir.path().join("target.appa"), "mcp/files/read {}\n").expect("the trace writes");
+        let link = dir.path().join("link.appa");
+        std::os::unix::fs::symlink(dir.path().join("target.appa"), &link).expect("links");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send((read_trace(&fifo).ok(), read_trace(&link).ok())));
+        assert_eq!(
+            receiver.recv_timeout(std::time::Duration::from_secs(10)),
+            Ok((None, Some("mcp/files/read {}\n".to_string())))
+        );
     }
 
     /// A FIFO named like a trace is never collected for reading: the walk passes over it, and
@@ -1263,7 +1310,7 @@ mod tests {
         const CHILD: &str = "APPA_REPLAY_ROOT_CHILD";
         let trace = parsed("mcp/files/read {}\n").expect("the trace parses");
         if std::env::var_os(CHILD).is_some() {
-            println!("root={}", trace.root().0);
+            println!("\nroot={}", trace.root().0);
             return;
         }
         let first_root = || {
