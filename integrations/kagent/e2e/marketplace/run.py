@@ -276,7 +276,8 @@ class Acceptance:
         # accepting the offered narrowing stands on the annotation pinned to the open offer.
         for case, script, expected_reads, expected_writes, denials, lookups in (
             ("read-refused", [read, {"text": "done"}], 0, 0, 1, 1),
-            ("tainted-write-refused", [read, {"remedy": "trust drops"}, read, write, {"text": "done"}], 1, 0, 2, 2),
+            # An issue needs no trust, so the suspicious session still writes it.
+            ("suspicious-session-write", [read, {"remedy": "trust drops"}, read, write, {"text": "done"}], 1, 1, 1, 2),
             ("trusted-write", [write, {"text": "done"}], 0, 1, 0, 1),
         ):
             http(fixture_url + "/state", {})
