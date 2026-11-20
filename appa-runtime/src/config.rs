@@ -615,8 +615,9 @@ pub(crate) const JEV_URL_VARIABLE: &str = "APPA_PROVIDER_JEV_API_URL";
 const JEV_SECTION: &str = "jev";
 
 /// How a bound component the runtime does not answer itself is reached: an HTTP endpoint
-/// or a local command. Every section accepts both; an Annotator and a context provider
-/// accept nothing else, since a stock Annotator is named on its policy declaration.
+/// or a local command. Every section accepts both; a context provider and a recorder accept
+/// nothing else, and neither does an Annotator, since a stock Annotator is named on its
+/// policy declaration.
 #[derive(Debug, Clone)]
 pub enum Transport {
     Url(Endpoint),
@@ -927,7 +928,7 @@ pub enum ConfigError {
     },
 }
 
-/// The five sections a component binds under. Every section takes a URL or a command;
+/// The six sections a component binds under. Every section takes a URL or a command;
 /// which builtin names a section accepts is the one difference, and the audience section
 /// alone takes a `readers` roster and a `lookup` redirect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2642,11 +2643,14 @@ fn split_context(raw: BTreeMap<String, RawContextBinding>) -> Result<SplitContex
 
 type SplitContext = (BTreeMap<String, RawBinding>, BTreeMap<ContextProviderName, ContextHint>);
 
-/// An annotator or context-provider binding after its section refused every `builtin` at parse.
+/// An annotator, context-provider or recorder binding after its section refused every `builtin`
+/// at parse.
 fn transport_only(implementation: Implementation) -> Transport {
     match implementation {
         Implementation::Transport(transport) => transport,
-        Implementation::Builtin(_) => unreachable!("the annotators and context sections refuse every builtin"),
+        Implementation::Builtin(_) => {
+            unreachable!("the annotators, context and recorders sections refuse every builtin")
+        }
     }
 }
 
