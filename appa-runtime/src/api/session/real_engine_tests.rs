@@ -6185,6 +6185,51 @@ async fn a_second_plan_for_an_approved_call_is_refused_and_the_call_proposed_aga
     assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
 }
 
+/// A host executing the second plan while the first plan's approval stands is told that
+/// refusal by name, not handed it as a runtime failure.
+#[tokio::test]
+async fn a_second_plan_for_an_approved_call_refuses_the_host_as_approval_pending() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    for call_id in ["host-call-1", "host-call-2"] {
+        runtime.store().fail_commit_after(1);
+        let blocked = session
+            .on_tool_call_identified(wire(500), Some(call_id.to_string()), None, None)
+            .await;
+        assert!(matches!(blocked, Err(EventError::Storage(_))), "{blocked:?}");
+    }
+    let [first, second] = runtime
+        .minted_offers(&root(), &root())
+        .iter()
+        .map(|quoted| runtime.resolve_in(&root(), quoted).expect("the quoted id resolves").0)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("one plan per blocked call");
+    let actor = the_root();
+    let execute = |offer| {
+        runtime.run_remedy(
+            &actor,
+            offer,
+            RemedyArguments::default(),
+            None,
+            None,
+            EmbeddedPresentationOptions::default(),
+        )
+    };
+    assert!(matches!(
+        execute(first).await,
+        crate::api::RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        execute(second).await,
+        crate::api::RemedyOutcome::Refused {
+            reason: crate::api::RemedyRefusal::ApprovalPending
+        }
+    );
+}
+
 /// A trust gate the authority covers is released on every call that meets it, since an approval
 /// never raises the label. The tool whose tag the authority excepts stays blocked, with no plan.
 #[tokio::test]

@@ -425,6 +425,9 @@ pub enum RemedyRefusal {
     Superseded,
     /// The offer is currently being executed by another caller.
     AlreadyExecuting,
+    /// Another plan's approval for this exact call still stands, so this plan was not
+    /// applied. Nothing is appended; the call proposed again is checked anew.
+    ApprovalPending,
     /// An annotator the plan consults gave no answer. This attempt committed no engine facts,
     /// did not authorize the call, and did not consume the offer; a retry needs a fresh vouch,
     /// which a control hook writes.
@@ -451,6 +454,10 @@ impl RemedyRefusal {
             Self::AmbiguousReplay => "more than one session declared under this attempt",
             Self::ActorMismatch => "offer belongs to a different session",
             Self::AlreadyExecuting => "this offer is already being executed",
+            Self::ApprovalPending => {
+                "[appa] Another plan already approved this exact call, so this plan was not applied. Call the \
+                 blocked tool again with the same arguments; it will be checked again."
+            }
             Self::Unanswered { annotator, class } => {
                 return std::borrow::Cow::Owned(format!(
                     "annotator {annotator} gave no answer ({class}), so the plan was not applied. Nothing changed \
@@ -496,6 +503,7 @@ impl From<EventError> for RemedyOutcome {
                 no_answer: Some(class),
                 ..
             } => RemedyRefusal::Unanswered { annotator, class },
+            EventError::ApprovalPending => RemedyRefusal::ApprovalPending,
             error => RemedyRefusal::Runtime {
                 detail: error.to_string(),
             },
