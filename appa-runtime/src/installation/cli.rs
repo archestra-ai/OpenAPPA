@@ -219,8 +219,11 @@ fn open_recovered(path: &Path, validate: impl Fn() -> Result<(), InstallError>) 
 
 /// The config a battery change starts from loads. One that includes a
 /// battery the store does not hold as one cannot be changed by a battery
-/// command, which loads it first, so the refusal says to drop the include.
-fn load_for_battery_change(path: &Path) -> Result<(), InstallError> {
+/// command, which loads it first, so the refusal says how to get past it:
+/// dropping the include by hand is the removal itself when `removing` names
+/// that battery, and otherwise is followed by installing it again, so its
+/// policy comes back.
+fn load_for_battery_change(path: &Path, removing: Option<&PackageName>) -> Result<(), InstallError> {
     let error = match crate::config::Config::load_local(path, &[]) {
         Ok(_) => return Ok(()),
         Err(error) => error,
@@ -237,13 +240,17 @@ fn load_for_battery_change(path: &Path) -> Result<(), InstallError> {
         }
         _ => None,
     };
-    Err(match missing {
-        Some(name) => InstallError::Invalid(format!(
-            "{error}: the store holds no battery {name} as a real directory with a real appa.toml; \
-             remove batteries/{name}/appa.toml from `include` by hand, then rerun"
-        )),
-        None => invalid(error),
-    })
+    let Some(name) = missing else {
+        return Err(invalid(error));
+    };
+    let next = match removing.is_some_and(|removed| removed.as_str() == name) {
+        true => "which drops its policy, then rerun to finish removing it".to_owned(),
+        false => format!("run `appa battery install {name}` to install it again with its policy, then rerun"),
+    };
+    Err(InstallError::Invalid(format!(
+        "{error}: the store holds no battery {name} as a real directory with a real appa.toml; \
+         remove batteries/{name}/appa.toml from `include` by hand, {next}"
+    )))
 }
 
 fn package_name(value: &str) -> Result<PackageName, String> {
@@ -280,7 +287,7 @@ pub fn install_battery(mut args: BatteryInstall) -> ExitCode {
                 path.display()
             )));
         }
-        let installation = open_recovered(&path, || load_for_battery_change(&path))?;
+        let installation = open_recovered(&path, || load_for_battery_change(&path, None))?;
         let before = super::required_bytes(installation.config_path())?;
         let current = installation.selection()?.ok_or_else(|| {
             InstallError::Invalid(format!(
@@ -481,7 +488,7 @@ fn render_setup(output: &mut impl Write, style: Style, result: &serde_json::Valu
 pub fn remove_battery(args: BatteryRemove) -> ExitCode {
     let result = (|| {
         let path = args.target.path();
-        let installation = open_recovered(&path, || load_for_battery_change(&path))?;
+        let installation = open_recovered(&path, || load_for_battery_change(&path, Some(&args.name)))?;
         let before = super::required_bytes(installation.config_path())?;
         let mut selection = installation
             .selection()?
