@@ -185,6 +185,54 @@ hint = "deployment hint"
     assert_eq!(page["answer"]["delta"]["trust"], "trusted");
 }
 
+/// An answer that cannot be written fails the run, and no consult starts after it: one
+/// call in flight at a time, so the first write that meets the closed reader is the last.
+#[test]
+fn an_unwritable_answer_fails_the_run_before_the_next_consult() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let asked = dir.path().join("asked");
+    std::fs::write(dir.path().join("appa.toml"), POLICY).expect("the policy is written");
+    let counting = format!("echo >> '{}'\n{CLASSIFIER}", asked.display());
+    std::fs::write(dir.path().join("classifier.sh"), counting).expect("the annotator is written");
+    let calls = "{\"id\": \"page\", \"tool\": \"fetch\", \"arguments\": {\"url\": \"https://a.example\"}}\n".repeat(5);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["runtime", "annotate", "--concurrency", "1", "--config"])
+        .arg(dir.path().join("appa.toml"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("appa starts");
+    // Standard error closes too: the failure is the exit status, never a panic's.
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+    child
+        .stdin
+        .take()
+        .expect("stdin is piped")
+        .write_all(calls.as_bytes())
+        .expect("the calls are written");
+    assert_eq!(child.wait().expect("appa exits").code(), Some(1));
+    let consults = std::fs::read_to_string(&asked)
+        .expect("the annotator was asked")
+        .lines()
+        .count();
+    assert_eq!(consults, 1);
+}
+
+/// Zero repeats would ask nothing and exit as if every call had been answered.
+#[test]
+fn zero_repeats_are_refused_as_a_usage_error() {
+    let status = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["runtime", "annotate", "--repeat", "0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("appa runs");
+    assert_eq!(status.code(), Some(2));
+}
+
 #[test]
 fn zero_concurrency_is_refused_rather_than_hanging() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
