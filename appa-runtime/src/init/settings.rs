@@ -157,7 +157,8 @@ fn disable_legacy_plugin(settings: &mut Map<String, Value>, path: &Path) -> Resu
 }
 
 /// Drop this deployment's entries from every event, whatever events an earlier
-/// install registered them under.
+/// install registered them under, and the events and `hooks` object that held
+/// nothing else. One that was empty to begin with stays.
 pub(super) fn remove_hooks(paths: &DeploymentPaths, binary: &Path) -> Result<(), InitError> {
     let path = path(paths);
     let binary = portable(binary)?;
@@ -168,13 +169,16 @@ pub(super) fn remove_hooks(paths: &DeploymentPaths, binary: &Path) -> Result<(),
         let hooks = hooks
             .as_object_mut()
             .ok_or_else(|| conflict(&path, "hooks must be an object"))?;
-        for groups in hooks.values_mut() {
-            if let Some(groups) = groups.as_array_mut() {
-                drop_owned(groups, binary);
-            }
-        }
-        hooks.retain(|_, groups| groups.as_array().is_none_or(|groups| !groups.is_empty()));
-        if hooks.is_empty() {
+        let events = hooks.len();
+        hooks.retain(|_, groups| {
+            let Some(groups) = groups.as_array_mut() else {
+                return true;
+            };
+            let before = groups.len();
+            drop_owned(groups, binary);
+            !(before > 0 && groups.is_empty())
+        });
+        if events > 0 && hooks.is_empty() {
             settings.remove("hooks");
         }
         Ok(())
@@ -556,6 +560,31 @@ mod tests {
         install_hooks(&paths, &target, &mut Compensation::default()).unwrap();
         remove_hooks(&paths, &binary).unwrap();
         assert_eq!(settings(&paths), Map::new());
+    }
+
+    /// Removal prunes only what it emptied: an event or a `hooks` object that held nothing
+    /// before it is not this deployment's to judge.
+    #[test]
+    fn removal_keeps_hook_containers_that_were_empty_before_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (paths, binary) = fixture(root.path());
+        for foreign in [json!({"hooks": {"Notification": []}}), json!({"hooks": {}})] {
+            let bytes = write(&paths, foreign);
+            remove_hooks(&paths, &binary).unwrap();
+            assert_eq!(fs::read(path(&paths)).unwrap(), bytes);
+        }
+
+        let foreign = json!({"hooks": {"Notification": []}});
+        write(&paths, foreign.clone());
+        let target = HookTarget {
+            binary: &binary,
+            url: "http://127.0.0.1:1",
+            config: &paths.config_dir.join("appa.toml"),
+            data_dir: &paths.data_dir,
+        };
+        install_hooks(&paths, &target, &mut Compensation::default()).unwrap();
+        remove_hooks(&paths, &binary).unwrap();
+        assert_eq!(Value::Object(settings(&paths)), foreign);
     }
 
     #[test]
