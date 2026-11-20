@@ -15,7 +15,9 @@ use appa_runtime_api::Ruling;
 /// only — the HTTP path's cap behavior is untouched.
 pub(crate) const MODULE_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 
-const REFUSED_MODULE_NAMES: [&str; 7] = [
+/// The `builtin` names the runtime answers before any module, so a module under one is
+/// never reached. `jev` serves Annotators only, which no module can be.
+const REFUSED_MODULE_NAMES: &[&str] = &[
     "hitl",
     "attest-schema",
     "approve",
@@ -23,6 +25,8 @@ const REFUSED_MODULE_NAMES: [&str; 7] = [
     "redact-secrets",
     CLAUDE_CODE_BUILTIN,
     LLM_BUILTIN,
+    #[cfg(feature = "archestra")]
+    crate::config::ARCHESTRA_BUILTIN,
 ];
 
 /// The implementation-name grammar: 1..=64 bytes of ASCII lowercase
