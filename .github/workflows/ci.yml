@@ -345,7 +345,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@v2.9.3
@@ -471,7 +471,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache marketplace builds
         uses: Swatinem/rust-cache@v2.9.3
@@ -536,6 +536,10 @@ jobs:
   # `ImageOS`: build scripts record what they found on the image (pyo3 links
   # the image's libpython3.x) and cargo does not rerun them when the image
   # changes, so an entry built on one image must not restore on another.
+  # Every Rust job installs the newest stable instead of using the image's
+  # toolchain. Images ship different Rust versions per OS and update on their
+  # own schedule, so the same commit linted differently from runner to runner.
+  # The Rust Canary covers beta and the oldest supported release.
   rust-lint:
     name: Rust Lint
     needs: [changes, cargo-release-age]
@@ -550,7 +554,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2.9.3
@@ -601,7 +605,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2.9.3
@@ -701,7 +705,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2.9.3
@@ -734,7 +738,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2.9.3
@@ -774,7 +778,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2.9.3
@@ -847,7 +851,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2.9.3
@@ -1048,7 +1052,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       # The suite drives a real appa runtime, so this job builds the binary
       # and caches the build under the default job key. Lint, tests, the
@@ -1327,7 +1331,7 @@ jobs:
           cache: false
       - name: Setup acceptance tools
         run: |
-          rustup show
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
           go install sigs.k8s.io/kind@v0.27.0
           go install github.com/google/go-containerregistry/cmd/crane@v0.20.3
           helm version

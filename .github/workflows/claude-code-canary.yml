@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Rust
-        run: rustup show
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt --no-self-update && rustup default stable
 
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@v2.9.3
