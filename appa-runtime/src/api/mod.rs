@@ -1262,9 +1262,9 @@ pub struct Reloaded {
     pub policy_key: String,
     pub policy_identity: String,
     pub policy_revision: u64,
-    /// `false` when the line's head already stood at the new file's revision, so nothing was
-    /// published: the reload still ran every gate, and swapped an equal deployment. `true` when
-    /// the reload published the file as the line's next revision.
+    /// `true` when the reload moved the serving deployment to another revision of the line.
+    /// `false` when the deployment it replaced already served this revision; the reload still
+    /// ran every gate, and the new deployment still replaces it.
     pub changed: bool,
 }
 
@@ -1387,6 +1387,7 @@ impl Prepared {
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
                     spawn_holds: spawn_hold::SpawnHolds::default(),
                     launches: launch::Launches::default(),
+                    installing: std::sync::Mutex::new(()),
                 }),
                 store,
                 transcriber: None,
@@ -1512,6 +1513,10 @@ struct Shared {
     working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
     spawn_holds: spawn_hold::SpawnHolds,
     launches: launch::Launches,
+    /// Taken by [`Runtime::install`] from its publish through its swap, gate sizing and cache
+    /// clear, so concurrent installs on this runtime swap in their deployments in the order
+    /// they publish.
+    installing: std::sync::Mutex<()>,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
@@ -2428,7 +2433,17 @@ impl Runtime {
     ///
     /// On a deployment another runtime prepared.
     pub fn install(&self, prepared: PreparedDeployment) -> Result<Reloaded, OpenError> {
-        let (deployment, new) = serve(&self.inner.store, &self.inner.shared.line, &self.own(&prepared))?;
+        let prepared = self.own(&prepared);
+        // Held from the publish to the cache clear, so a concurrent install cannot swap in an
+        // older publish after this one's. It guards no data: a panic under it leaves nothing
+        // to recover.
+        let installing = self
+            .inner
+            .shared
+            .installing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (deployment, new) = serve(&self.inner.store, &self.inner.shared.line, &prepared)?;
         let deployment = Arc::new(deployment);
         let identity = deployment.resident().identity_hex();
         let previous = std::mem::replace(
@@ -2450,6 +2465,7 @@ impl Runtime {
             .lock()
             .expect("the revision-engine mutex is never poisoned: no panic runs while it is held")
             .clear();
+        drop(installing);
 
         let key = deployment.key();
         let revision = deployment
