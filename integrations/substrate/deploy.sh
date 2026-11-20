@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # envsubst takes the names to substitute as a literal '${VAR}' list.
 # shellcheck disable=SC2016
-# Deploy one stock Claude Code actor to try OpenAPPA at an Agent Substrate
-# egress gateway. Substrate must be installed with `ate-setup deploy --openappa`.
+# Deploy two actors running stock Claude Code and stock Codex to try OpenAPPA
+# at an Agent Substrate egress gateway. Substrate must be installed with
+# `ate-setup deploy --openappa`.
 #
-#   integrations/substrate/deploy.sh          build, push, and create the actor
-#   integrations/substrate/deploy.sh delete   remove the actor and its namespace
+#   integrations/substrate/deploy.sh          build, push, and create the actors
+#   integrations/substrate/deploy.sh delete   remove the actors and their namespace
 #
 # Required environment:
 #   WORKER_IMAGE        the installed Substrate's ateworker-gvisor image
 #   CLAUDE_TOKEN_FILE   a file holding a `claude setup-token` OAuth token
-#   GITHUB_TOKEN_FILE   a file holding a GitHub token, injected by the egress
-#                       gateway into the actor's MCP requests
+#   OPENAI_KEY_FILE     a file holding an OpenAI API key
+#   GITHUB_TOKEN_FILE   a file holding a GitHub token
+#
+# The egress gateway injects the three credentials into the actors'
+# requests; the actors never hold them.
 #
 # Optional environment:
 #   KUBE_CONTEXT        kubeconfig context (default: kind-substrate)
@@ -23,15 +27,16 @@ context="${KUBE_CONTEXT:-kind-substrate}"
 repo="${IMAGE_REPO:-localhost:5001}"
 namespace=appa-substrate-demo
 atespace=appa-substrate-demo
-actor=agent
+template=agent
+actors=(claude codex)
 secret=appa-substrate-demo-credentials
 
 k() { kubectl --context "$context" "$@"; }
 ate() { kubectl ate --context "$context" "$@"; }
 
 if [[ "${1:-}" == "delete" ]]; then
-  ate delete actor "$actor" -a "$atespace" 2>/dev/null || true
-  ate delete actor-template "$actor" -a "$atespace" 2>/dev/null || true
+  for actor in "${actors[@]}"; do ate delete actor "$actor" -a "$atespace" 2>/dev/null || true; done
+  ate delete actor-template "$template" -a "$atespace" 2>/dev/null || true
   k delete namespace "$namespace" --ignore-not-found
   echo "Deleted. The atespace and its namespace grant remain."
   exit 0
@@ -39,6 +44,7 @@ fi
 
 : "${WORKER_IMAGE:?set WORKER_IMAGE to the installed ateworker-gvisor image}"
 : "${CLAUDE_TOKEN_FILE:?set CLAUDE_TOKEN_FILE to a file holding a claude setup-token token}"
+: "${OPENAI_KEY_FILE:?set OPENAI_KEY_FILE to a file holding an OpenAI API key}"
 : "${GITHUB_TOKEN_FILE:?set GITHUB_TOKEN_FILE to a file holding a GitHub token}"
 export WORKER_IMAGE
 
@@ -60,6 +66,7 @@ envsubst '${WORKER_IMAGE}' <"$here/manifests/workerpool.yaml.tmpl" | k apply -f 
 echo "==> Storing the credentials the egress gateway injects"
 k -n "$namespace" create secret generic "$secret" \
   --from-file=claude-code-oauth-token=<(tr -d '[:space:]' <"$CLAUDE_TOKEN_FILE") \
+  --from-file=openai-api-key=<(tr -d '[:space:]' <"$OPENAI_KEY_FILE") \
   --from-file=github-token=<(tr -d '[:space:]' <"$GITHUB_TOKEN_FILE") \
   --dry-run=client -o yaml | k apply -f -
 
@@ -87,20 +94,26 @@ print(yaml.safe_dump(doc, sort_keys=False))
   k -n ate-system rollout status deployment/k8s-credential-provider --timeout=2m
 } || echo "    already granted"
 
-echo "==> Creating the atespace, the template, and the actor"
+echo "==> Creating the atespace, the template, and the actors"
 ate create atespace "$atespace" 2>/dev/null || echo "    atespace exists"
-ate delete actor "$actor" -a "$atespace" 2>/dev/null || true
-ate delete actor-template "$actor" -a "$atespace" 2>/dev/null || true
+for actor in "${actors[@]}"; do ate delete actor "$actor" -a "$atespace" 2>/dev/null || true; done
+ate delete actor-template "$template" -a "$atespace" 2>/dev/null || true
 envsubst '${ACTOR_IMAGE}' <"$here/manifests/actor-template.yaml.tmpl" | ate create actor-template -f -
-ate create actor "$actor" -a "$atespace" --template "$actor"
-ate create egress-policy "$actor" -a "$atespace" -f "$here/manifests/egress-policy.yaml.tmpl"
+for actor in "${actors[@]}"; do
+  ate create actor "$actor" -a "$atespace" --template "$template"
+  ate create egress-policy "$actor" -a "$atespace" -f "$here/manifests/egress-policy.yaml.tmpl"
+done
 
 cat <<EOF
 
-Done. Open the actor's console through Substrate's router, and the egress
-decisions beside it:
+Done. Open each actor's terminal through Substrate's router, then run
+\`claude\` or \`codex\` in it:
 
-  kubectl ate --context $context proxy actor $actor 8000:8080 -a $atespace
-  kubectl --context $context -n ate-system port-forward deploy/openappa 8001:8081
-  open 'http://localhost:8000/?log-port=8001'
+  kubectl ate --context $context proxy actor claude 7681:7681 -a $atespace
+  kubectl ate --context $context proxy actor codex 7682:7681 -a $atespace
+  open http://localhost:7681 http://localhost:7682
+
+Follow OpenAPPA's decisions at the egress gateway:
+
+  kubectl --context $context -n ate-system logs -f deploy/openappa -c extproc
 EOF

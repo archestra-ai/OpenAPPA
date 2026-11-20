@@ -1,10 +1,10 @@
-# ActorTemplate (protojson-shaped ateapi.ActorTemplate) for a stock Claude
-# Code actor. Applied with `kubectl ate create actor-template -f -` after
-# substituting ${ACTOR_IMAGE}.
+# ActorTemplate (protojson-shaped ateapi.ActorTemplate) for an actor running
+# stock Claude Code and stock Codex. Applied with
+# `kubectl ate create actor-template -f -` after substituting ${ACTOR_IMAGE}.
 #
-# Both credentials are placeholders. The actor's EgressPolicy replaces each
-# Authorization header outside the sandbox, so neither token is in the
-# actor's environment, its filesystem, or its snapshots.
+# Every credential is a placeholder. The actor's EgressPolicy replaces each
+# one outside the sandbox, so no token is in the actor's environment, its
+# filesystem, or its snapshots.
 metadata:
   atespace: appa-substrate-demo
   name: agent
@@ -15,14 +15,15 @@ containers:
 - name: agent
   image: ${ACTOR_IMAGE}
   env:
-  - { name: ACTOR_NAME, value: agent }
   - { name: ACTOR_ATESPACE, value: appa-substrate-demo }
-  - { name: GITHUB_TOKEN, value: injected-by-substrate-egress }
   - { name: CLAUDE_CODE_OAUTH_TOKEN, value: injected-by-substrate-egress }
-  - { name: AGENT_EGRESS_HOSTS, value: "api.anthropic.com,api.githubcopilot.com" }
+  - { name: OPENAI_API_KEY, value: injected-by-substrate-egress }
+  - { name: GITHUB_TOKEN, value: injected-by-substrate-egress }
   # The egress gateway terminates TLS for the hosts it injects into, so
   # clients must trust the gateway's CA as well as the public roots.
   - { name: NODE_EXTRA_CA_CERTS, value: /run/ate/egress-trust-bundle/trust-bundle.pem }
+  - { name: SSL_CERT_FILE, value: /run/ate/egress-trust-bundle/trust-bundle.pem }
+  - { name: CODEX_CA_CERTIFICATE, value: /run/ate/egress-trust-bundle/trust-bundle.pem }
   - { name: CURL_CA_BUNDLE, value: /run/ate/egress-trust-bundle/trust-bundle.pem }
   volumeMounts:
   - name: system-info
@@ -35,6 +36,9 @@ volumes:
 - name: system-info
   systemInfo:
     dataSources:
+    - actorMetadata:
+        items:
+        - { field: ACTOR_METADATA_FIELD_NAME, path: actor/name }
     - trustBundle:
         names:
         - egress-mitm.ate.dev

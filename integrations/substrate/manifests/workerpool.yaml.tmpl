@@ -14,11 +14,11 @@ metadata:
   labels:
     workload: appa-substrate-agent
 spec:
-  replicas: 1
+  replicas: 2
   workerImage: ${WORKER_IMAGE}
   template:
-    # One worker holds one actor. Claude Code and the
-    # actor server fit in the actor's 2Gi; the worker keeps the rest.
+    # One worker holds one actor: one for the `claude` actor, one for
+    # `codex`. Either harness fits in the actor's 2Gi.
     resources:
       limits:
         cpu: "1"

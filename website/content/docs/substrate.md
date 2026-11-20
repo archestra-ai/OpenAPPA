@@ -80,27 +80,34 @@ ATE_INSTALL_KIND=true go run ./cmd/ate-setup publish worker-images --kind --cont
 
 The last command prints an `ateworker-gvisor` image reference.
 
-#### 2. Deploy the actor
+#### 2. Deploy the actors
 
-Save a Claude subscription token from `claude setup-token` and a GitHub token to files. Then run the deploy script from the OpenAPPA checkout:
+Save a Claude subscription token from `claude setup-token`, an OpenAI API key, and a GitHub token to files. Then run the deploy script from the OpenAPPA checkout:
 
 ```sh
 WORKER_IMAGE=<the ateworker-gvisor reference> \
 CLAUDE_TOKEN_FILE=<claude token file> \
+OPENAI_KEY_FILE=<openai key file> \
 GITHUB_TOKEN_FILE=<github token file> \
   integrations/substrate/deploy.sh
 ```
 
-The script builds the agent image and creates the actor. The actor's `EgressPolicy` allows only `api.anthropic.com` and `api.githubcopilot.com`, and the egress gateway injects both tokens into the actor's requests.
+The script builds the agent image and creates two actors, `claude` and `codex`, from one template. The image holds stock Claude Code and stock Codex, both configured for GitHub's MCP server, and no OpenAPPA code. Each actor's `EgressPolicy` allows only `api.anthropic.com`, `api.openai.com` and `api.githubcopilot.com`, and the egress gateway injects the three credentials into the actor's requests. The actor holds placeholders.
 
-#### 3. Open the console
+#### 3. Open a terminal in an actor
+
+Each actor serves a terminal on port 7681. Substrate's router carries it, and resumes the actor if it is suspended:
 
 ```sh
-kubectl ate --context kind-substrate proxy actor agent 8000:8080 -a appa-substrate-demo
-kubectl --context kind-substrate -n ate-system port-forward deploy/openappa 8001:8081
+kubectl ate --context kind-substrate proxy actor claude 7681:7681 -a appa-substrate-demo
+kubectl ate --context kind-substrate proxy actor codex 7682:7681 -a appa-substrate-demo
 ```
 
-Open `http://localhost:8000/?log-port=8001`. The left side runs the agent. The right side is the processor's decision log.
+Open `http://localhost:7681` and run `claude`, or open `http://localhost:7682` and run `codex`. Follow the processor's decisions beside it:
+
+```sh
+kubectl --context kind-substrate -n ate-system logs -f deploy/openappa -c extproc
+```
 
 ## Scenario
 
@@ -108,7 +115,7 @@ Ask the agent to read a file in a private repository and post a summary on a pub
 
 1. The agent calls `get_file_contents`. The read would narrow the actor's label to the repository's collaborators. The processor takes the narrowing, and the read runs.
 2. The agent calls `add_issue_comment` on the public issue. A public issue's readers are everyone, and the actor holds data only the collaborators may read. The processor answers the call with OpenAPPA's refusal, and the agent reports it.
-3. **Same comment with curl** sends that comment with `curl` from the same actor. The request is refused the same way, because the label belongs to the actor, not to the client.
+3. The same comment sent with `curl` from the actor's terminal, `mcp-call.sh add_issue_comment '{"owner":…,"repo":…,"issue_number":…,"body":"…"}'`, is refused the same way, because the label belongs to the actor, not to the client. So is the same task given to the other harness in that actor.
 
 ## Policy
 
@@ -117,6 +124,7 @@ The policy includes the GitHub [battery](/docs/battery-github). A tool crosses t
 Start a fresh label for an actor:
 
 ```sh
+kubectl --context kind-substrate -n ate-system port-forward deploy/openappa 8001:8081
 curl -X POST 'localhost:8001/reset?actor=spiffe://substrate-actor.local/worker-for-actor/<atespace>/<actor>'
 ```
 

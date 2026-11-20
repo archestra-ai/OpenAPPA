@@ -7,7 +7,8 @@ includes the following:
 - An `ext_proc` processor that enforces OpenAPPA at Substrate's egress gateway.
   Substrate's installer deploys it beside an OpenAPPA runtime with
   `ate-setup deploy --openappa`.
-- A stock agent image and a deploy script to try it with.
+- An agent image with stock Claude Code and stock Codex, and a deploy script
+  to try it with.
 
 - **Public documentation**: [website/content/docs/substrate.md](../../website/content/docs/substrate.md)
 
@@ -26,13 +27,12 @@ integrations/substrate/
 │   └── testdata/flow.appa.toml    # policy for the runtime-backed test
 ├── manifests/
 │   ├── workerpool.yaml.tmpl       # the agent's namespace and WorkerPool
-│   ├── actor-template.yaml.tmpl   # stock Claude Code actor, placeholder credentials
-│   └── egress-policy.yaml.tmpl    # api.anthropic.com and api.githubcopilot.com, tokens injected
+│   ├── actor-template.yaml.tmpl   # Claude Code and Codex actor, placeholder credentials
+│   └── egress-policy.yaml.tmpl    # Anthropic, OpenAI and GitHub MCP hosts, credentials injected
 ├── workload/                      # the agent image: no OpenAPPA inside
-│   ├── actor-server.mjs           # console, POST /run (Claude Code), POST /curl
-│   ├── mcp-call.sh                # one MCP tool call with curl
-│   └── ui/index.html
-└── deploy.sh                      # build, push, and deploy the agent to a kind install
+│   ├── Dockerfile, entrypoint.sh  # stock Claude Code and Codex in a ttyd terminal
+│   └── mcp-call.sh                # one MCP tool call with curl
+└── deploy.sh                      # build, push, and deploy the actors to a kind install
 ```
 
 ## Test

@@ -297,7 +297,6 @@ func (p *processor) refuse(ex *exchange, id json.RawMessage, kind, text string) 
 		verdict = "refused"
 	}
 	p.record(context.Background(), ex, verdict, reasons(text))
-	log.Printf("appa-extproc: %s %s for %s", verdict, ex.tool, ex.actor)
 	return immediate(200, "application/json", toolError(id, text))
 }
 
@@ -321,6 +320,24 @@ func (p *processor) record(ctx context.Context, ex *exchange, verdict, reason st
 		}
 	}
 	p.config.journal.add(entry)
+	logDecision(entry)
+}
+
+// logDecision writes one line per decision, so `kubectl logs` shows each
+// tool call and result as the gateway decided it.
+func logDecision(e entry) {
+	line := fmt.Sprintf("appa-extproc: %s %s for %s", e.Verdict, e.Tool, e.Actor)
+	var status struct {
+		Audience string `json:"audience"`
+	}
+	if json.Unmarshal(e.Status, &status) == nil && status.Audience != "" {
+		line += "; actor label: readers " + status.Audience
+	}
+	// The first reason fits a log line; the decision log keeps them all.
+	if reason, _, _ := strings.Cut(e.Reason, "\n"); reason != "" {
+		line += "; " + reason
+	}
+	log.Print(line)
 }
 
 func immediate(code int, contentType string, body []byte) *extprocv3.ProcessingResponse {

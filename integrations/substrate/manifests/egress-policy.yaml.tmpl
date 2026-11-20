@@ -1,5 +1,5 @@
-# The actor's EgressPolicy: two hosts, each with its credential injected.
-# Applied with `kubectl ate create egress-policy agent -f -`.
+# The actor's EgressPolicy: three hosts, each with its credential injected.
+# Applied with `kubectl ate create egress-policy <actor> -f -`.
 #
 # A read of a private repository and a comment on a public issue both go to
 # api.githubcopilot.com, so this policy cannot tell them apart. OpenAPPA, on
@@ -12,6 +12,13 @@ rules:
       - header: Authorization
         prefix: "Bearer "
         credentialUri: ate-secret://k8s.io/default/appa-substrate-demo/appa-substrate-demo-credentials/claude-code-oauth-token
+- https:
+    hostnames: ["api.openai.com"]
+    effects:
+      replaceHeaders:
+      - header: Authorization
+        prefix: "Bearer "
+        credentialUri: ate-secret://k8s.io/default/appa-substrate-demo/appa-substrate-demo-credentials/openai-api-key
 - https:
     hostnames: ["api.githubcopilot.com"]
     effects:
