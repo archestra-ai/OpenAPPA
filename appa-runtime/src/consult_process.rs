@@ -283,10 +283,30 @@ pub(crate) const CONSULT_TIMEOUT_VARIABLE: &str = "APPA_CONSULT_TIMEOUT_MS";
 pub(crate) fn without_runtime_variables(
     parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {
-    parent.into_iter().filter(|(key, _)| {
-        !key.to_string_lossy()
-            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
-    })
+    parent
+        .into_iter()
+        .filter(|(key, _)| !in_runtime_namespace(key, PLATFORM_NAME_CASE))
+}
+
+/// How the platform's environment compares variable names.
+enum NameCase {
+    Exact,
+    /// Windows: `appa_token` and `APPA_TOKEN` name one variable.
+    AsciiInsensitive,
+}
+
+const PLATFORM_NAME_CASE: NameCase = match cfg!(windows) {
+    true => NameCase::AsciiInsensitive,
+    false => NameCase::Exact,
+};
+
+fn in_runtime_namespace(key: &std::ffi::OsStr, case: NameCase) -> bool {
+    let prefix = crate::config::RUNTIME_VARIABLE_PREFIX.as_bytes();
+    let head = key.as_encoded_bytes().get(..prefix.len());
+    match case {
+        NameCase::Exact => head == Some(prefix),
+        NameCase::AsciiInsensitive => head.is_some_and(|head| head.eq_ignore_ascii_case(prefix)),
+    }
 }
 
 async fn run_command_process(
@@ -393,6 +413,29 @@ async fn run_command_process(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Where names ignore case, the runtime's namespace does too: a lower-case `appa_`
+    /// credential is the runtime's own, and stays out of the child.
+    #[test]
+    fn the_runtime_namespace_follows_the_platforms_name_case() {
+        use std::ffi::OsStr;
+        for (key, exact, insensitive) in [
+            ("APPA_TOKEN", true, true),
+            ("appa_token", false, true),
+            ("Appa_Provider_Key", false, true),
+            ("APPA", false, false),
+            ("APPAX_TOKEN", false, false),
+            ("PATH", false, false),
+            ("", false, false),
+        ] {
+            assert_eq!(in_runtime_namespace(OsStr::new(key), NameCase::Exact), exact, "{key}");
+            assert_eq!(
+                in_runtime_namespace(OsStr::new(key), NameCase::AsciiInsensitive),
+                insensitive,
+                "{key}"
+            );
+        }
+    }
 
     /// A command that names no executable: a consult that tries to start it is unreachable.
     fn missing_command() -> ResolverCommand {
