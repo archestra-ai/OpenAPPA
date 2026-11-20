@@ -15,8 +15,9 @@ use appa_runtime_api::Ruling;
 /// only — the HTTP path's cap behavior is untouched.
 pub(crate) const MODULE_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 
-/// The `builtin` names the runtime answers before any module, so a module under one is
-/// never reached. `jev` serves Annotators only, which no module can be.
+/// The `builtin` names the runtime answers itself for an authority or a sanitizer. Module
+/// names are one namespace across both kinds, so a module cannot take a name the runtime
+/// answers for either kind. `jev` serves Annotators only, which no module can be.
 const REFUSED_MODULE_NAMES: &[&str] = &[
     "hitl",
     "attest-schema",

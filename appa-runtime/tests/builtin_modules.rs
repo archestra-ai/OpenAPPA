@@ -214,17 +214,22 @@ fn a_module_claiming_a_stock_name_refuses() {
 }
 
 /// Where the host serves `archestra`, a sanitizer bound to that builtin reaches the host's
-/// transport, never a module, so a module cannot take the name.
-#[cfg(feature = "archestra")]
+/// transport, never a module, so a module cannot take the name. Elsewhere the name is free,
+/// which shows the same module is otherwise a valid one.
 #[test]
-fn a_module_claiming_the_archestra_name_refuses() {
+fn a_module_claims_the_archestra_name_only_where_the_host_does_not_serve_it() {
     let deployment = Deployment::new(CONFIG);
     deployment.install(
         &build_module("appa-module-fixture-bad", Some("claims-archestra")),
         &library_filename("libclaims_archestra"),
     );
-    assert!(matches!(deployment.open(), Err(OpenError::Modules(_))));
-    assert!(!deployment.db().exists(), "a refused open must create no database");
+    let opened = deployment.open();
+    if cfg!(feature = "archestra") {
+        assert!(matches!(opened, Err(OpenError::Modules(_))));
+        assert!(!deployment.db().exists(), "a refused open must create no database");
+    } else {
+        assert!(opened.is_ok());
+    }
 }
 
 #[test]
