@@ -28,7 +28,7 @@ pub(crate) use self::mcp::SERVER as RUNTIME_SERVER;
 pub use self::paths::installed_config_path;
 pub use self::removal::{Purge, PurgedRuntime, claude_code_purge, claude_code_remove};
 
-use self::config::{ComposedPolicy, discard_file, verify_config};
+use self::config::{ComposedPolicy, verify_config};
 use self::endpoint::{
     Endpoint, EndpointOwner, RuntimeOutcome, clear_stale_endpoint, endpoint_health, endpoint_owner, reconcile_policy,
     stop_owned_appa_runtime, unidentified, verify_runtime_deployment,
@@ -559,35 +559,21 @@ fn install_runtime(source: &Path, target: &Path, compensation: &mut Compensation
             source,
         })?;
     }
-    let temporary = target.with_extension(format!("installing-{}", std::process::id()));
-    if let Err(source) = fs::copy(source, &temporary) {
-        discard_file(&temporary);
-        return Err(InitError::InstallRuntime {
-            path: target.to_path_buf(),
-            source,
-        });
-    }
-    let permissions = fs::metadata(source)
-        .and_then(|metadata| {
-            let permissions = metadata.permissions();
-            fs::set_permissions(&temporary, permissions)
-        })
-        .map_err(|source| InitError::InstallRuntime {
-            path: target.to_path_buf(),
-            source,
-        });
-    if let Err(error) = permissions {
-        discard_file(&temporary);
-        return Err(error);
-    }
-    if let Err(source) = fs::rename(&temporary, target) {
-        discard_file(&temporary);
-        return Err(InitError::InstallRuntime {
-            path: target.to_path_buf(),
-            source,
-        });
-    }
-    Ok(())
+    let install = |source| InitError::InstallRuntime {
+        path: target.to_path_buf(),
+        source,
+    };
+    // Dropping the stage removes whatever this call staged in it, and nothing else.
+    let stage = tempfile::Builder::new()
+        .prefix(".appa-installing-")
+        .tempdir_in(target.parent().unwrap_or(Path::new(".")))
+        .map_err(install)?;
+    let temporary = stage.path().join(appa_filename());
+    fs::copy(source, &temporary).map_err(install)?;
+    fs::metadata(source)
+        .and_then(|metadata| fs::set_permissions(&temporary, metadata.permissions()))
+        .map_err(install)?;
+    fs::rename(&temporary, target).map_err(install)
 }
 
 fn runtime_contents_match(source: &Path, target: &Path) -> Result<bool, InitError> {
@@ -887,6 +873,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_failed_runtime_copy_leaves_entries_it_did_not_create() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("missing-source");
+        let target = root.path().join("installed");
+        let occupant = target.with_extension(format!("installing-{}", std::process::id()));
+        fs::write(&occupant, b"left by another install").unwrap();
+        let mut compensation = Compensation::default();
+        assert!(matches!(
+            install_runtime(&source, &target, &mut compensation),
+            Err(InitError::InstallRuntime { .. })
+        ));
+        let entries: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(entries, std::slice::from_ref(&occupant));
+        assert_eq!(fs::read(&occupant).unwrap(), b"left by another install");
+    }
 
     #[test]
     fn launcher_reuse_preserves_mtime_but_repairs_disabled_contents_and_permissions() {

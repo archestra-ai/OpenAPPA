@@ -17,14 +17,6 @@ pub(crate) enum ComposedPolicy {
     Unknowable,
 }
 
-/// Remove a file this activation wrote and abandons. Nothing it protects is lost
-/// with it, so a failure is noted beside the error being returned.
-pub(super) fn discard_file(path: &Path) {
-    if let Err(error) = super::remove_if_present(path) {
-        tracing::warn!(path = %path.display(), %error, "cannot remove a file the activation abandoned");
-    }
-}
-
 /// The config the runtime will be started against, put through the runtime's
 /// own startup refusals first.
 ///
