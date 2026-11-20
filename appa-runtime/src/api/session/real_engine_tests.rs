@@ -1767,6 +1767,86 @@ async fn a_denial_retires_plans_naming_the_denier_and_sticks() {
     assert_eq!(after, before, "no new offer names the denying authority");
 }
 
+/// One plan needs both `alpha` (mark `first`) and `beta` (mark `second`).
+fn two_authorities(alpha: &str, beta: &str) -> Config {
+    config_from(&format!(
+        r#"[policy]
+version = 2
+
+[[policy.tool]]
+name = "wire"
+parameters = {{ type = "object", properties = {{ amount = {{ type = "integer" }} }} }}
+requires = {{ attention = ["first", "second"] }}
+delta = {{}}
+
+[[policy.authority]]
+name = "alpha"
+[policy.authority.permits]
+attention = ["first"]
+
+[[policy.authority]]
+name = "beta"
+[policy.authority.permits]
+attention = ["second"]
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+[externals.authorities.alpha]
+url = "{alpha}"
+[externals.authorities.beta]
+url = "{beta}"
+"#
+    ))
+}
+
+/// A deny beside an abstention denies the plan whichever of the two comes first in it.
+#[tokio::test]
+async fn a_deny_wins_over_an_abstention_in_either_plan_order() {
+    let deny = serde_json::json!({"ruling": "deny", "reason": "no"});
+    let abstain = serde_json::json!({"note": "still thinking"});
+    for (alpha, beta, denier) in [(&deny, &abstain, "alpha"), (&abstain, &deny, "beta")] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let config = two_authorities(&stub(alpha.clone()).await, &stub(beta.clone()).await);
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
+        let offer = surfaced_offer(&runtime);
+        let before = runtime.minted_offers(&root(), &root()).len();
+        assert!(
+            matches!(
+                session
+                    .on_remedy(offer, RemedyArguments::default(), None, None)
+                    .await
+                    .expect("the denial is delivered"),
+                RemedyDecision::Declined { .. },
+            ),
+            "{denier}'s deny must decline the plan beside the other's abstention"
+        );
+        let deniers: Vec<String> = runtime
+            .log_facts(&root())
+            .iter()
+            .filter_map(|fact| match fact {
+                appa_engine::fact::Fact::OfferDenied { authority, .. } => Some(authority.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deniers, [denier]);
+        assert!(matches!(
+            session
+                .on_tool_call(wire(500), false)
+                .await
+                .expect("the re-block is delivered"),
+            ToolCallDecision::Deny { .. },
+        ));
+        let after = runtime.minted_offers(&root(), &root()).len();
+        assert_eq!(after, before, "no new offer names the denying authority");
+    }
+}
+
 /// The denial leads the call's block with the authority that denied the plan.
 #[tokio::test]
 async fn a_denial_names_the_authority_that_denied_the_plan() {
