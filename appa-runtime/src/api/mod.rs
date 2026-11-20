@@ -3990,6 +3990,27 @@ impl Runtime {
     /// case with one session's standing.
     #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+        self.take_vouched_from(key, None)
+    }
+
+    /// [`Runtime::take_vouched`] for a caller that already knows whose call this is: a
+    /// standing held by any other actor answers `Nobody` and stays where it is, so a request
+    /// under the wrong session cannot spend another session's release.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn take_vouched_by(
+        &self,
+        key: &PermitKey,
+        expected: &Actor,
+    ) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+        self.take_vouched_from(key, Some(expected))
+    }
+
+    #[cfg(any(test, feature = "daemon"))]
+    fn take_vouched_from(
+        &self,
+        key: &PermitKey,
+        expected: Option<&Actor>,
+    ) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         // The spelling is read before the store is asked anything. An MCP request names the
         // key, so a caller over a non-loopback listener can ask about ids this runtime never
         // minted, and learning that no such offer exists must not cost a walk over every
@@ -4017,6 +4038,9 @@ impl Runtime {
             // is the siblings only — and where the key names no sibling, which is every
             // offer and every ticket only one session quoted, there is nothing to read.
             let host::LiveVouch { actor, ruling, .. } = standing_in(log, key)?;
+            if expected.is_some_and(|expected| *expected != actor) {
+                return Err(Unvouched::Nobody);
+            }
             if self.live_holder(key, Some(&root))?.is_some() {
                 return Err(Unvouched::Ambiguous);
             }
@@ -4698,12 +4722,16 @@ fn inventory_digest(inventory: &appa_runtime_api::inventory::ToolInventory) -> S
     crate::engine::policy_file_key(&bytes)
 }
 
-/// The `[policy]` table of a stored policy file, with the key of the bytes it came from.
+/// The `[policy]` table of a policy file, with the key of the bytes it came from.
 ///
-/// A trajectory's own bytes rather than the deployment's current ones wherever there is a
-/// trajectory: the log pins its policy file, so a reload since the session opened does not
-/// rewrite the rules a report explains. The key comes from the same bytes, so the document and
-/// its fingerprint are one snapshot.
+/// A report passes the bytes the reporting view serves when it projects, with or without a
+/// trajectory: every family follows its deployment rather than the file it opened with, and the
+/// trust chain and vouched tool names the same report carries come from that same serving
+/// deployment, or are empty when it does not resolve for the family (a publish that outran the
+/// projection, for one). A batch stamped with an earlier revision was decided under that
+/// revision's file, which the report does not carry, and its numeric ranks keep that
+/// revision's chain. The key comes from the same bytes, so the document and its fingerprint
+/// are one snapshot.
 #[cfg(feature = "daemon")]
 fn policy_section(bytes: &[u8]) -> Option<(toml::Value, String)> {
     let text = std::str::from_utf8(bytes).ok()?;

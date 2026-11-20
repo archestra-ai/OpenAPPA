@@ -154,6 +154,10 @@ impl Session {
     /// control subagent context releases a spawn unmarked, so nothing is applied there: the
     /// host declares for every spawn and cannot know the deployment's choice.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
+        // A release refuses an empty call id; refused here, before a block or a plan writes.
+        if proposal.call_id.as_deref() == Some("") {
+            return Err(EventError::CallIdReused);
+        }
         let invocation = appa_eventlog::InvocationNonce(rand::random());
         let (mut decision, took) = self.propose_resolving(&proposal, Some(invocation)).await?;
         let (Some(spawn), ToolCallDecision::Deny { .. }) = (proposal.spawn, &decision) else {
