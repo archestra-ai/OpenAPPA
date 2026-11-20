@@ -356,6 +356,35 @@ mod tests {
 
     #[test]
     fn extraction_refuses_traversal_and_specials() {
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_link_name("/etc/passwd").unwrap();
+        link.set_path("link").unwrap();
+        // The builder refuses `..` in a path, so the escaping name is written raw.
+        let mut escaping = tar::Header::new_gnu();
+        escaping.as_old_mut().name[..4].copy_from_slice(b"../x");
+        for mut header in [link, escaping] {
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_cksum();
+            let source = tempfile::tempdir().unwrap();
+            let archive = source.path().join("bundle.tar.gz");
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+                fs::File::create(&archive).unwrap(),
+                flate2::Compression::fast(),
+            ));
+            builder.append(&header, std::io::empty()).unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+            let destination = source.path().join("tree");
+            fs::create_dir(&destination).unwrap();
+
+            assert!(matches!(
+                extract_archive(&archive, &destination),
+                Err(ArchiveError::Malformed { .. })
+            ));
+            assert!(fs::symlink_metadata(destination.join("link")).is_err());
+            assert!(fs::symlink_metadata(source.path().join("x")).is_err());
+        }
         for escaping in ["../escape", "/absolute", "plugin/../../escape"] {
             assert_eq!(safe_relative(Path::new(escaping)), EntryPath::Escaping);
         }
