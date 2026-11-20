@@ -1,6 +1,8 @@
 //! Secret redaction: the stock `redact-secrets` sanitizer's text pass, and the same pass
 //! over an annotation's call before it leaves for a model provider.
 
+use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -68,10 +70,124 @@ static SECRET_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a fixed pattern")
 });
 
+/// A quoted value at the start of the text read past backslash-escaped quotes on its line,
+/// to a closing quote that whitespace, a delimiter or the end of the text follows.
+static ESCAPED_QUOTED_VALUE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?x)
+        ^ ( "(?: [^"\\\n\x0B\x0C\r\x{85}\x{2028}\x{2029}] | \\[^\n\x0B\x0C\r\x{85}\x{2028}\x{2029}] )*"
+          | '(?: [^'\\\n\x0B\x0C\r\x{85}\x{2028}\x{2029}] | \\[^\n\x0B\x0C\r\x{85}\x{2028}\x{2029}] )*' )
+        (?: [\s`,;&|)\]}] | $ )
+        "#,
+    )
+    .expect("a fixed pattern")
+});
+
 /// A netrc `password` entry, on its own line or after the machine and login it belongs to.
 static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^(\s*(?:machine\s+\S+\s+(?:login\s+\S+\s+)?)?password\s+)(\S+)").expect("a fixed pattern")
 });
+
+/// Every secret assignment's value and every netrc password replaced, quotes kept. A
+/// quoted value that ends at a backslash-escaped quote is also read past the escape.
+/// Whether the backslash escapes depends on syntax no pattern here sees, so both readings
+/// are masked, and the longer one hides nothing: assignments are found on the text as
+/// given, and netrc passwords on the text with only the plain readings masked.
+fn mask_keyed_values(text: &str) -> Cow<'_, str> {
+    let mut plain: Vec<Range<usize>> = Vec::new();
+    let mut escaped: Vec<Range<usize>> = Vec::new();
+    for found in SECRET_ASSIGNMENT.captures_iter(text) {
+        let value = found.get(2).expect("the pattern captures a value");
+        match value.as_str().as_bytes() {
+            [b'"' | b'\'', .., b'\\', _] => {
+                plain.push(value.start() + 1..value.end() - 1);
+                if let Some(reading) = ESCAPED_QUOTED_VALUE.captures(&text[value.start()..]) {
+                    let quoted = reading.get(1).expect("the pattern captures a quoted value");
+                    escaped.push(value.start() + 1..value.start() + quoted.end() - 1);
+                }
+            }
+            [b'"' | b'\'', ..] => plain.push(value.start() + 1..value.end() - 1),
+            _ => plain.push(value.range()),
+        }
+    }
+    let masked = mask_spans(text, &plain);
+    let mut source = SourceOffsets::new(&plain);
+    let passwords: Vec<Range<usize>> = NETRC_PASSWORD
+        .captures_iter(&masked)
+        .map(|found| {
+            let password = found.get(2).expect("the pattern captures a password");
+            source.of(password.start())..source.of(password.end())
+        })
+        .collect();
+    match (escaped.is_empty(), passwords.is_empty()) {
+        (true, true) => masked,
+        _ => {
+            let mut spans = plain;
+            spans.extend(escaped);
+            spans.extend(passwords);
+            spans.sort_by_key(|span| (span.start, span.end));
+            spans.dedup_by(|next, kept| match next.start < kept.end {
+                true => {
+                    kept.end = kept.end.max(next.end);
+                    true
+                }
+                false => false,
+            });
+            Cow::Owned(mask_spans(text, &spans).into_owned())
+        }
+    }
+}
+
+/// The text with each span, sorted and disjoint, replaced by the placeholder.
+fn mask_spans<'a>(text: &'a str, spans: &[Range<usize>]) -> Cow<'a, str> {
+    if spans.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let mut masked = String::with_capacity(text.len());
+    let mut copied = 0;
+    for span in spans {
+        masked.push_str(&text[copied..span.start]);
+        masked.push_str(SECRET_PLACEHOLDER);
+        copied = span.end;
+    }
+    masked.push_str(&text[copied..]);
+    Cow::Owned(masked)
+}
+
+/// Offsets in [`mask_spans`]'s output mapped back to its input, asked in nondecreasing
+/// order. None falls inside a placeholder: a netrc password starts after whitespace and
+/// ends before it or at the end of the text, and the placeholder holds no whitespace.
+struct SourceOffsets<'a> {
+    spans: std::slice::Iter<'a, Range<usize>>,
+    next: Option<&'a Range<usize>>,
+    source_passed: usize,
+    masked_passed: usize,
+}
+
+impl<'a> SourceOffsets<'a> {
+    fn new(spans: &'a [Range<usize>]) -> SourceOffsets<'a> {
+        let mut spans = spans.iter();
+        let next = spans.next();
+        SourceOffsets {
+            spans,
+            next,
+            source_passed: 0,
+            masked_passed: 0,
+        }
+    }
+
+    fn of(&mut self, offset: usize) -> usize {
+        while let Some(span) = self
+            .next
+            .filter(|span| offset > span.start + self.masked_passed - self.source_passed)
+        {
+            self.source_passed += span.len();
+            self.masked_passed += SECRET_PLACEHOLDER.len();
+            self.next = self.spans.next();
+        }
+        offset + self.source_passed - self.masked_passed
+    }
+}
 
 /// A run long enough to be a credential and shaped like one; the entropy test decides. `=`
 /// is a separator here, not base64 padding: the run before it is what carries the entropy.
@@ -84,17 +200,7 @@ pub(crate) fn redact_secrets(input: &str) -> String {
     let masked = URL_PASSWORD.replace_all(&masked, |found: &regex::Captures<'_>| {
         format!("{}{SECRET_PLACEHOLDER}@", &found[1])
     });
-    let masked = SECRET_ASSIGNMENT.replace_all(&masked, |found: &regex::Captures<'_>| {
-        let quote = match found[2].as_bytes().first() {
-            Some(b'"') => "\"",
-            Some(b'\'') => "'",
-            _ => "",
-        };
-        format!("{}{quote}{SECRET_PLACEHOLDER}{quote}", &found[1])
-    });
-    let masked = NETRC_PASSWORD.replace_all(&masked, |found: &regex::Captures<'_>| {
-        format!("{}{SECRET_PLACEHOLDER}", &found[1])
-    });
+    let masked = mask_keyed_values(&masked);
     let masked = KNOWN_TOKEN.replace_all(&masked, SECRET_PLACEHOLDER);
     let masked = AWS_SECRET_KEY_RUN.replace_all(&masked, |found: &regex::Captures<'_>| {
         let run = &found[0];
@@ -229,6 +335,74 @@ mod tests {
                 format!("machine api.example.com login me password {masked}"),
             ),
             ("DB_PASSWORD='p@ss'", format!("DB_PASSWORD='{masked}'")),
+            ("DB_PASSWORD=\"\"", format!("DB_PASSWORD=\"{masked}\"")),
+            (
+                r#"password="ab\"cdefgh" next"#,
+                format!(r#"password="{masked}" next"#),
+            ),
+            (
+                r"password='ab\'cdefgh' next",
+                format!("password='{masked}' next"),
+            ),
+            (
+                r#"{"password": "a\\\"b\\c", "user": "me"}"#,
+                format!(r#"{{"password": "{masked}", "user": "me"}}"#),
+            ),
+            // A backslash that escapes nothing: the escaped reading finds no closing quote
+            // that ends a value, and every later assignment and netrc password is masked.
+            (
+                r#"DIR_PASSWORD="C:\dir\" next"#,
+                format!(r#"DIR_PASSWORD="{masked}" next"#),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD=\"hunter2\"",
+                format!("DIR_PASSWORD=\"{masked}\"\nDB_PASSWORD=\"{masked}\""),
+            ),
+            (
+                r"password='C:\dir\' token='hunter2'",
+                format!("password='{masked}' token='{masked}'"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\u{2028}DB_PASSWORD=\"hunter2\"",
+                format!("DIR_PASSWORD=\"{masked}\"\u{2028}DB_PASSWORD=\"{masked}\""),
+            ),
+            (
+                r#"password='C:\dir\' token="ab'cd\"cdefgh""#,
+                format!(r#"password='{masked}' token="{masked}""#),
+            ),
+            (
+                r#"machine api.example.com login token="ab\" password "hunter2""#,
+                format!(r#"machine api.example.com login token="{masked}" password {masked}"#),
+            ),
+            (
+                r#"machine token="foo bar\" password abc",hunter2"#,
+                format!(r#"machine token="{masked}"#),
+            ),
+            (
+                "token=\"x\npassword inner\"suffix\"",
+                format!("token=\"{masked}\"suffix\""),
+            ),
+            (
+                r#"`password="ab\"cdefgh"`"#,
+                format!(r#"`password="{masked}"`"#),
+            ),
+            (
+                r#"export password="ab\"cdefgh"|cat"#,
+                format!(r#"export password="{masked}"|cat"#),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\u{2028}DB_PASSWORD=\" hunter2\"",
+                format!("DIR_PASSWORD=\"{masked}\"\u{2028}DB_PASSWORD=\"{masked}\""),
+            ),
+            (
+                "machine h login token=\"\" password hunter2",
+                format!("machine h login token=\"{masked}\" password {masked}"),
+            ),
+            (
+                "machine h login me password api_key=abc\nnext",
+                format!("machine h login me password {masked}\nnext"),
+            ),
+            ("password=token=\"public\"", format!("password={masked}\"public\"")),
             (
                 "{\"password\": \"hunter2\", \"user\": \"me\"}",
                 format!("{{\"password\": \"{masked}\", \"user\": \"me\"}}"),
