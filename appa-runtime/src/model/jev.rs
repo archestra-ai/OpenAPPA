@@ -28,7 +28,7 @@ use futures_util::stream::FuturesUnordered;
 use serde::Serialize;
 use tokio::time::Instant;
 
-use super::MAX_ATTEMPTS;
+use super::{MAX_ATTEMPTS, RETRY_BACKOFF};
 use crate::config::{Endpoint, EndpointHost, JevProfile, ProfileKey, Token};
 use crate::consult::{AnnotationArtifact, Consult, ConsultBody};
 use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
@@ -219,7 +219,8 @@ impl JevBackend {
     }
 
     /// Jev's labels: the first attempt that answers them, hedged when an attempt is slow and
-    /// retried after a 5xx or a connection failure while the budget allows.
+    /// retried after a 429, a 5xx or a connection failure while the budget allows. Once an
+    /// attempt settles with a 429, no attempt of the consult starts for [`RETRY_BACKOFF`].
     async fn ask(
         &self,
         body: &[u8],
@@ -243,12 +244,14 @@ impl JevBackend {
             }};
         }
         let mut prompt = None;
+        // A 429 holds every later retry and hedge of this consult back by `RETRY_BACKOFF`.
+        let mut not_before = Instant::now();
         launch!(pool.current(&self.url, self.timing.pool_idle_timeout));
         let settled = loop {
             let (_, last_start, patience) = launched.last().expect("an attempt is launched first");
-            let hedge_at = *last_start + *patience;
+            let hedge_at = (*last_start + *patience).max(not_before);
             let may_hedge =
-                in_flight.len() == 1 && launched.len() < MAX_ATTEMPTS && hedge_at + self.timing.min_attempt <= deadline;
+                in_flight.len() == 1 && self.may_launch(launched.len(), hedge_at.max(Instant::now()), deadline);
             tokio::select! {
                 biased;
                 Some(Attempted { index, reply }) = in_flight.next() => {
@@ -273,20 +276,33 @@ impl JevBackend {
                         Reply::Status { status, body } => {
                             exchange.last = Some((status, body));
                             let reason = NoAnswerReason::NonSuccess { status, detail: None };
-                            if status < 500 {
-                                break Err((JevFailure::NoAnswer, reason));
+                            match status {
+                                429 => not_before = not_before.max(Instant::now() + RETRY_BACKOFF),
+                                500.. => {}
+                                _ => break Err((JevFailure::NoAnswer, reason)),
                             }
                             reason
                         }
                         Reply::Connection => NoAnswerReason::Transport,
                     };
-                    match (in_flight.is_empty(), self.may_retry(launched.len(), deadline)) {
-                        (false, _) => {}
-                        (true, true) => launch!(pool.current(&self.url, self.timing.pool_idle_timeout)),
-                        (true, false) => break Err((JevFailure::NoAnswer, failed)),
+                    if in_flight.is_empty() {
+                        let at = not_before.max(Instant::now());
+                        if !self.may_launch(launched.len(), at, deadline) {
+                            break Err((JevFailure::NoAnswer, failed));
+                        }
+                        tokio::time::sleep_until(at).await;
+                        // The wake can come late: the budget is checked again before the attempt.
+                        if !self.may_launch(launched.len(), Instant::now(), deadline) {
+                            break Err((JevFailure::NoAnswer, failed));
+                        }
+                        launch!(pool.current(&self.url, self.timing.pool_idle_timeout));
                     }
                 }
-                _ = tokio::time::sleep_until(hedge_at), if may_hedge => launch!(pool.fresh(&self.url, self.timing.pool_idle_timeout)),
+                _ = tokio::time::sleep_until(hedge_at), if may_hedge => {
+                    if self.may_launch(launched.len(), Instant::now(), deadline) {
+                        launch!(pool.fresh(&self.url, self.timing.pool_idle_timeout));
+                    }
+                }
                 _ = tokio::time::sleep_until(deadline) => break Err((JevFailure::NoAnswer, NoAnswerReason::Timeout)),
             }
         };
@@ -311,8 +327,8 @@ impl JevBackend {
         settled
     }
 
-    fn may_retry(&self, launched: usize, deadline: Instant) -> bool {
-        launched < MAX_ATTEMPTS && Instant::now() + self.timing.min_attempt <= deadline
+    fn may_launch(&self, launched: usize, at: Instant, deadline: Instant) -> bool {
+        launched < MAX_ATTEMPTS && at + self.timing.min_attempt <= deadline
     }
 
     async fn attempt(&self, index: usize, slot: Arc<ClientSlot>, body: Vec<u8>, key: &str) -> Attempted {
@@ -889,6 +905,7 @@ mod tests {
         peers: Vec<SocketAddr>,
         per_connection: Vec<usize>,
         requests: Vec<(HeaderMap, serde_json::Value)>,
+        arrivals: Vec<Instant>,
     }
 
     /// A local Jev API. The n-th request gets the n-th scripted reply (the last one
@@ -908,6 +925,12 @@ mod tests {
 
         fn requests(&self) -> Vec<(HeaderMap, serde_json::Value)> {
             self.seen.lock().unwrap().requests.clone()
+        }
+
+        /// The time between the arrivals of the `earlier`-th and the `later`-th request.
+        fn gap(&self, earlier: usize, later: usize) -> Duration {
+            let arrivals = &self.seen.lock().unwrap().arrivals;
+            arrivals[later] - arrivals[earlier]
         }
     }
 
@@ -938,6 +961,7 @@ mod tests {
                             seen.per_connection[connection] += 1;
                             let request = serde_json::from_str(&body).expect("the request is JSON");
                             seen.requests.push((headers, request));
+                            seen.arrivals.push(Instant::now());
                             (connection, seen.requests.len() - 1)
                         };
                         tokio::time::sleep(stub.delays.get(connection).copied().unwrap_or_default()).await;
@@ -1311,6 +1335,50 @@ mod tests {
         assert_eq!(answered, Ok(jev_annotation()));
         assert_eq!(attempts(&record), json!(["http_503", "ok"]));
         assert_eq!(stub.requests().len(), 2);
+    }
+
+    /// A 429 is retried after [`RETRY_BACKOFF`], and only while the budget leaves room for
+    /// the backoff and another attempt.
+    #[tokio::test]
+    async fn a_rate_limit_is_retried_after_the_backoff() {
+        let (url, stub) = serve(vec![Scripted::Status(429), Scripted::Answers], vec![]).await;
+        let (answered, record) = backend(&url, Duration::from_secs(2), FAST).consult(&call()).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        assert_eq!(attempts(&record), json!(["http_429", "ok"]));
+        assert_eq!(stub.requests().len(), 2);
+        assert!(stub.gap(0, 1) >= RETRY_BACKOFF, "{:?}", stub.gap(0, 1));
+
+        // The budget left after the 429 holds the backoff, but not another attempt after it.
+        let timeout = FAST.budget_margin + RETRY_BACKOFF + FAST.min_attempt - Duration::from_millis(10);
+        let (url, stub) = serve(vec![Scripted::Status(429), Scripted::Answers], vec![]).await;
+        let (answered, record) = backend(&url, timeout, FAST).consult(&call()).await;
+        assert_eq!(
+            answered,
+            Err(NoAnswerReason::NonSuccess {
+                status: 429,
+                detail: None
+            })
+        );
+        assert_eq!(attempts(&record), json!(["http_429"]));
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    /// A 429 on a hedge holds back the consult's next attempt while the first is still in
+    /// flight: the retry after the first attempt's 503, and a second hedge beside it.
+    #[tokio::test]
+    async fn a_rate_limit_on_a_hedge_holds_back_the_next_attempt() {
+        // FAST hedges the first attempt after 300 ms, and its 429 comes back at once: the
+        // first attempt settles well after it, and the held-back attempt goes out at about
+        // 800 ms, well before the first attempt's 1.5 s answer.
+        let slow = Duration::from_millis(600);
+        let slower = Duration::from_millis(1500);
+        for (first, delay) in [(Scripted::Status(503), slow), (Scripted::Answers, slower)] {
+            let (url, stub) = serve(vec![first, Scripted::Status(429), Scripted::Answers], vec![delay]).await;
+            let (answered, _) = backend(&url, Duration::from_secs(2), FAST).consult(&call()).await;
+            assert_eq!(answered, Ok(jev_annotation()), "{delay:?}");
+            assert_eq!(stub.requests().len(), 3, "{delay:?}");
+            assert!(stub.gap(1, 2) >= RETRY_BACKOFF, "{delay:?}: {:?}", stub.gap(1, 2));
+        }
     }
 
     #[tokio::test]
