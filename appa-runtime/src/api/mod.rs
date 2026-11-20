@@ -4011,6 +4011,27 @@ impl Runtime {
 
     #[cfg(any(test, feature = "daemon"))]
     pub(crate) fn take_vouched(&self, key: &PermitKey) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+        self.take_vouched_from(key, None)
+    }
+
+    /// [`Runtime::take_vouched`] for a caller that already knows whose call this is: a
+    /// standing held by any other actor answers `Nobody` and stays where it is, so a request
+    /// under the wrong session cannot spend another session's release.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn take_vouched_by(
+        &self,
+        key: &PermitKey,
+        expected: &Actor,
+    ) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
+        self.take_vouched_from(key, Some(expected))
+    }
+
+    #[cfg(any(test, feature = "daemon"))]
+    fn take_vouched_from(
+        &self,
+        key: &PermitKey,
+        expected: Option<&Actor>,
+    ) -> Result<(Actor, Option<appa_runtime_api::Ruling>), Unvouched> {
         // The spelling is read before the store is asked anything. An MCP request names the
         // key, so a caller over a non-loopback listener can ask about ids this runtime never
         // minted, and learning that no such offer exists must not cost a walk over every
@@ -4038,6 +4059,9 @@ impl Runtime {
             // is the siblings only — and where the key names no sibling, which is every
             // offer and every ticket only one session quoted, there is nothing to read.
             let host::LiveVouch { actor, ruling, .. } = standing_in(log, key)?;
+            if expected.is_some_and(|expected| *expected != actor) {
+                return Err(Unvouched::Nobody);
+            }
             if self.live_holder(key, Some(&root))?.is_some() {
                 return Err(Unvouched::Ambiguous);
             }
