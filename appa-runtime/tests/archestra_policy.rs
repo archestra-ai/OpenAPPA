@@ -223,6 +223,15 @@ const TABLE: &[Class] = &[
             ("list_openappa_consults", r#"{"sessionId": "s"}"#),
             ("list_openappa_operations", r#"{"decision": "deny_call"}"#),
             ("preview_guardrails_policy_change", r#"{"edits": []}"#),
+            ("get_guardrails_server_rules", r#"{"mcpServerId": "s"}"#),
+            (
+                "preview_guardrails_server_rules_change",
+                r#"{"mcpServerId": "s", "content": "", "expectedCommit": "c"}"#,
+            ),
+            (
+                "get_guardrails_server_rules_change_status",
+                r#"{"mcpServerId": "s", "number": 1}"#,
+            ),
             ("read_file", r#"{"id": "f"}"#),
             ("get_agent", r#"{"id": "a"}"#),
             ("get_agent_run", r#"{"run_id": "r"}"#),
@@ -283,6 +292,10 @@ const TABLE: &[Class] = &[
             (
                 "propose_tuner_suggestion",
                 r#"{"fingerprint": "f", "rationale": "r", "policy_change": {"expected_revision": 1, "edits": []}}"#,
+            ),
+            (
+                "propose_guardrails_server_rules_change",
+                r#"{"mcpServerId": "s", "content": "", "expectedCommit": "c", "summary": "m"}"#,
             ),
             ("create_agent", ORGANIZATION),
             (
