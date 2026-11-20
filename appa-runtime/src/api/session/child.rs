@@ -184,12 +184,18 @@ impl Session {
         }
     }
 
-    /// The calls a child's end closes, or how a child that already ended did so.
+    /// The calls a child's end closes, or how a child that already ended did so. A trajectory
+    /// with no parent is refused here, before its end closes any call it has open.
     fn child_calls(&self) -> Result<ChildCalls, EventError> {
         self.with_view(|context| {
             Ok(match context.engine().liveness(context.view, &self.trajectory) {
                 Liveness::Ended => ChildCalls::Ended(context.child_end(&self.trajectory)),
-                Liveness::Live | Liveness::Unopened => ChildCalls::Open(context.open_dispatches()),
+                Liveness::Live | Liveness::Unopened => {
+                    match (context.open_dispatches(), context.parent_of(&self.trajectory)) {
+                        (open, None) if !open.is_empty() => return Err(EventError::NotAChild),
+                        (open, _) => ChildCalls::Open(open),
+                    }
+                }
             })
         })
     }
