@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tomllib
@@ -192,6 +193,60 @@ def test_a_run_without_a_complete_summary_is_not_published(tmp_path: Path):
     (run / "run-config.json").write_text(json.dumps({"git_sha": "0" * 40, "git_dirty": False}))
     done = _cli("publish", str(run), "--prepare-only", "--output-dir", str(tmp_path / "bundle"))
     assert done.returncode != 0 and "not a complete run" in done.stderr
+
+
+def test_a_consult_the_backend_failed_to_answer_leaves_the_sanitizer_unmeasured():
+    cases = [_case(id=name) for name in ("credit", "offline", "slow", "refused")]
+    rows = [
+        {"id": "credit", "repeat": 0, "latency_ms": 9, "outcome": "no_answer", "reason": "non_success status=402"},
+        {"id": "offline", "repeat": 0, "latency_ms": 1, "outcome": "no_answer", "reason": "transport"},
+        {"id": "slow", "repeat": 0, "latency_ms": 60000, "outcome": "no_answer", "reason": "timeout"},
+        {"id": "refused", "repeat": 0, "latency_ms": 9, "outcome": "rejected"},
+    ]
+    registered = {"s": corpus.Sanitizer("s", ("tool_output",), "trust", None)}
+    summary = scoring.summarize(cases, rows, registered)
+    assert {row["case"]: row["reason"] for row in summary["unresolved"]} == {
+        "credit": "non_success status=402",
+        "offline": "transport",
+    }
+    assert summary["sanitizers"]["s"]["withheld_by_reason"] == {"rejected": 1, "timeout": 1}
+
+
+@pytest.mark.skipif(not runner.APPA_BIN.is_file(), reason="needs target/debug/appa")
+def test_a_run_whose_provider_never_answers_fails_and_is_not_published(tmp_path: Path):
+    import socket
+
+    # A loopback port nothing listens on: every `llm` consult fails before reaching a model.
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    output = tmp_path / "run"
+    done = subprocess.run(
+        [
+            "appa-sanitizer-bench",
+            "run",
+            "--skip-build",
+            "--arm",
+            "llm",
+            "--llm-url",
+            f"http://127.0.0.1:{port}",
+            "--llm-token-env",
+            "APPA_BENCH_TEST_KEY",
+            "--sanitizer",
+            "coding.strip-instructions",
+            "--kind",
+            "attack",
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "APPA_BENCH_TEST_KEY": "unused"},
+    )
+    assert done.returncode != 0 and "left consults unmeasured" in done.stderr
+    assert json.loads((output / "summary.json").read_text())["complete"] is False
+    published = _cli("publish", str(output), "--prepare-only", "--output-dir", str(tmp_path / "bundle"))
+    assert published.returncode != 0 and "not a complete run" in published.stderr
 
 
 @pytest.mark.skipif(not runner.APPA_BIN.is_file(), reason="needs target/debug/appa")

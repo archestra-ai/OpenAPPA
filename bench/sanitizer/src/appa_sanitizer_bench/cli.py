@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
 from appa_bench_publish import add_publish_parser, publish_from_args
@@ -101,7 +102,8 @@ def _headline(summary: dict) -> dict:
     return {
         "arm": summary["arm"],
         "backend": summary["backend"],
-        "unresolved": len(summary["unresolved"]),
+        # How many consults nothing measured, by the backend's or the policy's reason.
+        "unresolved": dict(Counter(row["reason"] or "unknown" for row in summary["unresolved"]).most_common()),
         "sanitizers": {
             name: {key: value for key, value in entry.items() if key != "by_size"}
             for name, entry in summary["sanitizers"].items()
@@ -205,14 +207,25 @@ def main() -> None:
         },
     }
     (args.output / "run-config.json").write_text(json.dumps(config, indent=2) + "\n")
-    summaries = [_headline(_run_arm(args, arm, cases, args.output)) for arm in arms]
-    complete = not any(summary["unresolved"] for summary in summaries)
-    # Written only once every arm returned a full answer set: `publish` requires it.
+    summaries = []
+    for arm in arms:
+        summaries.append(_headline(_run_arm(args, arm, cases, args.output)))
+        if summaries[-1]["unresolved"]:
+            # No later arm can make this run a result, so its consults would only spend.
+            break
+    complete = len(summaries) == len(arms) and not any(summary["unresolved"] for summary in summaries)
+    # `publish` packages only a run whose every arm measured every consult.
     result = {"config": config, "complete": complete, "arms": summaries}
     (args.output / "summary.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result, indent=2))
     if not complete:
-        sys.exit("some values were unresolved: a harness error, see summary.json")
+        failed = summaries[-1]
+        reasons = "; ".join(f"{count} × {reason}" for reason, count in failed["unresolved"].items())
+        skipped = arms[len(summaries) :]
+        sys.exit(
+            f"the run is incomplete: the {failed['arm']} arm left consults unmeasured ({reasons})"
+            + (f"; not run: {', '.join(skipped)}" if skipped else "")
+        )
 
 
 if __name__ == "__main__":
