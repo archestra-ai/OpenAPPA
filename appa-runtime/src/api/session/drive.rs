@@ -962,7 +962,7 @@ impl Session {
             };
             match appended {
                 Ok(()) => {
-                    self.inner.shared.spawn_holds.appended();
+                    self.inner.shared.spawn_holds.appended(&self.root);
                     self.inner.deliver_records(&self.root);
                     if let Some(slot) = opening.took {
                         *slot.lock().expect("the slot's lock is never poisoned") = took;
