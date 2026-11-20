@@ -34,9 +34,10 @@ pub(super) fn config_path() -> Result<PathBuf, InstallError> {
 }
 
 fn settings_path() -> Result<PathBuf, InstallError> {
-    let directory = std::env::var_os("OPENCODE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or(config_home()?.join("opencode"));
+    let directory = match std::env::var_os("OPENCODE_CONFIG_DIR") {
+        Some(directory) => PathBuf::from(directory),
+        None => config_home()?.join("opencode"),
+    };
     let directory =
         std::path::absolute(&directory).map_err(|error| io("resolve OpenCode directory", &directory, error))?;
     if directory.join("opencode.jsonc").exists() {
@@ -409,7 +410,10 @@ pub fn setup(args: Setup) -> ExitCode {
         let native = native::NativeArtifacts::prepare(&installation, selection.generation(), selection.platform)?;
         let binary = native.binary().to_path_buf();
         let config = installation.config.clone();
-        let project = args.project.unwrap_or(std::env::current_dir().map_err(invalid)?);
+        let project = match args.project {
+            Some(project) => project,
+            None => std::env::current_dir().map_err(invalid)?,
+        };
         let marketplace = acquired.marketplace().to_path_buf();
         drop(installation);
         let runtime = tokio::runtime::Runtime::new().map_err(invalid)?;
