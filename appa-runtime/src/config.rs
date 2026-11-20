@@ -2468,22 +2468,22 @@ fn compose_included_confinement(
 ) -> Result<Vec<(String, Vec<String>)>, ConfigError> {
     let refused = |field: &str| ConfigError::IncludedPolicyField {
         path: include_path.display().to_string(),
-        field: format!("deployment.{field}"),
+        field: field.to_owned(),
     };
-    let deployment = deployment.as_table().ok_or_else(|| refused(""))?;
+    let deployment = deployment.as_table().ok_or_else(|| refused("deployment"))?;
     if let Some(field) = deployment.keys().find(|field| field.as_str() != "confined_results") {
-        return Err(refused(field));
+        return Err(refused(&format!("deployment.{field}")));
     }
     let confined: Vec<String> = deployment
         .get("confined_results")
         .and_then(toml::Value::as_array)
-        .ok_or_else(|| refused("confined_results"))?
+        .ok_or_else(|| refused("deployment.confined_results"))?
         .iter()
         .map(|entry| {
             entry
                 .as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| refused("confined_results"))
+                .ok_or_else(|| refused("deployment.confined_results"))
         })
         .collect::<Result<_, _>>()?;
     let declared: std::collections::BTreeSet<&str> = included_policy
@@ -2504,11 +2504,11 @@ fn compose_included_confinement(
         .entry("deployment".to_string())
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
-        .ok_or_else(|| refused(""))?
+        .ok_or_else(|| refused("deployment"))?
         .entry("confined_results".to_string())
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
-        .ok_or_else(|| refused("confined_results"))?;
+        .ok_or_else(|| refused("deployment.confined_results"))?;
     let mut tagged = Vec::new();
     for tool in confined {
         if !destination.iter().any(|entry| entry.as_str() == Some(&tool)) {
@@ -5705,6 +5705,22 @@ mod tests {
         }
         let root = format!("{HOSTED_ROOT}[policy.deployment]\nhint = \"The root's own hosts.\"\n");
         assert!(hosted_composed(&root, &[]).is_ok(), "the root declares it");
+    }
+
+    #[test]
+    fn a_hosted_battery_s_deployment_that_is_no_table_is_refused_under_its_own_name() {
+        assert!(matches!(
+            hosted_composed(
+                HOSTED_ROOT,
+                &[HostedBattery {
+                    name: "fetcher",
+                    base: "[policy]\nversion = 2\ndeployment = 1\n",
+                    target: None,
+                    token_env: &[],
+                }],
+            ),
+            Err(ConfigError::IncludedPolicyField { field, .. }) if field == "deployment"
+        ));
     }
 
     #[test]
