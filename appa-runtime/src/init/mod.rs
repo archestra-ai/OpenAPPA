@@ -7,7 +7,7 @@
 //! the appa-guide skill is written from bytes compiled into the binary.
 
 use crate::config::ConfigError;
-use crate::installation::archive;
+use crate::installation::{StagedMode, archive};
 use std::env;
 use std::fs;
 use std::io::{Read, Seek};
@@ -511,13 +511,17 @@ fn file_before(path: &Path) -> Result<Option<Vec<u8>>, InitError> {
 
 /// Replace `path` atomically, creating its directory.
 fn write_state(path: &Path, bytes: &[u8]) -> Result<(), InitError> {
+    write_state_as(path, bytes, StagedMode::Private)
+}
+
+fn write_state_as(path: &Path, bytes: &[u8], mode: StagedMode) -> Result<(), InitError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| InitError::WriteFile {
             path: parent.to_path_buf(),
             source,
         })?;
     }
-    crate::installation::atomic_write(path, bytes).map_err(|error| InitError::NativeState {
+    crate::installation::atomic_write_as(path, bytes, mode).map_err(|error| InitError::NativeState {
         path: path.to_path_buf(),
         message: error.to_string(),
     })

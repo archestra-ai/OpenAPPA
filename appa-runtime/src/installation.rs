@@ -931,6 +931,28 @@ fn write_synced(path: &Path, bytes: &[u8]) -> Result<(), InstallError> {
 }
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), InstallError> {
+    atomic_write_as(path, bytes, StagedMode::Private)
+}
+
+/// The mode a replacement carries from the moment it appears at its path.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StagedMode {
+    /// Owner read and write only, as the staging file is created.
+    Private,
+    /// A launcher: executable by everyone, writable by its owner.
+    Executable,
+}
+
+pub(crate) fn atomic_write_as(path: &Path, bytes: &[u8], mode: StagedMode) -> Result<(), InstallError> {
+    let parent = path.parent().expect("installation paths have parents");
+    stage(path, bytes, mode)?
+        .persist(path)
+        .map_err(|error| io("replace file", path, error.error))?;
+    sync_directory(parent)
+}
+
+/// The synced replacement for `path`, beside it and not yet in its place.
+fn stage(path: &Path, bytes: &[u8], mode: StagedMode) -> Result<tempfile::NamedTempFile, InstallError> {
     if bytes.len() as u64 > MAX_STATE_BYTES {
         return Err(InstallError::Invalid(format!(
             "{} exceeds the state byte limit",
@@ -940,6 +962,19 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), InstallError
     require_file_or_absent(path)?;
     let parent = path.parent().expect("installation paths have parents");
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| io("stage file", path, error))?;
+    match mode {
+        StagedMode::Private => {}
+        StagedMode::Executable => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                temporary
+                    .as_file()
+                    .set_permissions(fs::Permissions::from_mode(0o755))
+                    .map_err(|error| io("mark staged file executable", path, error))?;
+            }
+        }
+    }
     temporary
         .write_all(bytes)
         .map_err(|error| io("write staged file", path, error))?;
@@ -947,10 +982,7 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), InstallError
         .as_file()
         .sync_all()
         .map_err(|error| io("sync staged file", path, error))?;
-    temporary
-        .persist(path)
-        .map_err(|error| io("replace file", path, error.error))?;
-    sync_directory(parent)
+    Ok(temporary)
 }
 
 fn sync_directory(path: &Path) -> Result<(), InstallError> {
@@ -1108,6 +1140,30 @@ mod tests {
     }
 
     use super::*;
+
+    /// The replacement is renamed into place, so the mode it is staged with is
+    /// the mode the path holds from the moment it changes.
+    #[cfg(unix)]
+    #[test]
+    fn an_executable_replacement_is_executable_before_it_takes_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let launcher = directory.path().join("clappa");
+        fs::write(&launcher, b"armed").unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o755)).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        let staged = stage(&launcher, b"stub", StagedMode::Executable).unwrap();
+        assert_eq!(mode(staged.path()), 0o755);
+        assert_eq!(fs::read(&launcher).unwrap(), b"armed");
+        drop(staged);
+
+        atomic_write_as(&launcher, b"stub", StagedMode::Executable).unwrap();
+        assert_eq!(mode(&launcher), 0o755);
+        assert_eq!(fs::read(&launcher).unwrap(), b"stub");
+        atomic_write(&launcher, b"state").unwrap();
+        assert_eq!(mode(&launcher), 0o600);
+    }
 
     #[test]
     fn export_refuses_a_compressible_bundle_above_the_import_payload_limit() {
