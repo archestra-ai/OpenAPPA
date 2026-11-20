@@ -287,11 +287,14 @@ def main():
         agents = get('pods', args.namespace, 'appa.dev/managed=kagent')
         runtime = get('pods', 'appa', 'app.kubernetes.io/instance=appa-runtime,app.kubernetes.io/name=appa-runtime')
         seen = set()
-        for pod, kind in [(p, p['metadata'].get('labels', {}).get('appa.dev/runtime')) for p in agents] + [(p, 'runtime') for p in runtime]:
+        # Only the release query evidences the runtime; an agent pod names a language.
+        languages = set(images) - {'runtime'}
+        for pod, kind, allowed in ([(p, p['metadata'].get('labels', {}).get('appa.dev/runtime'), languages) for p in agents]
+                                   + [(p, 'runtime', {'runtime'}) for p in runtime]):
             if pod['metadata'].get('deletionTimestamp'):
                 continue
             name = pod['metadata']['name']
-            require(kind in images, 'unselected or unknown runtime on pod ' + name)
+            require(kind in allowed, 'unselected or unknown runtime on pod ' + name)
             require(pod['status'].get('phase') == 'Running' and any(
                 c.get('type') == 'Ready' and c.get('status') == 'True'
                 for c in pod['status'].get('conditions', [])), 'pod is not ready: ' + name)
@@ -686,6 +689,16 @@ else:
             let mut fixture = Fixture::new();
             fixture.evidence["runtime"]["items"] = json!([]);
             fixture.fails(PODS, "no verified ready pods for: runtime");
+            // A pod in the agent namespace labelled `runtime` is no evidence
+            // of the release runtime.
+            let mut fixture = Fixture::new();
+            let runtime = fixture.evidence["runtime"]["items"][0].take();
+            fixture.evidence["runtime"]["items"] = json!([]);
+            fixture.evidence["agents"]["items"]
+                .as_array_mut()
+                .unwrap()
+                .push(runtime);
+            assert_eq!(fixture.run(PODS).status.code(), Some(1));
             let mut fixture = Fixture::new();
             fixture.evidence["agents"]["items"][0]["status"]["conditions"][0]["status"] = json!("False");
             fixture.fails(PODS, "pod is not ready");
