@@ -1,0 +1,65 @@
+name: Rust Canary
+
+# CI and release builds use the newest stable Rust. This job checks the two
+# versions on either side of it every night and blocks no pull request:
+# beta, which becomes stable within six weeks, and 1.96, the oldest Rust a
+# source build is expected to work on. Red on beta: fix it before that beta
+# ships as stable. Red on 1.96: a change needs a newer Rust than source
+# builders may have.
+
+on:
+  schedule:
+    - cron: "45 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-canary
+  cancel-in-progress: false
+
+jobs:
+  toolchain:
+    name: Rust ${{ matrix.toolchain }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [beta, "1.96"]
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Setup Rust
+        env:
+          TOOLCHAIN: ${{ matrix.toolchain }}
+        run: rustup toolchain install "$TOOLCHAIN" --profile minimal --component clippy --no-self-update && rustup default "$TOOLCHAIN"
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: rust-canary-${{ matrix.toolchain }}
+          env-vars: CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG ImageOS
+
+      # As in CI's Rust Tests: SafeBash's tests run commands in this sandbox.
+      - name: Install SafeBash's sandbox
+        run: |
+          .github/tools/claude-code/install-sandbox.sh
+          npm ci --prefix appa-file-tracker/sandbox-runtime --ignore-scripts --no-audit --no-fund
+          echo "$PWD/appa-file-tracker/sandbox-runtime/node_modules/.bin" >> "$GITHUB_PATH"
+
+      # Lints change from release to release; only the coming ones matter.
+      - name: Rust lint
+        if: matrix.toolchain == 'beta'
+        run: cargo clippy --workspace --all-targets --features appa-eventlog/postgres,appa/postgres,appa/archestra --locked -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --workspace --features appa-eventlog/postgres,appa/postgres,appa/archestra --locked

@@ -131,16 +131,16 @@ impl ArchestraBackend {
         })?;
         let status = response.status();
         if !status.is_success() {
-            // The host says why it could not answer; read it for the record alone.
+            // The host says why it could not answer; a body cut short says nothing.
             let mut body = Vec::new();
-            let _ = tokio::time::timeout(
+            let read = tokio::time::timeout(
                 RECORD_READ_GRACE,
                 read_body(&mut response, self.max_body_bytes as u64, &mut body),
             )
             .await;
             return Err(NoAnswerReason::NonSuccess {
                 status: status.as_u16(),
-                detail: refusal_detail(&body),
+                detail: matches!(read, Ok(Ok(()))).then(|| refusal_detail(&body)).flatten(),
             });
         }
         let mut text = Vec::new();
@@ -317,6 +317,22 @@ mod tests {
             })
         );
         assert_eq!(seen.diagnostics, None, "a silent host leaves no diagnostics");
+    }
+
+    /// A refusing host whose body stalls part-way: the cut may have dropped the key that
+    /// marks what follows secret, so the part read says nothing about the refusal.
+    #[tokio::test]
+    async fn a_refusal_body_cut_short_is_no_detail() {
+        const STALLED: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 100\r\n\r\npartial";
+        let url = crate::test_support::raw_stub(STALLED, true).await;
+
+        assert_eq!(
+            backend(url, 65_536).send(ConsultKind::Annotation, &prompt()).await,
+            Err(NoAnswerReason::NonSuccess {
+                status: 502,
+                detail: None
+            })
+        );
     }
 
     #[tokio::test]

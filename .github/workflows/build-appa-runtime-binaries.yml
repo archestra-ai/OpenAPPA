@@ -84,6 +84,12 @@ jobs:
           release_ref: ${{ inputs.release_ref }}
           source_commit: ${{ inputs.source_commit }}
 
+      # The image's own toolchain differs per runner and lags: v0.44.0 shipped
+      # binaries from Rust 1.98.0 to 1.100.0. Every target builds with the
+      # newest stable, which carries every point-release fix.
+      - name: Setup Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+
       # The binary accepts only the batteries artifact whose digest it is built
       # with. Baking it in at compile time is what makes a shipped binary
       # unable to install any other release's batteries archive.

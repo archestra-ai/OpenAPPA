@@ -16,6 +16,27 @@ pub(crate) async fn serve(router: axum::Router) -> SocketAddr {
     addr
 }
 
+/// Answer the first connection on an ephemeral loopback port with `response`, byte for byte,
+/// and answer its URL. `hold_open` keeps the connection open after the write, so a response
+/// that declares more than it sends stalls instead of ending.
+pub(crate) async fn raw_stub(response: &'static [u8], hold_open: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("an ephemeral loopback port binds");
+    let addr = listener.local_addr().expect("the bound address is readable");
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("the stub accepts");
+        let mut request = [0u8; 4096];
+        let _ = socket.read(&mut request).await;
+        socket.write_all(response).await.expect("the stub writes");
+        if hold_open {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+    format!("http://{addr}/")
+}
+
 /// A fake `claude` executable in `dir` running `script` in place of the model, for the
 /// Claude Code backend's `command`.
 #[cfg(unix)]
