@@ -180,8 +180,10 @@ pub(crate) struct Export {
     /// Set when the log did not replay. The facts are exported anyway — a log the engine
     /// refuses is exactly the thing worth reporting — but nothing derived from a view is.
     pub(crate) replay_refused: Option<ReplayRefusalClass>,
-    /// The policy's trust ranks, lowest first, so a reader can read the numeric ranks the
-    /// facts carry.
+    /// The serving policy's trust ranks, lowest first, so a reader can read the numeric ranks
+    /// the facts carry. Empty when the serving policy does not resolve for the family. A fact
+    /// decided under an earlier revision numbers its ranks by that revision's chain, which may
+    /// differ.
     pub(crate) trust_chain: Vec<String>,
     pub(crate) facts: Vec<FactEntry>,
     pub(crate) runtime_events: Vec<EventEntry>,
@@ -245,8 +247,8 @@ pub(crate) struct Source<'a> {
     pub(crate) facts: &'a [Fact],
     pub(crate) events: crate::events::Events,
     pub(crate) trust_chain: Vec<String>,
-    /// The composed `[policy]` table this trajectory pinned, with its key, or `None` when the
-    /// stored policy did not parse.
+    /// The composed `[policy]` table the deployment serves, with its key, or `None` when the
+    /// serving policy file did not parse.
     pub(crate) policy: Option<(toml::Value, String)>,
     /// The tool names the serving policy writes. A tool name in a fact or a hook is the
     /// model's string until this set vouches for it.
@@ -287,7 +289,7 @@ pub(crate) fn branches(
         .collect()
 }
 
-/// How long ago the chosen trajectory was last active, or why none was chosen.
+/// The root of the recently active family, or why none was chosen.
 pub(crate) fn resolve(recent: crate::events::Recent) -> Result<TrajectoryId, OmittedReason> {
     match recent {
         crate::events::Recent::One { root, age } if age <= RECENT_WINDOW => Ok(TrajectoryId(root)),
@@ -595,7 +597,7 @@ mod tests {
             "the inventory does not cover {:?}",
             projection.unclassified
         );
-        let policy = projection.policy.expect("the pinned policy is carried");
+        let policy = projection.policy.expect("the serving policy is carried");
         let export = match projection.trajectory {
             Diagnostic::Present(export) => *export,
             Diagnostic::Omitted { omitted_reason } => panic!("the recorded session exports, got {omitted_reason:?}"),
@@ -904,6 +906,44 @@ mod tests {
         );
     }
 
+    /// A context provider's consult is classified like every other external's, with its name
+    /// numbered among the context providers rather than dropped as drift.
+    #[test]
+    fn a_context_provider_consult_is_classified_not_drift() {
+        use crate::events::{Events, ExternalOutcome, ExternalRole, RecordedEvent, RuntimeEvent};
+        let consult = RecordedEvent {
+            seq: 0,
+            at: std::time::SystemTime::now(),
+            event: RuntimeEvent::External {
+                role: ExternalRole::ContextProvider,
+                name: "github".to_string(),
+                outcome: ExternalOutcome::Answered,
+                duration_ms: 3,
+                offer: None,
+                dispatch: None,
+            },
+        };
+        let source = Source {
+            facts: &[],
+            events: Events {
+                entries: vec![consult],
+                ..Events::default()
+            },
+            trust_chain: Vec::new(),
+            policy: None,
+            vouched: BTreeSet::new(),
+            parents: Vec::new(),
+            replay_refused: None,
+            yelling: None,
+        };
+        let projection = build(source, Mode::Pseudonymized, Budget::default());
+        assert_eq!(projection.unclassified, Vec::new());
+        let Diagnostic::Present(export) = projection.trajectory else {
+            panic!("the source exports");
+        };
+        assert_eq!(export.runtime_events[0].event["name"], Value::from("context-1"));
+    }
+
     /// A caller that cannot fit an export asks for less of it, and the runtime rebuilds under
     /// the smaller bound. The newest facts are the ones a yell is about, so the cut is at the
     /// old end and the export says where it is.
@@ -1009,8 +1049,8 @@ mod tests {
     ///
     /// This match is the compile-time half of the gate. The walk is deny-by-default, so an
     /// unclassified variant is safe — it carries nothing — but safe is not the same as
-    /// reported, and a recorded session only ever produces a handful of the twenty-three. Add
-    /// a variant to the engine and this stops compiling, which is the moment to add its table.
+    /// reported, and a recorded session only ever produces a handful of them. Add a variant to
+    /// the engine and this stops compiling, which is the moment to add its table.
     fn variant(fact: &Fact) -> &'static str {
         match fact {
             Fact::TrajectoryOpened(_) => "TrajectoryOpened",
