@@ -262,6 +262,13 @@ impl StderrTail {
     }
 }
 
+impl Drop for StderrTail {
+    /// A tail no one reads leaves no reader behind, whatever still holds the pipe.
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// The stderr tail of a child that failed, given a second to close the pipe.
 pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
     tail.within(Duration::from_secs(1)).await
@@ -439,6 +446,30 @@ mod tests {
             .await
             .expect("an aborted reader ends at once");
         assert!(joined.expect_err("the reader was aborted").is_cancelled());
+        child.kill().await.expect("sleep is killed");
+    }
+
+    /// A tail dropped unread, as on a consult that answered with no record, takes its
+    /// reader with it: the reader's share of the tail is released though the pipe is open.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_tail_takes_its_reader_with_it() {
+        let mut child = crate::child_process::spawn_async(
+            tokio::process::Command::new("sleep")
+                .arg("10")
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true),
+        )
+        .expect("sleep starts");
+        let tail = stderr_tail(child.stderr.take().expect("stderr is piped"));
+        let read = Arc::downgrade(&tail.read);
+
+        drop(tail);
+        let released = crate::test_support::wait_until(tokio::time::Instant::now() + Duration::from_secs(5), || {
+            read.upgrade().is_none().then_some(())
+        })
+        .await;
+        assert_eq!(released, Some(()), "the reader still holds the tail");
         child.kill().await.expect("sleep is killed");
     }
 }
