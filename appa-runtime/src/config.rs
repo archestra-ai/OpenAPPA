@@ -1917,9 +1917,8 @@ fn named_include_files(
 /// One include entry, as authored: a spelling this runtime resolves beside the root
 /// config, or hands to a host that holds the battery under it. The hosted loader refuses
 /// a spelling that starts elsewhere or leaves the root; a local root refuses only the
-/// first, and reaches a file outside its folder through `..`. [`edit::add_include`]
-/// refuses an entry here before it writes one, so a document the editor wrote is one
-/// both loaders read.
+/// first, and names a single file outside its folder through `..`. [`edit::add_include`]
+/// refuses an entry here before it writes one.
 pub(crate) fn refuse_include_entry(entry: &str) -> Result<(), ConfigError> {
     let path = Path::new(entry);
     if path.is_absolute() {
