@@ -4217,6 +4217,35 @@ async fn a_fan_out_childs_call_before_its_start_opens_it_under_its_prompt() {
     assert!(opened(&runtime, &child("c1")));
 }
 
+/// A tool that sets [`FETCH_AND_SEND`] and its next revision apart.
+const READ_TOOL: &str = r#"
+[[policy.tool]]
+name = "read"
+parameters = { type = "object", properties = { path = { type = "string" } } }
+"#;
+
+/// A late open whose session was attached before a publish meets a log its start already
+/// stamped at the head: it follows the head and finds the child open, never refusing as a
+/// policy move.
+#[tokio::test]
+async fn a_late_open_behind_a_publish_finds_the_child_its_start_opened_at_the_head() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let mut parent = runtime.create_session(root(), None).expect("a fresh id opens");
+    let binding = release_spawn(&mut parent, fetch(serde_json::json!({"a": 1}))).await;
+    let late = runtime.session(&root(), &root()).expect("the late opener attaches");
+    runtime
+        .reload(config_with(&format!("{FETCH_AND_SEND}{READ_TOOL}"), None))
+        .expect("the next revision installs");
+    runtime
+        .session(&root(), &root())
+        .expect("the start attaches at the head")
+        .on_child_start(child("c1"), SpawnRef::Binding(binding))
+        .expect("the start opens the child at the head");
+    assert!(matches!(late.open_late(child("c1"), None), Ok(LateOpen::AlreadyOpen)));
+}
+
 /// A child that returns while one of its calls is still open is refused, and the refusal
 /// closes none of its calls.
 #[tokio::test]
