@@ -16,8 +16,9 @@ use appa_runtime_api::TrajectoryId;
 
 use super::Inner;
 
-/// How far one recorder has read one family: the count of facts it has been delivered.
-type Cursor = Arc<tokio::sync::Mutex<usize>>;
+/// One recorder binding reading one family: the family, the recorder's name, and how it is
+/// reached.
+type Binding = (TrajectoryId, String, String);
 
 /// The waits before each delivery attempt: the first at once, the last about two minutes later.
 const ATTEMPTS: [std::time::Duration; 8] = {
@@ -36,22 +37,29 @@ const ATTEMPTS: [std::time::Duration; 8] = {
 
 /// Every recorder binding's cursor into every family, and the families a delivery task is
 /// running for. A binding is its name and how it is reached — the transport's description,
-/// which names its endpoint or argv and never a credential's value.
+/// which names its endpoint or argv and never a credential's value. Only the family's one
+/// delivery task reads or moves a family's cursors.
 #[derive(Default)]
 pub(super) struct Cursors {
-    cursors: Mutex<HashMap<(TrajectoryId, String, String), Cursor>>,
+    /// How far each binding has read its family: the count of facts it has been delivered.
+    cursors: Mutex<HashMap<Binding, usize>>,
     /// A family with a delivery task, and whether it appended since that task last read it.
     running: Mutex<HashMap<TrajectoryId, bool>>,
 }
 
 impl Cursors {
-    fn of(&self, root: &TrajectoryId, recorder: &str, transport: &crate::config::Transport) -> Cursor {
-        let mut cursors = self
-            .cursors
+    fn cursors(&self) -> std::sync::MutexGuard<'_, HashMap<Binding, usize>> {
+        self.cursors
             .lock()
-            .expect("the recorder cursors mutex is never poisoned: no panic runs while it is held");
-        let key = (root.clone(), recorder.to_string(), format!("{transport:?}"));
-        Arc::clone(cursors.entry(key).or_default())
+            .expect("the recorder cursors mutex is never poisoned: no panic runs while it is held")
+    }
+
+    fn delivered(&self, binding: &Binding) -> usize {
+        self.cursors().get(binding).copied().unwrap_or_default()
+    }
+
+    fn advance(&self, binding: Binding, to: usize) {
+        self.cursors().insert(binding, to);
     }
 
     fn running(&self) -> std::sync::MutexGuard<'_, HashMap<TrajectoryId, bool>> {
@@ -168,10 +176,9 @@ impl Inner {
         let deployment = self.deployment();
         let mut delivered_all = true;
         for (recorder, transport) in &deployment.config.externals.recorders {
-            let cursor = self.shared.recorder_cursors.of(root, recorder, transport);
-            let mut delivered = cursor.lock().await;
-            // Read under the cursor's lock, so two deliveries to one recorder never interleave
-            // and each reads the log as far as it has grown.
+            let cursors = &self.shared.recorder_cursors;
+            let binding = (root.clone(), recorder.clone(), format!("{transport:?}"));
+            let delivered = cursors.delivered(&binding);
             let Ok(log) = self.log(root) else { return false };
             let Ok(policy) = self.resolve_policy(&deployment, &log) else {
                 return false;
@@ -182,9 +189,9 @@ impl Inner {
             let facts = log.facts();
             let mut records = policy
                 .engine()
-                .recorder_records(&view, &facts[(*delivered).min(facts.len())..]);
+                .recorder_records(&view, &facts[delivered.min(facts.len())..]);
             let Some(records) = records.remove(recorder.as_str()) else {
-                *delivered = facts.len();
+                cursors.advance(binding, facts.len());
                 continue;
             };
             let delivery = serde_json::json!({
@@ -195,7 +202,7 @@ impl Inner {
                 "records": records,
             });
             match deployment.externals.deliver(recorder, &delivery).await {
-                Ok(()) => *delivered = facts.len(),
+                Ok(()) => cursors.advance(binding, facts.len()),
                 Err(reason) => {
                     delivered_all = false;
                     tracing::warn!(
