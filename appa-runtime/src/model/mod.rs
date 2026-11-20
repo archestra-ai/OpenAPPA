@@ -43,7 +43,9 @@ pub(crate) enum PromptModel {
 /// - **Budget.** One deadline, `budget` from now, covers the whole consult: waits for a
 ///   permit of `builtin`'s gate, every attempt, and every backoff.
 /// - **Concurrency.** Each attempt holds one gate permit. The permit is released before the
-///   backoff and acquired again for the next attempt.
+///   backoff and acquired again for the next attempt. A retry whose permit does not come
+///   while [`MIN_ATTEMPT`] of the budget remains is not made: the last attempt's outcome is
+///   returned.
 /// - **Retries.** A transport failure, a 429 or a 5xx is retried after [`RETRY_BACKOFF`].
 ///   Any other failure is returned at once. No retry starts after [`MAX_ATTEMPTS`]
 ///   attempts, or when less than [`RETRY_BACKOFF`] plus [`MIN_ATTEMPT`] of the budget remains.
@@ -69,8 +71,8 @@ where
     let deadline = tokio::time::Instant::now() + budget;
     let gate = gates.model(builtin);
     let mut attempts = 1;
+    let mut permit = acquire_within(&gate, deadline, builtin.wire_name(), name).await?;
     loop {
-        let permit = acquire_within(&gate, deadline, builtin.wire_name(), name).await?;
         let answered = attempt(send(), deadline, max_body_bytes, seen.as_deref_mut()).await;
         drop(permit);
         let retryable = matches!(
@@ -89,6 +91,12 @@ where
         }
         attempts += 1;
         tokio::time::sleep(RETRY_BACKOFF).await;
+        let retry_by = deadline - MIN_ATTEMPT;
+        permit = match tokio::time::timeout_at(retry_by, gate.acquire()).await {
+            // A permit ready when the task is polled late can still arrive past the cutoff.
+            Ok(permit) if tokio::time::Instant::now() <= retry_by => permit.expect("a consult gate is never closed"),
+            _ => return answered,
+        };
     }
 }
 
@@ -129,4 +137,69 @@ async fn attempt(
         };
     }
     answered
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    const BUDGET: Duration = Duration::from_secs(2);
+    const UNAVAILABLE: NoAnswerReason = NoAnswerReason::NonSuccess {
+        status: 503,
+        detail: None,
+    };
+
+    /// A one-permit consult whose every attempt answers 503, while another consult takes
+    /// the permit during the first attempt and keeps it for `held`: the outcome, and how
+    /// many attempts were sent.
+    async fn retried_with_the_permit_held_for(held: Duration) -> (Result<serde_json::Value, NoAnswerReason>, usize) {
+        let gates = ConsultGates::per_runtime();
+        gates.resize(AnnotatorBuiltin::Llm, 1);
+        let gate = gates.model(AnnotatorBuiltin::Llm);
+        let sent = Arc::new(AtomicUsize::new(0));
+        let attempted = Arc::new(tokio::sync::Notify::new());
+        // Queued while the first attempt holds the permit, so the fair gate hands it here
+        // before the retry asks.
+        let holder = tokio::spawn({
+            let attempted = Arc::clone(&attempted);
+            async move {
+                attempted.notified().await;
+                let _permit = gate.acquire().await.expect("the gate is open");
+                tokio::time::sleep(held).await;
+            }
+        });
+        let answered = consult_with_retries(&gates, AnnotatorBuiltin::Llm, BUDGET, 1024, "judge", None, || {
+            sent.fetch_add(1, Ordering::SeqCst);
+            attempted.notify_one();
+            async {
+                tokio::task::yield_now().await;
+                Err(UNAVAILABLE)
+            }
+        })
+        .await;
+        holder.abort();
+        (answered, sent.load(Ordering::SeqCst))
+    }
+
+    /// A retry whose permit stays taken past the budget is not made: the consult answers
+    /// what the last attempt did, not a timeout, and stops waiting at the retry cutoff.
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_with_no_permit_in_time_answers_the_last_attempt() {
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            retried_with_the_permit_held_for(Duration::from_secs(30)).await,
+            (Err(UNAVAILABLE), 1)
+        );
+        assert!(started.elapsed() < BUDGET, "{:?}", started.elapsed());
+    }
+
+    /// A permit freed with less than [`MIN_ATTEMPT`] of the budget left starts no retry.
+    #[tokio::test(start_paused = true)]
+    async fn a_permit_freed_too_late_for_an_attempt_starts_no_retry() {
+        let late = BUDGET - MIN_ATTEMPT / 2;
+        assert_eq!(retried_with_the_permit_held_for(late).await, (Err(UNAVAILABLE), 1));
+    }
 }
