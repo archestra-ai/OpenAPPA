@@ -109,7 +109,10 @@ async fn a_page_read_keeps_trust_and_a_search_lowers_it() {
     let HookDecision::DenyCall { feedback, .. } = propose(&runtime, skill).await else {
         panic!("an untrusted session does not turn a page into a skill outright");
     };
-    assert!(feedback.contains("trust"), "the refusal names the trust gap: {feedback}");
+    assert!(
+        feedback.contains("trust"),
+        "the refusal names the trust gap: {feedback}"
+    );
 }
 
 /// A trusted write inside the workspace runs outright and records `notion.changed`; a

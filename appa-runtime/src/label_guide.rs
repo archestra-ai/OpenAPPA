@@ -1267,7 +1267,8 @@ mod tests {
         let instruction_write = example(">> AGENTS.md").expect("the instruction-file write example");
         assert_eq!(instruction_write.requires_audience, RequiredAudience::None);
         assert!(instruction_write.requires_trusted);
-        let dependency_instructions = example("node_modules/left-pad/AGENTS.md").expect("the dependency instructions example");
+        let dependency_instructions =
+            example("node_modules/left-pad/AGENTS.md").expect("the dependency instructions example");
         let project_source = example("grep -rn 'fn resolve'").expect("the source read example");
         assert_eq!(dependency_instructions.delta_trust, ResultTrust::Suspicious);
         assert_eq!(project_source.delta_trust, ResultTrust::Trusted);
