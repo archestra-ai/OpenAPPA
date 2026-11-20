@@ -588,6 +588,9 @@ pub enum EngineRefusal {
     DispatchClosed,
     #[error("the offer is not one this family carries")]
     UnknownOffer,
+    /// The call already carries a current approval another plan recorded.
+    #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
+    ApprovalPending,
     #[error("the fork and the child are already bound elsewhere")]
     Unbindable,
     #[error("the host reused a call id")]
@@ -621,6 +624,7 @@ impl EngineRefusal {
             EngineRefusal::Ended => ReplayRefusalClass("ended"),
             EngineRefusal::DispatchClosed => ReplayRefusalClass("dispatch_closed"),
             EngineRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
+            EngineRefusal::ApprovalPending => ReplayRefusalClass("approval_pending"),
             EngineRefusal::Unbindable => ReplayRefusalClass("unbindable"),
             EngineRefusal::CallIdReused => ReplayRefusalClass("call_id_reused"),
             EngineRefusal::OutcomeMismatch => ReplayRefusalClass("outcome_mismatch"),
@@ -4189,6 +4193,7 @@ fn outcome_refusal(error: TransitionError) -> EngineRefusal {
 fn offer_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::UnknownOffer | TransitionError::OfferElsewhere => EngineRefusal::UnknownOffer,
+        TransitionError::ApprovalPending => EngineRefusal::ApprovalPending,
         TransitionError::BranchEnded => EngineRefusal::Ended,
         error => EngineRefusal::Invariant {
             detail: format!("deciding an offer: {error}"),

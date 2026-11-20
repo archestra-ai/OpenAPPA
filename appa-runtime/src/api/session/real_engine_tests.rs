@@ -6140,6 +6140,51 @@ async fn a_stock_approve_plan_that_cannot_commit_refuses_the_call() {
     assert!(runtime.open_dispatches(&root(), &root()).is_empty());
 }
 
+/// Two parallel calls of the same arguments each meet the block and get their own plan. Once
+/// one plan's approval stands, the other plan meets that approval: a refusal, never an
+/// operational fault, so the stock approve loop proposes the call again instead of failing.
+#[tokio::test]
+async fn a_second_plan_for_an_approved_call_is_refused_and_the_call_proposed_again() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    // Each call's block commits and its stock approval does not, so both plans stand unapplied.
+    for call_id in ["host-call-1", "host-call-2"] {
+        runtime.store().fail_commit_after(1);
+        let blocked = session
+            .on_tool_call_identified(wire(500), Some(call_id.to_string()), None, None)
+            .await;
+        assert!(matches!(blocked, Err(EventError::Storage(_))), "{blocked:?}");
+    }
+    let [first, second] = runtime
+        .minted_offers(&root(), &root())
+        .iter()
+        .map(|quoted| runtime.resolve_in(&root(), quoted).expect("the quoted id resolves").0)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("one plan per blocked call");
+    assert!(matches!(
+        session.on_remedy(first, RemedyArguments::default(), None, None).await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    let pending = session.on_remedy(second, RemedyArguments::default(), None, None).await;
+    assert!(
+        matches!(&pending, Err(error @ EventError::ApprovalPending) if !error.is_operational()),
+        "{pending:?}"
+    );
+    // The second call meets its plan refused while the first call's approval stands: a block,
+    // not a fault. The first call releases on that approval, and the second on its own after.
+    let decided = |call_id: &str| session.on_tool_call_identified(wire(500), Some(call_id.to_string()), None, None);
+    let held = decided("host-call-2").await;
+    assert!(matches!(held, Ok(ToolCallDecision::Deny { .. })), "{held:?}");
+    let first = decided("host-call-1").await;
+    assert!(matches!(first, Ok(ToolCallDecision::Allow { .. })), "{first:?}");
+    let second = decided("host-call-2").await;
+    assert!(matches!(second, Ok(ToolCallDecision::Allow { .. })), "{second:?}");
+    assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
+}
+
 /// A trust gate the authority covers is released on every call that meets it, since an approval
 /// never raises the label. The tool whose tag the authority excepts stays blocked, with no plan.
 #[tokio::test]
