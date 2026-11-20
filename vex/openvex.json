@@ -3,7 +3,97 @@
   "@id": "https://github.com/archestra-ai/OpenAPPA/blob/main/vex/openvex.json",
   "author": "Archestra (https://archestra.ai)",
   "role": "Document Creator",
-  "timestamp": "2026-11-19T00:00:00Z",
-  "version": 1,
-  "statements": []
+  "timestamp": "2026-11-20T00:01:32Z",
+  "version": 4,
+  "statements": [
+    {
+      "vulnerability": {
+        "name": "CVE-2026-19445"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:generic/python@3.13.13"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T00:01:32Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The use-after-free needs a Python TLS server whose ssl.SSLContext.sni_callback switches SSLSocket.context; no code in the image outside CPython's own ssl module (including everything under /.kagent/.venv) sets sni_callback or calls set_servername_callback."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-19445"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:generic/python@3.13.15"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:generic/python@3.13.15"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:generic/python@3.13.15"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T00:01:32Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The use-after-free needs a Python TLS server whose ssl.SSLContext.sni_callback switches SSLSocket.context; no code in the image outside CPython's own ssl module sets sni_callback or calls set_servername_callback, and the image's Python uses TLS only as a client, which the advisory says is not affected."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-8376"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/perl-base@5.40.1-6?arch=amd64&distro=debian-13.6&upstream=perl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-20T00:01:32Z",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The heap overflow exists only in 32-bit perl builds; these images are linux/amd64 and their only perl, /usr/bin/perl from perl-base, is a 64-bit x86-64 ELF binary (readelf -h: Class ELF64)."
+    }
+  ]
 }
