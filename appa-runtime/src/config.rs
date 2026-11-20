@@ -809,6 +809,8 @@ pub enum ConfigError {
         section: String,
         name: String,
     },
+    #[error("included config {path} repeats [[policy.{field}]] {name:?}, which the root config replaces")]
+    DuplicateComponent { path: String, field: String, name: String },
     #[error("invalid internal composition metadata: {reason}")]
     InvalidComposedMetadata { reason: String },
     #[error("the {section} endpoint {name:?} has an invalid url: {url}")]
@@ -2324,20 +2326,34 @@ impl Composition {
                 // An Annotator or a Sanitizer is one named policy component, not an ordered
                 // matcher. The root may replace one included default so a deployment can own
                 // its trusted hint, mandate, and model builtin without editing a battery. A
-                // second included declaration with that name remains in the composed policy,
-                // where normal duplicate validation refuses it instead of silently choosing
-                // between two batteries.
+                // second included declaration with that name is refused here instead of
+                // silently choosing between two batteries; kept, an unbound one would be left
+                // out by name together with the root's own declaration.
+                let mut repeated = None;
                 declarations.retain(|declaration| {
                     let Some(name) = declaration_name(declaration) else {
                         return true;
                     };
                     let key = (field.clone(), name.to_string());
-                    let replaced = self.root_components.contains(&key) && self.replaced_components.insert(key);
-                    if replaced && field == "sanitizer" {
-                        self.replaced_sanitizers.push(declaration.clone());
+                    if !self.root_components.contains(&key) {
+                        return true;
                     }
-                    !replaced
+                    match self.replaced_components.insert(key) {
+                        true if field == "sanitizer" => self.replaced_sanitizers.push(declaration.clone()),
+                        true => {}
+                        false => {
+                            repeated.get_or_insert_with(|| name.to_owned());
+                        }
+                    }
+                    false
                 });
+                if let Some(name) = repeated {
+                    return Err(ConfigError::DuplicateComponent {
+                        path: display.to_string(),
+                        field,
+                        name,
+                    });
+                }
             }
             if field == "sanitizer" {
                 self.included_sanitizers.extend(
@@ -4155,6 +4171,30 @@ mod tests {
             confined.is_empty(),
             "a replacement that cannot reach `lookup` releases its confinement"
         );
+    }
+
+    /// A root replaces one included declaration of a Sanitizer. A second one is refused, so
+    /// it cannot reach the leave-out of unbound Sanitizers and take the root's with it.
+    #[test]
+    fn a_second_included_declaration_of_a_root_sanitizer_is_refused() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let fragment = "[policy]\nversion = 2\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\
+                        [policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        std::fs::write(dir.path().join("a.toml"), fragment).expect("write a");
+        std::fs::write(dir.path().join("b.toml"), fragment).expect("write b");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            "include = [\"a.toml\", \"b.toml\"]\n[policy]\nversion = 2\n\
+             [[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\nbuiltin = \"llm\"\n\
+             [policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n\
+             [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write root");
+        assert!(matches!(
+            Config::load(&dir.path().join("appa.toml")),
+            Err(ConfigError::DuplicateComponent { path, field, name })
+                if Path::new(&path).ends_with("b.toml") && field == "sanitizer" && name == "mask"
+        ));
     }
 
     /// An included Sanitizer that names no builtin runs only where the deployment binds it.
