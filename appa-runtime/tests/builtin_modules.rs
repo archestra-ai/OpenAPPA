@@ -223,12 +223,10 @@ fn a_module_claims_the_archestra_name_only_where_the_host_does_not_serve_it() {
         &build_module("appa-module-fixture-bad", Some("claims-archestra")),
         &library_filename("libclaims_archestra"),
     );
-    let opened = deployment.open();
     if cfg!(feature = "archestra") {
-        assert!(matches!(opened, Err(OpenError::Modules(_))));
-        assert!(!deployment.db().exists(), "a refused open must create no database");
+        expect_refusal(&deployment, "already provided");
     } else {
-        assert!(opened.is_ok());
+        assert!(deployment.open().is_ok());
     }
 }
 
