@@ -31,7 +31,7 @@ use tokio::time::Instant;
 use super::{MAX_ATTEMPTS, RETRY_BACKOFF};
 use crate::config::{Endpoint, EndpointHost, JevProfile, ProfileKey, Token};
 use crate::consult::{AnnotationArtifact, Consult, ConsultBody};
-use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
+use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, acquire_within, read_body};
 use crate::label_guide::{Call, Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
 use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_policy::AnnotatorBuiltin;
@@ -240,7 +240,7 @@ impl JevBackend {
                     true => self.timing.hedge_delay,
                     false => self.timing.cold_hedge_delay,
                 };
-                in_flight.push(self.attempt(launched.len(), Arc::clone(&slot), body.to_vec(), key));
+                in_flight.push(self.attempt(launched.len(), Arc::clone(&slot), body.to_vec(), key, deadline));
                 launched.push((slot, Instant::now(), patience));
                 exchange.attempts.push(None);
             }};
@@ -342,15 +342,22 @@ impl JevBackend {
         launched < MAX_ATTEMPTS && at + self.timing.min_attempt <= deadline
     }
 
-    async fn attempt(&self, index: usize, slot: Arc<ClientSlot>, body: Vec<u8>, key: &str) -> Attempted {
-        let reply = self.exchange(&slot.client, body, key).await;
+    async fn attempt(
+        &self,
+        index: usize,
+        slot: Arc<ClientSlot>,
+        body: Vec<u8>,
+        key: &str,
+        deadline: Instant,
+    ) -> Attempted {
+        let reply = self.exchange(&slot.client, body, key, deadline).await;
         if !matches!(reply, Reply::Connection) {
             *slot.answered.lock().expect("the slot mutex is never poisoned") = Some(Instant::now());
         }
         Attempted { index, reply }
     }
 
-    async fn exchange(&self, client: &reqwest::Client, body: Vec<u8>, key: &str) -> Reply {
+    async fn exchange(&self, client: &reqwest::Client, body: Vec<u8>, key: &str, deadline: Instant) -> Reply {
         let sent = client
             .post(&self.url)
             .bearer_auth(key)
@@ -362,18 +369,24 @@ impl JevBackend {
             return Reply::Connection;
         };
         let status = response.status().as_u16();
+        let cap = self.max_body_bytes as u64;
         let mut body = Vec::new();
-        let read = crate::external::read_body(&mut response, self.max_body_bytes as u64, &mut body).await;
-        match (read, response.status().is_success()) {
-            (_, false) => Reply::Status { status, body },
-            (Err(NoAnswerReason::Oversized), true) => Reply::Invalid {
+        if !response.status().is_success() {
+            // The status is the outcome; the body is read for the record alone, and never
+            // past the deadline, where the status would be lost to a timeout.
+            let read_until = deadline.min(Instant::now() + RECORD_READ_GRACE);
+            let _ = tokio::time::timeout_at(read_until, read_body(&mut response, cap, &mut body)).await;
+            return Reply::Status { status, body };
+        }
+        match read_body(&mut response, cap, &mut body).await {
+            Err(NoAnswerReason::Oversized) => Reply::Invalid {
                 trace: LabelTrace::default(),
                 status,
                 body,
                 reason: NoAnswerReason::Oversized,
             },
-            (Err(_), true) => Reply::Connection,
-            (Ok(()), true) => {
+            Err(_) => Reply::Connection,
+            Ok(()) => {
                 let mut trace = LabelTrace::default();
                 match labels_of(&body, &mut trace) {
                     Some(labels) => Reply::Labels {
@@ -1423,6 +1436,72 @@ mod tests {
         assert_eq!(diagnostics(&record)["error"], "no_answer");
         assert_eq!(record.http_status, Some(400));
         assert_eq!(stub.requests().len(), 1);
+    }
+
+    /// An error status whose body stalls is that status within the record-read grace, not
+    /// a timeout at the end of the budget. No retry fits the budget, so the status is the
+    /// consult's outcome.
+    #[tokio::test]
+    async fn an_error_status_with_a_stalled_body_is_still_that_status() {
+        const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
+        let url = crate::test_support::raw_stub(STALLED, true).await;
+        let one_attempt = JevTiming {
+            min_attempt: Duration::from_secs(5),
+            ..FAST
+        };
+        let started = Instant::now();
+        let (answered, record) = backend(&url, Duration::from_secs(5), one_attempt)
+            .consult(&call())
+            .await;
+        assert_eq!(
+            answered,
+            Err(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: None
+            })
+        );
+        assert_eq!(record.http_status, Some(503));
+        // The grace, not the five-second budget, ends the read; the slack is for a loaded suite.
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+
+    /// An error status that lands with less than the record-read grace left is still that
+    /// status: its body is read only until the deadline, not past it into a timeout.
+    #[tokio::test]
+    async fn an_error_status_near_the_deadline_is_still_that_status() {
+        const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
+        let timeout = Duration::from_secs(2);
+        let deadline = Instant::now() + timeout - FAST.budget_margin;
+        let respond_at = deadline - RECORD_READ_GRACE / 2;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral loopback port binds");
+        let url = format!(
+            "http://{}/",
+            listener.local_addr().expect("the bound address is readable")
+        );
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let (mut socket, _) = listener.accept().await.expect("the stub accepts");
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            tokio::time::sleep_until(respond_at).await;
+            socket.write_all(STALLED).await.expect("the stub writes");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let one_attempt = JevTiming {
+            min_attempt: Duration::from_secs(5),
+            ..FAST
+        };
+        let (answered, record) = backend(&url, timeout, one_attempt).consult(&call()).await;
+        assert_eq!(
+            answered,
+            Err(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: None
+            })
+        );
+        assert_eq!(record.http_status, Some(503));
     }
 
     #[tokio::test]
