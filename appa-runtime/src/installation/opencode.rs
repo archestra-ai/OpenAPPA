@@ -11,7 +11,7 @@ use clap::Args;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{InstallError, Installation, Selection, atomic_write, invalid, io, native, optional_bytes};
+use super::{InstallError, Installation, Selection, atomic_write, invalid, io, native, optional_bytes, sync_directory};
 use crate::init::endpoint::{
     Endpoint, EndpointOwner, endpoint_health, endpoint_owner, reconcile_policy, verify_runtime_deployment,
 };
@@ -361,8 +361,11 @@ pub(super) fn remove(config: &Path) -> Result<(), InstallError> {
     let path = settings_path()?;
     let _lock = profile_lock(&path)?;
     let mut profile = Profile::read(config)?;
+    let directory = path.parent().expect("settings have a directory");
+    // An unlink an interrupted removal left unsynced must be durable before the
+    // journal is marked clean, or the receipt can come back.
     let Some(receipt) = &profile.receipt else {
-        return Ok(());
+        return sync_directory(directory);
     };
     if let Some(plugins) = profile.settings["plugins"].as_array() {
         let kept: Vec<_> = plugins
@@ -384,7 +387,8 @@ pub(super) fn remove(config: &Path) -> Result<(), InstallError> {
     }
     profile.write()?;
     let receipt = receipt_path(&path);
-    fs::remove_file(&receipt).map_err(|error| io("remove OpenCode receipt", &receipt, error))
+    fs::remove_file(&receipt).map_err(|error| io("remove OpenCode receipt", &receipt, error))?;
+    sync_directory(directory)
 }
 
 #[derive(Args)]
