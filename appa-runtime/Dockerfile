@@ -18,7 +18,7 @@
 #
 # Each FROM pins its base image by digest. The tag beside the digest names the version.
 
-FROM rust:1.96-bookworm@sha256:a339861ae23e9abb272cea45dfafde21760d2ce6577a70f8a926153677902663 AS builder
+FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY appa-example-agent appa-example-agent
