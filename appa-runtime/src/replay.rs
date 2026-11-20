@@ -5,7 +5,8 @@
 //! so every step is judged by the production session, engine boundary, and engine over a log
 //! that lives in memory for the run. No tool runs: after an allowed call that does not
 //! mismatch its step, the runner reports an empty output, which is the moment the contract's
-//! `delta` lands on the trajectory label, so the next step sees the narrowed trajectory.
+//! `delta` lands on the trajectory label, so the next step sees the narrowed trajectory. An
+//! allowed call that mismatches its step is closed as indeterminate.
 //!
 //! A step expects one of five things. `allow`: the call runs, or the only thing in the way is
 //! the plain narrowing acceptance, which the runner takes as the model would. `withhold`: the
@@ -618,9 +619,10 @@ async fn run_step(runtime: &Runtime, actor: &Actor, step: &Step) -> StepOutcome 
         cwd: None,
     };
     let (got, feedback, offers) = match propose(runtime, actor, call).await {
-        // A mismatch ends the file, so the call is never closed: its result cannot land a
+        // A mismatch ends the file, so the call never succeeds: its result cannot land a
         // `delta`, consult a party, or turn the mismatch into a refusal.
-        Proposed::Allowed(_) if matches!(&step.check, Check::Expect(expect) if !expect.matches(&Got::Allowed)) => {
+        Proposed::Allowed(call) if matches!(&step.check, Check::Expect(expect) if !expect.matches(&Got::Allowed)) => {
+            close_unrun(runtime, actor, call).await;
             (Got::Allowed, None, Vec::new())
         }
         Proposed::Allowed(call) => match report_empty_output(runtime, actor, call).await {
@@ -701,6 +703,19 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
         HookDecision::Block { reason } => Err(reason),
         other => Err(format!("the result answered {other:?}")),
     }
+}
+
+/// Close a released call that will not run as indeterminate, so nothing it holds open, such as
+/// a recorder's reservation, outlives the step. The step's verdict stands whatever the close
+/// answers.
+async fn close_unrun(runtime: &Runtime, actor: &Actor, call: ProposedCall) {
+    let event = HookEvent::ToolResult {
+        actor: actor.clone(),
+        call,
+        call_id: None,
+        outcome: ToolOutcome::Indeterminate,
+    };
+    let _ = hooks::handle(runtime, event).await;
 }
 
 /// The offers a block makes, each with whom taking it involves. An id the runtime no longer
@@ -1197,10 +1212,11 @@ mod tests {
         );
     }
 
-    /// An allow that the step did not expect is the mismatch, decided before any result:
-    /// the call is never closed, so nothing its result does can change the verdict.
+    /// An allow that the step did not expect is the mismatch, decided before any result: the
+    /// call closes as indeterminate, never as run, so nothing its result does can change the
+    /// verdict and nothing it holds stays open.
     #[tokio::test]
-    async fn an_unexpected_allow_mismatches_without_closing_the_call() {
+    async fn an_unexpected_allow_mismatches_and_closes_the_call_unrun() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let runtime = runtime(&dir, "[[policy.tool]]\nname = \"mcp/files/read\"\ndelta = {}\n");
         let trace = parsed("mcp/files/read {}\nexpect deny\n").expect("the trace parses");
@@ -1215,12 +1231,16 @@ mod tests {
                 feedback: None
             }
         ));
-        let audit = runtime.audit(&root).expect("the trajectory is audited");
-        assert!(
-            !audit
-                .iter()
-                .any(|entry| matches!(entry.event, crate::api::AuditEvent::Closed { .. }))
-        );
+        let closes: Vec<_> = runtime
+            .audit(&root)
+            .expect("the trajectory is audited")
+            .into_iter()
+            .filter_map(|entry| match entry.event {
+                crate::api::AuditEvent::Closed { outcome } => Some(outcome),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(closes, vec![crate::api::DispatchOutcome::Unknown]);
     }
 
     #[test]
