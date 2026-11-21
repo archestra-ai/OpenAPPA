@@ -1175,6 +1175,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Log in to Docker Hardened Images
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: dhi.io
+          username: archestra
+          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4.4.0
 
@@ -1342,6 +1349,13 @@ jobs:
           enable-cache: false
       - name: Check fixture and evidence contracts
         run: uv run --isolated --no-project --with 'mcp>=1.25,<2' --with pytest python -m pytest integrations/kagent/e2e/marketplace -q
+      - name: Log in to Docker Hardened Images
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: dhi.io
+          username: archestra
+          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4.4.0
       - name: Build runtime
@@ -1359,12 +1373,6 @@ jobs:
           tags: appa-acceptance-python:ci
           load: true
           cache-from: type=gha,scope=appa-kagent-adk
-      - name: Log in to Docker Hardened Images for Go plugin
-        uses: docker/login-action@v4.7.0
-        with:
-          registry: dhi.io
-          username: archestra
-          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
       - name: Build Go plugin
         uses: docker/build-push-action@v7.4.0
         with:
@@ -1412,6 +1420,13 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Log in to Docker Hardened Images
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: dhi.io
+          username: archestra
+          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v4.4.0
@@ -1462,12 +1477,6 @@ jobs:
           cache-from: type=gha,scope=appa-kagent-adk
           cache-to: type=gha,mode=max,scope=appa-kagent-adk
 
-      - name: Log in to Docker Hardened Images for Go plugin
-        uses: docker/login-action@v4.7.0
-        with:
-          registry: dhi.io
-          username: archestra
-          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
       - name: Build the go plugin image
         uses: docker/build-push-action@v7.4.0
         with:

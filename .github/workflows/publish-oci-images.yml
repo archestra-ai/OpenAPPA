@@ -128,6 +128,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
+      - name: Log in to Docker Hardened Images
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: dhi.io
+          username: archestra
+          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
+
       - name: Verify and checkout release source
         if: ${{ inputs.verify_release }}
         uses: $/.github/actions/verify-release-source
