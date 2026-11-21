@@ -1,10 +1,10 @@
 # The demo tools MCP server: one file over streamable HTTP, canned data.
 # Each FROM and COPY --from pins its base image by digest. The tag beside the digest names the version.
-FROM python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
-RUN pip install --no-cache-dir "mcp>=1.25,<2" \
-    && groupadd --system --gid 65532 appa \
-    && useradd --system --uid 65532 --gid 65532 --no-create-home appa
-COPY --chown=appa:appa demo_tools.py /srv/demo_tools.py
+FROM dhi.io/python:3.13.18-debian13-dev@sha256:02e72cc2c83c22c06fcb4cbe23c54edb339e248bee4774ac640fabac635529a6
+RUN python -m venv /opt/appa-venv \
+    && /opt/appa-venv/bin/pip install --no-cache-dir "mcp>=1.25,<2"
+ENV PATH=/opt/appa-venv/bin:$PATH
+COPY --chown=65532:65532 demo_tools.py /srv/demo_tools.py
 USER 65532:65532
 EXPOSE 3000
 ENTRYPOINT ["python", "/srv/demo_tools.py", "--host", "0.0.0.0", "--port", "3000"]
