@@ -47,7 +47,7 @@ the generated SQL and its results.
 input must be sharable with `public`.
 
 *Reviewed writes* — creating or updating an insight, a dashboard, or a
-survey, and adding an insight to a dashboard, need trusted data that
+survey, and adding an insight to a dashboard, need data that
 `internal` may see and the `posthog-review` mark, and record
 `posthog.changed`.
 
@@ -58,6 +58,14 @@ experiment writes: `experiment-create` takes the
 `launch`, which starts serving the variants. Every deletion —
 `delete-feature-flag`, `insight-delete`, `dashboard-delete`,
 `experiment-delete`, `survey-delete` — records `posthog.sensitive` too.
+
+*Trusted input* — `create-feature-flag`, `update-feature-flag`,
+`delete-feature-flag`, `experiment-create` and `experiment-update` also
+require a trusted session. They change which code paths run in
+production, and the change takes effect without a person reading it
+first. Every other write, including `experiment-delete`, changes content
+people read. Its `audience` requirement bounds who reads the data, and
+`posthog-review` stays.
 
 The Claude Code and kagent plugin defaults ship a human authority
 permitting every mark (`attention = ["*"]`), so `posthog-review` needs no

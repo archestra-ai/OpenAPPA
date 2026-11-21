@@ -19,7 +19,7 @@ over it, whose rules run first.
   personal API key. People stay the account emails Linear reports, so
   map `internal` as below and `self` from another source.
 - **base alone** — no helper and no lookup: a read that names a resource
-  stays with the viewer (`self`), and a write into one needs trusted data
+  stays with the viewer (`self`), and a write into one needs data
   everyone may see.
 
 ## Files
@@ -31,7 +31,7 @@ integration posts counts as trusted too, because a member installed it.
 Linear's public documentation (`search_documentation`) and images from
 arbitrary URLs (`extract_images`) enter `suspicious`. A tool that names an issue, team, or document by id is
 labelled with that resource's readers through a selector placeholder
-such as `@linear:issue/$issueId/readers`; a write into it needs trusted
+such as `@linear:issue/$issueId/readers`; a write into it needs
 data those readers may see, the `linear-review` mark, and records
 `linear.changed` or `linear.sensitive`. A summary of a private team's
 issue can be commented back onto that issue and not onto a public
@@ -39,6 +39,15 @@ team's. Tools that name no resource, or name one by a free-text query,
 keep the `internal` audience: map it in the root config to readers
 authorized for everything this connection can list. Image extraction can
 fetch external URLs, so its input must be public and reviewed.
+
+A write requires a trusted session only when it changes access or
+releases code. `share_issue` and `unshare_issue` change who can read an
+issue. `merge_diff` lands a code change on its target branch, where
+builds and deploys can take it without another review. Every other write
+creates, edits or deletes content people read: issues, comments,
+documents, projects, milestones, labels, attachments, releases and status
+updates. Its `audience` requirement bounds who reads the data, and
+`linear-review` stays.
 
 **`audience-source.py`** — the `linear` audience source, over the
 GraphQL API; its reads live in `linear_audience.py`, which both

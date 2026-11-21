@@ -85,14 +85,19 @@ Hub's default). `create_repo` with `source_uri` copies a repository
 server-side, a flow the trajectory never carries, so the annotator
 admits it only when the source's readers are inside the target's: a
 public source into any target, or the viewer's own private repository
-into another of the viewer's own; anything else is refused.
+into another of the viewer's own; anything else is refused. Both
+require a trusted session because they leave code behind that runs
+without review: a write commits straight to the repository's revision,
+a Space rebuilds and runs from it, and a model's files run where it is
+loaded. A `create_repo` copy of a Space deploys it.
 
 *Code run with the viewer's token* — `hf_jobs`, `hf_sandbox`,
 `hf_sandbox_exec`, `hf_sandbox_fs`, and `dynamic_space` with
 `operation` `invoke`, which posts the parameters to a Space's own code
-with the token forwarded. They run only with trusted data the viewer may
-see and a person permitting `huggingface-review`; what they return is
-untrusted and stays with the viewer.
+with the token forwarded. They run code the call chooses, so they run
+only in a trusted session, with data the viewer may see and a person
+permitting `huggingface-review`; what they return is untrusted and
+stays with the viewer.
 
 *Space discovery and schemas* — the other `dynamic_space` operations
 search Spaces with the token and read a Space's parameter schema:

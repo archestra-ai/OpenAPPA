@@ -1,4 +1,4 @@
-//! Notion battery: coarse internal reads, trusted writes, reviewed structural changes.
+//! Notion battery: coarse internal reads, writes bounded by audience, reviewed structural changes.
 use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
@@ -48,9 +48,10 @@ selectors = [{{ template = "members", feeds = "internal" }}]
     .await
 }
 
-/// A page read narrows the trajectory to internal and keeps its trust, so the page can be
-/// written back; a search reaches connected sources such as mail and lowers the trust, so
-/// nothing built from it is written as trusted, nor fetched from a URL into the workspace.
+/// A page read narrows the trajectory to internal and keeps its trust; a search reaches
+/// connected sources such as mail and lowers the trust. A page is content people read, so a
+/// page built from the search is still written: its audience bounds it. Turning a page into
+/// an agent skill leaves instructions behind, so it needs a trusted session.
 #[tokio::test]
 async fn a_page_read_keeps_trust_and_a_search_lowers_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -93,22 +94,25 @@ async fn a_page_read_keeps_trust_and_a_search_lowers_it() {
     );
     ran(&runtime, search).await;
 
-    for write in [
-        call(
-            "notion-create-pages",
-            serde_json::json!({ "pages": [{ "properties": { "title": "Summary" } }] }),
-        ),
-        call(
-            "notion-create-attachment",
-            serde_json::json!({ "filename": "x.html", "source_url": "https://example.com/x.html" }),
-        ),
-    ] {
-        assert!(
-            !matches!(propose(&runtime, write.clone()).await, HookDecision::AllowCall { .. }),
-            "{}",
-            write.tool
-        );
-    }
+    let summary = call(
+        "notion-create-pages",
+        serde_json::json!({ "pages": [{ "properties": { "title": "Summary" } }] }),
+    );
+    assert_eq!(
+        propose(&runtime, summary.clone()).await,
+        HookDecision::AllowCall { spawn: None },
+        "an untrusted session still writes a page its readers may see"
+    );
+    ran(&runtime, summary).await;
+
+    let skill = call("notion-convert-page-to-skill", serde_json::json!({ "page_id": "1" }));
+    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, skill).await else {
+        panic!("an untrusted session does not turn a page into a skill outright");
+    };
+    assert!(
+        feedback.contains("trust"),
+        "the refusal names the trust gap: {feedback}"
+    );
 }
 
 /// A trusted write inside the workspace runs outright and records `notion.changed`; a

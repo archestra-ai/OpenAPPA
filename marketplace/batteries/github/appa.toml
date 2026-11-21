@@ -4,7 +4,9 @@
 # repository's reads and writes run first and ask GitHub for the
 # repository's visibility. Composed alone, a read of one repository
 # enters `suspicious` and stays with the viewer (`self`), and a write
-# into one needs trusted data everyone may see. The parent issue
+# into one needs data everyone may see. A write requires a trusted
+# session only where it leaves instructions or code behind, or changes
+# who must approve code (see the writes below). The parent issue
 # `sub_issue_write` returns is labelled as a read of that issue is.
 
 [policy]
@@ -152,14 +154,25 @@ name = "mcp/github/search_pull_requests"
 delta = { trust = "suspicious", audience = ["self"] }
 tags = ["github"]
 
-# --- writes into one repository: a target policy asks its visibility; alone, only trusted public data ---
+# --- writes into one repository: a target policy asks its visibility; alone, data everyone may see ---
+
+# Issues, comments, reviews, pull requests and a feature branch are read by
+# people before anything takes them, so these writes need no trusted
+# session: `requires.audience` bounds what they disclose. A write requires a
+# trusted session when it leaves instructions or code behind that a later
+# session or run takes without a person reading it first, or when it changes
+# who must approve code: an instruction file, CI or hook configuration,
+# `CODEOWNERS`, a default or release branch, a merge, or an approving review.
+# Under a target policy, the `github.repository-readers` annotator applies
+# that rule to each call's path, branch and event. This base alone reads no
+# arguments, so every file write, delete, push, branch creation, merge and
+# review it covers requires a trusted session.
 
 [[policy.tool]]
 name = "mcp/github/fork_repository"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -199,7 +212,6 @@ name = "mcp/github/issue_write"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -208,7 +220,6 @@ delta = { trust = "suspicious", audience = ["self"] }
 tags = ["github"]
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -216,7 +227,6 @@ name = "mcp/github/add_issue_comment"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -224,7 +234,6 @@ name = "mcp/github/create_pull_request"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -232,7 +241,6 @@ name = "mcp/github/update_pull_request"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -240,7 +248,6 @@ name = "mcp/github/update_pull_request_branch"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -264,7 +271,6 @@ name = "mcp/github/add_comment_to_pending_review"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -272,7 +278,6 @@ name = "mcp/github/add_reply_to_pull_request_comment"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 [[policy.tool]]
@@ -280,7 +285,6 @@ name = "mcp/github/request_copilot_review"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 # --- writes that name no existing repository: only public data may go in ---
@@ -290,7 +294,6 @@ name = "mcp/github/create_repository"
 delta = {}
 
 [policy.tool.requires]
-trust = "trusted"
 audience = { contains = ["public"] }
 
 # --- sanitizers ---

@@ -32,7 +32,10 @@ audience.
 `appa battery remove file-tracker` turns file tracking off. This battery's
 own rules then decide those tools: reads under `private/` narrow audience to
 `internal`, writes and edits require `trusted` data, and `appa_safebash` runs
-only `pwd`.
+only `pwd`. Without file tracking no rule resolves a write's path, so the
+floor that keeps outside text out of an instruction file such as `AGENTS.md`,
+a hook or CI configuration covers every edit. `pwd` only reports the working
+directory, so it needs no trusted session.
 
 Web tools require `public` audience and return `suspicious` data. When the root binds
 `opencode.strip-instructions`, the battery confines both web results and

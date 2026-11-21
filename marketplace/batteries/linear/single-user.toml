@@ -2,7 +2,7 @@
 # A tool that names an issue, a team, a project, or a document by id is
 # labelled with that resource's readers as Linear reports them, through
 # the `linear` audience source bound below; a write into one needs
-# trusted data those readers may see. These rules run before the base
+# data those readers may see. These rules run before the base
 # policy's.
 
 [policy]
@@ -58,37 +58,37 @@ requires = { audience = { contains = ["internal"] } }
 [[policy.tool]]
 name = "mcp/linear/save_comment(issueId:*)"
 delta = { audience = ["@linear:issue/$issueId/readers"] }
-requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issueId/readers"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["@linear:issue/$issueId/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 # Moving an issue: the team it lands in decides who reads it from then on.
 [[policy.tool]]
 name = "mcp/linear/save_issue(id:*,team:*)"
 delta = { audience = ["@linear:team/$team/readers"] }
-requires = { trust = "trusted", audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/save_issue(id:*)"
 delta = { audience = ["@linear:issue/$id/readers"] }
-requires = { trust = "trusted", audience = { contains = ["@linear:issue/$id/readers"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["@linear:issue/$id/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 # Creating an issue: the team it lands in decides who reads it.
 [[policy.tool]]
 name = "mcp/linear/save_issue"
 delta = { audience = ["@linear:team/$team/readers"] }
-requires = { trust = "trusted", audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["@linear:team/$team/readers"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/create_attachment"
 delta = { audience = ["@linear:issue/$issue/readers"] }
-requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/create_attachment_from_upload"
 delta = { audience = ["@linear:issue/$issue/readers"] }
-requires = { trust = "trusted", audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["@linear:issue/$issue/readers"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]

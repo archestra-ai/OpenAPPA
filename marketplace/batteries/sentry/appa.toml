@@ -11,12 +11,22 @@
 # What Sentry returns — issues, events, stack traces, breadcrumbs, user
 # reports, replays, comments — was produced by the monitored applications
 # and their users, so every read enters `suspicious`, restricted to the
-# organization's members (`internal`). Every write needs trusted data that
+# organization's members (`internal`). Every write needs data that
 # `internal` may see and the `sentry-review` mark; changing a project,
 # team, DSN, or monitor records `sentry.sensitive`, the rest
 # `sentry.changed`. The root config supplies an authority permitting
 # `sentry-review`. Sentry exposes no per-project readers to a policy, so
 # map `internal` to the people who may see everything this token can list.
+#
+# A write also needs a trusted session when outside text it carries could
+# act later without a person reading it first. A Seer run takes an
+# instruction that Sentry's agent follows. An uptime monitor sends the
+# request the call defines on a schedule. Creating a project issues a DSN;
+# DSN changes, a project's team, and adding or removing a team change who
+# holds a key or reads the project. A `name` outside the catalog can be
+# any of these. Issue updates, notes, onboarding status, a new team and
+# deleting a monitor change records people read and need no trusted
+# session.
 #
 # Documentation tools fetch public pages from docs.sentry.io, so their
 # input must be public. `search_events`, `search_issues`,
@@ -45,7 +55,7 @@ tags = ["sentry"]
 [[policy.tool]]
 name = "mcp/sentry/update_issue"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["sentry-review"] }
 effects = ["sentry.changed"]
 tags = ["sentry"]
 
@@ -327,14 +337,14 @@ tags = ["sentry"]
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:update_issue)"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["sentry-review"] }
 effects = ["sentry.changed"]
 tags = ["sentry"]
 
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:add_issue_note)"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["sentry-review"] }
 effects = ["sentry.changed"]
 tags = ["sentry"]
 
@@ -348,14 +358,14 @@ tags = ["sentry"]
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:onboarding_status_update)"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["sentry-review"] }
 effects = ["sentry.changed"]
 tags = ["sentry"]
 
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:create_team)"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["sentry-review"] }
 effects = ["sentry.sensitive"]
 tags = ["sentry"]
 
@@ -418,7 +428,7 @@ tags = ["sentry"]
 [[policy.tool]]
 name = "mcp/sentry/execute_sentry_tool(name:delete_uptime_monitor)"
 delta = { trust = "suspicious", audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["sentry-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["sentry-review"] }
 effects = ["sentry.sensitive"]
 tags = ["sentry"]
 

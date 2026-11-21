@@ -58,7 +58,12 @@ fallback for tools no rule names.
 
 The other built-in tools get static rules:
 
-- **Tools that stay inside the session** — `Glob`, `Skill`, `ToolSearch`,
+- **Skills** — a skill returns instructions the agent follows, so its trust
+  is its author's. A plugin's skill (`plugin:skill`) enters `suspicious`: the
+  session keeps sending and editing, but writing its own instructions or
+  choosing code to run needs a root rule that vouches for that plugin. A user
+  or project skill takes the session's label as it is.
+- **Tools that stay inside the session** — `Glob`, `ToolSearch`,
   `TodoWrite`, the plan, worktree, task, cron and artifact tools, and the
   other session-local tools take the session's label as it is. The subagent
   tools `Agent`, `Task` and `Workflow` are the root's to declare: their rules

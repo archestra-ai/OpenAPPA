@@ -10,10 +10,12 @@ its visibility:
                                  reads for a public repository, the
                                  repository's collaborators otherwise; its
                                  trust follows who wrote it (below)
-  github.repository-readers      what a write needs: trusted data that
-                                 everyone may see for a public repository,
-                                 that the repository's collaborators may
-                                 see otherwise; and what its result returns
+  github.repository-readers      what a write needs: data that everyone
+                                 may see for a public repository, that the
+                                 repository's collaborators may see
+                                 otherwise; a trusted session for a write
+                                 that leaves instructions or code behind
+                                 (below); and what its result returns
 
 Only `public` is public. A `private` repository is read by its
 collaborators. An Enterprise `internal` one is read by every enterprise
@@ -41,6 +43,18 @@ public repository's readers are anyone, and a fork's content came from
 its parent, so both are `suspicious`; a private or internal repository
 that is not a fork keeps the session's trust.
 
+A write needs a trusted session only when it leaves instructions or code
+behind that a later agent session, pipeline, or install takes without a
+person reading it first. Those are: a file write, delete, or push that
+touches an instruction file (`AGENTS.md`, `CLAUDE.md`, a rules file, a
+skill, `.github/copilot-instructions.md`), CI or hook configuration, or
+`CODEOWNERS`; a file write, delete, or push to a default or release branch,
+or with no branch named; creating a `gh-pages` or `release*` branch; a
+merge; and an approving review. Issues, comments, pull requests, and
+pushes of ordinary files to a feature branch are read by people before
+anything takes them: their audience bounds what they disclose. A branch is
+matched by name, so a default branch with another name is not recognized.
+
 A write's result is labelled only when it returns stored text beyond the
 call's own arguments. `sub_issue_write` (every method) returns the parent
 issue its `issue_number` names, title and body included; its result gets
@@ -66,6 +80,7 @@ guessed public.
 """
 
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 import json
 import os
 import sys
@@ -118,6 +133,7 @@ class Call:
     tool: str
     number: int | None
     context: dict | None
+    leaves_code: bool = False
 
     @staticmethod
     def of(args, context):
@@ -127,7 +143,55 @@ class Call:
         numbers = (arguments.get(key) for key in NUMBER_ARGUMENTS)
         number = next((value for value in numbers if isinstance(value, int) and not isinstance(value, bool) and value > 0), None)
         entry = context.get("github") if isinstance(context, dict) else None
-        return Call(tool, number, entry if isinstance(entry, dict) else None)
+        return Call(tool, number, entry if isinstance(entry, dict) else None, leaves_code(tool, arguments))
+
+
+# Files a later agent session loads as instructions, or a pipeline runs, or
+# that decide who approves code. `*` matches `/` too, as a policy selector does.
+INSTRUCTION_OR_CODE_PATHS = (
+    "*AGENTS.md", "*CLAUDE.md", "*CLAUDE.local.md", "*GEMINI.md", "*SKILL.md",
+    "*.claude/*", "*.agents/*", "*.cursor/*", "*.cursorrules", "*.clinerules*", "*.windsurfrules",
+    "*.mcp.json", "*.github/copilot-instructions.md", "*.github/instructions/*",
+    "*.github/prompts/*", "*.github/agents/*", "*.github/workflows/*", "*.github/actions/*",
+    "*.gitlab-ci.yml", "*.husky/*", "*CODEOWNERS",
+)
+# Branches that deploys, pages, and releases take without review.
+RELEASE_BRANCHES = ("main", "master", "trunk", "develop", "gh-pages", "release*")
+
+
+def released(branch):
+    """Whether a write to `branch` lands where something takes it without
+    review: a release branch by name, or the default branch when none is named."""
+    return not isinstance(branch, str) or not branch or any(fnmatchcase(branch, name) for name in RELEASE_BRANCHES)
+
+
+def instruction_or_code(path):
+    return not isinstance(path, str) or any(fnmatchcase(path, pattern) for pattern in INSTRUCTION_OR_CODE_PATHS)
+
+
+def leaves_code(tool, arguments):
+    """Whether the write leaves instructions or code behind that something
+    later takes without a person reading it: see the module docstring. An
+    argument this cannot read counts as doing so."""
+    match tool:
+        case "create_or_update_file" | "delete_file":
+            return released(arguments.get("branch")) or instruction_or_code(arguments.get("path"))
+        case "push_files":
+            files = arguments.get("files")
+            if not isinstance(files, list) or not files:
+                return True
+            return released(arguments.get("branch")) or any(
+                not isinstance(file, dict) or instruction_or_code(file.get("path")) for file in files
+            )
+        case "create_branch":
+            branch = arguments.get("branch")
+            return not isinstance(branch, str) or any(fnmatchcase(branch, name) for name in ("gh-pages", "release*"))
+        case "merge_pull_request":
+            return True
+        case "pull_request_review_write":
+            return arguments.get("event") == "APPROVE"
+        case _:
+            return False
 
 
 def collaborators(owner, repo):
@@ -305,16 +369,10 @@ def annotation(name, call, repository, owner, repo):
                 "emits": [],
             }
         case "github.repository-readers":
-            return {
-                "delta": write_delta(call, repository, owner, repo),
-                "requires": {
-                    "trust": "trusted",
-                    "audience": {"contains": must_reach(visibility, owner, repo)},
-                    "history": [],
-                    "attention": [],
-                },
-                "emits": [],
-            }
+            requires = {"audience": {"contains": must_reach(visibility, owner, repo)}, "history": [], "attention": []}
+            if call.leaves_code:
+                requires["trust"] = "trusted"
+            return {"delta": write_delta(call, repository, owner, repo), "requires": requires, "emits": []}
         case _:
             raise ValueError(f"unexpected annotator name {name!r}")
 

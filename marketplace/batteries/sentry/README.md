@@ -23,10 +23,27 @@ bare `execute_sentry_tool` rule and needs a person.
 Reads return what the monitored applications and their users produced,
 so they enter `suspicious`, restricted to `internal`, and a query's
 input must be sharable with `internal`. `search_docs` and `get_doc`
-fetch public pages, so their input must be public. Writes need trusted
-data that `internal` may see and the `sentry-review` mark, and record
+fetch public pages, so their input must be public. Writes need data
+that `internal` may see and the `sentry-review` mark, and record
 `sentry.changed`; creating or changing a team, project, DSN, or uptime
 monitor records `sentry.sensitive` instead.
+
+A write also requires a trusted session when text from outside the
+operator's control could act later without a person reading it first:
+
+- `analyze_issue_with_seer`, listed and in the catalog, sends an
+  instruction to Seer, Sentry's agent.
+- `create_uptime_monitor` and `update_uptime_monitor` define a request
+  that Sentry sends on a schedule.
+- `create_project` issues a DSN. `create_dsn`, `update_dsn`,
+  `update_project`, `add_team_to_project` and `remove_team_from_project`
+  change who holds a key or reads a project.
+- A `name` outside the catalog can do any of these.
+
+Updating an issue, adding a note, onboarding status updates, creating a
+team and deleting a monitor change records people read. They need no
+trusted session: their `audience` requirement bounds who reads the data,
+and `sentry-review` stays.
 
 The Claude Code and kagent plugin defaults ship a human authority
 permitting every mark (`attention = ["*"]`), so `sentry-review` needs no

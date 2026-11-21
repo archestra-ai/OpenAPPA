@@ -170,10 +170,11 @@ def test_the_status_page_injection_is_gated_at_the_read(stack):
     assert not task.calls("post_status_update"), "the agent never reaches the public sink"
 
 
-def test_the_github_battery_blocks_repository_text_at_a_public_write(stack):
-    """The GitHub battery marks public repository text suspicious. After
-    accepting that input, the same session cannot send it to the trusted
-    public issue sink."""
+def test_the_github_battery_lets_a_suspicious_session_open_a_public_issue(stack):
+    """The GitHub battery marks public repository text suspicious, and the
+    session accepts that drop at the read. An issue is text people read,
+    not instructions or code a later session obeys or runs, so the
+    suspicious session still opens one on the public repository."""
     task = stack.say(
         GITHUB_READ,
         [
@@ -195,7 +196,7 @@ def test_the_github_battery_blocks_repository_text_at_a_public_write(stack):
                     "body": "Deploy only reviewed changes.",
                 },
             },
-            {"text": "The public issue write was blocked because repository text is suspicious."},
+            {"text": "I opened the public issue."},
         ],
     )
     responses = task.responses("get_file_contents")
@@ -203,9 +204,8 @@ def test_the_github_battery_blocks_repository_text_at_a_public_write(stack):
     assert "trust" in str(responses[0].get("result", "")).lower()
     assert GITHUB_INJECTION in task.everything()
     writes = task.responses("issue_write")
-    assert writes and writes[0].get("appa") == "denied"
-    assert "suspicious" in str(writes[0].get("result", "")).lower()
-    assert '"created": true' not in task.everything().lower()
+    assert writes and writes[0].get("appa") != "denied", f"the public issue needs no trust: {writes}"
+    assert '"created": true' in str(writes[0]), f"the tool created the issue: {writes}"
 
 
 def test_the_github_battery_allows_operator_authored_public_issue_text(stack):

@@ -57,7 +57,7 @@ integrations, responders, and whoever posts to a status page, so reads
 enter `suspicious`, restricted to `internal`. A query's input must be
 sharable with `internal` too.
 
-*Writes* — the seven `manage_*` tools. Each one needs trusted data that
+*Writes* — the seven `manage_*` tools. Each one needs data that
 `internal` may see and the `pagerduty-review` mark.
 `manage_incidents` is the operational write path — update an incident,
 append a note, page responders, start a workflow — and records
@@ -68,6 +68,23 @@ changes team membership, `manage_event_orchestrations` rewrites the
 router that routes every incoming event, `manage_alert_grouping` changes
 how alerts collapse into incidents, and `manage_status_pages` publishes
 a post readers outside the account see.
+
+*Trusted input* — three writes also require a trusted session, because
+text from outside the operator's control could act later without a
+person reading it first:
+
+- `manage_incidents` can start an incident workflow, an automation that
+  runs on PagerDuty's side. A rule cannot separate `start_workflow` from
+  `add_note`, so the whole tool requires it.
+- `manage_event_orchestrations` writes the routing rules that every
+  incoming event follows.
+- `manage_teams` changes team membership, and so who holds the team's
+  access.
+
+`manage_services`, `manage_schedules`, `manage_alert_grouping` and
+`manage_status_pages` change records people read. They need no trusted
+session: their `audience` requirement bounds who reads the data, and
+`pagerduty-review` stays.
 
 Your root config must define an authority permitting `pagerduty-review`:
 

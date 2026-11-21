@@ -17,8 +17,9 @@ Writes need `sentry-review`. The Claude Code and kagent plugin defaults permit e
 
 - Issues, events, stack traces, replays, profiles, releases, monitors, alert rules, and dashboards were produced by the monitored applications and their users. They return untrusted `internal` data.
 - Documentation lookups fetch public pages, so their input must be public.
-- Changing an issue, adding a note, starting a Seer run, and onboarding updates require trusted internal data and review, and record `sentry.changed`.
+- Changing an issue, adding a note, starting a Seer run, and onboarding updates require internal data and review, and record `sentry.changed`.
 - Creating or changing a team, project, DSN, or uptime monitor records `sentry.sensitive`.
+- Only calls whose outside text could act later without a person reading it first also require a trusted session. A Seer run takes an instruction Sentry's agent follows. An uptime monitor sends its request on a schedule. Project, DSN and project-team changes grant keys or access. Other writes change records people read, which their audience requirement and review bound.
 - A catalog name the policy does not know needs a person.
 
 Sentry tokens do not expose per-project reader boundaries to policy, so all reads default to `internal`. To restrict an agent to specific projects, scope them in your root policy using argument selectors.

@@ -16,8 +16,9 @@ Your root config must define an Authority permitting `pagerduty-review` for writ
 ## Tool behavior
 
 - Incidents, alerts, notes, log entries, change events, and status page posts were written by monitoring integrations, responders, and status page authors. They return untrusted `internal` data, and a query's input must be sharable with `internal`.
-- `manage_incidents` updates an incident, appends a note, pages responders, or starts a workflow. It requires trusted internal data and review, and records `pagerduty.changed`.
+- `manage_incidents` updates an incident, appends a note, pages responders, or starts a workflow. It requires internal data and review, and records `pagerduty.changed`.
 - The other six writes change configuration or publish outward — services, schedules, team membership, event orchestration routers, alert grouping, and status page posts — and record `pagerduty.sensitive`.
+- `manage_incidents`, `manage_event_orchestrations` and `manage_teams` also require a trusted session. An incident workflow and the event router run later without a person reading them, and team membership grants access. The other writes change records people read, which their audience requirement and review bound.
 
 ## Sanitizers
 

@@ -75,8 +75,8 @@ policy, PersistentVolumeClaim, provider Secret, ModelConfig, or
 `demo-tools` also exposes canned `get_file_contents` and `issue_write`
 calls for a public repository. The demo template includes the GitHub battery
 and binds it to the demo MCP endpoint. `appa-guide` proposes that configuration
-when it is missing from the serving policy. Repository text then enters as suspicious, while trusted issue
-text supplied by the operator can still publish.
+when it is missing from the serving policy. Repository text then enters as suspicious. A public issue needs no trust,
+so the session can still publish one after it reads repository text.
 
 ## Tests
 

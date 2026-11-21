@@ -4,10 +4,17 @@
 # a team, a project, or a document by id run first and label it with
 # that resource's readers as Linear reports them. Composed alone, such a
 # read stays with the viewer (`self`) and a write into such a resource
-# needs trusted data everyone may see. Tools that name no resource, or
+# needs data everyone may see. Tools that name no resource, or
 # name one by a free-text query, stay `internal`: map it in the root
 # config to readers authorized for everything this connection can list.
 # Every mutation requires review.
+#
+# A write needs a trusted session only when it changes access or releases
+# code: `share_issue` and `unshare_issue` change who can read an issue, and
+# `merge_diff` lands a code change on its target branch, where builds and
+# deploys can take it without another review. Issues, comments,
+# documents, projects, labels, attachments and status updates are content
+# people read: their `audience` requirement and the review mark bound them.
 #
 # Trust follows who can write the text. Issues, comments, documents, and
 # projects are written by workspace members, so reads keep the session's
@@ -227,86 +234,87 @@ delta = { trust = "suspicious", audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 tags = ["linear"]
 
-# Routine writes: trusted internal input and explicit review.
+# Routine writes: internal input and explicit review.
 
 [[policy.tool]]
 name = "mcp/linear/mark_notification"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/save_comment(issueId:*)"
 delta = { audience = ["self"] }
-requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["public"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/save_comment"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/save_document"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/save_issue"
 delta = { audience = ["self"] }
-requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["public"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 [[policy.tool]]
 name = "mcp/linear/save_milestone"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.changed"]
 
 # Administrative, sharing and destructive writes: explicit review.
+# Sharing and merging a diff also require trusted input.
 
 [[policy.tool]]
 name = "mcp/linear/create_attachment"
 delta = { audience = ["self"] }
-requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["public"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/create_attachment_from_upload"
 delta = { audience = ["self"] }
-requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["public"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/create_issue_label"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/delete_attachment"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/delete_comment"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/delete_diff_comment"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/delete_status_update"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
@@ -320,79 +328,79 @@ effects = ["linear.sensitive"]
 # keeps the prepared upload attachable to any issue the workspace reads.
 name = "mcp/linear/prepare_attachment_upload"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/resolve_diff_thread"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/restore_issue_label"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/restore_project_label"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/retire_issue_label"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/retire_project_label"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/save_diff_comment"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/save_issue_label"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/save_project"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/save_project_label"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/save_release"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/save_release_note"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
 name = "mcp/linear/save_status_update"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]
@@ -404,7 +412,7 @@ effects = ["linear.sensitive"]
 [[policy.tool]]
 name = "mcp/linear/submit_diff_review"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["linear-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["linear-review"] }
 effects = ["linear.sensitive"]
 
 [[policy.tool]]

@@ -15,5 +15,5 @@ selectors = [{ template = "user/<id>" }]
 [[policy.tool]]
 name = "mcp/monday/create_notification"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["@monday:user/$user_id"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["@monday:user/$user_id"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]

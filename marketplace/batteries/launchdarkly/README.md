@@ -56,13 +56,17 @@ free-text `comment`, `description`, and `title` fields. All of it reaches
 the agent as text, so every read enters `suspicious`, restricted to
 `internal`. A query's input must be sharable with `internal` too.
 
-*Writes* — every write changes a live flag or AI Config, which changes
-what the application serves in production. Writes need trusted data that
-`internal` may see and the `launchdarkly-review` mark, and record
-`launchdarkly.changed`. The three deletes destroy configuration and
-record `launchdarkly.sensitive`. A create or update returns the changed
-object, so it labels the trajectory like a read; a delete returns no
-content and changes no label.
+*Writes* — every write changes a live flag or AI Config, so it changes
+what the application runs in production without a person reading the
+change first. A flag, its targeting and its rollout choose which code
+paths run. An AI Config holds the prompts and model that the
+application's model later loads. So every write, delete included, needs
+a trusted session: text from outside the organization cannot choose the
+change. Writes also need data that `internal` may see and the
+`launchdarkly-review` mark, and record `launchdarkly.changed`. The three
+deletes destroy configuration and record `launchdarkly.sensitive`. A
+create or update returns the changed object, so it labels the trajectory
+like a read; a delete returns no content and changes no label.
 
 The Claude Code and kagent plugin defaults ship a human authority
 permitting every mark (`attention = ["*"]`), so `launchdarkly-review`

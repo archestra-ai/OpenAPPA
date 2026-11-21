@@ -106,13 +106,13 @@ rollback_deployment(name: "checkout-api")
 This scenario establishes information-flow boundaries on repository tools.
 
 1. **Policy rule:**
-   The GitHub battery labels repository contents as `suspicious`. It requires `trusted` data for `issue_write`.
+   The GitHub battery labels repository contents as `suspicious`. `issue_write` into a public repository requires only `public` data. Trust gates the writes a later session obeys or runs, such as `AGENTS.md`, workflows, and merges.
 
 2. **Engine decision:**
-   Reading repository files succeeds. However, forwarding that unvetted repository text to `issue_write` is blocked because suspicious data cannot flow into trusted sinks.
+   The first repository read is blocked with a remedy that drops the session to `suspicious`. The agent accepts it and reads the file. The suspicious session can still open a public issue, because an issue is text people read.
 
 3. **Resolution:**
-   Fresh text supplied directly by an authorized operator retains `trusted` status and publishes without human approval.
+   The repository text reaches the agent without human approval. The same session cannot write an instruction file or a workflow, because those writes require `trusted` data.
 
 ## Scenario 6: Permitted reads flow without interruption
 

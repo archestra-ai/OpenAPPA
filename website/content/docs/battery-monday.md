@@ -30,7 +30,7 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
   suspicious and public. `read_docs` instead reads internal
   workspace documents.
 - **Reviewed writes:** items, comments, docs, folders, groups, dashboards,
-  widgets, views and uploads require trusted internal input and `monday-review`,
+  widgets, views and uploads require internal input and `monday-review`,
   and record `monday.changed`. Results stay internal and keep the session's
   trust.
 - **Reviewed sensitive changes:** structural changes, deletes, notifications,
@@ -38,6 +38,14 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
   general GraphQL operations record `monday.sensitive`. Results stay internal
   and keep the session's trust. Review includes the affected resources and any
   external destinations.
+- **Trusted input:** a write requires a trusted session only when outside text
+  could act later without a person reading it first. Agent definitions,
+  skills, knowledge and the workflow expert hold instructions an agent
+  follows. Automations, workflows, agent triggers, code, actions, Vibe apps and
+  the general GraphQL mutation tools run code later or elsewhere. Workspace
+  and form access settings, Vibe publication and external-agent connections
+  grant access. Every other write is content people read or a message to
+  them: its `audience` requirement and `monday-review` bound it.
 - **Notifications:** `create_notification` also checks its `user_id` recipient
   against the input audience. A monday audience source resolves that user to a
   confirmed email; absent, inactive, or unconfirmed users are refused. The
@@ -47,7 +55,8 @@ and its [rules and covered tools](https://github.com/archestra-ai/OpenAPPA/blob/
   public input and review. Their internal responses mean the exact
   call also needs an authority permitted to approve audience expansion.
 - **Returned credentials:** `connect_external_agent` returns a signing secret
-  and API token. Its reviewed contract keeps input and output within `self`.
+  and API token. Its reviewed contract requires trusted input and keeps input
+  and output within `self`.
 
 The read actions of `manage_agent`, `manage_agent_triggers`, and
 `manage_agent_knowledge` have separate contracts before their reviewed mutation

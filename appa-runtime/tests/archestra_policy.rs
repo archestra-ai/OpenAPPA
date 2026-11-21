@@ -200,11 +200,15 @@ struct Class {
 }
 
 const TABLE: &[Class] = &[
-    // The session's own surfaces, and writes that carry no session data.
+    // The session's own surfaces, writes that carry no session data, and deletes that
+    // leave no instructions or code behind.
     Class {
         adds: Adds::Nothing,
         needs: Needs::Nothing,
         calls: &[
+            ("delete_workspace", r#"{"run_id": "r"}"#),
+            ("delete_runtime_credential", r#"{"id": "c"}"#),
+            ("delete_plugin", r#"{"id": "p"}"#),
             ("search_tools", r#"{"query": "github"}"#),
             ("ask_user", r#"{"question": "Apply?"}"#),
             ("validate_guardrails_policy", r#"{"content": ""}"#),
@@ -255,7 +259,7 @@ const TABLE: &[Class] = &[
             ("get_llm_session_logs", r#"{"session_id": "s"}"#),
         ],
     },
-    // Guardrails, destructive and control-plane writes.
+    // Guardrails, control-plane writes, and creates of what agents load or run.
     Class {
         adds: Adds::Nothing,
         needs: Needs::Trusted,
@@ -267,9 +271,6 @@ const TABLE: &[Class] = &[
                 "bind_guardrails_credential",
                 r#"{"variable": "APPA_PROVIDER_X", "key": "k"}"#,
             ),
-            ("delete_workspace", r#"{"run_id": "r"}"#),
-            ("delete_runtime_credential", r#"{"id": "c"}"#),
-            ("delete_plugin", r#"{"id": "p"}"#),
             ("unassign_knowledge_base_from_agent", r#"{"agent_id": "a"}"#),
             ("create_mcp_server", r#"{"name": "s"}"#),
             ("create_agent", r#"{"name": "a"}"#),
@@ -278,17 +279,16 @@ const TABLE: &[Class] = &[
             ("create_knowledge_base", r#"{"name": "k"}"#),
         ],
     },
-    // Writes other members read or run, writes a later read returns as trusted, creates that
-    // share with someone, and credential transfers that carry a value or send no modes.
+    // Writes other members' agents load or run, writes a later read returns as trusted,
+    // creates that share with someone, and credential transfers that carry a value or send
+    // no modes.
     Class {
         adds: Adds::Nothing,
         needs: Needs::TrustedInternal,
         calls: &[
-            ("post_agent_run_message", r#"{"run_id": "r", "text": "done"}"#),
             ("edit_agent", r#"{"id": "a", "systemPrompt": "p"}"#),
             ("create_schedule_trigger", r#"{"message_template": "m"}"#),
             ("publish_app", r#"{"appId": "a", "scope": "org"}"#),
-            ("post_run_message", r#"{"run_id": "r", "text": "done"}"#),
             (
                 "propose_tuner_suggestion",
                 r#"{"fingerprint": "f", "rationale": "r", "policy_change": {"expected_revision": 1, "edits": []}}"#,
@@ -311,7 +311,6 @@ const TABLE: &[Class] = &[
             ("refine_app", r#"{"appId": "a", "spec": {}}"#),
             ("save_file", r#"{"filename": "n.md", "content": "n"}"#),
             ("edit_file", r#"{"id": "f", "content": "n"}"#),
-            ("copy_file", r#"{"id": "f"}"#),
             ("download_file", r#"{"path": "out.csv"}"#),
             (
                 "transfer_credential",
@@ -321,11 +320,15 @@ const TABLE: &[Class] = &[
             ("transfer_credential", r#"{"agent_id": "a"}"#),
         ],
     },
-    // Writes into a run, and credential declarations an agent's readers see.
+    // Writes into a run, messages and copies people read, and credential declarations an
+    // agent's readers see.
     Class {
         adds: Adds::Nothing,
         needs: Needs::Internal,
         calls: &[
+            ("post_agent_run_message", r#"{"run_id": "r", "text": "done"}"#),
+            ("post_run_message", r#"{"run_id": "r", "text": "done"}"#),
+            ("copy_file", r#"{"id": "f"}"#),
             ("start_agent_run", r#"{"agent_id": "a", "message": "m"}"#),
             ("start_run", r#"{"agent_id": "a", "message": "m"}"#),
             ("transfer_credential", r#"{"agent_id": "a", "transferModes": ["link"]}"#),

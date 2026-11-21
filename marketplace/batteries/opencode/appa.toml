@@ -51,6 +51,10 @@ name = "host/opencode/websearch"
 delta = { trust = "suspicious" }
 tags = ["opencode"]
 
+# Local edits keep the trust floor. A local edit to an ordinary file needs no
+# trusted session, but an edit to an instruction file, a hook, CI or a
+# credential does. The plugin does not resolve a write's path, so a path
+# selector cannot exclude an alias of those files: every edit requires trust.
 [[policy.tool]]
 name = "host/opencode/write"
 requires = { trust = "trusted" }
@@ -62,7 +66,7 @@ requires = { trust = "trusted" }
 # Without file tracking nothing labels what a command reads, so only pwd runs.
 [[policy.tool]]
 name = "host/opencode/appa_safebash(command:pwd)"
-requires = { trust = "trusted", audience = { contains = ["public"] } }
+requires = { audience = { contains = ["public"] } }
 
 [externals]
 

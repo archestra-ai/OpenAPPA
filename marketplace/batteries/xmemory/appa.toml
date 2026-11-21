@@ -12,18 +12,24 @@
 # `internal`, because the instance stores it and its readers see it.
 #
 # Trust follows who can write the text. Memory is written by the
-# organisation's members and agents, and every write needs trusted data,
-# so reads keep the session's trust: suspicious text cannot enter memory
-# and come back trusted. A `text` write can already update and delete
-# records through extraction, so a `structured_mutations` write that
-# names them exactly gets the same contract.
+# organisation's members and agents, so reads keep the session's trust.
+# Memory, the schema that shapes it, and an instance's owner instructions
+# are what later agent sessions load and follow without a person reading
+# them first. So every call that writes them needs a trusted session:
+# memory writes, schema decisions and migrations, creating an instance,
+# and changing its metadata. Suspicious text cannot enter memory and come
+# back trusted. A `text` write can already update and delete records
+# through extraction, so a `structured_mutations` write that names them
+# exactly gets the same contract.
 #
 # Creating an instance and changing its metadata return the whole
 # instance: its schema, description, and owner instructions. Owner
 # instructions reach every agent connected to the instance. Applying a
 # schema migration and deleting an instance cannot be undone and need the
-# `xmemory-review` mark. The root config supplies an authority permitting
-# both.
+# `xmemory-review` mark. Deleting an instance writes nothing an agent
+# later follows, so it needs no trusted session; its `audience`
+# requirement and the review mark bound it. The root config supplies an
+# authority permitting both.
 
 [policy]
 version = 2
@@ -82,7 +88,7 @@ name = "mcp/xmemory/enhance_schema"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# --- memory writes: trusted internal input ---
+# --- memory writes: trusted internal input, which later sessions load ---
 
 [[policy.tool]]
 name = "mcp/xmemory/write"
@@ -172,7 +178,7 @@ name = "mcp/xmemory/admin_enhance_schema"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# --- admin writes: trusted data ---
+# --- admin writes: trusted data; metadata carries the owner instructions ---
 
 [[policy.tool]]
 name = "mcp/xmemory/admin_create_instance"
@@ -209,11 +215,11 @@ effects = ["xmemory.admin"]
 [[policy.tool]]
 name = "mcp/xmemory/admin_delete_instance"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["xmemory-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["xmemory-review"] }
 effects = ["xmemory.deleted"]
 
 [[policy.tool]]
 name = "mcp/xmemory/admin_delete_instance_by_id"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["xmemory-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["xmemory-review"] }
 effects = ["xmemory.deleted"]

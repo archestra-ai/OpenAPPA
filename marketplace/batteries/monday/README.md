@@ -23,7 +23,7 @@ email and never asks who owns the token. The targets differ only in setup:
 - **single-user** — one person's API token.
 - **multi-user** — an app token with `users:read` that every agent shares.
 - **base alone** — no helper and no lookup: `create_notification`
-  requires trusted public input and review; every other rule is the same.
+  requires public input and review; every other rule is the same.
 
 ## Rules
 
@@ -57,7 +57,7 @@ use the sensitive-write contract below.
 answers from monday's own documentation, so its result enters `suspicious` and
 `public`.
 
-*Reviewed writes* — trusted internal input and `monday-review`; results are
+*Reviewed writes* — internal input and `monday-review`; results are
 `internal` and keep the session's trust. These tools record `monday.changed`:
 
 `change_item_column_values`, `create_dashboard`, `create_doc`, `create_folder`,
@@ -80,21 +80,44 @@ session's trust. These tools are:
 `update_folder`, `update_form`, `update_workspace`, `vibe_create`, `vibe_delete`,
 `vibe_publication`, `vibe_update`.
 
+*Trusted input* — a write requires a trusted session only when text from
+outside the operator's control could act later without a person reading it
+first. These tools require it:
+
+- Instructions an agent follows: `manage_agent`, `manage_agent_skills`,
+  `manage_agent_knowledge`, and `invoke_workflow_expert`, which sends a
+  message to monday's workflow agent.
+- Code or automation that runs later or elsewhere: `manage_automations`,
+  `create_automation`, `create_workflow`, `publish_workflow`,
+  `run_workflow_once`, `manage_agent_triggers`, `execute_code`,
+  `create_action`, `update_action`, `run_action`, `vibe_create`,
+  `vibe_update`, `all_monday_api` and `all_api_write`. The two GraphQL tools
+  can perform any of these mutations.
+- Access and its protection: `update_workspace` (open or closed),
+  `update_form` (password and login settings), `vibe_publication` and
+  `connect_external_agent`.
+
+The read actions of the `manage_agent*` tools require no trust. Every other
+write creates, edits, moves or deletes content people read, or sends a
+notification or a submission. It needs no trusted session: its `audience`
+requirement bounds who reads the data, and `monday-review` stays.
+
 Under a target, `create_notification` additionally requires that its `user_id`
 recipient can read the input. The `monday` audience source looks up that user's confirmed
 email through the monday Users API. It refuses absent, inactive, or
-unconfirmed users and lookup errors. The contract requires trusted input and
-`monday-review`; its result is `internal`.
+unconfirmed users and lookup errors. The contract requires `monday-review`;
+its result is `internal`.
 
 *External submissions* — `create_form_submission` and
-`submit_bug_or_feature_request` require trusted public input and review, and
+`submit_bug_or_feature_request` require public input and review, and
 record `monday.sensitive`. Results are `internal`, so the combined
 input/output check also requires explicit audience-expansion authority, even
 from a fresh trajectory.
 
-*Credentials* — `connect_external_agent` requires trusted input sharable with
-`self` and review, records `monday.sensitive`, and returns `self` content
-containing a signing secret and API token.
+*Credentials* — `connect_external_agent` grants a new agent API access, so it
+requires trusted input sharable with `self` and review. It records
+`monday.sensitive` and returns `self` content containing a signing secret and
+API token.
 
 ## Root configuration
 

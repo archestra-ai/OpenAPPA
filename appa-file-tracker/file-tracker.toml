@@ -319,6 +319,44 @@ write_trust = "trusted"
 pattern = "*/Library/LaunchAgents/*"
 write_trust = "trusted"
 
+# Other harnesses read these as instructions, and CI runs its workflows, without a
+# person reading them first.
+[[path]]
+pattern = "*GEMINI.md"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.cursorrules"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.cursor/rules/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.github/copilot-instructions.md"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.github/instructions/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.clinerules*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.windsurfrules"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.github/workflows/*"
+write_trust = "trusted"
+
+[[path]]
+pattern = "*/.gitlab-ci.yml"
+write_trust = "trusted"
+
 # Amp reads a repository's skills as instructions and runs an orb's setup and resume
 # scripts as code when the orb starts.
 [[path]]
@@ -365,6 +403,21 @@ write_attention = ["human-approval"]
 
 [[path]]
 pattern = "*/.amp/settings.json"
+write_attention = ["human-approval"]
+
+# OpenCode's settings, which register its plugins, AppenCode among them, and its MCP servers,
+# and its configuration directories, whose plugins run when OpenCode starts and whose agents
+# and commands it loads as instructions.
+[[path]]
+pattern = "*/opencode.json*"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/.opencode/*"
+write_attention = ["human-approval"]
+
+[[path]]
+pattern = "*/.config/opencode/*"
 write_attention = ["human-approval"]
 
 [[path]]

@@ -20,6 +20,16 @@
 # execution, sharing and destructive operations record monday.sensitive.
 # The root supplies an authority permitting monday-review.
 #
+# A write needs a trusted session only when outside text it carries could
+# act later without a person reading it first. Agent definitions, skills,
+# knowledge, triggers and the workflow expert hold instructions an agent
+# follows. Automations, workflows, code, actions, Vibe apps and the general
+# GraphQL mutation tools run code or automation later or elsewhere. Workspace
+# and form settings, Vibe publication and external-agent connections grant
+# access or change its protection. Items, updates, docs, boards, views,
+# columns, notifications and submissions are content people read: their
+# `audience` requirement and the review mark bound them.
+#
 # Leave ordinary parameters to the server. Only an operation that changes the
 # security contract needs an argument selector, placed before its fallback.
 
@@ -280,121 +290,123 @@ delta = { trust = "suspicious", audience = ["public"] }
 requires = { audience = { contains = ["public"] } }
 tags = ["monday"]
 
-# --- writes inside the workspace: trusted internal input, reviewed ---
+# --- writes inside the workspace: internal input, reviewed ---
 # create_update returns the existing item name. Bulk/duplicate item creation
 # and document updates can also return existing content; none is labelled public.
 
 [[policy.tool]]
 name = "mcp/monday/create_item"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_items"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_update"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/change_item_column_values"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/update_items"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_doc"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/update_doc"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_folder"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_group"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_dashboard"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_widget"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_view"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/create_view_table"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/update_view"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/update_view_table"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/get_asset_upload_url"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 [[policy.tool]]
 name = "mcp/monday/finalize_asset_upload"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.changed"]
 
 # --- structural, automation, execution and sharing changes: reviewed ---
 # GraphQL mutations, code, stored actions and workflow/agent runs can perform
 # changes beyond the named resource. Review their complete operation and sinks.
 # Vibe publication changes availability on the caller account.
+# Tools that leave instructions, code or automation behind, or that change
+# access, also require trusted input; the other structural changes do not.
 
 [[policy.tool]]
 name = "mcp/monday/create_form"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
@@ -406,19 +418,19 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/form_questions_editor"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_column"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/update_column"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
@@ -430,31 +442,31 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/update_folder"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_workspace"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/move_object"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/create_board"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/delete_view"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
@@ -496,7 +508,7 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/stop_workflow_run_once"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
@@ -544,7 +556,7 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/delete_action"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
@@ -574,7 +586,7 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/vibe_delete"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
@@ -593,7 +605,7 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/create_notification"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["public"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 # --- external submissions: public input, reviewed ---
@@ -603,13 +615,13 @@ effects = ["monday.sensitive"]
 [[policy.tool]]
 name = "mcp/monday/create_form_submission"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["public"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 [[policy.tool]]
 name = "mcp/monday/submit_bug_or_feature_request"
 delta = { audience = ["internal"] }
-requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["monday-review"] }
+requires = { audience = { contains = ["public"] }, attention = ["monday-review"] }
 effects = ["monday.sensitive"]
 
 # --- connecting an external agent: returned credentials stay with self ---

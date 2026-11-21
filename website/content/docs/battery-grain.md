@@ -18,8 +18,8 @@ Actions that need a person's approval carry the `human-approval` mark. The Claud
 - Meeting content, directories, and settings return `internal` data, the built-in audience of the organization's members.
 - Meeting content (meetings, transcripts, notes, action items, coaching, clips, collections, stories, companies, people, dossiers, and deals) is untrusted: outside participants said part of it. Workspace users, teams, and settings keep the session's trust.
 - Resolving a URL has no extra restrictions.
-- Creating clips, stories, and collections, adding to them, and tagging meetings require only `internal` data, since Grain returns them as meeting content: a session that read a transcript can still cut a clip from it. Creating a smart topic requires trusted data.
-- Public sharing, invitations, seat assignments, team changes, and workspace administration require approval every time.
+- Creating clips, stories, and collections, adding to them, and tagging meetings require only `internal` data and no trusted session: they are ordinary content that people read, and a session that read a transcript can still cut a clip from it. Creating a smart topic requires a trusted session, because Grain's model applies it to later recordings.
+- Public sharing, invitations, seat assignments, team changes, and user, team, and workspace settings grant access, so they require a trusted session and approval every time.
 
 To change how one tool works, add a more specific rule to the root config. Root rules run before battery rules.
 

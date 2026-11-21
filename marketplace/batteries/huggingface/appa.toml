@@ -21,9 +21,12 @@
 #   name = "mcp/huggingface/hub_repo_search(author:acme)"
 #   delta = { trust = "suspicious" }
 #
-# Jobs, the sandbox, and a Space invoked with the viewer's token run
-# code outside this policy's sight: trusted input that stays with the
-# viewer, and a person permitting `huggingface-review`.
+# A write into a repository requires a trusted session: it commits
+# straight to the repository's revision, a Space rebuilds and runs from
+# it, and a model's files run where it is loaded. Jobs, the sandbox, and
+# a Space invoked with the viewer's token run code outside this policy's
+# sight: a trusted session, input that stays with the viewer, and a
+# person permitting `huggingface-review`.
 
 [policy]
 version = 2

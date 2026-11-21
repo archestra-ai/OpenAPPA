@@ -15,14 +15,20 @@
 # outside participants said, so the searches and meeting-note queries
 # enter `suspicious`.
 #
-# Writes that stay in the workspace need trusted data that `internal` may
-# see and record `notion.changed`; what they return confirms the write and
-# changes no label. Moving pages, changing or trashing a
-# data source, turning a page into an agent Skill, and driving custom
-# Agent sessions need the `notion-review` mark and record
-# `notion.sensitive`. Creating an attachment from a URL makes Notion fetch
-# that URL, so its input must be public and reviewed. The root config
-# supplies an authority permitting `notion-review`.
+# Writes that stay in the workspace need data that `internal` may see and
+# record `notion.changed`; what they return confirms the write and
+# changes no label. Pages, databases, views, comments and uploads are
+# content people read, so they need no trusted session. Moving pages,
+# changing or trashing a data source, turning a page into an agent Skill,
+# and driving custom Agent sessions need the `notion-review` mark and
+# record `notion.sensitive`. Creating an attachment from a URL makes
+# Notion fetch that URL, so its input must be public and reviewed. The
+# root config supplies an authority permitting `notion-review`.
+#
+# Three calls also need a trusted session, because they write
+# instructions that an agent later follows without a person reading them
+# first: turning a page into a Skill, starting a custom Agent session,
+# and sending a message into one.
 
 [policy]
 version = 2
@@ -132,74 +138,76 @@ name = "mcp/notion/notion-read-session-event"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
-# --- writes inside the workspace: trusted internal data ---
+# --- writes inside the workspace: internal data ---
 
 [[policy.tool]]
 name = "mcp/notion/notion-create-file-upload"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-create-pages"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-update-page"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-duplicate-page"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-create-database"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-create-folder"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-create-view"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-update-view"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-create-comment"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] } }
+requires = { audience = { contains = ["internal"] } }
 effects = ["notion.changed"]
 
-# --- structural, skill, and agent-session changes: a person reviews ---
+# --- structural, skill, and agent-session changes: a person reviews; a
+# Skill and an Agent session's prompt or message also need a trusted
+# session ---
 
 [[policy.tool]]
 name = "mcp/notion/notion-move-pages"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["notion-review"] }
 effects = ["notion.sensitive"]
 
 [[policy.tool]]
 name = "mcp/notion/notion-update-data-source"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["notion-review"] }
 effects = ["notion.sensitive"]
 
 [[policy.tool]]
@@ -217,7 +225,7 @@ effects = ["notion.sensitive"]
 [[policy.tool]]
 name = "mcp/notion/notion-stop-session"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["notion-review"] }
+requires = { audience = { contains = ["internal"] }, attention = ["notion-review"] }
 effects = ["notion.sensitive"]
 
 [[policy.tool]]
@@ -231,7 +239,7 @@ effects = ["notion.sensitive"]
 [[policy.tool]]
 name = "mcp/notion/notion-create-attachment"
 delta = {}
-requires = { trust = "trusted", audience = { contains = ["public"] }, attention = ["notion-review"] }
+requires = { audience = { contains = ["public"] }, attention = ["notion-review"] }
 effects = ["notion.sensitive"]
 
 # --- sanitizers ---
