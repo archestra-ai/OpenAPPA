@@ -23,13 +23,13 @@ The battery declares no rule for these tools:
 ## Reads
 
 - Discovery and the session's own surfaces add no label: `search_tools`, `search_files`, `load_skill`, `ask_user`, `todo_write`, and `whoami`. A validation or a yell resolve adds no label either.
-- A read of Archestra's configuration, rosters, guardrails policy, yells, helper consults, files, apps, run state, LLM session list (`list_llm_sessions`), and decided operations (`list_openappa_operations`) adds `internal`.
+- A read of Archestra's configuration, rosters, guardrails policy, an MCP server's own rules (`get_guardrails_server_rules`, their preview, and their pull request's state), yells, helper consults, files, apps, run state, LLM session list (`list_llm_sessions`), and decided operations (`list_openappa_operations`) adds `internal`.
 - A read that returns text that strangers can write adds `internal` and `suspicious`: `query_knowledge_sources` (synced mail and tickets) `get_schedule_trigger_run_transcript` (every tool result the run read), and the LLM request logs `list_llm_interactions`, `get_llm_interaction`, and `get_llm_session_logs` (prompts, responses, and tool results).
 
 ## Writes
 
 - A write that removes or controls a shared resource requires `trusted` data. This covers deletes and unassigns, guardrails policy and validation publishes, policy repository connection and sync, credential bindings, schedule controls, team changes, limits, and tool assignments.
-- A write that other members read or run also requires data sharable with `internal`. This covers agents, MCP gateways and servers, hooks, skills, plugins, apps, scheduled tasks, posts to a run's messaging thread, credential transfers, and tuner suggestions (`propose_tuner_suggestion`), whose policy change an admin may apply.
+- A write that other members read or run also requires data sharable with `internal`. This covers agents, MCP gateways and servers, hooks, skills, plugins, apps, scheduled tasks, posts to a run's messaging thread, credential transfers, tuner suggestions (`propose_tuner_suggestion`), whose policy change an admin may apply, and a pull request that changes one MCP server's rules (`propose_guardrails_server_rules_change`).
 - A write to persistent files, which a project or app can share and a later read returns as trusted, requires `trusted` data sharable with `internal`. So does an app spec or a knowledge base update; a personal agent, plugin or knowledge base create requires `trusted`.
 - `run_command` routes to the `archestra.run-command` Annotator. An Archestra root answers it with its own model (`builtin = "archestra"`).
 
