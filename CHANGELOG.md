@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.46.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.46.0...v0.46.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **images:** run appa-demo-tools as a non-root user ([#1001](https://github.com/archestra-ai/OpenAPPA/issues/1001)) ([68dce5b](https://github.com/archestra-ai/OpenAPPA/commit/68dce5b9e46d455da29f40cda10ef352b79c235b))
+* **release:** run the release publisher's fixed malware scan ([#1003](https://github.com/archestra-ai/OpenAPPA/issues/1003)) ([31bd783](https://github.com/archestra-ai/OpenAPPA/commit/31bd78354664b419b00cd2670599533dace92922))
+
 ## [0.46.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.45.0...v0.46.0) (2026-11-20)
 
 
