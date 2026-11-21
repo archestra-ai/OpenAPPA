@@ -1,0 +1,39 @@
+{
+  "images": [
+    {
+      "key": "ghcr.io/archestra-ai/appa-runtime",
+      "dockerfile": "appa-runtime/Dockerfile",
+      "context": "."
+    },
+    {
+      "key": "ghcr.io/archestra-ai/appa-kagent-adk",
+      "dockerfile": "integrations/kagent/appa-kagent-adk/Dockerfile",
+      "context": "integrations/kagent/appa-kagent-adk"
+    },
+    {
+      "key": "ghcr.io/archestra-ai/appa-kagent-adk-go",
+      "dockerfile": "integrations/kagent/appa-kagent-adk-go/Dockerfile",
+      "context": "integrations/kagent/appa-kagent-adk-go"
+    },
+    {
+      "key": "ghcr.io/archestra-ai/appa-demo-tools",
+      "dockerfile": "integrations/kagent/demo/Dockerfile",
+      "context": "integrations/kagent/demo"
+    },
+    {
+      "key": "ghcr.io/archestra-ai/appa-demo-mocks",
+      "dockerfile": "integrations/kagent/demo/mocks/Dockerfile",
+      "context": "integrations/kagent/demo/mocks"
+    }
+  ],
+  "unreleased": [
+    {
+      "dockerfile": "Dockerfile",
+      "reason": "The openappa.com chat playground, deployed from a pinned commit; not a release image."
+    },
+    {
+      "dockerfile": "integrations/kagent/e2e/marketplace/Dockerfile",
+      "reason": "Acceptance-test fixture for the kagent e2e suite; never released."
+    }
+  ]
+}

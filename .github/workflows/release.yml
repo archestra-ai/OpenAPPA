@@ -540,11 +540,11 @@ jobs:
     if: ${{ !cancelled() && !failure() && needs.attest-release.result == 'success' }}
     permissions:
       actions: read # Required to download the chart artifact.
-      contents: read # read vex/openvex.json at the release commit (release-publish.yml)
+      contents: read # read vex/openvex.json and the benchmark waivers at the release commit (release-publish.yml)
       id-token: write # sign the image contents attestations (release-publish.yml)
       attestations: write # store them
       packages: read # pull the staged images to scan them
-    uses: archestra-ai/.github/.github/workflows/release-publish.yml@6982a3d6d72b5f9b88e40fcbf73f5857e7f3b2e2 # v1.38.0
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@93e1d8fdd1aba31ad2501f134220188ab3083f22 # v1.40.0
     with:
       # Holds the archestra-releaser App's key; main only.
       environment: releaser
@@ -556,6 +556,9 @@ jobs:
       # Each image's statements, read from the release commit, are attested
       # next to its SBOMs (vex/README.md).
       vex-document: vex/openvex.json
+      # The waivers the Image Benchmark required workflow applies before
+      # merge; each image's benchmark is attested with the waivers it used.
+      benchmark-waivers: .github/image-benchmark-waivers.json
       # Hand the request off: the release waits for its approval in the
       # publisher, and release-finalize.yml publishes the GitHub release once
       # the publisher run succeeds (Release Gate dispatches it).
@@ -795,7 +798,7 @@ jobs:
       id-token: write # sign the image contents attestations (release-publish.yml)
       attestations: write # store them
       packages: read # pull the staged images to scan them
-    uses: archestra-ai/.github/.github/workflows/release-publish.yml@6982a3d6d72b5f9b88e40fcbf73f5857e7f3b2e2 # v1.38.0
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@93e1d8fdd1aba31ad2501f134220188ab3083f22 # v1.40.0
     with:
       # Holds the archestra-releaser App's key; main only.
       environment: releaser
