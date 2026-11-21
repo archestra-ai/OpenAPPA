@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.47.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.46.1...v0.47.0) (2026-11-21)
+
+
+### Features
+
+* **images:** use hardened bases for published runtimes ([#1009](https://github.com/archestra-ai/OpenAPPA/issues/1009)) ([bb0f63b](https://github.com/archestra-ai/OpenAPPA/commit/bb0f63b9af8542c3cd27fc89757bfc882db25ba5))
+* **kagent:** use hardened static base for Go runtime ([#1007](https://github.com/archestra-ai/OpenAPPA/issues/1007)) ([0745ac8](https://github.com/archestra-ai/OpenAPPA/commit/0745ac83ed2915305c9b9b09b7fc0d2fdda0c3fe))
+
+
+### Dependencies
+
+* upgrade Rig core and agent to 0.46 ([#879](https://github.com/archestra-ai/OpenAPPA/issues/879)) ([0df2691](https://github.com/archestra-ai/OpenAPPA/commit/0df2691e6f8ad2d8cf5d585c44fcf5700ff508f8))
+
 ## [0.46.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.46.0...v0.46.1) (2026-11-21)
 
 
