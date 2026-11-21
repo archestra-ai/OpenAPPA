@@ -1359,6 +1359,12 @@ jobs:
           tags: appa-acceptance-python:ci
           load: true
           cache-from: type=gha,scope=appa-kagent-adk
+      - name: Log in to Docker Hardened Images for Go plugin
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: dhi.io
+          username: archestra
+          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
       - name: Build Go plugin
         uses: docker/build-push-action@v7.4.0
         with:
@@ -1456,6 +1462,12 @@ jobs:
           cache-from: type=gha,scope=appa-kagent-adk
           cache-to: type=gha,mode=max,scope=appa-kagent-adk
 
+      - name: Log in to Docker Hardened Images for Go plugin
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: dhi.io
+          username: archestra
+          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
       - name: Build the go plugin image
         uses: docker/build-push-action@v7.4.0
         with:
