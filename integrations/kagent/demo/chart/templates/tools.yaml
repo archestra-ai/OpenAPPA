@@ -15,10 +15,21 @@ spec:
     metadata:
       labels: { app: demo-tools }
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
       containers:
         - name: demo-tools
           image: {{ include "appa-demo.image" (dict "image" .Values.tools.image "root" .) }}
           imagePullPolicy: {{ .Values.tools.image.pullPolicy }}
+          env:
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
           ports:
             - { name: http, containerPort: 3000 }
           readinessProbe:
