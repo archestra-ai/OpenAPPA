@@ -5,13 +5,17 @@
 //! the two transports sees the same question. Every failure the provider returns is no
 //! answer; nothing about the trajectory reaches the model.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
+use futures_util::future::BoxFuture;
 use rig_agent::AgentBuilder;
 use rig_agent::agent::OutputMode;
-use rig_agent::completion::{Prompt, PromptError};
-use rig_core::client::completion::CompletionClient;
-use rig_core::completion::{CompletionError, CompletionModel};
+use rig_agent::completion::PromptError;
+use rig_core::DynModel;
+use rig_core::error::{ErrorKind, ProviderError};
+use rig_core::operation::Completion;
 
 use rig_core::providers::{anthropic, gemini, ollama, openai};
 
@@ -53,10 +57,10 @@ pub struct LlmBackend {
 /// works unchanged.
 #[derive(Clone)]
 enum LlmClient {
-    Anthropic(anthropic::Client),
-    OpenAi(openai::CompletionsClient),
-    Gemini(gemini::Client),
-    Ollama(ollama::Client),
+    Anthropic(Arc<anthropic::Anthropic>),
+    OpenAi(Arc<openai::OpenAI>),
+    Gemini(Arc<gemini::Gemini>),
+    Ollama(Arc<ollama::Ollama>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,27 +86,30 @@ impl LlmBackend {
             Some(key) => Some(key.token().map(Token::reveal).unwrap_or_default()),
             None => Some(""),
         };
-        let failed = |error: rig_core::http_client::Error| LlmClientError {
-            provider: profile.provider.as_str(),
-            detail: error.to_string(),
-        };
-        macro_rules! client {
-            ($provider:ident, $token:expr) => {{
-                let mut builder = $provider::Client::builder().api_key($token);
-                if let Some(url) = &profile.url {
-                    builder = builder.base_url(url);
-                }
-                builder.build().map_err(failed)?
-            }};
-        }
         let client = match token {
             None => None,
-            Some(token) => Some(match profile.provider {
-                LlmProvider::Anthropic => LlmClient::Anthropic(client!(anthropic, token)),
-                LlmProvider::OpenAi => LlmClient::OpenAi(client!(openai, token).completions_api()),
-                LlmProvider::Gemini => LlmClient::Gemini(client!(gemini, token)),
-                LlmProvider::Ollama => LlmClient::Ollama(client!(ollama, token)),
-            }),
+            Some(token) => {
+                let http = reqwest::Client::builder().build().map_err(|error| LlmClientError {
+                    provider: profile.provider.as_str(),
+                    detail: error.to_string(),
+                })?;
+                let http = rig_reqwest::ReqwestClient::from(http);
+                macro_rules! client {
+                    ($config:expr) => {{
+                        let mut config = $config;
+                        if let Some(url) = &profile.url {
+                            config = config.with_base_url(url);
+                        }
+                        Arc::new(config.connect(http))
+                    }};
+                }
+                Some(match profile.provider {
+                    LlmProvider::Anthropic => LlmClient::Anthropic(client!(anthropic::AnthropicConfig::new(token))),
+                    LlmProvider::OpenAi => LlmClient::OpenAi(client!(openai::OpenAIConfig::new(token))),
+                    LlmProvider::Gemini => LlmClient::Gemini(client!(gemini::GeminiConfig::new(token))),
+                    LlmProvider::Ollama => LlmClient::Ollama(client!(ollama::OllamaConfig::new().with_api_key(token))),
+                })
+            }
         };
         Ok(LlmBackend {
             client,
@@ -123,12 +130,7 @@ impl LlmBackend {
         let Some(client) = &self.client else {
             return Err(NoAnswerReason::Unregistered);
         };
-        let send = || async {
-            self.prompt(client, prompt).await.map_err(|error| {
-                tracing::debug!(%error, "the llm consult failed");
-                no_answer(error)
-            })
-        };
+        let send = || self.prompt(client, prompt);
         consult_with_retries(
             &self.gates,
             AnnotatorBuiltin::Llm,
@@ -141,13 +143,13 @@ impl LlmBackend {
         .await
     }
 
-    async fn prompt(&self, client: &LlmClient, prompt: &ModelPrompt) -> Result<String, PromptError> {
+    async fn prompt(&self, client: &LlmClient, prompt: &ModelPrompt) -> Result<String, NoAnswerReason> {
         let max_tokens = answer_budget(&prompt.input, self.max_body_bytes);
         match client {
-            LlmClient::Anthropic(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
-            LlmClient::OpenAi(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
-            LlmClient::Gemini(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
-            LlmClient::Ollama(client) => run(client.completion_model(&self.model), prompt, max_tokens).await,
+            LlmClient::Anthropic(client) => run(client.completion(&self.model), prompt, max_tokens).await,
+            LlmClient::OpenAi(client) => run(client.chat(&self.model), prompt, max_tokens).await,
+            LlmClient::Gemini(client) => run(client.completion(&self.model), prompt, max_tokens).await,
+            LlmClient::Ollama(client) => run(client.native_completion(&self.model), prompt, max_tokens).await,
         }
     }
 }
@@ -156,28 +158,35 @@ impl LlmBackend {
 /// prompt, the artifact as the only user turn, the schema enforced natively. No sampling
 /// setting is sent, as `claude -p` sends none: the model's defaults hold, and a model
 /// that refuses `temperature` (Anthropic's `claude-sonnet-5`) still answers.
-async fn run<M: CompletionModel + 'static>(
-    model: M,
+fn run(
+    model: impl Into<DynModel<Completion>>,
     prompt: &ModelPrompt,
     max_tokens: u64,
-) -> Result<String, PromptError> {
-    let schema = schemars::Schema::try_from(prompt.schema.clone()).expect("every consult schema is a JSON object");
-    AgentBuilder::new(model)
-        .preamble(&prompt.system)
-        .output_schema_raw(schema)
-        .output_mode(OutputMode::Native)
-        .max_tokens(max_tokens)
-        .build()
-        .prompt(prompt.input.as_str())
-        .await
+) -> BoxFuture<'_, Result<String, NoAnswerReason>> {
+    let model = model.into();
+    // Bound the provider future here so callers do not inherit Rig's deeply nested types.
+    async move {
+        let schema = schemars::Schema::try_from(prompt.schema.clone()).expect("every consult schema is a JSON object");
+        AgentBuilder::new(model)
+            .preamble(&prompt.system)
+            .output_schema_raw(schema)
+            .output_mode(OutputMode::Native)
+            .max_tokens(max_tokens)
+            .build()
+            .prompt(prompt.input.as_str())
+            .await
+            .map(|response| response.output())
+            .map_err(|error| {
+                tracing::debug!(%error, "the llm consult failed");
+                no_answer(error)
+            })
+    }
+    .boxed()
 }
 
 /// A provider's non-success status is a non-success, however rig carried it; a
 /// response rig could not read is malformed; everything else is a transport failure.
 fn no_answer(error: PromptError) -> NoAnswerReason {
-    let PromptError::CompletionError(error) = error else {
-        return NoAnswerReason::Transport;
-    };
     if let Some(status) = error.provider_response_status() {
         return NoAnswerReason::NonSuccess {
             status: status.as_u16(),
@@ -185,7 +194,10 @@ fn no_answer(error: PromptError) -> NoAnswerReason {
         };
     }
     match error {
-        CompletionError::JsonError(_) | CompletionError::ResponseError(_) => NoAnswerReason::Malformed,
+        PromptError::Provider(ProviderError::Json(_) | ProviderError::Response(_)) => NoAnswerReason::Malformed,
+        PromptError::Report(report) if matches!(report.kind, ErrorKind::Json | ErrorKind::Response) => {
+            NoAnswerReason::Malformed
+        }
         _ => NoAnswerReason::Transport,
     }
 }
@@ -247,6 +259,30 @@ mod tests {
             "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "test-model",
             "choices": [{ "index": 0, "message": { "role": "assistant", "content": text }, "logprobs": null, "finish_reason": "stop" }],
             "usage": { "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2 },
+        })
+        .to_string()
+    }
+
+    fn ollama_reply(text: &str) -> String {
+        serde_json::json!({
+            "model": "test-model",
+            "message": { "role": "assistant", "content": text },
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 1,
+            "eval_count": 1,
+        })
+        .to_string()
+    }
+
+    fn gemini_reply(text: &str) -> String {
+        serde_json::json!({
+            "candidates": [{
+                "content": { "role": "model", "parts": [{ "text": text }] },
+                "finishReason": "STOP",
+                "index": 0,
+            }],
+            "usageMetadata": { "promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2 },
         })
         .to_string()
     }
@@ -429,6 +465,63 @@ mod tests {
         assert_eq!(
             property_names(&body["response_format"]["json_schema"]["schema"]),
             property_names(&prompt().schema)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ollama_consult_keeps_the_native_route_and_output_schema() {
+        let (addr, stub) = serve("/api/chat", ollama_reply, Duration::ZERO).await;
+        stub.answering(StubAnswer::Text(APPROVE.to_string()));
+        let backend = built(LlmProvider::Ollama, format!("http://{addr}"), 4);
+
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Ok(serde_json::json!({ "ruling": "approve" }))
+        );
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 1);
+        let (headers, body) = &requests[0];
+        assert_eq!(headers["authorization"], "Bearer sekret");
+        assert_eq!(body["model"], "test-model");
+        assert_eq!(body["messages"][0]["content"], prompt().system);
+        assert_eq!(body["messages"][1]["content"], prompt().input);
+        assert_eq!(property_names(&body["format"]), property_names(&prompt().schema));
+        assert!(
+            body["options"]["num_predict"]
+                .as_u64()
+                .is_some_and(|n| n >= MIN_ANSWER_TOKENS)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gemini_consult_keeps_generate_content_and_native_structured_output() {
+        let (addr, stub) = serve(
+            "/v1beta/models/test-model:generateContent",
+            gemini_reply,
+            Duration::ZERO,
+        )
+        .await;
+        stub.answering(StubAnswer::Text(APPROVE.to_string()));
+        let backend = built(LlmProvider::Gemini, format!("http://{addr}"), 4);
+
+        assert_eq!(
+            backend.consult(&prompt(), "judge", None).await,
+            Ok(serde_json::json!({ "ruling": "approve" }))
+        );
+        let requests = stub.requests();
+        assert_eq!(requests.len(), 1);
+        let (_, body) = &requests[0];
+        assert_eq!(text_of(&body["systemInstruction"]["parts"]), prompt().system);
+        assert_eq!(text_of(&body["contents"][0]["parts"]), prompt().input);
+        assert_eq!(body["generationConfig"]["responseMimeType"], "application/json");
+        assert_eq!(
+            property_names(&body["generationConfig"]["responseJsonSchema"]),
+            property_names(&prompt().schema)
+        );
+        assert!(
+            body["generationConfig"]["maxOutputTokens"]
+                .as_u64()
+                .is_some_and(|n| n >= MIN_ANSWER_TOKENS)
         );
     }
 
