@@ -18,8 +18,21 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
 
 /// [`tokio::process::Command::spawn`], alone. Tokio spawns through std's
 /// [`Command::spawn`], synchronously inside this call, so the same lock covers it.
+#[cfg(any(feature = "daemon", test))]
 pub(crate) fn spawn_async(command: &mut tokio::process::Command) -> io::Result<tokio::process::Child> {
     alone(|| command.spawn())
+}
+
+/// [`spawn_async`], with `ready` run under the same lock just before the spawn: a launch
+/// it refuses never starts, however long the lock kept it waiting.
+pub(crate) fn spawn_async_when<E>(
+    command: &mut tokio::process::Command,
+    ready: impl FnOnce(&mut tokio::process::Command) -> Result<(), E>,
+) -> Result<io::Result<tokio::process::Child>, E> {
+    alone(|| {
+        ready(command)?;
+        Ok(command.spawn())
+    })
 }
 
 /// [`Command::output`], alone: stdin empty, stdout and stderr captured.
