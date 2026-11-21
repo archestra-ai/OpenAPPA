@@ -1,0 +1,17 @@
+# The policy TestFlowAgainstRuntime runs under: a read of the internal repo
+# narrows the reader to internal, and an issue comment requires public.
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "mcp/github/get_file_contents"
+delta = { audience = ["internal"] }
+
+[[policy.tool]]
+name = "mcp/github/add_issue_comment"
+requires = { audience = { contains = ["public"] } }
+delta = {}
+
+[externals]
+timeout_ms = 5000
+max_body_bytes = 65536

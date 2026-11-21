@@ -34,19 +34,19 @@ class ImageDescriptorTests(unittest.TestCase):
             binary.write_text(f"#!{sys.executable}\n" + '''
 import json
 import sys
-images = ["appa-runtime", "appa-kagent-adk", "appa-demo-tools", "appa-demo-mocks"]
+images = ["appa-runtime", "appa-kagent-adk", "appa-demo-tools", "appa-demo-mocks", "appa-extproc"]
 if "create" in sys.argv:
     sys.exit(0)
 reference = sys.argv[-1]
 image = next(name for name in images if "/" + name + ":" in reference or "/" + name + "@" in reference)
-digest = "sha256:" + "abcd"[images.index(image)] * 64
+digest = "sha256:" + "abcde"[images.index(image)] * 64
 if "--format" in sys.argv:
     print(digest)
 elif "--raw" in sys.argv:
     print(json.dumps({"manifests": [{"digest": digest, "platform": {"os": "linux", "architecture": arch}} for arch in ["amd64", "arm64"]]}))
 ''')
             binary.chmod(0o755)
-            for image in ("appa-runtime", "appa-kagent-adk", "appa-demo-tools", "appa-demo-mocks"):
+            for image in ("appa-runtime", "appa-kagent-adk", "appa-demo-tools", "appa-demo-mocks", "appa-extproc"):
                 inputs = root / "digests" / image
                 inputs.mkdir(parents=True)
                 for value in ("a", "b"):

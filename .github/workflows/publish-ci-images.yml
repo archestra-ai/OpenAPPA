@@ -61,6 +61,7 @@ jobs:
               - 'website/content/docs/contracts.md'
               - 'receiver/appa-yell/salt.txt'
               - 'integrations/kagent/**'
+              - 'integrations/substrate/appa-extproc/**'
               - 'marketplace/plugins/claude-code/**'
               - 'integrations/appa-guide/**'
               - 'marketplace/batteries/**'
