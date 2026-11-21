@@ -343,6 +343,8 @@ jobs:
       verify_release: true
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       immutable: ${{ needs.release-please.outputs.registry_only != 'true' }}
+    secrets:
+      DOCKERHUB_DHI_TOKEN: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
   # archestra-ai/release-publisher pushes the charts after verifying them; this
   # job only packages them, pinned to the staged image digests.

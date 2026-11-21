@@ -22,6 +22,7 @@ workflows:
         - 'archestra-ai/.github@v1.33.0'
         - 'astral-sh/setup-uv@v10.3.3'
         - 'docker/build-push-action@v7.4.0'
+        - 'docker/login-action@v4.7.0'
         - 'docker/setup-buildx-action@v4.4.0'
         - 'dorny/paths-filter@v4.0.3'
         - 'google-github-actions/get-secretmanager-secrets@v3.0.0'
