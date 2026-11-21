@@ -5,8 +5,9 @@
 //! never answers an effect, a `history` entry or an attention mark.
 //!
 //! The call's name, description and arguments leave for the TypeSafe API, after the
-//! best-effort redaction every model provider gets ([`crate::secrets::redact_args`]). Each
-//! label is Jev's likeliest option, and a tie goes to the safer one: the narrower result
+//! best-effort redaction every model provider gets
+//! ([`crate::consult::AnnotationArtifact::redacted_args`]). Each label is Jev's likeliest
+//! option, and a tie goes to the safer one: the narrower result
 //! audience, the lower trust rank, the wider required audience. A label the mandate does not
 //! admit, a consult that is not a complete call, and every provider failure are no answer.
 //!
@@ -187,7 +188,7 @@ impl JevBackend {
             }
             &trimmed
         };
-        let args = crate::secrets::redact_args(&artifact.args);
+        let args = artifact.redacted_args(declaration);
         let context = (!artifact.context.is_empty()).then(|| {
             crate::secrets::redact_args(
                 &serde_json::to_value(&artifact.context).expect("context serializes: it holds JSON"),
@@ -556,6 +557,7 @@ fn without_largest_answers(
     Ok(AnnotationArtifact {
         args: artifact.args.clone(),
         context: AnnotationContext::new(entries),
+        tool_name: artifact.tool_name,
     })
 }
 
@@ -857,6 +859,7 @@ mod tests {
                 artifact: AnnotationArtifact {
                     args,
                     context: Default::default(),
+                    tool_name: crate::consult::ToolNameAuthor::Policy,
                 },
             },
         }

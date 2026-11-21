@@ -2304,6 +2304,7 @@ impl Runtime {
             declaration,
             args,
             context,
+            tool_name,
             ..
         }) = deployment.resident.annotation_owed(tool, raw_arguments, cwd)?
         else {
@@ -2317,7 +2318,11 @@ impl Runtime {
             name: annotator.clone(),
             body: crate::consult::ConsultBody::Annotation {
                 declaration: declaration.clone(),
-                artifact: crate::consult::AnnotationArtifact { args, context },
+                artifact: crate::consult::AnnotationArtifact {
+                    args,
+                    context,
+                    tool_name,
+                },
             },
         };
         let outcome = deployment.externals.consult_afresh(&consult).await;
