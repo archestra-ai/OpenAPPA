@@ -16,8 +16,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use appa_runtime_api::{
-    AdapterName, Codec, HookDecision, HookEvent, LaunchStart, LaunchToken, PeerAddress, StartKind, WireDecision,
-    WireEvent,
+    AdapterName, Codec, HookDecision, HookEvent, LaunchStart, LaunchToken, PeerAddress, RefusalClass, StartKind,
+    WireDecision, WireEvent,
 };
 
 use crate::api::refusal_detail;
@@ -64,6 +64,36 @@ impl Decides {
 
 fn post(endpoint: &Endpoint, event: &[u8], deadline: &Deadline) -> Result<Answer, String> {
     request(endpoint, "POST", "/hook", event, deadline)
+}
+
+/// How many times a launched start is posted while another start of its launch decides, and
+/// the first wait between posts. Each wait doubles, so the waits sum to about six seconds,
+/// well inside the authorization budget.
+const LAUNCHED_START_POSTS: u32 = 8;
+const LAUNCHED_START_WAIT: Duration = Duration::from_millis(50);
+
+/// The answer to `event`, posted by `post`. A launched start refused as contended is posted
+/// again after a wait: Claude Code goes on past a start hook that blocks, so the start is the
+/// one chance to bind the session's id to the family its launch runs.
+fn posted(event: &HookEvent, mut post: impl FnMut() -> Result<Answer, String>) -> Result<Answer, String> {
+    let mut wait = LAUNCHED_START_WAIT;
+    for _ in 1..LAUNCHED_START_POSTS {
+        let answer = post()?;
+        match (event, decision_of(&answer.body)) {
+            (
+                HookEvent::SessionStart { launch: Some(_), .. },
+                Ok(HookDecision::Refuse {
+                    class: RefusalClass::Contended,
+                    ..
+                }),
+            ) => {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            _ => return Ok(answer),
+        }
+    }
+    post()
 }
 
 /// The blocking hook outcome. Claude Code reads stderr as the reason it blocked.
@@ -296,8 +326,10 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
         Ok(body) => body,
         Err(failure) => return unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
     };
-    let answered =
-        Endpoint::parse(&target.url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
+    let answered = Endpoint::parse(&target.url).and_then(|endpoint| {
+        let deadline = Deadline::spanning(decides.budget());
+        posted(&event, || post(&endpoint, &body, &deadline))
+    });
     let answer = match answered {
         Ok(answer) => answer,
         Err(failure) => return unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
@@ -486,6 +518,89 @@ fn stands_in_for_a_result(decision: &HookDecision) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claude Code's start of `session` from `source` inside `launch`, as the client posts it.
+    fn launched_start(session: &str, source: &str, launch: &LaunchStart) -> HookEvent {
+        let host = serde_json::json!({"hook_event_name": "SessionStart", "session_id": session, "source": source});
+        let bytes = serde_json::to_vec(&host).expect("the fixture serializes");
+        match parse_host_event(&appa_adapter_claude_code::codec(), &bytes) {
+            Ok(Some(HookEvent::SessionStart {
+                root,
+                principal,
+                address,
+                title,
+                start,
+                launch: None,
+            })) => HookEvent::SessionStart {
+                root,
+                principal,
+                address,
+                title,
+                start,
+                launch: Some(launch.clone()),
+            },
+            _ => panic!("a session start parses as one"),
+        }
+    }
+
+    /// A launched start refused while another start of its launch decides is posted again,
+    /// and once that start is done it binds the session's new id to the family its launch
+    /// runs. The posts reach a real runtime through the hook route's own handler.
+    #[test]
+    fn a_launched_start_posted_while_its_launch_decides_binds_once_that_start_is_done() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            "[policy]\nversion = 2\n\n[[policy.tool]]\nname = \"host/claude-code/Bash\"\n\n\
+             [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("the config writes");
+        let config = crate::config::Config::load(&path).expect("the config loads");
+        let runtime = crate::api::Runtime::open(config, dir.path().join("appa.db"), None).expect("the runtime opens");
+        let tokio = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime builds");
+        let answer = |event: &HookEvent| {
+            let body = wire_body(event).expect("the start crosses the wire");
+            let (status, body) = tokio.block_on(crate::hooks::answer(
+                &runtime,
+                &appa_adapter_claude_code::adapter(),
+                appa_runtime_api::PrincipalSource::None,
+                &body,
+            ));
+            Answer {
+                status,
+                body: serde_json::to_vec(&body).expect("the answer serializes"),
+            }
+        };
+        let launch = LaunchStart {
+            launch: LaunchToken::parse("the-launch").expect("the token parses"),
+            forked_from: None,
+        };
+        let started = launched_start("6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d", "startup", &launch);
+        assert!(answer(&started).is_success());
+
+        let compacted = launched_start("7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", "compact", &launch);
+        let mut deciding = Some(runtime.decide_launch(launch.clone()).expect("the other start decides"));
+        let mut posts = 0;
+        let answered = posted(&compacted, || {
+            posts += 1;
+            let answered = answer(&compacted);
+            deciding.take();
+            Ok(answered)
+        })
+        .expect("the start is answered");
+        assert_eq!(posts, 2);
+        assert_eq!(decision_of(&answered.body), Ok(HookDecision::Ack));
+        let (HookEvent::SessionStart { root: family, .. }, HookEvent::SessionStart { root: host, .. }) =
+            (&started, &compacted)
+        else {
+            unreachable!("both are starts");
+        };
+        assert_eq!(runtime.alias_of(host).expect("the alias reads"), Some(family.clone()));
+    }
 
     #[test]
     fn a_turn_end_waits_on_less_than_an_authorization_does() {
