@@ -784,6 +784,8 @@ impl Dispatcher<'_> {
         {
             tracing::warn!(root = %root.0, %error, "the session's peer identity was not recorded");
         }
+        // The rest only reads, and another start of the launch need not wait on it.
+        drop(launch);
         let context = [matches!(launched, LaunchedStart::ClearKept(_)).then_some(CLEAR_KEPT.to_owned())]
             .into_iter()
             .flatten()
@@ -1653,6 +1655,10 @@ mod tests {
         let runtime = open_runtime(&dir);
         let first = launch("first-launch");
         let deciding = runtime.decide_launch(first.clone()).expect("the first start decides");
+        assert!(matches!(
+            runtime.decide_launch(first.clone()),
+            Err(EventError::LaunchDeciding)
+        ));
 
         let wired = launched("0f1e2d3c-4b5a-4968-8776-655443322110", "startup", first.clone());
         assert!(contended(&answered_start(&runtime, &wired).await));

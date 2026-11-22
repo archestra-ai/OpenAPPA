@@ -90,7 +90,11 @@ impl Runtime {
     /// Begin deciding a start of `launch`, or refuse it as contended while another start of
     /// that launch decides.
     pub(crate) fn decide_launch(&self, launch: LaunchStart) -> Result<Deciding<'_>, EventError> {
-        self.inner.shared.launches.decide(launch).ok_or_else(raced)
+        self.inner
+            .shared
+            .launches
+            .decide(launch)
+            .ok_or(EventError::LaunchDeciding)
     }
 
     /// The family the host continues under `host`, where it continues one there. `None` for
@@ -286,8 +290,7 @@ impl Runtime {
     }
 }
 
-/// A concurrent start of the launch is deciding, or moved it between this start's read and
-/// its handoff.
+/// A concurrent start moved the launch between this start's read and its handoff.
 fn raced() -> EventError {
     EventError::Contended { attempts: 1 }
 }

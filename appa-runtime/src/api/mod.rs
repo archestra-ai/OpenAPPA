@@ -748,6 +748,9 @@ pub(crate) enum EventError {
     SpawnNeverStarted,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
+    /// Another start of the same launch was deciding its family; this start read nothing.
+    #[error("another start of this launch is in progress; start again once it is done")]
+    LaunchDeciding,
     #[error("external resolution did not settle after {rounds} rounds")]
     ResolutionDiverged { rounds: u32 },
     #[error("the engine returned a follow-up this event cannot deliver")]
@@ -825,7 +828,7 @@ impl EventError {
             EventError::LegacyFamily => RefusalClass::LegacyFamily,
             EventError::InventoryRefused(_) => RefusalClass::InventoryRefused,
             EventError::EngineInvariant(_) | EventError::UnexpectedDecision => RefusalClass::EngineInvariant,
-            EventError::Contended { .. } => RefusalClass::Contended,
+            EventError::Contended { .. } | EventError::LaunchDeciding => RefusalClass::Contended,
             EventError::ResolutionDiverged { .. } => RefusalClass::ResolutionDiverged,
             EventError::AnnotationRefused { .. } => RefusalClass::AnnotationRefused,
             EventError::UndeclaredTool { .. } => RefusalClass::UndeclaredTool,
@@ -873,6 +876,7 @@ impl EventError {
             | EventError::InventoryRefused(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
+            | EventError::LaunchDeciding
             | EventError::ResolutionDiverged { .. }
             | EventError::AnnotationRefused { .. }
             | EventError::UndeclaredTool { .. }
