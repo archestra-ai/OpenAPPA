@@ -1256,6 +1256,7 @@ var REFUSAL_CLASSES = [
   "inventory_refused",
   "engine_invariant",
   "contended",
+  "launch_deciding",
   "resolution_diverged",
   "annotation_refused",
   "undeclared_tool",
