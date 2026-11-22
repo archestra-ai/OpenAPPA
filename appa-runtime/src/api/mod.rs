@@ -28,7 +28,7 @@ pub use appa_runtime_api::{
     TrajectoryId,
 };
 pub use embedded::{EmbeddedPeerArrival, EmbeddedPeerError, EmbeddedPeerId, EmbeddedPeerNotice};
-pub(crate) use launch::LaunchedStart;
+pub(crate) use launch::{Deciding, LaunchedStart};
 pub(crate) use session::{LateOpen, Session, Stop, is_control_tool};
 
 /// Why a host could not read a root's current status.

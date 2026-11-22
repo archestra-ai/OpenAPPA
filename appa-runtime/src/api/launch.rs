@@ -22,23 +22,23 @@ pub(crate) struct Launches {
 }
 
 impl Launches {
-    /// `None` while another start of `launch` is deciding.
-    fn decide(&self, launch: &LaunchToken) -> Option<Deciding<'_>> {
+    /// `None` while another start of the launch is deciding.
+    fn decide(&self, launch: LaunchStart) -> Option<Deciding<'_>> {
         // The set only gains and loses whole tokens, so a panic elsewhere leaves it consistent.
         self.deciding
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(launch.clone())
-            .then(|| Deciding {
-                launches: self,
-                launch: launch.clone(),
-            })
+            .insert(launch.launch.clone())
+            .then(|| Deciding { launches: self, launch })
     }
 }
 
-struct Deciding<'a> {
+/// One launched start deciding its family. Until it drops, every other start of its launch
+/// on this runtime is refused as contended. A start holds it from its first read of the
+/// family, the alias lookup, through the last thing it records, and nothing awaits under it.
+pub(crate) struct Deciding<'a> {
     launches: &'a Launches,
-    launch: LaunchToken,
+    launch: LaunchStart,
 }
 
 impl Drop for Deciding<'_> {
@@ -47,7 +47,7 @@ impl Drop for Deciding<'_> {
             .deciding
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.launch);
+            .remove(&self.launch.launch);
     }
 }
 
@@ -87,6 +87,12 @@ enum Cleared {
 }
 
 impl Runtime {
+    /// Begin deciding a start of `launch`, or refuse it as contended while another start of
+    /// that launch decides.
+    pub(crate) fn decide_launch(&self, launch: LaunchStart) -> Result<Deciding<'_>, EventError> {
+        self.inner.shared.launches.decide(launch).ok_or_else(raced)
+    }
+
     /// The family the host continues under `host`, where it continues one there. `None` for
     /// a host id that names its own root or names nothing.
     pub(crate) fn alias_of(&self, host: &TrajectoryId) -> Result<Option<TrajectoryId>, EventError> {
@@ -104,19 +110,16 @@ impl Runtime {
     }
 
     /// Open the family a launched start belongs to. `root` is the start's own host id,
-    /// already resolved through [`Runtime::alias_of`]. A start that overlaps another start of
-    /// its launch, or whose handoff finds the launch already moved, is refused as contended:
-    /// it claims nothing.
+    /// resolved through [`Runtime::alias_of`] under the same `deciding`. A start whose
+    /// handoff finds the launch already moved is refused as contended: it claims nothing.
     pub(crate) fn launched_start(
         &self,
         root: &TrajectoryId,
         start: Option<StartKind>,
-        launch: &LaunchStart,
+        deciding: &Deciding<'_>,
     ) -> Result<LaunchedStart, EventError> {
+        let launch = &deciding.launch;
         let token = &launch.launch;
-        let Some(_deciding) = self.inner.shared.launches.decide(token) else {
-            return Err(raced());
-        };
         let family = self.launch_family(token)?;
         let known = self.has_root(root)?;
         let opened = match (known, family) {
@@ -301,24 +304,4 @@ fn runs(log: &Log, launch: &LaunchToken) -> bool {
             _ => None,
         })
         .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn token(text: &str) -> LaunchToken {
-        LaunchToken::parse(text).expect("the token parses")
-    }
-
-    #[test]
-    fn a_launchs_overlapping_start_is_refused_until_the_first_is_done_and_another_launch_is_not() {
-        let launches = Launches::default();
-        let first = launches.decide(&token("one")).expect("the first start decides");
-        assert!(launches.decide(&token("one")).is_none());
-        drop(launches.decide(&token("other")).expect("another launch decides alongside"));
-        drop(first);
-        drop(launches.decide(&token("one")).expect("the launch decides once its first start is done"));
-        assert!(launches.deciding.lock().expect("no panic held the set").is_empty());
-    }
 }
