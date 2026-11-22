@@ -72,9 +72,11 @@ fn post(endpoint: &Endpoint, event: &[u8], deadline: &Deadline) -> Result<Answer
 const LAUNCHED_START_POSTS: u32 = 8;
 const LAUNCHED_START_WAIT: Duration = Duration::from_millis(50);
 
-/// The answer to `event`, posted by `post`. A launched start refused as contended is posted
-/// again after a wait: Claude Code goes on past a start hook that blocks, so the start is the
-/// one chance to bind the session's id to the family its launch runs.
+/// The answer to `event`, posted by `post`. A launched start refused because another start
+/// of its launch was deciding is posted again after a wait: Claude Code goes on past a start
+/// hook that blocks, so the start is the one chance to bind the session's id to the family
+/// its launch runs. A start that lost its log's compare-and-swap may have written part of a
+/// handoff, so it is not posted again.
 fn posted(event: &HookEvent, mut post: impl FnMut() -> Result<Answer, String>) -> Result<Answer, String> {
     let mut wait = LAUNCHED_START_WAIT;
     for _ in 1..LAUNCHED_START_POSTS {
@@ -83,7 +85,7 @@ fn posted(event: &HookEvent, mut post: impl FnMut() -> Result<Answer, String>) -
             (
                 HookEvent::SessionStart { launch: Some(_), .. },
                 Ok(HookDecision::Refuse {
-                    class: RefusalClass::Contended,
+                    class: RefusalClass::LaunchDeciding,
                     ..
                 }),
             ) => {
@@ -545,9 +547,10 @@ mod tests {
 
     /// A launched start refused while another start of its launch decides is posted again,
     /// and once that start is done it binds the session's new id to the family its launch
-    /// runs. The posts reach a real runtime through the hook route's own handler.
+    /// runs. A start that lost its log's compare-and-swap is posted once. The posts reach a
+    /// real runtime through the hook route's own handler.
     #[test]
-    fn a_launched_start_posted_while_its_launch_decides_binds_once_that_start_is_done() {
+    fn only_a_launched_start_refused_while_its_launch_decides_is_posted_again() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let path = dir.path().join("appa.toml");
         std::fs::write(
@@ -582,24 +585,44 @@ mod tests {
         let started = launched_start("6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d", "startup", &launch);
         assert!(answer(&started).is_success());
 
+        let class = |answer: &Answer| match decision_of(&answer.body) {
+            Ok(HookDecision::Refuse { class, .. }) => Some(class),
+            _ => None,
+        };
+        let root = |event: &HookEvent| match event {
+            HookEvent::SessionStart { root, .. } => root.clone(),
+            _ => unreachable!("a start names its root"),
+        };
+
         let compacted = launched_start("7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", "compact", &launch);
         let mut deciding = Some(runtime.decide_launch(launch.clone()).expect("the other start decides"));
-        let mut posts = 0;
+        let mut classes = Vec::new();
         let answered = posted(&compacted, || {
-            posts += 1;
             let answered = answer(&compacted);
+            classes.push(class(&answered));
             deciding.take();
             Ok(answered)
         })
         .expect("the start is answered");
-        assert_eq!(posts, 2);
+        assert_eq!(classes, vec![Some(RefusalClass::LaunchDeciding), None]);
         assert_eq!(decision_of(&answered.body), Ok(HookDecision::Ack));
-        let (HookEvent::SessionStart { root: family, .. }, HookEvent::SessionStart { root: host, .. }) =
-            (&started, &compacted)
-        else {
-            unreachable!("both are starts");
-        };
-        assert_eq!(runtime.alias_of(host).expect("the alias reads"), Some(family.clone()));
+        assert_eq!(
+            runtime.alias_of(&root(&compacted)).expect("the alias reads"),
+            Some(root(&started))
+        );
+
+        let raced = launched_start("8c9d0e1f-2a3b-4c4d-8e5f-6a7b8c9d0e1f", "compact", &launch);
+        runtime.store().contend_next_appends(u64::MAX);
+        let mut classes = Vec::new();
+        posted(&raced, || {
+            let answered = answer(&raced);
+            classes.push(class(&answered));
+            Ok(answered)
+        })
+        .expect("the start is answered");
+        runtime.store().contend_next_appends(0);
+        assert_eq!(classes, vec![Some(RefusalClass::Contended)]);
+        assert_eq!(runtime.alias_of(&root(&raced)).expect("the alias reads"), None);
     }
 
     #[test]

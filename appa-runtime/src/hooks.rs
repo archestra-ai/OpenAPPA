@@ -1640,7 +1640,7 @@ mod tests {
         matches!(
             decision,
             HookDecision::Refuse {
-                class: appa_runtime_api::RefusalClass::Contended,
+                class: appa_runtime_api::RefusalClass::LaunchDeciding,
                 ..
             }
         )

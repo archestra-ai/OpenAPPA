@@ -257,6 +257,7 @@ const (
 	RefusalInventoryRefused   RefusalClass = "inventory_refused"
 	RefusalEngineInvariant    RefusalClass = "engine_invariant"
 	RefusalContended          RefusalClass = "contended"
+	RefusalLaunchDeciding     RefusalClass = "launch_deciding"
 	RefusalResolutionDiverged RefusalClass = "resolution_diverged"
 	RefusalAnnotationRefused  RefusalClass = "annotation_refused"
 	RefusalUndeclaredTool     RefusalClass = "undeclared_tool"
@@ -276,8 +277,8 @@ const (
 // refusalClasses is the closed set, in the runtime's declaration order.
 var refusalClasses = []RefusalClass{
 	RefusalStorage, RefusalUntrustedLog, RefusalPolicyUnavailable, RefusalPolicyMoved,
-	RefusalLegacyFamily, RefusalInventoryRefused, RefusalEngineInvariant, RefusalContended, RefusalResolutionDiverged,
-	RefusalAnnotationRefused, RefusalUndeclaredTool, RefusalUndeclaredSpawn, RefusalPeerMessage,
+	RefusalLegacyFamily, RefusalInventoryRefused, RefusalEngineInvariant, RefusalContended, RefusalLaunchDeciding,
+	RefusalResolutionDiverged, RefusalAnnotationRefused, RefusalUndeclaredTool, RefusalUndeclaredSpawn, RefusalPeerMessage,
 	RefusalPrincipal, RefusalOutstandingCall, RefusalCallIDReused, RefusalTrajectoryEnded,
 	RefusalTrajectory, RefusalDispatch, RefusalRemedy, RefusalSpawnNotTaken, RefusalSpawn,
 }
