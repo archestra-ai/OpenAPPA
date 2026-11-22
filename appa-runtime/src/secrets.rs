@@ -79,37 +79,16 @@ static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Every secret assignment's value and every netrc password replaced, quotes kept. A
 /// quoted value that ends at a backslash-escaped quote is also masked to the end of its
-/// line: where it really closes depends on syntax no pattern here sees, and the search for
-/// the next assignment resumes after that line, so no match starting in the masked rest
-/// can reach past it. A line ends at an ASCII line break, which no JSON string holds
-/// unescaped. Netrc passwords are found on the text with only the values to their first
-/// closing quote masked, so a `password` keyword inside the rest of such a line still
-/// finds its password on the next.
+/// line: where it really closes depends on syntax no pattern here sees. A line ends at an
+/// ASCII line break, which no JSON string holds unescaped. Whether a match starting in the
+/// rest of such a line is a real assignment is just as unknowable, so assignments are
+/// found twice, reading on from each value and resuming after each escaped line, and
+/// netrc passwords on the text with only the first reading of every value masked. Every
+/// span found is masked: masking more never leaks.
 fn mask_keyed_values(text: &str) -> Cow<'_, str> {
-    let mut plain: Vec<Range<usize>> = Vec::new();
-    let mut escaped: Vec<Range<usize>> = Vec::new();
-    let mut search_from = 0;
-    while let Some(found) = SECRET_ASSIGNMENT.captures_at(text, search_from) {
-        let value = found.get(2).expect("the pattern captures a value");
-        search_from = match value.as_str().as_bytes() {
-            [b'"' | b'\'', .., b'\\', _] => {
-                let line_end = line_end(text, value.end());
-                plain.push(value.start() + 1..value.end() - 1);
-                escaped.push(value.start() + 1..line_end);
-                line_end
-            }
-            [b'"' | b'\'', ..] => {
-                plain.push(value.start() + 1..value.end() - 1);
-                value.end()
-            }
-            _ => {
-                plain.push(value.range());
-                value.end()
-            }
-        };
-    }
-    let masked = mask_spans(text, &plain);
-    let mut source = SourceOffsets::new(&plain);
+    let read_on = assignment_spans(text, Resume::AfterValue);
+    let masked = mask_spans(text, &read_on.first_readings);
+    let mut source = SourceOffsets::new(&read_on.first_readings);
     let passwords: Vec<Range<usize>> = NETRC_PASSWORD
         .captures_iter(&masked)
         .map(|found| {
@@ -117,15 +96,67 @@ fn mask_keyed_values(text: &str) -> Cow<'_, str> {
             source.of(password.start())..source.of(password.end())
         })
         .collect();
-    match (escaped.is_empty(), passwords.is_empty()) {
+    match (read_on.escaped_lines.is_empty(), passwords.is_empty()) {
         (true, true) => masked,
         _ => {
-            let mut spans = plain;
-            spans.extend(escaped);
+            let resumed = assignment_spans(text, Resume::AfterEscapedLine);
+            let mut spans = read_on.first_readings;
+            spans.extend(read_on.escaped_lines);
+            spans.extend(resumed.first_readings);
+            spans.extend(resumed.escaped_lines);
             spans.extend(passwords);
             Cow::Owned(mask_spans(text, &merged(spans)).into_owned())
         }
     }
+}
+
+/// Where the search for the next secret assignment resumes after a value that ends at an
+/// escaped quote.
+#[derive(Clone, Copy)]
+enum Resume {
+    AfterValue,
+    AfterEscapedLine,
+}
+
+struct AssignmentSpans {
+    /// Each value to its first closing quote, sorted and disjoint.
+    first_readings: Vec<Range<usize>>,
+    /// Each value that ends at an escaped quote, to the end of its line.
+    escaped_lines: Vec<Range<usize>>,
+}
+
+fn assignment_spans(text: &str, resume: Resume) -> AssignmentSpans {
+    let mut spans = AssignmentSpans {
+        first_readings: Vec::new(),
+        escaped_lines: Vec::new(),
+    };
+    let mut search_from = 0;
+    let mut current_line_end = 0;
+    while let Some(found) = SECRET_ASSIGNMENT.captures_at(text, search_from) {
+        let value = found.get(2).expect("the pattern captures a value");
+        search_from = match value.as_str().as_bytes() {
+            [b'"' | b'\'', .., b'\\', _] => {
+                if value.end() > current_line_end {
+                    current_line_end = line_end(text, value.end());
+                }
+                spans.first_readings.push(value.start() + 1..value.end() - 1);
+                spans.escaped_lines.push(value.start() + 1..current_line_end);
+                match resume {
+                    Resume::AfterValue => value.end(),
+                    Resume::AfterEscapedLine => current_line_end,
+                }
+            }
+            [b'"' | b'\'', ..] => {
+                spans.first_readings.push(value.start() + 1..value.end() - 1);
+                value.end()
+            }
+            _ => {
+                spans.first_readings.push(value.range());
+                value.end()
+            }
+        };
+    }
+    spans
 }
 
 /// The offset of the first ASCII line break at or after `from`, or the end of the text.
@@ -135,10 +166,11 @@ fn line_end(text: &str, from: usize) -> usize {
         .map_or(text.len(), |found| from + found)
 }
 
-/// The spans sorted, with every overlapping pair joined.
+/// The spans sorted, with every overlapping pair, and every pair with the same start,
+/// joined.
 fn merged(mut spans: Vec<Range<usize>>) -> Vec<Range<usize>> {
     spans.sort_by_key(|span| (span.start, span.end));
-    spans.dedup_by(|next, kept| match next.start < kept.end {
+    spans.dedup_by(|next, kept| match next.start < kept.end || next.start == kept.start {
         true => {
             kept.end = kept.end.max(next.end);
             true
@@ -598,7 +630,15 @@ mod tests {
             ),
             (
                 "PASSWORD=\"x\\\"TOKEN='y\"\nDB_PASSWORD='hunter2'",
-                format!("PASSWORD=\"{masked}\nDB_PASSWORD='{masked}'"),
+                format!("PASSWORD=\"{masked}'{masked}'"),
+            ),
+            (
+                "{\"password\":\"ab\\\"cd\",\"token\":\n  \"hunter2\"}",
+                format!("{{\"password\":\"{masked}\n  \"{masked}\"}}"),
+            ),
+            (
+                "machine TOKEN=\"a\\\"b\" login SECRET=\"foo bar\" password\nhunter2",
+                format!("machine TOKEN=\"{masked}\n{masked}"),
             ),
         ];
         for (input, expected) in cases {
