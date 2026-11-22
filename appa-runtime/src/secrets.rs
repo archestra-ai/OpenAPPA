@@ -79,27 +79,34 @@ static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Every secret assignment's value and every netrc password replaced, quotes kept. A
 /// quoted value that ends at a backslash-escaped quote is also masked to the end of its
-/// line: where it really closes depends on syntax no pattern here sees. A line ends at an
-/// ASCII line break, which no JSON string holds unescaped. Netrc passwords are found on
-/// the text with only the values to their first closing quote masked, so a `password`
-/// keyword inside the rest of such a line still finds its password on the next.
+/// line: where it really closes depends on syntax no pattern here sees, and the search for
+/// the next assignment resumes after that line, so no match starting in the masked rest
+/// can reach past it. A line ends at an ASCII line break, which no JSON string holds
+/// unescaped. Netrc passwords are found on the text with only the values to their first
+/// closing quote masked, so a `password` keyword inside the rest of such a line still
+/// finds its password on the next.
 fn mask_keyed_values(text: &str) -> Cow<'_, str> {
     let mut plain: Vec<Range<usize>> = Vec::new();
     let mut escaped: Vec<Range<usize>> = Vec::new();
-    let mut current_line_end = 0;
-    for found in SECRET_ASSIGNMENT.captures_iter(text) {
+    let mut search_from = 0;
+    while let Some(found) = SECRET_ASSIGNMENT.captures_at(text, search_from) {
         let value = found.get(2).expect("the pattern captures a value");
-        match value.as_str().as_bytes() {
+        search_from = match value.as_str().as_bytes() {
             [b'"' | b'\'', .., b'\\', _] => {
+                let line_end = line_end(text, value.end());
                 plain.push(value.start() + 1..value.end() - 1);
-                if value.end() > current_line_end {
-                    current_line_end = line_end(text, value.end());
-                }
-                escaped.push(value.start() + 1..current_line_end);
+                escaped.push(value.start() + 1..line_end);
+                line_end
             }
-            [b'"' | b'\'', ..] => plain.push(value.start() + 1..value.end() - 1),
-            _ => plain.push(value.range()),
-        }
+            [b'"' | b'\'', ..] => {
+                plain.push(value.start() + 1..value.end() - 1);
+                value.end()
+            }
+            _ => {
+                plain.push(value.range());
+                value.end()
+            }
+        };
     }
     let masked = mask_spans(text, &plain);
     let mut source = SourceOffsets::new(&plain);
@@ -588,6 +595,10 @@ mod tests {
             (
                 "password=\"a\\\"b\" TOKEN=\"\"\r\npassword hunter2",
                 format!("password=\"{masked}\r\npassword {masked}"),
+            ),
+            (
+                "PASSWORD=\"x\\\"TOKEN='y\"\nDB_PASSWORD='hunter2'",
+                format!("PASSWORD=\"{masked}\nDB_PASSWORD='{masked}'"),
             ),
         ];
         for (input, expected) in cases {
