@@ -1869,6 +1869,12 @@ impl Inner {
     /// `Runtime`, and the consults worth timing happen inside a session.
     pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
         crate::telemetry::runtime_event(root, &event);
+        self.insert_event(root, event);
+    }
+
+    /// [`Inner::record`] without its telemetry, for a caller that emits that only once it
+    /// holds no lock.
+    fn insert_event(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
         self.shared
             .events
             .lock()
@@ -2475,15 +2481,28 @@ impl Runtime {
             .lock()
             .expect("the revision-engine mutex is never poisoned: no panic runs while it is held")
             .clear();
-        drop(installing);
-        if new {
-            trace_published(&self.inner.shared.line, &deployment);
-        }
-
         let key = deployment.key();
         let revision = deployment
             .revision()
             .expect("a served deployment decides at a revision of its line");
+        // Deployment-wide: a publish belongs to no trajectory, and every trajectory alive
+        // across it needs to see that its policy moved under it. Installing bytes the head
+        // already names publishes nothing. Inserted under the lock, so reports read publishes
+        // in swap order; its telemetry waits for the release.
+        let publication = new.then(|| crate::events::RuntimeEvent::PolicyPublished {
+            deployment: self.inner.shared.line.to_string(),
+            revision,
+            policy_key: key.clone(),
+        });
+        if let Some(publication) = &publication {
+            self.inner.insert_event(None, publication.clone());
+        }
+        drop(installing);
+        if let Some(publication) = &publication {
+            trace_published(&self.inner.shared.line, &deployment);
+            crate::telemetry::runtime_event(None, publication);
+        }
+
         let changed = previous.revision() != Some(revision);
         tracing::info!(
             deployment = %self.inner.shared.line,
@@ -2493,19 +2512,6 @@ impl Runtime {
             changed,
             "reloaded the serving deployment"
         );
-        // Deployment-wide: a publish belongs to no trajectory, and every trajectory alive
-        // across it needs to see that its policy moved under it. Installing bytes the head
-        // already names publishes nothing.
-        if new {
-            self.record(
-                None,
-                crate::events::RuntimeEvent::PolicyPublished {
-                    deployment: self.inner.shared.line.to_string(),
-                    revision,
-                    policy_key: key.clone(),
-                },
-            );
-        }
         Ok(Reloaded {
             policy_key: key,
             policy_identity: identity,
@@ -5796,6 +5802,18 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             )),
             nested: Arc::clone(&nested),
         };
+        // A trajectory alive across both installs, whose report reads their publishes.
+        let root = TrajectoryId("across".to_string());
+        runtime.record(
+            Some(&root),
+            crate::events::RuntimeEvent::Hook {
+                event: crate::events::HookKind::SessionStart,
+                tool: None,
+                dispatch: None,
+                outcome: crate::events::HookOutcome::Acked,
+                offers: Vec::new(),
+            },
+        );
         let (sent, installed) = std::sync::mpsc::channel();
         let installing = Arc::clone(&runtime);
         std::thread::spawn(move || {
@@ -5814,6 +5832,20 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             .expect("the subscriber's install succeeds");
         assert_eq!((outer, nested.policy_revision), (2, 3));
         assert_eq!(runtime.inner.deployment().revision(), Some(3));
+        #[cfg(feature = "daemon")]
+        {
+            let publications: Vec<_> = runtime
+                .inner
+                .events(&root)
+                .deployment
+                .iter()
+                .filter_map(|entry| match &entry.event {
+                    crate::events::RuntimeEvent::PolicyPublished { revision, .. } => Some(*revision),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(publications, vec![2, 3], "a report reads the publishes in swap order");
+        }
     }
 
     #[tokio::test]
