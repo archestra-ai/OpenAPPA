@@ -78,25 +78,31 @@ static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Every secret assignment's value and every netrc password replaced, quotes kept. A
-/// quoted value that ends at a backslash-escaped quote is masked to the end of its line:
-/// where it really closes depends on syntax no pattern here sees. A line ends at an ASCII
-/// line break, which no JSON string holds unescaped.
+/// quoted value that ends at a backslash-escaped quote is also masked to the end of its
+/// line: where it really closes depends on syntax no pattern here sees. A line ends at an
+/// ASCII line break, which no JSON string holds unescaped. Netrc passwords are found on
+/// the text with only the values to their first closing quote masked, so a `password`
+/// keyword inside the rest of such a line still finds its password on the next.
 fn mask_keyed_values(text: &str) -> Cow<'_, str> {
-    let values = merged(
-        SECRET_ASSIGNMENT
-            .captures_iter(text)
-            .map(|found| {
-                let value = found.get(2).expect("the pattern captures a value");
-                match value.as_str().as_bytes() {
-                    [b'"' | b'\'', .., b'\\', _] => value.start() + 1..line_end(text, value.end()),
-                    [b'"' | b'\'', ..] => value.start() + 1..value.end() - 1,
-                    _ => value.range(),
+    let mut plain: Vec<Range<usize>> = Vec::new();
+    let mut escaped: Vec<Range<usize>> = Vec::new();
+    let mut current_line_end = 0;
+    for found in SECRET_ASSIGNMENT.captures_iter(text) {
+        let value = found.get(2).expect("the pattern captures a value");
+        match value.as_str().as_bytes() {
+            [b'"' | b'\'', .., b'\\', _] => {
+                plain.push(value.start() + 1..value.end() - 1);
+                if value.end() > current_line_end {
+                    current_line_end = line_end(text, value.end());
                 }
-            })
-            .collect(),
-    );
-    let masked = mask_spans(text, &values);
-    let mut source = SourceOffsets::new(&values);
+                escaped.push(value.start() + 1..current_line_end);
+            }
+            [b'"' | b'\'', ..] => plain.push(value.start() + 1..value.end() - 1),
+            _ => plain.push(value.range()),
+        }
+    }
+    let masked = mask_spans(text, &plain);
+    let mut source = SourceOffsets::new(&plain);
     let passwords: Vec<Range<usize>> = NETRC_PASSWORD
         .captures_iter(&masked)
         .map(|found| {
@@ -104,16 +110,18 @@ fn mask_keyed_values(text: &str) -> Cow<'_, str> {
             source.of(password.start())..source.of(password.end())
         })
         .collect();
-    match passwords.is_empty() {
-        true => masked,
-        false => {
-            let mut spans = values;
+    match (escaped.is_empty(), passwords.is_empty()) {
+        (true, true) => masked,
+        _ => {
+            let mut spans = plain;
+            spans.extend(escaped);
             spans.extend(passwords);
             Cow::Owned(mask_spans(text, &merged(spans)).into_owned())
         }
     }
 }
 
+/// The offset of the first ASCII line break at or after `from`, or the end of the text.
 fn line_end(text: &str, from: usize) -> usize {
     text[from..]
         .find(['\n', '\x0B', '\x0C', '\r'])
@@ -572,6 +580,14 @@ mod tests {
             (
                 "token=\"ab\\\"cd\nmachine h login me password hunter2",
                 format!("token=\"{masked}\nmachine h login me password {masked}"),
+            ),
+            (
+                "machine h login token=\"a\\\"b\" password\nhunter2",
+                format!("machine h login token=\"{masked}\n{masked}"),
+            ),
+            (
+                "password=\"a\\\"b\" TOKEN=\"\"\r\npassword hunter2",
+                format!("password=\"{masked}\r\npassword {masked}"),
             ),
         ];
         for (input, expected) in cases {
