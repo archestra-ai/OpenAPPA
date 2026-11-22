@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.47.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.46.1...v0.47.0) (2026-11-21)
+
+
+### Features
+
+* **images:** use hardened bases for published runtimes ([#1009](https://github.com/archestra-ai/OpenAPPA/issues/1009)) ([bb0f63b](https://github.com/archestra-ai/OpenAPPA/commit/bb0f63b9af8542c3cd27fc89757bfc882db25ba5))
+* **kagent:** use hardened static base for Go runtime ([#1007](https://github.com/archestra-ai/OpenAPPA/issues/1007)) ([0745ac8](https://github.com/archestra-ai/OpenAPPA/commit/0745ac83ed2915305c9b9b09b7fc0d2fdda0c3fe))
+
+
+### Dependencies
+
+* upgrade Rig core and agent to 0.46 ([#879](https://github.com/archestra-ai/OpenAPPA/issues/879)) ([0df2691](https://github.com/archestra-ai/OpenAPPA/commit/0df2691e6f8ad2d8cf5d585c44fcf5700ff508f8))
+
+## [0.46.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.46.0...v0.46.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* **images:** run appa-demo-tools as a non-root user ([#1001](https://github.com/archestra-ai/OpenAPPA/issues/1001)) ([68dce5b](https://github.com/archestra-ai/OpenAPPA/commit/68dce5b9e46d455da29f40cda10ef352b79c235b))
+* **release:** run the release publisher's fixed malware scan ([#1003](https://github.com/archestra-ai/OpenAPPA/issues/1003)) ([31bd783](https://github.com/archestra-ai/OpenAPPA/commit/31bd78354664b419b00cd2670599533dace92922))
+
+## [0.46.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.45.0...v0.46.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runtime:** RemedyRefusal has a new ApprovalPending variant.
+
+### Features
+
+* **appa-agent:** name a block's offers as data and pin the offer-line contract ([#971](https://github.com/archestra-ai/OpenAPPA/issues/971)) ([8d9a620](https://github.com/archestra-ai/OpenAPPA/commit/8d9a6203131493e380c9e166203ea384efbd9919))
+
+
+### Bug Fixes
+
+* **batteries:** keep the parked store when it cannot be restored ([#980](https://github.com/archestra-ai/OpenAPPA/issues/980)) ([9012e5a](https://github.com/archestra-ai/OpenAPPA/commit/9012e5a3eab615d52ff3de7b7c2ab046b70e7072))
+* **config:** refuse a duplicate included sanitizer before leaving out unbound ones ([#979](https://github.com/archestra-ai/OpenAPPA/issues/979)) ([42dbc24](https://github.com/archestra-ai/OpenAPPA/commit/42dbc24a8ec6316c60a28e50086816f040227ce4))
+* **config:** runtime config sweep — deployment refusal field name, include at the filesystem root, section docs ([#973](https://github.com/archestra-ai/OpenAPPA/issues/973)) ([7862003](https://github.com/archestra-ai/OpenAPPA/commit/786200363a101e8c8bdd8ea771ab0db80c150a84))
+* **hooks:** a turn-end hook does not block when its event cannot be read ([#977](https://github.com/archestra-ai/OpenAPPA/issues/977)) ([f7098ef](https://github.com/archestra-ai/OpenAPPA/commit/f7098ef928babb2a459203c7e30d6d65c2c90a20))
+* **hooks:** fail closed on an unreadable event, an empty call id, and a closed stderr ([#987](https://github.com/archestra-ai/OpenAPPA/issues/987)) ([6ec3f57](https://github.com/archestra-ai/OpenAPPA/commit/6ec3f57b8a7af944e1a248e36fb3126c9b678e57))
+* **images:** appa-kagent-adk on CPython 3.13.18 with fixed curl and brotli ([#999](https://github.com/archestra-ai/OpenAPPA/issues/999)) ([b576e5a](https://github.com/archestra-ai/OpenAPPA/commit/b576e5ab81962e25003daf97ddafe12d990bb4df))
+* **init:** install and removal hygiene across init, OpenCode, amp-proxy, and appa-package ([#983](https://github.com/archestra-ai/OpenAPPA/issues/983)) ([beff928](https://github.com/archestra-ai/OpenAPPA/commit/beff928f004630dd9399dec229a08289f4160297))
+* **init:** uninstall keeps hook containers that were empty before it ([#976](https://github.com/archestra-ai/OpenAPPA/issues/976)) ([ceff423](https://github.com/archestra-ai/OpenAPPA/commit/ceff42335b32566339330c7b814745b0fcd4556f))
+* **runtime:** a deny decides a remedy plan in any order; an exact peer-read retry replays its receipt ([#992](https://github.com/archestra-ai/OpenAPPA/issues/992)) ([0aaa68b](https://github.com/archestra-ai/OpenAPPA/commit/0aaa68b5133bdf57bc6eea934499c97a9fb0e1f2))
+* **runtime:** a dropped recorder task frees its family; a held spawn wakes only on its own family ([#994](https://github.com/archestra-ai/OpenAPPA/issues/994)) ([074ca6f](https://github.com/archestra-ai/OpenAPPA/commit/074ca6f6562b19bd6ebf54a7572b4ca90be36a6f))
+* **runtime:** a judged host write outrun by publishes refuses as PolicyMoved ([#975](https://github.com/archestra-ai/OpenAPPA/issues/975)) ([69cc59e](https://github.com/archestra-ai/OpenAPPA/commit/69cc59ea243782bfa00e963981e4ff857a6006d2))
+* **runtime:** a signal-killed claude consult fails in transport, not as status 0 ([#984](https://github.com/archestra-ai/OpenAPPA/issues/984)) ([de87e44](https://github.com/archestra-ai/OpenAPPA/commit/de87e44c6595f1899ee0b80aff9fef45bae774ef))
+* **runtime:** annotate stops at a failed write, refuse --repeat 0, reserve the archestra module name ([#985](https://github.com/archestra-ai/OpenAPPA/issues/985)) ([4947907](https://github.com/archestra-ai/OpenAPPA/commit/4947907dd22b8fb9ddc0806f0c183cbdcee1458e))
+* **runtime:** archestra transport takes no refusal detail from a body cut short ([#974](https://github.com/archestra-ai/OpenAPPA/issues/974)) ([8c116a0](https://github.com/archestra-ai/OpenAPPA/commit/8c116a00be12f0470bf177ee68de3cc07aac65f5))
+* **runtime:** bound the preload self-test, skip FIFOs in the agent scan, refuse a selector on *, and harden replay ([#990](https://github.com/archestra-ai/OpenAPPA/issues/990)) ([394cd22](https://github.com/archestra-ai/OpenAPPA/commit/394cd22ec99fcc4bd5ae325dcd6999e6cd105e31))
+* **runtime:** installation hardening — finish interrupted switches, pin git to the checkout, hash-then-extract, no-follow batteries ([#993](https://github.com/archestra-ai/OpenAPPA/issues/993)) ([6ed628a](https://github.com/archestra-ai/OpenAPPA/commit/6ed628a8bebfecbfefdcd82cc16e3373863ef776))
+* **runtime:** jev retries a 429 after the retry backoff ([#989](https://github.com/archestra-ai/OpenAPPA/issues/989)) ([d096196](https://github.com/archestra-ai/OpenAPPA/commit/d096196e52465179e43cb67c2ef000618fa56c99))
+* **runtime:** record a failed spawn as failed, refuse an empty call id and a root's child stop before writing ([#982](https://github.com/archestra-ai/OpenAPPA/issues/982)) ([d726021](https://github.com/archestra-ai/OpenAPPA/commit/d7260212bd5e780decae25dcbb3c16fb30a31c66))
+* **runtime:** refuse a failed stock approve, finish the 8th consult batch, answer a lost child open as AlreadyOpen ([#991](https://github.com/archestra-ai/OpenAPPA/issues/991)) ([7d329ad](https://github.com/archestra-ai/OpenAPPA/commit/7d329ad0fc2bf6d232c782fcd3a1f7a437a774ce))
+* **runtime:** take no archestra refusal detail from a body cut short ([8c116a0](https://github.com/archestra-ai/OpenAPPA/commit/8c116a00be12f0470bf177ee68de3cc07aac65f5))
+* **yell:** classify context-provider consults and make the report docs true ([#986](https://github.com/archestra-ai/OpenAPPA/issues/986)) ([1819495](https://github.com/archestra-ai/OpenAPPA/commit/1819495849383badf0975e4a14d181e10d1b6ac4))
+* **yell:** keep the release on a foreign request and answer no on closed stdin ([#981](https://github.com/archestra-ai/OpenAPPA/issues/981)) ([751e5ea](https://github.com/archestra-ai/OpenAPPA/commit/751e5ea2c9e659d1ec55ce5ed504d736c2addd50))
+
+
+### Code Refactoring
+
+* **runtime:** drop the remedy replay no caller can reach and make the api and engine docs true ([#988](https://github.com/archestra-ai/OpenAPPA/issues/988)) ([388adfc](https://github.com/archestra-ai/OpenAPPA/commit/388adfcc94f4e42afb4608df9551ec0bc89c5345))
+
 ## [0.45.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.44.0...v0.45.0) (2026-11-20)
 
 

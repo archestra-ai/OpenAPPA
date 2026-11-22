@@ -213,6 +213,23 @@ fn a_module_claiming_a_stock_name_refuses() {
     expect_refusal(&deployment, "already provided");
 }
 
+/// Where the host serves `archestra`, a sanitizer bound to that builtin reaches the host's
+/// transport, never a module, so a module cannot take the name. Elsewhere the name is free,
+/// which shows the same module is otherwise a valid one.
+#[test]
+fn a_module_claims_the_archestra_name_only_where_the_host_does_not_serve_it() {
+    let deployment = Deployment::new(CONFIG);
+    deployment.install(
+        &build_module("appa-module-fixture-bad", Some("claims-archestra")),
+        &library_filename("libclaims_archestra"),
+    );
+    if cfg!(feature = "archestra") {
+        expect_refusal(&deployment, "already provided");
+    } else {
+        assert!(deployment.open().is_ok());
+    }
+}
+
 #[test]
 fn two_modules_claiming_one_name_refuse() {
     let deployment = Deployment::new(CONFIG);

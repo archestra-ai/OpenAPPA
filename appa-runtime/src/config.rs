@@ -1348,7 +1348,8 @@ impl Config {
                     .filter(|(_, file)| !named.contains(file))
                     .collect(),
                 None => {
-                    let file = crate::batteries::resolve_include(authored, &source_dir, battery_dirs);
+                    let file = crate::batteries::resolve_include(authored, &source_dir, battery_dirs)
+                        .ok_or_else(|| unreadable(&source_dir.join(authored), std::io::ErrorKind::NotFound.into()))?;
                     let file = std::fs::canonicalize(&file).map_err(|source| unreadable(&file, source))?;
                     vec![(authored.clone(), file)]
                 }
@@ -1883,6 +1884,7 @@ impl<'a> IncludeGlob<'a> {
             // The entry's own type, which a symbolic link does not pass on.
             let kind = item.file_type().map_err(|source| unreadable(&item.path(), source))?;
             if kind.is_file() {
+                self.refuse_a_battery_not_found(source_dir, &name)?;
                 names.push(name);
             }
         }
@@ -1900,6 +1902,22 @@ impl<'a> IncludeGlob<'a> {
                 Ok((entry, path))
             })
             .collect()
+    }
+
+    /// A match the entry would name as a battery, `batteries/<name>/appa.toml`,
+    /// is refused unless [`crate::batteries::battery_in`] finds that battery
+    /// beside the root config, as a single-file entry is: its policy is not
+    /// dropped without a word.
+    fn refuse_a_battery_not_found(&self, source_dir: &Path, name: &str) -> Result<(), ConfigError> {
+        let entry = format!("{}/{name}", self.folder);
+        match crate::batteries::name_from_include(Path::new(&entry)) {
+            Some(battery) if crate::batteries::battery_in(&source_dir.join("batteries"), &battery).is_none() => {
+                Err(self.invalid(&format!(
+                    "it matches {entry}, and battery {battery} is not a real directory with a real appa.toml"
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1936,15 +1954,16 @@ fn named_include_files(
         .iter()
         .filter(|authored| !authored.contains('*'))
         .filter_map(|authored| {
-            std::fs::canonicalize(crate::batteries::resolve_include(authored, source_dir, battery_dirs)).ok()
+            std::fs::canonicalize(crate::batteries::resolve_include(authored, source_dir, battery_dirs)?).ok()
         })
         .collect()
 }
 
 /// One include entry, as authored: a spelling this runtime resolves beside the root
-/// config, or hands to a host that holds the battery under it. Neither reads a spelling
-/// that starts elsewhere or leaves the root. [`edit::add_include`] refuses an entry here
-/// before it writes one, so a document the editor wrote is one a loader reads.
+/// config, or hands to a host that holds the battery under it. The hosted loader refuses
+/// an absolute spelling and any `..` component; a local root refuses an absolute spelling,
+/// and its single-file entries may hold `..`. [`edit::add_include`] refuses an entry here
+/// before it writes one.
 pub(crate) fn refuse_include_entry(entry: &str) -> Result<(), ConfigError> {
     let path = Path::new(entry);
     if path.is_absolute() {
@@ -3966,6 +3985,67 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(names, ["root", "from-image"]);
         assert_eq!(config.included_batteries(), ["slack"]);
+    }
+
+    /// A store battery that is a link to a tree elsewhere is not loaded as
+    /// the battery it is named for.
+    #[cfg(unix)]
+    #[test]
+    fn a_battery_include_does_not_follow_a_link_in_the_store() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let elsewhere = dir.path().join("elsewhere/slack");
+        std::fs::create_dir_all(&elsewhere).expect("linked tree");
+        std::fs::write(elsewhere.join("appa.toml"), "[policy]\nversion = 2\n").expect("linked battery");
+        std::fs::create_dir_all(dir.path().join("batteries")).expect("store");
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join("batteries/slack")).expect("store link");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            "include = [\"batteries/slack/appa.toml\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n",
+        )
+        .expect("root config");
+
+        let refused = Config::load_from(&dir.path().join("appa.toml"), &[]);
+        assert!(
+            matches!(&refused, Err(ConfigError::Unreadable { source, .. }) if source.kind() == std::io::ErrorKind::NotFound),
+            "{refused:?}"
+        );
+    }
+
+    /// A glob over a store battery that is a link is refused, whether the
+    /// link stays inside the root config's folder or leads out of it; a glob
+    /// over a real battery folder that matches nothing still loads.
+    #[cfg(unix)]
+    #[test]
+    fn a_battery_glob_does_not_follow_a_link_in_the_store() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let inside = dir.path().join("vendor/slack");
+        let outside = tempfile::tempdir().expect("outside directory");
+        for tree in [inside.as_path(), outside.path()] {
+            std::fs::create_dir_all(tree).expect("linked tree");
+            std::fs::write(
+                tree.join("appa.toml"),
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"linked\"\ndelta = {}\n",
+            )
+            .expect("linked battery");
+        }
+        std::fs::create_dir_all(dir.path().join("batteries")).expect("store");
+        std::os::unix::fs::symlink(&inside, dir.path().join("batteries/slack")).expect("inside link");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("batteries/github")).expect("outside link");
+        let root = |include: &str| {
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!("include = [\"{include}\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n"),
+            )
+            .expect("root config");
+            Config::load_from(&dir.path().join("appa.toml"), &[])
+        };
+
+        for linked in ["batteries/slack/*.toml", "batteries/github/*.toml"] {
+            assert!(matches!(root(linked), Err(ConfigError::GlobInclude { .. })), "{linked}");
+        }
+        std::fs::create_dir_all(dir.path().join("batteries/empty")).expect("real battery folder");
+        let config = root("batteries/empty/*.toml").expect("a glob matching nothing loads");
+        assert!(config.included_batteries().is_empty());
     }
 
     #[test]

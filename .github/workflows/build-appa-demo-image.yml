@@ -40,6 +40,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Log in to Docker Hardened Images
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: dhi.io
+          username: archestra
+          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
+
       - name: Build image
         run: docker build --tag "$IMAGE:sha-${GITHUB_SHA::12}" .
 
@@ -68,6 +75,13 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Log in to Docker Hardened Images
+        uses: docker/login-action@v4.7.0
+        with:
+          registry: dhi.io
+          username: archestra
+          password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
       - name: Build image
         run: docker build --tag "$IMAGE:sha-${GITHUB_SHA::12}" --tag "$IMAGE:latest" .

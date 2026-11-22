@@ -168,21 +168,42 @@ pub(crate) fn download_bounded(url: &str, destination: &Path, max_bytes: u64) ->
 /// uncompressed bytes are capped. Modes come from the install, not from the
 /// archive.
 pub(crate) fn extract_archive(archive: &Path, destination: &Path) -> Result<(), ArchiveError> {
-    extract_bounded(archive, destination, MAX_UNCOMPRESSED_BYTES, MAX_ENTRIES)
+    extract_bounded(
+        open(archive)?,
+        archive,
+        destination,
+        MAX_UNCOMPRESSED_BYTES,
+        MAX_ENTRIES,
+    )
 }
 
 pub(crate) fn extract_bundle_archive(archive: &Path, destination: &Path) -> Result<(), ArchiveError> {
+    extract_bundle_file(open(archive)?, archive, destination)
+}
+
+/// [`extract_bundle_archive`] from an open `file`, the very handle that was
+/// hashed; `label` names it in refusals.
+pub(crate) fn extract_bundle_file(file: fs::File, label: &Path, destination: &Path) -> Result<(), ArchiveError> {
     // A complete marketplace may already use its entry allowance. The bundle
     // adds a separately bounded custom-file snapshot, descriptor, selection,
     // config, artifact files and directories.
-    extract_bounded(archive, destination, 512 * 1024 * 1024, MAX_ENTRIES * 2 + 32)
+    extract_bounded(file, label, destination, 512 * 1024 * 1024, MAX_ENTRIES * 2 + 32)
 }
 
-fn extract_bounded(archive: &Path, destination: &Path, max_bytes: u64, max_entries: usize) -> Result<(), ArchiveError> {
-    let file = fs::File::open(archive).map_err(|source| ArchiveError::Read {
+fn open(archive: &Path) -> Result<fs::File, ArchiveError> {
+    fs::File::open(archive).map_err(|source| ArchiveError::Read {
         path: archive.to_path_buf(),
         source,
-    })?;
+    })
+}
+
+fn extract_bounded(
+    file: fs::File,
+    archive: &Path,
+    destination: &Path,
+    max_bytes: u64,
+    max_entries: usize,
+) -> Result<(), ArchiveError> {
     // Include headers/padding in a second bound, including PAX records the tar
     // reader consumes internally before yielding a regular entry.
     let decoded = std::io::Read::take(
@@ -356,6 +377,35 @@ mod tests {
 
     #[test]
     fn extraction_refuses_traversal_and_specials() {
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Symlink);
+        link.set_link_name("/etc/passwd").unwrap();
+        link.set_path("link").unwrap();
+        // The builder refuses `..` in a path, so the escaping name is written raw.
+        let mut escaping = tar::Header::new_gnu();
+        escaping.as_old_mut().name[..4].copy_from_slice(b"../x");
+        for mut header in [link, escaping] {
+            header.set_size(0);
+            header.set_mode(0o644);
+            header.set_cksum();
+            let source = tempfile::tempdir().unwrap();
+            let archive = source.path().join("bundle.tar.gz");
+            let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
+                fs::File::create(&archive).unwrap(),
+                flate2::Compression::fast(),
+            ));
+            builder.append(&header, std::io::empty()).unwrap();
+            builder.into_inner().unwrap().finish().unwrap();
+            let destination = source.path().join("tree");
+            fs::create_dir(&destination).unwrap();
+
+            assert!(matches!(
+                extract_archive(&archive, &destination),
+                Err(ArchiveError::Malformed { .. })
+            ));
+            assert!(fs::symlink_metadata(destination.join("link")).is_err());
+            assert!(fs::symlink_metadata(source.path().join("x")).is_err());
+        }
         for escaping in ["../escape", "/absolute", "plugin/../../escape"] {
             assert_eq!(safe_relative(Path::new(escaping)), EntryPath::Escaping);
         }

@@ -343,6 +343,8 @@ jobs:
       verify_release: true
       release_ref: ${{ needs.release-please.outputs.tag_name }}
       immutable: ${{ needs.release-please.outputs.registry_only != 'true' }}
+    secrets:
+      DOCKERHUB_DHI_TOKEN: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
   # archestra-ai/release-publisher pushes the charts after verifying them; this
   # job only packages them, pinned to the staged image digests.
@@ -524,7 +526,7 @@ jobs:
     permissions:
       attestations: write # Store the build provenance attestation.
       id-token: write # Sign the build provenance attestation.
-    uses: archestra-ai/.github/.github/workflows/attest-provenance.yml@f25ce262a4bbb0a43ee907bcd2b0769829972057 # v1.32.1
+    uses: archestra-ai/.github/.github/workflows/attest-provenance.yml@6a057a74a0b093c79f29e74871de23f7b6712893 # v1.45.2
     with:
       # Images and charts, then the GitHub release files (none for
       # publish_registry_only).
@@ -540,11 +542,11 @@ jobs:
     if: ${{ !cancelled() && !failure() && needs.attest-release.result == 'success' }}
     permissions:
       actions: read # Required to download the chart artifact.
-      contents: read # read vex/openvex.json at the release commit (release-publish.yml)
+      contents: read # read vex/openvex.json and the benchmark waivers at the release commit (release-publish.yml)
       id-token: write # sign the image contents attestations (release-publish.yml)
       attestations: write # store them
       packages: read # pull the staged images to scan them
-    uses: archestra-ai/.github/.github/workflows/release-publish.yml@78920d499caedeb1efcb3e20395b41fd26eea8fe # v1.34.0
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@6a057a74a0b093c79f29e74871de23f7b6712893 # v1.45.2
     with:
       # Holds the archestra-releaser App's key; main only.
       environment: releaser
@@ -556,13 +558,27 @@ jobs:
       # Each image's statements, read from the release commit, are attested
       # next to its SBOMs (vex/README.md).
       vex-document: vex/openvex.json
+      # The waivers the Image Benchmark required workflow applies before
+      # merge; each image's benchmark is attested with the waivers it used.
+      benchmark-waivers: .github/image-benchmark-waivers.json
       # Hand the request off: the release waits for its approval in the
       # publisher, and release-finalize.yml publishes the GitHub release once
       # the publisher run succeeds (Release Gate dispatches it).
       wait: false
+      # Docker signs VEX for each Docker Hardened Images base (dhi.io) these
+      # Dockerfiles pin, read at the release commit; its statements about
+      # package builds an image holds are attested with the image's own.
+      base-images-from: |
+        Dockerfile
+        appa-runtime/Dockerfile
+        integrations/kagent/appa-kagent-adk-go/Dockerfile
+        integrations/kagent/appa-kagent-adk/Dockerfile
+        integrations/kagent/demo/Dockerfile
+        integrations/kagent/demo/mocks/Dockerfile
     secrets:
       APP_ID: ${{ secrets.APP_ID }}
       APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+      DHI_TOKEN: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
   prepare-release:
     name: Prepare GitHub release files
@@ -731,6 +747,11 @@ jobs:
           test "$(gh release view "v$SOURCE_VERSION" --json isDraft --jq .isDraft)" = false \
             || { echo "::error::v$SOURCE_VERSION is not a published release"; exit 1; }
 
+      # The runner's skopeo cannot copy an index whose images have zstd layers
+      # (Docker Hardened Images bases) with its digests preserved.
+      - name: Set up skopeo
+        uses: archestra-ai/.github/actions/setup-skopeo@v1.45.0
+
       # A version released before OpenAPPA published to GHCR is read from
       # Artifact Registry appa-public, anonymously.
       - name: Stage the published images
@@ -790,11 +811,12 @@ jobs:
     name: Publisher dry run (publish)
     needs: publisher-smoke
     permissions:
+      contents: read # release-publish.yml's attest-contents job requests it
       actions: read # Required to download the chart artifact.
       id-token: write # sign the image contents attestations (release-publish.yml)
       attestations: write # store them
       packages: read # pull the staged images to scan them
-    uses: archestra-ai/.github/.github/workflows/release-publish.yml@f25ce262a4bbb0a43ee907bcd2b0769829972057 # v1.32.1
+    uses: archestra-ai/.github/.github/workflows/release-publish.yml@6a057a74a0b093c79f29e74871de23f7b6712893 # v1.45.2
     with:
       # Holds the archestra-releaser App's key; main only.
       environment: releaser

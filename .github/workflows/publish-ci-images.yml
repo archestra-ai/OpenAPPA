@@ -136,3 +136,5 @@ jobs:
       version_label: ${{ needs.tags.outputs.version_label }}
       checkout_ref: ${{ needs.tags.outputs.source_commit }}
       immutable: false
+    secrets:
+      DOCKERHUB_DHI_TOKEN: ${{ secrets.DOCKERHUB_DHI_TOKEN }}

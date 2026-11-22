@@ -61,6 +61,8 @@ mod elicit;
 mod engine;
 mod events;
 mod external;
+#[cfg(feature = "daemon")]
+mod git_checkout;
 mod label_guide;
 mod model;
 mod process_tree;

@@ -1,0 +1,40 @@
+{
+  "waivers": [
+    {
+      "images": [
+        "ghcr.io/archestra-ai/appa-runtime",
+        "ghcr.io/archestra-ai/appa-demo-tools",
+        "ghcr.io/archestra-ai/appa-demo-mocks"
+      ],
+      "check": "DKL-DI-0005",
+      "reason": "The flagged layer is the python:3.13-slim base image's own, which clears /var/lib/apt/lists with Debian's apt-get dist-clean; Dockle 0.4.15 only recognises rm -rf.",
+      "alerts": [
+        "*apt-get dist-clean # buildkit"
+      ]
+    },
+    {
+      "images": [
+        "ghcr.io/archestra-ai/appa-demo-tools",
+        "ghcr.io/archestra-ai/appa-kagent-adk"
+      ],
+      "check": "CIS-DI-0010",
+      "reason": "settings.py of the MCP Python SDK (the auth server's settings model) and of google-adk's Bigtable and Spanner tools is source code, not a credential; Dockle matches the file name only. The release secret scan reads file contents.",
+      "alerts": [
+        "Suspicious filename found : */site-packages/mcp/server/auth/settings.py *",
+        "Suspicious filename found : */site-packages/google/adk/tools/bigtable/settings.py *",
+        "Suspicious filename found : */site-packages/google/adk/tools/spanner/settings.py *"
+      ]
+    },
+    {
+      "images": [
+        "ghcr.io/archestra-ai/appa-kagent-adk"
+      ],
+      "check": "DKL-DI-0004",
+      "reason": "Both apk add commands without --no-cache are layers of kagent's published app image, which this image extends unchanged (Wolfi keeps no package cache: /var/cache/apk is empty). This image's own apk commands use --no-cache.",
+      "alerts": [
+        "*apk update && apk add             curl openssl bash git ca-certificates libstdc++*",
+        "*/bin/sh -c apk add     nodejs npm node-gyp bubblewrap socat ripgrep # buildkit"
+      ]
+    }
+  ]
+}

@@ -12,7 +12,8 @@
 //!
 //! An ask waits for its consult gate inside the consult's own deadline, so `--concurrency`
 //! bounds how many values are in flight at once. The first answer that cannot be written
-//! ends the run with a failure: the consults still in flight are dropped, and none starts.
+//! ends the run with a failure: no further ask is scheduled, and the asks in flight are
+//! dropped.
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
@@ -106,7 +107,7 @@ async fn ask(runtime: &Runtime, value: &Value, repeat: u32) -> std::io::Result<(
 pub(crate) async fn run(
     config: Config,
     modules: Option<std::path::PathBuf>,
-    repeat: u32,
+    repeat: std::num::NonZeroU32,
     concurrency: std::num::NonZeroUsize,
 ) -> ExitCode {
     let runtime = match Runtime::open_in_memory(config, modules, crate::api::Remedies::Live) {
@@ -131,7 +132,7 @@ pub(crate) async fn run(
     }
     let asks = values
         .iter()
-        .flat_map(|value| (0..repeat).map(move |repeat| (value, repeat)))
+        .flat_map(|value| (0..repeat.get()).map(move |repeat| (value, repeat)))
         .map(|(value, repeat)| ask(&runtime, value, repeat));
     match futures_util::stream::iter(asks)
         .buffer_unordered(concurrency.get())
@@ -140,7 +141,11 @@ pub(crate) async fn run(
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("appa runtime sanitize: an answer could not be written: {error}");
+            // Standard error may share the closed pipe; the exit status carries the failure.
+            let _ = writeln!(
+                std::io::stderr(),
+                "appa runtime sanitize: an answer could not be written: {error}"
+            );
             ExitCode::FAILURE
         }
     }

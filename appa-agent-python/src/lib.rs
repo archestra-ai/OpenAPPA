@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 use serde::Serialize;
 
-const BINDING_IDENTITY: &str = "appa-agent-python-v8";
+const BINDING_IDENTITY: &str = "appa-agent-python-v9";
 const ATTEST_SCHEMA: &str = "attest-schema";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_BODY_BYTES: usize = 256 * 1024;
@@ -37,6 +37,9 @@ create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 enum DispatchResponse {
     Blocked {
         feedback: String,
+        /// The ids of the offers `feedback` quotes, for a host that takes one
+        /// without reading the text.
+        offer_ids: Vec<String>,
     },
     Delivered {
         content: String,
@@ -54,6 +57,9 @@ enum DispatchResponse {
 enum CheckResponse {
     Blocked {
         feedback: String,
+        /// The ids of the offers `feedback` quotes, for a host that takes one
+        /// without reading the text.
+        offer_ids: Vec<String>,
     },
     Allowed {
         dispatched_tool: String,
@@ -74,6 +80,9 @@ enum CheckResponse {
 enum SpawnResponse {
     Blocked {
         feedback: String,
+        /// The ids of the offers `feedback` quotes, for a host that takes one
+        /// without reading the text.
+        offer_ids: Vec<String>,
     },
     Opened {
         child_id: String,
@@ -453,7 +462,10 @@ impl SessionInner {
         call_id: Option<&str>,
     ) -> Result<String, Failure> {
         encode(match self.decide(child, tool, arguments_json, spawn, call_id)? {
-            Decision::Blocked { feedback, .. } => CheckResponse::Blocked { feedback },
+            Decision::Blocked { feedback, offers } => CheckResponse::Blocked {
+                feedback,
+                offer_ids: ids(offers),
+            },
             Decision::Control { reply } => CheckResponse::Control { reply },
             Decision::Allowed { call, binding } => CheckResponse::Allowed {
                 dispatched_tool: call.tool.clone(),
@@ -470,7 +482,10 @@ impl SessionInner {
             );
         };
         match self.decide(None, tool, arguments_json, false, None)? {
-            Decision::Blocked { feedback, .. } => encode(DispatchResponse::Blocked { feedback }),
+            Decision::Blocked { feedback, offers } => encode(DispatchResponse::Blocked {
+                feedback,
+                offer_ids: ids(offers),
+            }),
             Decision::Control { reply } => encode(DispatchResponse::Control { reply }),
             Decision::Allowed { call, .. } => {
                 let outcome = self
@@ -656,15 +671,15 @@ impl SessionInner {
         let decision = match self.decide(None, &tool, arguments_json, true, None)? {
             Decision::Blocked { feedback, offers } => match self.declare_return(&offers, return_schema)? {
                 Some(declared) => self.decide(None, &tool, declared.arguments.get(), true, None)?,
-                None => Decision::Blocked {
-                    feedback,
-                    offers: Vec::new(),
-                },
+                None => Decision::Blocked { feedback, offers },
             },
             decision => decision,
         };
         match decision {
-            Decision::Blocked { feedback, .. } => encode(SpawnResponse::Blocked { feedback }),
+            Decision::Blocked { feedback, offers } => encode(SpawnResponse::Blocked {
+                feedback,
+                offer_ids: ids(offers),
+            }),
             Decision::Control { reply } => encode(SpawnResponse::Control { reply }),
             Decision::Allowed { call, binding: None } => {
                 // The release prepared no fork, so no child exists to open. The
@@ -843,6 +858,10 @@ enum Decision {
     Control {
         reply: String,
     },
+}
+
+fn ids(offers: Vec<OfferedRemedy>) -> Vec<String> {
+    offers.into_iter().map(|offer| offer.id).collect()
 }
 
 fn arguments_value(call: &ProposedCall) -> serde_json::Value {
@@ -1351,17 +1370,10 @@ delta    = {}
     }
 
     fn offer_id(blocked: &str) -> String {
-        let feedback = serde_json::from_str::<serde_json::Value>(blocked).expect("a JSON response")["feedback"]
+        serde_json::from_str::<serde_json::Value>(blocked).expect("a JSON response")["offer_ids"][0]
             .as_str()
-            .expect("a block carries feedback")
-            .to_string();
-        let after = feedback
-            .split("offer_id:")
-            .nth(1)
-            .expect("blocking feedback surfaces an offer");
-        let rest = after.trim_start().strip_prefix('"').expect("the offer id is quoted");
-        let end = rest.find('"').expect("the offer id closes its quote");
-        rest[..end].to_string()
+            .expect("the block names an offer")
+            .to_string()
     }
 
     #[test]

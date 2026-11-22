@@ -14,13 +14,12 @@ COPY website-chat-playground/terra.patch /tmp/appa-demo-terra.patch
 RUN git apply /tmp/appa-demo-terra.patch \
     && cargo build --release --locked --manifest-path demo/appa-demo/Cargo.toml
 
-FROM debian:bookworm-slim
+FROM dhi.io/debian-base:trixie-debian13@sha256:70bc646aa7f20ee881733c5ff335a5a78d41b9179625f6f00bf5ec1d1a9d5707
 # The pinned runtime uses bundled TLS roots.
-RUN useradd --system --create-home appa
-USER appa
+USER 65532:65532
 WORKDIR /home/appa
 COPY --from=builder /build/demo/appa-demo/target/release/appa-demo /usr/local/bin/appa-demo
-COPY --from=builder --chown=appa /build/demo/appa-demo/world world
+COPY --from=builder --chown=65532:65532 /build/demo/appa-demo/world world
 ENV APPA_DEMO_WORLD=/home/appa/world
 EXPOSE 8787
 # CORS origins and the OpenRouter key arrive from the deployment, not the image.
