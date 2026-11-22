@@ -1,5 +1,11 @@
 //! Secret redaction: the stock `redact-secrets` sanitizer's text pass, and the same pass
 //! over an annotation's call before it leaves for a model provider.
+//!
+//! Where a quoted value ends depends on what a backslash does inside the quotes, which
+//! the text does not say. The keyed pass reads the text four ways, a backslash escaping
+//! or literal in double and in single quotes, finds assignments and netrc entries under
+//! each, and masks the union. The guarantee: an assignment's or a netrc entry's secret is
+//! masked whenever the text is consistent with at least one of the four readings.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -52,21 +58,77 @@ const AWS_SECRET_KEY_LENGTH: usize = 40;
 static URL_PASSWORD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(://[^/?#@:\s"']*:)([^/?#@\s"']+)@"#).expect("a fixed pattern"));
 
-/// An assignment whose key names a secret: `KEY=value`, `key: value`, or JSON's
-/// `"key": "value"`. A key names a secret when it contains one of the longer words, or
-/// when `key`, `pass`, `pwd` or `auth` is one of its segments, separated or camel-cased.
-/// The value is masked whatever its shape: a double-quoted value to the first quote no
-/// odd run of backslashes escapes, or to the end of the text; a single-quoted one to its
-/// closing quote; an HTTP credential with its scheme word; a bare one to the next space
-/// or delimiter. Its quotes stay.
-static SECRET_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(
-        r#"(?ix)
-        ( ["']? {SECRET_NAME} ["']? \s*[=:]\s* )
-        ( "(?: [^"\\] | \\[\s\S] )*(?: " | \\?\z ) | '[^']*' | (?: bearer | basic ) \s+ [^\s"'`,;&)\]}}]+ | [^\s"'`,;&)\]}}]+ )
-        "#
-    ))
-    .expect("a fixed pattern")
+/// Whether a backslash inside quotes of one kind escapes the next character, as in JSON
+/// or a shell's double quotes, or stands for itself, as in a shell's single quotes.
+#[derive(Debug, Clone, Copy)]
+enum Backslash {
+    Escapes,
+    Literal,
+}
+
+/// One reading of quoted text: what a backslash does in double and in single quotes.
+#[derive(Debug, Clone, Copy)]
+struct Reading {
+    double: Backslash,
+    single: Backslash,
+}
+
+/// Every combination. Text written in any of them, JSON, a shell, a `.env` file with
+/// Windows paths, reads the same as in one of these.
+const READINGS: [Reading; 4] = [
+    Reading {
+        double: Backslash::Escapes,
+        single: Backslash::Escapes,
+    },
+    Reading {
+        double: Backslash::Escapes,
+        single: Backslash::Literal,
+    },
+    Reading {
+        double: Backslash::Literal,
+        single: Backslash::Escapes,
+    },
+    Reading {
+        double: Backslash::Literal,
+        single: Backslash::Literal,
+    },
+];
+
+impl Backslash {
+    /// A value in `quote`s: to its closing quote, or to the end of the text.
+    fn quoted(self, quote: char) -> String {
+        match self {
+            Backslash::Escapes => format!(r"{quote}(?: [^{quote}\\] | \\[\s\S] )*(?: {quote} | \\?\z )"),
+            Backslash::Literal => format!(r"{quote}[^{quote}]*(?: {quote} | \z )"),
+        }
+    }
+
+    fn closes(self, inside: &[u8]) -> bool {
+        match self {
+            Backslash::Escapes => inside.iter().rev().take_while(|byte| **byte == b'\\').count() % 2 == 0,
+            Backslash::Literal => true,
+        }
+    }
+}
+
+/// An assignment whose key names a secret, under one reading: `KEY=value`, `key: value`,
+/// or JSON's `"key": "value"`. A key names a secret when it contains one of the longer
+/// words, or when `key`, `pass`, `pwd` or `auth` is one of its segments, separated or
+/// camel-cased. The value is masked whatever its shape: a quoted value to its closing
+/// quote, or to the end of the text; an HTTP credential with its scheme word; a bare one
+/// to the next space or delimiter. Its quotes stay.
+static SECRET_ASSIGNMENTS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
+    READINGS.map(|reading| {
+        Regex::new(&format!(
+            r#"(?ix)
+            ( ["']? {SECRET_NAME} ["']? \s*[=:]\s* )
+            ( {} | {} | (?: bearer | basic ) \s+ [^\s"'`,;&)\]}}]+ | [^\s"'`,;&)\]}}]+ )
+            "#,
+            reading.double.quoted('"'),
+            reading.single.quoted('\''),
+        ))
+        .expect("a fixed pattern")
+    })
 });
 
 const SECRET_NAME: &str = r"(?: [A-Za-z0-9_.-]* (?: password | passwd | passphrase | secret | token | api_?key | private_?key | access_?key | credential | authorization ) [A-Za-z0-9_.-]*
@@ -82,134 +144,53 @@ static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^(\s*(?:machine\s+\S+\s+(?:login\s+\S+\s+)?)?password\s+)(\S+)").expect("a fixed pattern")
 });
 
-/// Every secret assignment's value and every netrc password replaced, quotes kept. Two
-/// readings of a value are ambiguous. A single-quoted value whose quote follows an odd
-/// run of backslashes closes there in a shell and is escaped elsewhere, so it is masked
-/// to the end of its line. A double-quoted value across a line break may have closed on
-/// its first line where backslashes are literal. A line ends at an ASCII line break,
-/// which no JSON string holds unescaped. For either, assignments are found twice: reading
-/// on from the value, and afresh from the end of its ambiguous line. Netrc passwords are
-/// found on the text as given and on the text with the first reading's values masked.
-/// Every span found is masked: masking more never leaks.
+/// Every secret assignment's value and every netrc password replaced, quotes kept, under
+/// every reading at once.
 fn mask_keyed_values(text: &str) -> Cow<'_, str> {
-    let read_on = assignment_spans(text, Resume::AfterValue);
-    let masked = mask_spans(text, &read_on.values);
-    let mut source = SourceOffsets::new(&read_on.values);
-    let passwords: Vec<Range<usize>> = NETRC_PASSWORD
+    mask_keyed_values_under(text, READINGS.iter().copied().zip(SECRET_ASSIGNMENTS.iter()))
+}
+
+fn mask_keyed_values_under<'r>(text: &str, readings: impl Iterator<Item = (Reading, &'r Regex)>) -> Cow<'_, str> {
+    let mut spans: Vec<Range<usize>> = NETRC_PASSWORD
         .captures_iter(text)
         .map(|found| found.get(2).expect("the pattern captures a password").range())
-        .chain(NETRC_PASSWORD.captures_iter(&masked).map(|found| {
+        .collect();
+    for (reading, assignment) in readings {
+        spans.extend(keyed_spans(text, reading, assignment));
+    }
+    mask_spans(text, &merged(spans))
+}
+
+/// One reading's spans: every assignment's value, and every netrc password found on the
+/// text with those values masked, so a value with a space in it cannot hide the entry.
+fn keyed_spans(text: &str, reading: Reading, assignment: &Regex) -> Vec<Range<usize>> {
+    let values: Vec<Range<usize>> = assignment
+        .captures_iter(text)
+        .map(|found| value_span(found.get(2).expect("the pattern captures a value"), reading))
+        .collect();
+    let masked = mask_spans(text, &values);
+    let mut source = SourceOffsets::new(&values);
+    let passwords: Vec<Range<usize>> = NETRC_PASSWORD
+        .captures_iter(&masked)
+        .map(|found| {
             let password = found.get(2).expect("the pattern captures a password");
             source.of(password.start())..source.of(password.end())
-        }))
+        })
         .collect();
-    let rescanned: Vec<Range<usize>> = match read_on.ambiguous_lines.is_empty() {
-        true => Vec::new(),
-        false => {
-            let rescan = assignment_spans(text, Resume::AfterAmbiguousLine);
-            rescan.values.into_iter().chain(rescan.ambiguous_lines).collect()
-        }
+    values.into_iter().chain(passwords).collect()
+}
+
+/// A value inside its quotes: up to a closing quote, or to the end of the text.
+fn value_span(value: regex::Match<'_>, reading: Reading) -> Range<usize> {
+    let backslash = match value.as_str().as_bytes().first() {
+        Some(b'"') => reading.double,
+        Some(b'\'') => reading.single,
+        _ => return value.range(),
     };
-    match (read_on.ambiguous_lines.is_empty(), passwords.is_empty()) {
-        (true, true) => masked,
-        _ => {
-            let mut spans = read_on.values;
-            spans.extend(read_on.ambiguous_lines);
-            spans.extend(rescanned);
-            spans.extend(passwords);
-            Cow::Owned(mask_spans(text, &merged(spans)).into_owned())
-        }
+    match value.as_str().as_bytes() {
+        [open, inside @ .., close] if open == close && backslash.closes(inside) => value.start() + 1..value.end() - 1,
+        _ => value.start() + 1..value.end(),
     }
-}
-
-/// Where the search for the next secret assignment resumes after a value with two readings.
-#[derive(Clone, Copy)]
-enum Resume {
-    AfterValue,
-    AfterAmbiguousLine,
-}
-
-struct AssignmentSpans {
-    /// Each value inside its quotes, in the order found: sorted and disjoint when the
-    /// search resumes after each value.
-    values: Vec<Range<usize>>,
-    /// Each value with two readings, from its start to the end of the line that ends the
-    /// other reading.
-    ambiguous_lines: Vec<Range<usize>>,
-}
-
-fn assignment_spans(text: &str, resume: Resume) -> AssignmentSpans {
-    let mut spans = AssignmentSpans {
-        values: Vec::new(),
-        ambiguous_lines: Vec::new(),
-    };
-    let mut search_from = 0;
-    let mut current_line_end = 0;
-    while let Some(found) = SECRET_ASSIGNMENT.captures_at(text, search_from) {
-        let value = found.get(2).expect("the pattern captures a value");
-        let bytes = value.as_str().as_bytes();
-        let inside = value.start() + 1..value.end() - 1;
-        let ambiguous_line = match (bytes, closing(bytes)) {
-            ([b'"', ..], Closing::Closed) => {
-                spans.values.push(inside.clone());
-                text[inside.clone()].find(LINE_BREAKS).map(|found| inside.start + found)
-            }
-            ([b'"', ..], Closing::Escaped | Closing::Unterminated) => {
-                spans.values.push(value.start() + 1..value.end());
-                None
-            }
-            ([b'\'', ..], Closing::Escaped) => {
-                if value.end() > current_line_end {
-                    current_line_end = line_end(text, value.end());
-                }
-                spans.values.push(inside);
-                Some(current_line_end)
-            }
-            ([b'\'', ..], _) => {
-                spans.values.push(inside);
-                None
-            }
-            _ => {
-                spans.values.push(value.range());
-                None
-            }
-        };
-        search_from = match (ambiguous_line, resume) {
-            (Some(line_end), Resume::AfterAmbiguousLine) => line_end,
-            _ => value.end(),
-        };
-        if let Some(line_end) = ambiguous_line {
-            spans.ambiguous_lines.push(value.start() + 1..line_end);
-        }
-    }
-    spans
-}
-
-/// How a quoted value ends: at a closing quote, at a quote an odd run of backslashes
-/// escapes, or at the end of the text.
-enum Closing {
-    Closed,
-    Escaped,
-    Unterminated,
-}
-
-fn closing(value: &[u8]) -> Closing {
-    match value {
-        [open, inside @ .., close] if open == close => {
-            match inside.iter().rev().take_while(|byte| **byte == b'\\').count() % 2 {
-                0 => Closing::Closed,
-                _ => Closing::Escaped,
-            }
-        }
-        _ => Closing::Unterminated,
-    }
-}
-
-const LINE_BREAKS: [char; 4] = ['\n', '\x0B', '\x0C', '\r'];
-
-/// The offset of the first ASCII line break at or after `from`, or the end of the text.
-fn line_end(text: &str, from: usize) -> usize {
-    text[from..].find(LINE_BREAKS).map_or(text.len(), |found| from + found)
 }
 
 /// The spans sorted, with every overlapping or adjacent pair joined.
@@ -632,13 +613,13 @@ mod tests {
     }
 
     #[test]
-    fn a_quoted_secret_is_masked_to_its_closing_quote_and_an_escaped_single_quote_to_its_line_end() {
+    fn a_quoted_secret_is_masked_under_every_quote_reading() {
         let masked = "[redacted-secret]";
         let cases = [
             (r#"password="ab\"cdefgh" next"#, format!(r#"password="{masked}" next"#)),
-            (r"password='ab\'cdefgh' next", format!("password='{masked}")),
+            (r"password='ab\'cdefgh' next", format!("password='{masked}' next")),
             (r#"PASSWORD="a\"b\"c\"tail">out"#, format!(r#"PASSWORD="{masked}">out"#)),
-            (r"PASSWORD='a\'b\'tail'>out", format!("PASSWORD='{masked}")),
+            (r"PASSWORD='a\'b\'tail'>out", format!("PASSWORD='{masked}'>out")),
             (
                 r#"export DB_PASSWORD="ab\"cdefgh">out"#,
                 format!(r#"export DB_PASSWORD="{masked}">out"#),
@@ -659,8 +640,6 @@ mod tests {
                 format!(r#"{{"password":"{masked}","user":"me"}}"#),
             ),
             ("PASSWORD=\"a\\\"b\nshort tail\"", format!("PASSWORD=\"{masked}\"")),
-            // A double-quoted value across a line break may also have closed on its first
-            // line, so the line after it is searched afresh.
             (
                 "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD=\"hunter2\"\nUSER=me",
                 format!("DIR_PASSWORD=\"{masked}\"{masked}\"\nUSER=me"),
@@ -691,19 +670,19 @@ mod tests {
             ),
             (
                 "PASSWORD=\"x\\\"TOKEN='y\"\nDB_PASSWORD='hunter2'",
-                format!("PASSWORD=\"{masked}\"\nDB_PASSWORD='{masked}'"),
+                format!("PASSWORD=\"{masked}'{masked}'"),
             ),
             (
                 "PASSWORD=\"x\\\"TOKEN='foo\"\nPASSWORD=\"a\\\"b\" TOKEN=\n  'hunter2'",
-                format!("PASSWORD=\"{masked}\"\nPASSWORD=\"{masked}\" TOKEN=\n  '{masked}'"),
+                format!("PASSWORD=\"{masked}'{masked}'"),
             ),
             (
                 "PASSWORD=\"x\\\"TOKEN='y\"\nmachine h login me' password hunter2",
-                format!("PASSWORD=\"{masked}\"\nmachine h login me' password {masked}"),
+                format!("PASSWORD=\"{masked}' password {masked}"),
             ),
             (
                 "PASSWORD=\"x\\\"TOKEN='y\"\nmachine h login o'neil password\nhunter2",
-                format!("PASSWORD=\"{masked}\"\nmachine h login o'neil password\n{masked}"),
+                format!("PASSWORD=\"{masked}'neil password\n{masked}"),
             ),
             (
                 "{\"password\":\"ab\\\"cd\",\"token\":\n  \"hunter2\"}",
@@ -711,11 +690,19 @@ mod tests {
             ),
             (
                 "{\"password\":\"x\\\"TOKEN='y\",\n \"secret\":\"a\\\"b\",\"token\":\n \"'hunter2\"}",
-                format!("{{\"password\":\"{masked}\",\n \"secret\":\"{masked}\",\"token\":\n \"{masked}\"}}"),
+                format!("{{\"password\":\"{masked}\"}}"),
             ),
             (
                 "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD='x\"y\\'hunter2'",
-                format!("DIR_PASSWORD=\"{masked}"),
+                format!("DIR_PASSWORD=\"{masked}'"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nmachine h login token=\"a b\" password hunter2",
+                format!("DIR_PASSWORD=\"{masked}\"{masked}\" password {masked}"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\" DB_PASSWORD='x\n\" hunter2'",
+                format!("DIR_PASSWORD=\"{masked}'"),
             ),
             (
                 "machine TOKEN=\"a\\\"b\" login SECRET=\"foo bar\" password\nhunter2",
@@ -724,6 +711,66 @@ mod tests {
         ];
         for (input, expected) in cases {
             assert_eq!(redact_secrets(input), expected, "input {input:?}");
+        }
+    }
+
+    /// Each reading alone leaves a credential that another reading finds, in the order of
+    /// [`READINGS`]: double then single quotes, a backslash escaping (E) or literal (L).
+    #[test]
+    fn every_quote_reading_alone_leaves_a_credential_the_union_masks() {
+        let m = "[redacted-secret]";
+        let cases = [
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD=\"hunter2\"",
+                format!("DIR_PASSWORD=\"{m}\"{m}\""),
+                [
+                    format!("DIR_PASSWORD=\"{m}\"hunter2\""),
+                    format!("DIR_PASSWORD=\"{m}\"hunter2\""),
+                    format!("DIR_PASSWORD=\"{m}\"\nDB_PASSWORD=\"{m}\""),
+                    format!("DIR_PASSWORD=\"{m}\"\nDB_PASSWORD=\"{m}\""),
+                ],
+            ),
+            (
+                "{\"password\":\"ab\\\"cd\",\"token\":\n  \"hunter2\"}",
+                format!("{{\"password\":\"{m}\",\"token\":\n  \"{m}\"}}"),
+                [
+                    format!("{{\"password\":\"{m}\",\"token\":\n  \"{m}\"}}"),
+                    format!("{{\"password\":\"{m}\",\"token\":\n  \"{m}\"}}"),
+                    format!("{{\"password\":\"{m}\"cd\",\"token\":\n  \"{m}\"}}"),
+                    format!("{{\"password\":\"{m}\"cd\",\"token\":\n  \"{m}\"}}"),
+                ],
+            ),
+            (
+                "password='ab\\'cd' token='hunter2'",
+                format!("password='{m}' token='{m}'"),
+                [
+                    format!("password='{m}' token='{m}'"),
+                    format!("password='{m}'cd' token='{m}'"),
+                    format!("password='{m}' token='{m}'"),
+                    format!("password='{m}'cd' token='{m}'"),
+                ],
+            ),
+            (
+                "password='C:\\dir\\' token='hunter2'",
+                format!("password='{m}'{m}'"),
+                [
+                    format!("password='{m}'hunter2'"),
+                    format!("password='{m}' token='{m}'"),
+                    format!("password='{m}'hunter2'"),
+                    format!("password='{m}' token='{m}'"),
+                ],
+            ),
+        ];
+        for (input, union, alone) in cases {
+            assert_eq!(mask_keyed_values(input), union, "input {input:?}");
+            for ((reading, assignment), expected) in READINGS.iter().copied().zip(SECRET_ASSIGNMENTS.iter()).zip(alone)
+            {
+                assert_eq!(
+                    mask_keyed_values_under(input, std::iter::once((reading, assignment))),
+                    expected,
+                    "input {input:?} under {reading:?}"
+                );
+            }
         }
     }
 

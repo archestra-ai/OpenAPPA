@@ -1102,7 +1102,7 @@ Built-in sanitizers are configured using `builtin`:
 | Configuration | Behavior |
 |---|---|
 | `builtin = "redact-email"` | Replaces email addresses with standard placeholders. Does not redact other PII. |
-| `builtin = "redact-secrets"` | Detects and redacts credentials: private keys, well-known API tokens (AWS, GitHub, Anthropic, OpenAI, Slack, Google, GitLab, npm, JWT), 40-character AWS secret keys, URL credentials (`user:password@`), assignment values matching secret keywords (`password`, `token`, `secret`, `credential`, `auth`, `Bearer`, netrc lines), and high-entropy strings (20+ chars). This is heuristic detection, not a formal absence proof. |
+| `builtin = "redact-secrets"` | Detects and redacts credentials: private keys, well-known API tokens (AWS, GitHub, Anthropic, OpenAI, Slack, Google, GitLab, npm, JWT), 40-character AWS secret keys, URL credentials (`user:password@`), assignment values matching secret keywords (`password`, `token`, `secret`, `credential`, `auth`, `Bearer`, netrc lines), and high-entropy strings (20+ chars). A JSON body stays JSON of the same shape: the sanitizer redacts each string and key, and replaces the whole value of a field named for a secret. In other text, a backslash in quotes can escape or be literal. The sanitizer finds assignments under all four combinations for double and single quotes and masks every value it finds. This is heuristic detection, not a formal absence proof. |
 | `builtin = "claude-code"` | Uses local Claude Code to transform payloads according to `hint`, `on`, and `permits`. |
 | `builtin = "llm"` | Uses the model configured under `[externals.llm]` to transform payloads according to `hint`, `on`, and `permits`. |
 
