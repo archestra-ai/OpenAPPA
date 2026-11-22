@@ -1588,9 +1588,9 @@ mod tests {
         }
     }
 
-    /// Claude Code's start of `session` inside `launch`, as the dispatcher reads it.
-    fn launched(session: &str, launch: appa_runtime_api::LaunchStart) -> HookEvent {
-        let host = serde_json::json!({"hook_event_name": "SessionStart", "session_id": session, "source": "startup"});
+    /// Claude Code's start of `session` from `source` inside `launch`, as the dispatcher reads it.
+    fn launched(session: &str, source: &str, launch: appa_runtime_api::LaunchStart) -> HookEvent {
+        let host = serde_json::json!({"hook_event_name": "SessionStart", "session_id": session, "source": source});
         let Some(HookEvent::SessionStart {
             root,
             principal,
@@ -1629,9 +1629,9 @@ mod tests {
             .expect("a decision")
     }
 
-    fn opened(runtime: &Runtime, event: &HookEvent) -> bool {
+    fn session_of(runtime: &Runtime, event: &HookEvent) -> Result<Session, EventError> {
         let root = hook_root(event);
-        !matches!(runtime.session(root, root), Err(EventError::UnknownTrajectory))
+        runtime.session(root, root)
     }
 
     fn contended(decision: &HookDecision) -> bool {
@@ -1654,20 +1654,68 @@ mod tests {
         let first = launch("first-launch");
         let deciding = runtime.decide_launch(first.clone()).expect("the first start decides");
 
-        let wired = launched("0f1e2d3c-4b5a-4968-8776-655443322110", first.clone());
+        let wired = launched("0f1e2d3c-4b5a-4968-8776-655443322110", "startup", first.clone());
         assert!(contended(&answered_start(&runtime, &wired).await));
-        assert!(!opened(&runtime, &wired));
-        let embedded = launched("1a2b3c4d-5e6f-4a0b-9c1d-2e3f4a5b6c7d", first);
+        assert!(matches!(
+            session_of(&runtime, &wired),
+            Err(EventError::UnknownTrajectory)
+        ));
+        let embedded = launched("1a2b3c4d-5e6f-4a0b-9c1d-2e3f4a5b6c7d", "startup", first);
         assert!(contended(&handle(&runtime, embedded.clone()).await));
-        assert!(!opened(&runtime, &embedded));
+        assert!(matches!(
+            session_of(&runtime, &embedded),
+            Err(EventError::UnknownTrajectory)
+        ));
 
-        let other = launched("2b3c4d5e-6f7a-4b1c-8d2e-3f4a5b6c7d8e", launch("other-launch"));
+        let other = launched(
+            "2b3c4d5e-6f7a-4b1c-8d2e-3f4a5b6c7d8e",
+            "startup",
+            launch("other-launch"),
+        );
         assert_eq!(answered_start(&runtime, &other).await, HookDecision::Ack);
-        assert!(opened(&runtime, &other));
+        assert!(session_of(&runtime, &other).is_ok());
 
         drop(deciding);
         assert_eq!(answered_start(&runtime, &wired).await, HookDecision::Ack);
-        assert!(opened(&runtime, &wired));
+        assert!(session_of(&runtime, &wired).is_ok());
+    }
+
+    /// A launched start takes its launch's guard before the alias lookup reads anything:
+    /// while another start of the launch decides, it is refused as contended even where the
+    /// lookup itself would refuse.
+    #[tokio::test]
+    async fn a_launched_start_is_contended_before_its_alias_lookup() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        for (session, token) in [
+            ("3c4d5e6f-7a8b-4c2d-9e3f-4a5b6c7d8e9f", "first-launch"),
+            ("4d5e6f7a-8b9c-4d3e-8f4a-5b6c7d8e9fa0", "second-launch"),
+        ] {
+            let start = launched(session, "startup", launch(token));
+            assert_eq!(answered_start(&runtime, &start).await, HookDecision::Ack);
+        }
+        let compacted = launched(
+            "5e6f7a8b-9c0d-4e4f-9a5b-6c7d8e9fa0b1",
+            "compact",
+            launch("first-launch"),
+        );
+        assert_eq!(answered_start(&runtime, &compacted).await, HookDecision::Ack);
+        let second = runtime
+            .decide_launch(launch("second-launch"))
+            .expect("the second launch decides");
+        runtime
+            .launched_start(hook_root(&compacted), Some(StartKind::Compact), &second)
+            .expect("the compacted id aliases the second family too");
+        drop(second);
+        assert!(matches!(
+            runtime.alias_of(hook_root(&compacted)),
+            Err(EventError::EngineInvariant(_))
+        ));
+
+        let _deciding = runtime
+            .decide_launch(launch("first-launch"))
+            .expect("the first launch decides");
+        assert!(contended(&answered_start(&runtime, &compacted).await));
     }
 
     fn spawn_call() -> crate::api::ProposedCall {
