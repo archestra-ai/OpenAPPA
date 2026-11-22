@@ -747,6 +747,11 @@ jobs:
           test "$(gh release view "v$SOURCE_VERSION" --json isDraft --jq .isDraft)" = false \
             || { echo "::error::v$SOURCE_VERSION is not a published release"; exit 1; }
 
+      # The runner's skopeo cannot copy an index whose images have zstd layers
+      # (Docker Hardened Images bases) with its digests preserved.
+      - name: Set up skopeo
+        uses: archestra-ai/.github/actions/setup-skopeo@v1.45.0
+
       # A version released before OpenAPPA published to GHCR is read from
       # Artifact Registry appa-public, anonymously.
       - name: Stage the published images
