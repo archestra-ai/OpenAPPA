@@ -2454,6 +2454,7 @@ impl Runtime {
     /// On a deployment another runtime prepared.
     pub fn install(&self, prepared: PreparedDeployment) -> Result<Reloaded, OpenError> {
         let prepared = self.own(&prepared);
+        let key = prepared.key();
         // Held from the publish to the cache clear, so a concurrent install cannot swap in an
         // older publish after this one's. It guards no data: a panic under it leaves nothing
         // to recover.
@@ -2485,7 +2486,6 @@ impl Runtime {
             .lock()
             .expect("the revision-engine mutex is never poisoned: no panic runs while it is held")
             .clear();
-        let key = deployment.key();
         let revision = deployment
             .revision()
             .expect("a served deployment decides at a revision of its line");
