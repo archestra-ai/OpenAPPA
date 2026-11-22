@@ -89,7 +89,7 @@ impl Deadline {
 
     /// A socket reads a zero timeout as "no timeout", so a spent budget must fail
     /// here rather than reach one.
-    fn left(&self) -> Result<Duration, String> {
+    pub(crate) fn left(&self) -> Result<Duration, String> {
         self.0
             .checked_duration_since(Instant::now())
             .filter(|left| !left.is_zero())
