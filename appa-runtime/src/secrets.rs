@@ -39,11 +39,12 @@ static KNOWN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
 /// it by, and 40 characters of base64 instead. `/` belongs to that alphabet, so the
 /// candidate run below cannot see such a key whole — the run breaks at every slash and
 /// each piece falls under the length floor. The pattern takes a whole run of the alphabet
-/// and the caller keeps the length exact: a longer run, which is what a path or a URL is,
-/// is no 40-character match. Every character outside the alphabet ends a run, `=`, `-`,
-/// `_` and `.` included, and the match consumes none of them, so a key is found whatever
-/// stands next to it.
-static AWS_SECRET_KEY_RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]+").expect("a fixed pattern"));
+/// at least a key long, and the caller keeps the length exact: a longer run, which is what
+/// a path or a URL is, is no 40-character match. Every character outside the alphabet
+/// ends a run, `=`, `-`, `_` and `.` included, and the match consumes none of them, so a
+/// key is found whatever stands next to it.
+static AWS_SECRET_KEY_RUN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]{40,}").expect("a fixed pattern"));
 
 const AWS_SECRET_KEY_LENGTH: usize = 40;
 
@@ -502,6 +503,13 @@ mod tests {
             (
                 "3f7a9c2e1b8d4f6a0c5e7b9d1f3a5c7e9b2d4f68,Zq3/tVb8LmXw2Rk/9pHsYcD4nGfJ7uEoA1iTz/Bx",
                 format!("{masked},{masked}"),
+            ),
+            ("wJalrXUtnFEMI+K7MDENG/bPxRfiCYEXAMPLEKEY", masked.to_string()),
+            // A run longer than a key is taken whole, and no 40-character piece of it is
+            // masked.
+            (
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEX/AMPLEKEY12",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEX/AMPLEKEY12".to_string(),
             ),
             // A path and a URL are runs of the same alphabet; neither holds 40 characters
             // of it between two delimiters.
