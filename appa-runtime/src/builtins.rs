@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{CLAUDE_CODE_BUILTIN, LLM_BUILTIN, Section};
 use crate::consult::{AuthorityAnswer, Consult, ConsultBody};
-use crate::secrets::redact_secrets;
+use crate::secrets::redact_body;
 use appa_builtin::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
 use appa_runtime_api::Ruling;
 
@@ -74,7 +74,7 @@ impl Stock {
                 Some(serde_json::json!({ "body": redact_email(&artifact.body) }))
             }
             (Stock::RedactSecrets, ConsultBody::Sanitizer { artifact, .. }) => {
-                Some(serde_json::json!({ "body": redact_secrets(&artifact.body) }))
+                Some(serde_json::json!({ "body": redact_body(&artifact.body) }))
             }
             _ => None,
         }

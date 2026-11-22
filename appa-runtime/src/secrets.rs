@@ -55,122 +55,163 @@ static URL_PASSWORD: LazyLock<Regex> =
 /// An assignment whose key names a secret: `KEY=value`, `key: value`, or JSON's
 /// `"key": "value"`. A key names a secret when it contains one of the longer words, or
 /// when `key`, `pass`, `pwd` or `auth` is one of its segments, separated or camel-cased.
-/// The value is masked whatever its shape: a quoted value to its closing quote, an HTTP
-/// credential with its scheme word, a bare one to the next space or delimiter; its
-/// quotes stay.
+/// The value is masked whatever its shape: a double-quoted value to the first quote no
+/// odd run of backslashes escapes, or to the end of the text; a single-quoted one to its
+/// closing quote; an HTTP credential with its scheme word; a bare one to the next space
+/// or delimiter. Its quotes stay.
 static SECRET_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
+    Regex::new(&format!(
         r#"(?ix)
-        ( ["']?
-          (?: [A-Za-z0-9_.-]* (?: password | passwd | passphrase | secret | token | api_?key | private_?key | access_?key | credential | authorization ) [A-Za-z0-9_.-]*
-            | \b (?: [A-Za-z0-9]+ [_.-] )* (?: key | pass | pwd | auth ) (?: [_.-] [A-Za-z0-9]+ )*
-            | \b (?-i: [A-Za-z0-9]+ (?: Key | Pass | Pwd | Auth ) ) [A-Za-z0-9]* )
-          ["']? \s*[=:]\s* )
-        ( "[^"]*" | '[^']*' | (?: bearer | basic ) \s+ [^\s"'`,;&)\]}]+ | [^\s"'`,;&)\]}]+ )
-        "#,
-    )
+        ( ["']? {SECRET_NAME} ["']? \s*[=:]\s* )
+        ( "(?: [^"\\] | \\[\s\S] )*(?: " | \\?\z ) | '[^']*' | (?: bearer | basic ) \s+ [^\s"'`,;&)\]}}]+ | [^\s"'`,;&)\]}}]+ )
+        "#
+    ))
     .expect("a fixed pattern")
 });
+
+const SECRET_NAME: &str = r"(?: [A-Za-z0-9_.-]* (?: password | passwd | passphrase | secret | token | api_?key | private_?key | access_?key | credential | authorization ) [A-Za-z0-9_.-]*
+    | \b (?: [A-Za-z0-9]+ [_.-] )* (?: key | pass | pwd | auth ) (?: [_.-] [A-Za-z0-9]+ )*
+    | \b (?-i: [A-Za-z0-9]+ (?: Key | Pass | Pwd | Auth ) ) [A-Za-z0-9]* )";
+
+/// A whole name an assignment of a secret may use.
+static SECRET_NAME_WHOLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"(?ix) ^ {SECRET_NAME} $")).expect("a fixed pattern"));
 
 /// A netrc `password` entry, on its own line or after the machine and login it belongs to.
 static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^(\s*(?:machine\s+\S+\s+(?:login\s+\S+\s+)?)?password\s+)(\S+)").expect("a fixed pattern")
 });
 
-/// Every secret assignment's value and every netrc password replaced, quotes kept. A
-/// quoted value that ends at a backslash-escaped quote is also masked to the end of its
-/// line: where it really closes depends on syntax no pattern here sees. A line ends at an
-/// ASCII line break, which no JSON string holds unescaped. Whether a match starting in the
-/// rest of such a line is a real assignment is just as unknowable, so assignments are
-/// found twice, reading on from each value and resuming after each escaped line, and
-/// netrc passwords on the text with only the first reading of every value masked. Every
-/// span found is masked: masking more never leaks.
+/// Every secret assignment's value and every netrc password replaced, quotes kept. Two
+/// readings of a value are ambiguous. A single-quoted value whose quote follows an odd
+/// run of backslashes closes there in a shell and is escaped elsewhere, so it is masked
+/// to the end of its line. A double-quoted value across a line break may have closed on
+/// its first line where backslashes are literal. A line ends at an ASCII line break,
+/// which no JSON string holds unescaped. For either, assignments are found twice: reading
+/// on from the value, and afresh from the end of its ambiguous line. Netrc passwords are
+/// found on the text as given and on the text with the first reading's values masked.
+/// Every span found is masked: masking more never leaks.
 fn mask_keyed_values(text: &str) -> Cow<'_, str> {
     let read_on = assignment_spans(text, Resume::AfterValue);
-    let masked = mask_spans(text, &read_on.first_readings);
-    let mut source = SourceOffsets::new(&read_on.first_readings);
+    let masked = mask_spans(text, &read_on.values);
+    let mut source = SourceOffsets::new(&read_on.values);
     let passwords: Vec<Range<usize>> = NETRC_PASSWORD
-        .captures_iter(&masked)
-        .map(|found| {
+        .captures_iter(text)
+        .map(|found| found.get(2).expect("the pattern captures a password").range())
+        .chain(NETRC_PASSWORD.captures_iter(&masked).map(|found| {
             let password = found.get(2).expect("the pattern captures a password");
             source.of(password.start())..source.of(password.end())
-        })
+        }))
         .collect();
-    match (read_on.escaped_lines.is_empty(), passwords.is_empty()) {
+    let rescanned = match read_on.ambiguous_lines.is_empty() {
+        true => Vec::new(),
+        false => assignment_spans(text, Resume::AfterAmbiguousLine).values,
+    };
+    match (read_on.ambiguous_lines.is_empty(), passwords.is_empty()) {
         (true, true) => masked,
         _ => {
-            let resumed = assignment_spans(text, Resume::AfterEscapedLine);
-            let mut spans = read_on.first_readings;
-            spans.extend(read_on.escaped_lines);
-            spans.extend(resumed.first_readings);
-            spans.extend(resumed.escaped_lines);
+            let mut spans = read_on.values;
+            spans.extend(read_on.ambiguous_lines);
+            spans.extend(rescanned);
             spans.extend(passwords);
             Cow::Owned(mask_spans(text, &merged(spans)).into_owned())
         }
     }
 }
 
-/// Where the search for the next secret assignment resumes after a value that ends at an
-/// escaped quote.
+/// Where the search for the next secret assignment resumes after a value with two readings.
 #[derive(Clone, Copy)]
 enum Resume {
     AfterValue,
-    AfterEscapedLine,
+    AfterAmbiguousLine,
 }
 
 struct AssignmentSpans {
-    /// Each value to its first closing quote, sorted and disjoint.
-    first_readings: Vec<Range<usize>>,
-    /// Each value that ends at an escaped quote, to the end of its line.
-    escaped_lines: Vec<Range<usize>>,
+    /// Each value inside its quotes, sorted and disjoint.
+    values: Vec<Range<usize>>,
+    /// Each value with two readings, from its start to the end of the line that ends the
+    /// other reading.
+    ambiguous_lines: Vec<Range<usize>>,
 }
 
 fn assignment_spans(text: &str, resume: Resume) -> AssignmentSpans {
     let mut spans = AssignmentSpans {
-        first_readings: Vec::new(),
-        escaped_lines: Vec::new(),
+        values: Vec::new(),
+        ambiguous_lines: Vec::new(),
     };
     let mut search_from = 0;
     let mut current_line_end = 0;
     while let Some(found) = SECRET_ASSIGNMENT.captures_at(text, search_from) {
         let value = found.get(2).expect("the pattern captures a value");
-        search_from = match value.as_str().as_bytes() {
-            [b'"' | b'\'', .., b'\\', _] => {
+        let bytes = value.as_str().as_bytes();
+        let inside = value.start() + 1..value.end() - 1;
+        let ambiguous_line = match (bytes, closing(bytes)) {
+            ([b'"', ..], Closing::Closed) => {
+                spans.values.push(inside.clone());
+                text[inside.clone()].find(LINE_BREAKS).map(|found| inside.start + found)
+            }
+            ([b'"', ..], Closing::Escaped | Closing::Unterminated) => {
+                spans.values.push(value.start() + 1..value.end());
+                None
+            }
+            ([b'\'', ..], Closing::Escaped) => {
                 if value.end() > current_line_end {
                     current_line_end = line_end(text, value.end());
                 }
-                spans.first_readings.push(value.start() + 1..value.end() - 1);
-                spans.escaped_lines.push(value.start() + 1..current_line_end);
-                match resume {
-                    Resume::AfterValue => value.end(),
-                    Resume::AfterEscapedLine => current_line_end,
-                }
+                spans.values.push(inside);
+                Some(current_line_end)
             }
-            [b'"' | b'\'', ..] => {
-                spans.first_readings.push(value.start() + 1..value.end() - 1);
-                value.end()
+            ([b'\'', ..], _) => {
+                spans.values.push(inside);
+                None
             }
             _ => {
-                spans.first_readings.push(value.range());
-                value.end()
+                spans.values.push(value.range());
+                None
             }
         };
+        search_from = match (ambiguous_line, resume) {
+            (Some(line_end), Resume::AfterAmbiguousLine) => line_end,
+            _ => value.end(),
+        };
+        if let Some(line_end) = ambiguous_line {
+            spans.ambiguous_lines.push(value.start() + 1..line_end);
+        }
     }
     spans
 }
 
-/// The offset of the first ASCII line break at or after `from`, or the end of the text.
-fn line_end(text: &str, from: usize) -> usize {
-    text[from..]
-        .find(['\n', '\x0B', '\x0C', '\r'])
-        .map_or(text.len(), |found| from + found)
+/// How a quoted value ends: at a closing quote, at a quote an odd run of backslashes
+/// escapes, or at the end of the text.
+enum Closing {
+    Closed,
+    Escaped,
+    Unterminated,
 }
 
-/// The spans sorted, with every overlapping pair, and every pair with the same start,
-/// joined.
+fn closing(value: &[u8]) -> Closing {
+    match value {
+        [open, inside @ .., close] if open == close => {
+            match inside.iter().rev().take_while(|byte| **byte == b'\\').count() % 2 {
+                0 => Closing::Closed,
+                _ => Closing::Escaped,
+            }
+        }
+        _ => Closing::Unterminated,
+    }
+}
+
+const LINE_BREAKS: [char; 4] = ['\n', '\x0B', '\x0C', '\r'];
+
+/// The offset of the first ASCII line break at or after `from`, or the end of the text.
+fn line_end(text: &str, from: usize) -> usize {
+    text[from..].find(LINE_BREAKS).map_or(text.len(), |found| from + found)
+}
+
+/// The spans sorted, with every overlapping or adjacent pair joined.
 fn merged(mut spans: Vec<Range<usize>>) -> Vec<Range<usize>> {
     spans.sort_by_key(|span| (span.start, span.end));
-    spans.dedup_by(|next, kept| match next.start < kept.end || next.start == kept.start {
+    spans.dedup_by(|next, kept| match next.start <= kept.end {
         true => {
             kept.end = kept.end.max(next.end);
             true
@@ -341,6 +382,15 @@ pub(crate) fn redact_args(args: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// The stock `redact-secrets` sanitizer's derivation. A body that is JSON is redacted as
+/// its tree, so the derivation stays JSON of the same shape; any other body as text.
+pub(crate) fn redact_body(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(value) => redact_value(&value).to_string(),
+        Err(_) => redact_secrets(body),
+    }
+}
+
 /// An annotation's complete call as it leaves for a model provider: [`redact_args`], with
 /// the tool `name` left as written.
 pub(crate) fn redact_call(call: &serde_json::Value) -> serde_json::Value {
@@ -363,7 +413,7 @@ fn redact_value(value: &serde_json::Value) -> serde_json::Value {
 }
 
 fn redact_field(key: &str, value: &serde_json::Value) -> serde_json::Value {
-    match SECRET_FIELD.is_match(key) {
+    match SECRET_FIELD.is_match(key) || SECRET_NAME_WHOLE.is_match(key) {
         true => serde_json::Value::String(SECRET_PLACEHOLDER.to_string()),
         false => redact_value(value),
     }
@@ -439,10 +489,7 @@ mod tests {
             ),
             ("DB_PASSWORD='p@ss'", format!("DB_PASSWORD='{masked}'")),
             ("DB_PASSWORD=\"\"", format!("DB_PASSWORD=\"{masked}\"")),
-            (
-                "token=\"x\npassword inner\"suffix\"",
-                format!("token=\"{masked}\"suffix\""),
-            ),
+            ("token=\"x\npassword inner\"suffix\"", format!("token=\"{masked}")),
             (
                 "machine h login token=\"\" password hunter2",
                 format!("machine h login token=\"{masked}\" password {masked}"),
@@ -581,69 +628,120 @@ mod tests {
     }
 
     #[test]
-    fn a_quoted_secret_with_an_escaped_quote_is_masked_to_the_end_of_its_line() {
+    fn a_quoted_secret_is_masked_to_its_closing_quote_and_an_escaped_single_quote_to_its_line_end() {
         let masked = "[redacted-secret]";
         let cases = [
-            (r#"password="ab\"cdefgh" next"#, format!(r#"password="{masked}"#)),
+            (r#"password="ab\"cdefgh" next"#, format!(r#"password="{masked}" next"#)),
             (r"password='ab\'cdefgh' next", format!("password='{masked}")),
-            (r#"PASSWORD="a\"b\"c\"tail">out"#, format!(r#"PASSWORD="{masked}"#)),
+            (r#"PASSWORD="a\"b\"c\"tail">out"#, format!(r#"PASSWORD="{masked}">out"#)),
             (r"PASSWORD='a\'b\'tail'>out", format!("PASSWORD='{masked}")),
             (
                 r#"export DB_PASSWORD="ab\"cdefgh">out"#,
-                format!(r#"export DB_PASSWORD="{masked}"#),
+                format!(r#"export DB_PASSWORD="{masked}">out"#),
             ),
             (
                 r#"{"password": "a\\\"b\\c", "user": "me"}"#,
-                format!(r#"{{"password": "{masked}"#),
+                format!(r#"{{"password": "{masked}", "user": "me"}}"#),
             ),
             (
                 "{\"password\":\"ab\\\"cd\u{2028}efgh\"}",
-                format!("{{\"password\":\"{masked}"),
+                format!("{{\"password\":\"{masked}\"}}"),
             ),
+            (r#"password="abc\\" next"#, format!(r#"password="{masked}" next"#)),
+            (r#"password="a\\\"b" next"#, format!(r#"password="{masked}" next"#)),
+            (r"password='abc\\' next", format!("password='{masked}' next")),
+            (
+                r#"{"password":"abc\\","user":"me"}"#,
+                format!(r#"{{"password":"{masked}","user":"me"}}"#),
+            ),
+            ("PASSWORD=\"a\\\"b\nshort tail\"", format!("PASSWORD=\"{masked}\"")),
+            // A double-quoted value across a line break may also have closed on its first
+            // line, so the line after it is searched afresh.
             (
                 "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD=\"hunter2\"\nUSER=me",
-                format!("DIR_PASSWORD=\"{masked}\nDB_PASSWORD=\"{masked}\"\nUSER=me"),
+                format!("DIR_PASSWORD=\"{masked}\"{masked}\"\nUSER=me"),
             ),
             (
                 "PASSWORD=\"ab\\\"cd\"\r\nUSER=me",
-                format!("PASSWORD=\"{masked}\r\nUSER=me"),
+                format!("PASSWORD=\"{masked}\"\r\nUSER=me"),
             ),
             (
                 "token=\"ab\ncd\\\"ef\" tail\nNEXT=1",
-                format!("token=\"{masked}\nNEXT=1"),
+                format!("token=\"{masked}\" tail\nNEXT=1"),
+            ),
+            (
+                "token=\"ab\\\"cd\nmachine h login me password hunter2",
+                format!("token=\"{masked}"),
             ),
             (
                 r#"machine api.example.com login token="ab\" password "hunter2""#,
                 format!(r#"machine api.example.com login token="{masked}"#),
             ),
             (
-                "token=\"ab\\\"cd\nmachine h login me password hunter2",
-                format!("token=\"{masked}\nmachine h login me password {masked}"),
-            ),
-            (
                 "machine h login token=\"a\\\"b\" password\nhunter2",
-                format!("machine h login token=\"{masked}\n{masked}"),
+                format!("machine h login token=\"{masked}\" password\n{masked}"),
             ),
             (
                 "password=\"a\\\"b\" TOKEN=\"\"\r\npassword hunter2",
-                format!("password=\"{masked}\r\npassword {masked}"),
+                format!("password=\"{masked}\" TOKEN=\"{masked}\"\r\npassword {masked}"),
             ),
             (
                 "PASSWORD=\"x\\\"TOKEN='y\"\nDB_PASSWORD='hunter2'",
-                format!("PASSWORD=\"{masked}'{masked}'"),
+                format!("PASSWORD=\"{masked}\"\nDB_PASSWORD='{masked}'"),
+            ),
+            (
+                "PASSWORD=\"x\\\"TOKEN='foo\"\nPASSWORD=\"a\\\"b\" TOKEN=\n  'hunter2'",
+                format!("PASSWORD=\"{masked}\"\nPASSWORD=\"{masked}\" TOKEN=\n  '{masked}'"),
+            ),
+            (
+                "PASSWORD=\"x\\\"TOKEN='y\"\nmachine h login me' password hunter2",
+                format!("PASSWORD=\"{masked}\"\nmachine h login me' password {masked}"),
+            ),
+            (
+                "PASSWORD=\"x\\\"TOKEN='y\"\nmachine h login o'neil password\nhunter2",
+                format!("PASSWORD=\"{masked}\"\nmachine h login o'neil password\n{masked}"),
             ),
             (
                 "{\"password\":\"ab\\\"cd\",\"token\":\n  \"hunter2\"}",
-                format!("{{\"password\":\"{masked}\n  \"{masked}\"}}"),
+                format!("{{\"password\":\"{masked}\",\"token\":\n  \"{masked}\"}}"),
+            ),
+            (
+                "{\"password\":\"x\\\"TOKEN='y\",\n \"secret\":\"a\\\"b\",\"token\":\n \"'hunter2\"}",
+                format!("{{\"password\":\"{masked}\",\n \"secret\":\"{masked}\",\"token\":\n \"{masked}\"}}"),
             ),
             (
                 "machine TOKEN=\"a\\\"b\" login SECRET=\"foo bar\" password\nhunter2",
-                format!("machine TOKEN=\"{masked}\n{masked}"),
+                format!("machine TOKEN=\"{masked}\" login SECRET=\"{masked}\" password\n{masked}"),
             ),
         ];
         for (input, expected) in cases {
             assert_eq!(redact_secrets(input), expected, "input {input:?}");
         }
+    }
+
+    #[test]
+    fn a_json_body_is_redacted_as_its_tree_and_stays_json_of_the_same_shape() {
+        let masked = "[redacted-secret]";
+        let cases = [
+            (
+                r#"{"password":"a\"b","user":"me"}"#,
+                json!({"password": masked, "user": "me"}),
+            ),
+            (
+                r#"{"password":"abc\\","user":"me"}"#,
+                json!({"password": masked, "user": "me"}),
+            ),
+            (
+                r#"{"sshKey":"hunter2","db.pass":"hunter2","note":"token=abc","api_key":12345,"n":[1,"x"]}"#,
+                json!({"sshKey": masked, "db.pass": masked, "note": format!("token={masked}"), "api_key": masked, "n": [1, "x"]}),
+            ),
+        ];
+        for (body, expected) in cases {
+            let redacted: serde_json::Value =
+                serde_json::from_str(&redact_body(body)).unwrap_or_else(|error| panic!("{error}: {body}"));
+            assert_eq!(redacted, expected, "body {body:?}");
+        }
+        assert_eq!(redact_body("export TOKEN=abc"), format!("export TOKEN={masked}"));
     }
 
     #[test]
