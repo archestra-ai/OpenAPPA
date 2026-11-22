@@ -103,9 +103,12 @@ fn mask_keyed_values(text: &str) -> Cow<'_, str> {
             source.of(password.start())..source.of(password.end())
         }))
         .collect();
-    let rescanned = match read_on.ambiguous_lines.is_empty() {
+    let rescanned: Vec<Range<usize>> = match read_on.ambiguous_lines.is_empty() {
         true => Vec::new(),
-        false => assignment_spans(text, Resume::AfterAmbiguousLine).values,
+        false => {
+            let rescan = assignment_spans(text, Resume::AfterAmbiguousLine);
+            rescan.values.into_iter().chain(rescan.ambiguous_lines).collect()
+        }
     };
     match (read_on.ambiguous_lines.is_empty(), passwords.is_empty()) {
         (true, true) => masked,
@@ -127,7 +130,8 @@ enum Resume {
 }
 
 struct AssignmentSpans {
-    /// Each value inside its quotes, sorted and disjoint.
+    /// Each value inside its quotes, in the order found: sorted and disjoint when the
+    /// search resumes after each value.
     values: Vec<Range<usize>>,
     /// Each value with two readings, from its start to the end of the line that ends the
     /// other reading.
@@ -708,6 +712,10 @@ mod tests {
             (
                 "{\"password\":\"x\\\"TOKEN='y\",\n \"secret\":\"a\\\"b\",\"token\":\n \"'hunter2\"}",
                 format!("{{\"password\":\"{masked}\",\n \"secret\":\"{masked}\",\"token\":\n \"{masked}\"}}"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD='x\"y\\'hunter2'",
+                format!("DIR_PASSWORD=\"{masked}"),
             ),
             (
                 "machine TOKEN=\"a\\\"b\" login SECRET=\"foo bar\" password\nhunter2",
