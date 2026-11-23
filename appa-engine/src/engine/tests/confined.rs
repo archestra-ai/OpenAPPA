@@ -96,6 +96,120 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_dropped_is_withheld() {
     under_second(&[(1, &log), (1, &checkpoint), (2, &appended_facts(closed))]);
 }
 
+/// A later revision that keeps the bound sanitizer's name but no longer applies it to the
+/// released result — its output point is gone, the raw label misses its `from`, or its scope no
+/// longer covers the call — leaves
+/// nothing able to sanitize the raw body, as if it had dropped the sanitizer: the result is
+/// withheld at that revision, no derivation is asked for, and a derivation the runtime sends
+/// anyway changes nothing.
+#[test]
+fn a_result_bound_to_a_sanitizer_a_later_revision_no_longer_applies_is_withheld() {
+    let redactor = |output: bool, from_floor: Trust, scope: crate::authority::Scope| crate::authority::Sanitizer {
+        name: crate::names::SanitizerName::new("redactor"),
+        on: crate::authority::SanitizerPoints { input: false, output },
+        transition: crate::authority::DeclaredTransition::Trust {
+            from_floor,
+            to: TRUSTED,
+        },
+        scope,
+        hint: None,
+    };
+    let unscoped = crate::authority::Scope::default;
+    let revised = [
+        redactor(false, SUSPICIOUS, unscoped()),
+        redactor(true, TRUSTED, unscoped()),
+        redactor(
+            true,
+            SUSPICIOUS,
+            crate::authority::Scope {
+                tags: vec![crate::names::TagName::new("mail")],
+            },
+        ),
+    ];
+    let fetch = read_tool(
+        "fetch",
+        Delta {
+            trust: Some(SUSPICIOUS),
+            audience: None,
+        },
+    );
+    let mail = post_tool("mail", vec![crate::names::TagName::new("mail")]);
+    let at = |sanitizer: crate::authority::Sanitizer, revision: u64| {
+        open_engine(RegistryConfig {
+            recorders: Default::default(),
+            annotators: vec![],
+            trust_chain: TrustChain::new(vec!["suspicious".into(), "trusted".into()]),
+            tools: declared(vec![fetch.clone(), mail.clone()]),
+            authorities: vec![],
+            sanitizers: vec![sanitizer],
+            audience: crate::audience::AudienceConfig::default(),
+        })
+        .at(DeploymentName::new("default"), PolicyRevision::new(revision))
+    };
+    let first = at(redactor(true, SUSPICIOUS, unscoped()), 1);
+    let call = call("fetch", json!({}));
+    let (log, dispatch) = released_under_output_sanitizer(&first, vec![opened(&first)], &call);
+    let raw = ValueBody::new("page bytes");
+    let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+    let report = |evidence: Vec<crate::transition::Evidence>| ToolReport {
+        dispatch: dispatch.clone(),
+        outcome: ToolOutcome::Success {
+            body: OutcomeBody::Available(raw.clone()),
+        },
+        evidence,
+        offer_nonce: nonce(),
+        audience: crate::audience::AudienceEvidence::default(),
+    };
+    let derivation = || {
+        vec![crate::transition::Evidence::Sanitizer {
+            sanitizer: crate::names::SanitizerName::new("redactor"),
+            source,
+            derived: ValueBody::new("page bytes, redacted"),
+        }]
+    };
+    let withheld = FollowUp::Outcome(OutcomeFollowUp::Closed {
+        admitted: None,
+        withheld: true,
+    });
+    let checkpoint = appended_facts(
+        first
+            .handle(&viewing(&first, &log), EngineEvent::Outcome(report(Vec::new())))
+            .expect("the first revision checkpoints and asks for the derivation"),
+    );
+
+    for sanitizer in revised {
+        let second = at(sanitizer.clone(), 2);
+        let under_second = |batches: &[(u64, &[Fact])]| {
+            let batches: Vec<StampedBatch<'_>> = batches
+                .iter()
+                .map(|(revision, facts)| StampedBatch {
+                    revision: Some(PolicyRevision::new(*revision)),
+                    facts,
+                })
+                .collect();
+            second.replay(&traj(), &batches, &[&first]).expect("the log replays")
+        };
+        for prior in [&log[..0], &checkpoint[..]] {
+            for evidence in [Vec::new(), derivation()] {
+                let closed = second
+                    .handle(
+                        &under_second(&[(1, &log), (1, prior)]),
+                        EngineEvent::Outcome(report(evidence)),
+                    )
+                    .unwrap_or_else(|error| panic!("{sanitizer:?}: the outcome decides: {error}"));
+                assert_eq!(closed.follow_up, withheld, "{sanitizer:?}");
+                let close = appended_facts(closed);
+                assert!(!close.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
+                let after = under_second(&[(1, &log), (1, prior), (2, &close)]);
+                let again = second
+                    .handle(&after, EngineEvent::Outcome(report(Vec::new())))
+                    .expect("a repeat replays the close");
+                assert!(again.append.is_none() && again.follow_up == withheld);
+            }
+        }
+    }
+}
+
 #[test]
 fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
     let redactor = crate::authority::Sanitizer {
