@@ -4218,6 +4218,7 @@ fn offer_refusal(error: TransitionError) -> EngineRefusal {
 fn bind_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::UnbindableFork | TransitionError::ChildAlreadyUsed => EngineRefusal::Unbindable,
+        TransitionError::BranchEnded => EngineRefusal::Ended,
         error => EngineRefusal::Invariant {
             detail: format!("binding a fork: {error}"),
         },
