@@ -211,6 +211,7 @@ class RefusalClass(str, Enum):
     INVENTORY_REFUSED = "inventory_refused"
     ENGINE_INVARIANT = "engine_invariant"
     CONTENDED = "contended"
+    LAUNCH_DECIDING = "launch_deciding"
     RESOLUTION_DIVERGED = "resolution_diverged"
     ANNOTATION_REFUSED = "annotation_refused"
     UNDECLARED_TOOL = "undeclared_tool"

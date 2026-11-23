@@ -9,8 +9,8 @@ type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 // amppa installs as this one file, so it carries its own copy; its tests hold it to the runtime's list.
 const REFUSAL_CLASSES = [
   'storage', 'untrusted_log', 'policy_unavailable', 'policy_moved', 'legacy_family', 'inventory_refused',
-  'engine_invariant', 'contended', 'resolution_diverged', 'annotation_refused', 'undeclared_tool',
-  'undeclared_spawn', 'peer_message', 'principal', 'outstanding_call', 'call_id_reused', 'trajectory_ended',
+  'engine_invariant', 'contended', 'launch_deciding', 'resolution_diverged', 'annotation_refused',
+  'undeclared_tool', 'undeclared_spawn', 'peer_message', 'principal', 'outstanding_call', 'call_id_reused', 'trajectory_ended',
   'trajectory', 'dispatch', 'remedy', 'spawn_not_taken', 'spawn',
 ] as const
 

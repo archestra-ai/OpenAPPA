@@ -670,6 +670,9 @@ pub enum RefusalClass {
     InventoryRefused,
     EngineInvariant,
     Contended,
+    /// Another start of the same launch was deciding its family; this start read and wrote
+    /// nothing. The same start succeeds once posted again after that start is done.
+    LaunchDeciding,
     ResolutionDiverged,
     AnnotationRefused,
     UndeclaredTool,

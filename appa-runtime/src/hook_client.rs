@@ -16,8 +16,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use appa_runtime_api::{
-    AdapterName, Codec, HookDecision, HookEvent, LaunchStart, LaunchToken, PeerAddress, StartKind, WireDecision,
-    WireEvent,
+    AdapterName, Codec, HookDecision, HookEvent, LaunchStart, LaunchToken, PeerAddress, RefusalClass, StartKind,
+    WireDecision, WireEvent,
 };
 
 use crate::api::refusal_detail;
@@ -64,6 +64,43 @@ impl Decides {
 
 fn post(endpoint: &Endpoint, event: &[u8], deadline: &Deadline) -> Result<Answer, String> {
     request(endpoint, "POST", "/hook", event, deadline)
+}
+
+/// The first wait between posts of a launched start whose launch another start is deciding,
+/// and the longest; each wait doubles up to it.
+const LAUNCHED_START_WAIT: Duration = Duration::from_millis(50);
+const LAUNCHED_START_WAIT_CAP: Duration = Duration::from_millis(500);
+
+/// The answer to `event`, posted by `post`. A launched start refused because another start
+/// of its launch was deciding is posted again after a wait, for as long as the hook's
+/// `deadline` leaves room for the wait: Claude Code goes on past a start hook that blocks, so
+/// the start is the one chance to bind the session's id to the family its launch runs. A start
+/// that lost its log's compare-and-swap may have written part of a handoff, so it is not posted
+/// again.
+fn posted(
+    event: &HookEvent,
+    deadline: &Deadline,
+    mut post: impl FnMut() -> Result<Answer, String>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<Answer, String> {
+    let mut wait = LAUNCHED_START_WAIT;
+    loop {
+        let answer = post()?;
+        match (event, decision_of(&answer.body), deadline.left()) {
+            (
+                HookEvent::SessionStart { launch: Some(_), .. },
+                Ok(HookDecision::Refuse {
+                    class: RefusalClass::LaunchDeciding,
+                    ..
+                }),
+                Ok(left),
+            ) if left > wait => {
+                sleep(wait);
+                wait = (wait * 2).min(LAUNCHED_START_WAIT_CAP);
+            }
+            _ => return Ok(answer),
+        }
+    }
 }
 
 /// The blocking hook outcome. Claude Code reads stderr as the reason it blocked.
@@ -308,8 +345,15 @@ pub fn run(target: &RuntimeTarget, turn_end: bool, ensure: Option<&Deployment>) 
         Ok(body) => body,
         Err(failure) => return unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
     };
-    let answered =
-        Endpoint::parse(&target.url).and_then(|endpoint| post(&endpoint, &body, &Deadline::spanning(decides.budget())));
+    let answered = Endpoint::parse(&target.url).and_then(|endpoint| {
+        let deadline = Deadline::spanning(decides.budget());
+        posted(
+            &event,
+            &deadline,
+            || post(&endpoint, &body, &deadline),
+            std::thread::sleep,
+        )
+    });
     let answer = match answered {
         Ok(answer) => answer,
         Err(failure) => return unanswered(&codec, Unanswered::Event(&host_event, &event), &failure, decides),
@@ -500,6 +544,160 @@ fn stands_in_for_a_result(decision: &HookDecision) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Claude Code's start of `session` from `source` inside `launch`, as the client posts it.
+    fn launched_start(session: &str, source: &str, launch: &LaunchStart) -> HookEvent {
+        let host = serde_json::json!({"hook_event_name": "SessionStart", "session_id": session, "source": source});
+        let bytes = serde_json::to_vec(&host).expect("the fixture serializes");
+        match parse_host_event(&appa_adapter_claude_code::codec(), &bytes) {
+            Ok(Some(HookEvent::SessionStart {
+                root,
+                principal,
+                address,
+                title,
+                start,
+                launch: None,
+            })) => HookEvent::SessionStart {
+                root,
+                principal,
+                address,
+                title,
+                start,
+                launch: Some(launch.clone()),
+            },
+            _ => panic!("a session start parses as one"),
+        }
+    }
+
+    /// A launched start refused while another start of its launch decides is posted again,
+    /// and once that start is done it binds the session's new id to the family its launch
+    /// runs. A start that lost its log's compare-and-swap is posted once. The posts reach a
+    /// real runtime through the hook route's own handler.
+    #[test]
+    fn only_a_launched_start_refused_while_its_launch_decides_is_posted_again() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            "[policy]\nversion = 2\n\n[[policy.tool]]\nname = \"host/claude-code/Bash\"\n\n\
+             [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("the config writes");
+        let config = crate::config::Config::load(&path).expect("the config loads");
+        let runtime = crate::api::Runtime::open(config, dir.path().join("appa.db"), None).expect("the runtime opens");
+        let tokio = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime builds");
+        let answer = |event: &HookEvent| {
+            let body = wire_body(event).expect("the start crosses the wire");
+            let (status, body) = tokio.block_on(crate::hooks::answer(
+                &runtime,
+                &appa_adapter_claude_code::adapter(),
+                appa_runtime_api::PrincipalSource::None,
+                &body,
+            ));
+            Answer {
+                status,
+                body: serde_json::to_vec(&body).expect("the answer serializes"),
+            }
+        };
+        let launch = LaunchStart {
+            launch: LaunchToken::parse("the-launch").expect("the token parses"),
+            forked_from: None,
+        };
+        let started = launched_start("6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d", "startup", &launch);
+        assert!(answer(&started).is_success());
+
+        let class = |answer: &Answer| match decision_of(&answer.body) {
+            Ok(HookDecision::Refuse { class, .. }) => Some(class),
+            _ => None,
+        };
+        let root = |event: &HookEvent| match event {
+            HookEvent::SessionStart { root, .. } => root.clone(),
+            _ => unreachable!("a start names its root"),
+        };
+
+        // Time passes only in the waits: they are summed, never slept.
+        let hook_budget = Deadline::spanning(AUTHORIZATION_BUDGET);
+        let slept = std::cell::Cell::new(Duration::ZERO);
+        let waits = std::cell::RefCell::new(Vec::new());
+        let sleep = |wait: Duration| {
+            slept.set(slept.get() + wait);
+            waits.borrow_mut().push(wait);
+        };
+
+        // The other start decides for ten seconds, past what a fixed number of posts waited.
+        let held = Duration::from_secs(10);
+        let compacted = launched_start("7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", "compact", &launch);
+        let mut deciding = Some(runtime.decide_launch(launch.clone()).expect("the other start decides"));
+        let mut classes = Vec::new();
+        let answered = posted(
+            &compacted,
+            &hook_budget,
+            || {
+                if slept.get() >= held {
+                    deciding.take();
+                }
+                let answered = answer(&compacted);
+                classes.push(class(&answered));
+                Ok(answered)
+            },
+            sleep,
+        )
+        .expect("the start is answered");
+        assert_eq!(classes.last(), Some(&None));
+        assert!(
+            classes[..classes.len() - 1]
+                .iter()
+                .all(|class| *class == Some(RefusalClass::LaunchDeciding))
+        );
+        assert!(slept.get() >= held);
+        assert!(waits.borrow().iter().all(|wait| *wait <= LAUNCHED_START_WAIT_CAP));
+        assert_eq!(decision_of(&answered.body), Ok(HookDecision::Ack));
+        assert_eq!(
+            runtime.alias_of(&root(&compacted)).expect("the alias reads"),
+            Some(root(&started))
+        );
+
+        // A deadline that leaves no room for the next wait ends the posts at the refusal.
+        let spent = launched_start("9d0e1f2a-3b4c-4d5e-9f6a-7b8c9d0e1f2a", "compact", &launch);
+        let deciding = runtime.decide_launch(launch.clone()).expect("the other start decides");
+        waits.borrow_mut().clear();
+        let mut classes = Vec::new();
+        posted(
+            &spent,
+            &Deadline::until(std::time::Instant::now()),
+            || {
+                let answered = answer(&spent);
+                classes.push(class(&answered));
+                Ok(answered)
+            },
+            sleep,
+        )
+        .expect("the start is answered");
+        assert_eq!(classes, vec![Some(RefusalClass::LaunchDeciding)]);
+        assert!(waits.borrow().is_empty());
+        drop(deciding);
+
+        let raced = launched_start("8c9d0e1f-2a3b-4c4d-8e5f-6a7b8c9d0e1f", "compact", &launch);
+        runtime.store().contend_next_appends(u64::MAX);
+        let mut classes = Vec::new();
+        posted(
+            &raced,
+            &hook_budget,
+            || {
+                let answered = answer(&raced);
+                classes.push(class(&answered));
+                Ok(answered)
+            },
+            sleep,
+        )
+        .expect("the start is answered");
+        runtime.store().contend_next_appends(0);
+        assert_eq!(classes, vec![Some(RefusalClass::Contended)]);
+        assert_eq!(runtime.alias_of(&root(&raced)).expect("the alias reads"), None);
+    }
 
     #[test]
     fn a_turn_end_waits_on_less_than_an_authorization_does() {

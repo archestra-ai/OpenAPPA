@@ -4,16 +4,16 @@
 use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
-    Accepted, Actor, Adapter, HookDecision, HookEvent, LaunchStart, OpenCalls, ParseRefusal, PeerAddress, PeerFrame,
+    Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, ParseRefusal, PeerAddress, PeerFrame,
     PrincipalSource, PromptKey, ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind, ToolOutcome,
     TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
 use crate::api::{
-    ChildReturnDecision, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen, LaunchedStart, Quoted,
-    RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision, ToolResultDecision,
-    is_control_tool,
+    ChildReturnDecision, Deciding, EmbeddedHookOutcome, EmbeddedPresentationOptions, EventError, LateOpen,
+    LaunchedStart, Quoted, RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision,
+    ToolResultDecision, is_control_tool,
 };
 use appa_eventlog::EndKind;
 
@@ -46,14 +46,25 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         Ok(accepted) => accepted,
         Err(answered) => return answered,
     };
+    // No family is known yet for either refusal, and filing under the host id would invent one.
+    let unfiled = |event: &HookEvent, error| {
+        let (kind, tool) = hook_shape(event);
+        runtime.record(None, bare_hook(kind, crate::events::HookOutcome::Refused, tool));
+        (409, wire(&refuse(error)))
+    };
+    // A launched start decides from this alias lookup through the identity it records.
+    let deciding = match &event {
+        HookEvent::SessionStart {
+            launch: Some(launch), ..
+        } => match runtime.decide_launch(launch.clone()) {
+            Ok(deciding) => Some(deciding),
+            Err(error) => return unfiled(&event, error),
+        },
+        _ => None,
+    };
     let (event, names_children) = match runtime.alias_of(hook_root(&event)) {
         Ok(family) => continued(event, names_children, family),
-        // No family is known yet, and filing under the host id would invent one.
-        Err(error) => {
-            let (kind, tool) = hook_shape(&event);
-            runtime.record(None, bare_hook(kind, crate::events::HookOutcome::Refused, tool));
-            return (409, wire(&refuse(error)));
-        }
+        Err(error) => return unfiled(&event, error),
     };
     let root = hook_root(&event).clone();
     // The dispatcher refuses a call with an empty id; nothing that call carries lands first.
@@ -81,7 +92,33 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         appa_runtime_api::AdapterName::ClaudeCode => ToolCallIds::Named,
         _ => ToolCallIds::Unnamed,
     };
-    let handled = handle_internal(runtime, event, presentation, call_ids).await;
+    let handled = match (event, deciding) {
+        // Dispatched in place, so nothing awaits while the start's launch is deciding.
+        (
+            HookEvent::SessionStart {
+                root,
+                principal,
+                address,
+                title,
+                start,
+                ..
+            },
+            deciding,
+        ) => {
+            let (mut dispatch, mut shown) = (None, None);
+            let decision = Dispatcher {
+                runtime,
+                dispatch: &mut dispatch,
+                presentation: &mut shown,
+                options: &presentation,
+                call_ids,
+            }
+            .session_start(root, principal, address, title, start, deciding);
+            handled((crate::events::HookKind::SessionStart, None), dispatch, shown, decision)
+        }
+        (event, None) => handle_internal(runtime, event, presentation, call_ids).await,
+        (_, Some(_)) => unreachable!("only a session start carries a launch"),
+    };
     runtime.record(Some(&root), handled.event);
     let status = match handled.decision {
         HookDecision::Refuse { .. } => 409,
@@ -514,7 +551,7 @@ pub(crate) async fn handle_internal(
     presentation_options: EmbeddedPresentationOptions,
     call_ids: ToolCallIds,
 ) -> Handled {
-    let (kind, tool) = hook_shape(&event);
+    let shape = hook_shape(&event);
     let mut dispatch = None;
     let mut presentation = None;
     let decision = dispatch_event(
@@ -526,6 +563,15 @@ pub(crate) async fn handle_internal(
         call_ids,
     )
     .await;
+    handled(shape, dispatch, presentation, decision)
+}
+
+fn handled(
+    (kind, tool): (crate::events::HookKind, Option<String>),
+    dispatch: Option<EngineDispatchId>,
+    presentation: Option<RemedyPresentation>,
+    decision: HookDecision,
+) -> Handled {
     let presentation = presentation.or_else(|| presentation_for(&decision));
     let (outcome, mut offers) = hook_result(&decision);
     if let Some(presentation) = &presentation {
@@ -609,7 +655,10 @@ async fn dispatch_event(
             title,
             start,
             launch,
-        } => dispatcher.session_start(root, principal, address, title, start, launch),
+        } => match launch.map(|launch| runtime.decide_launch(launch)).transpose() {
+            Ok(deciding) => dispatcher.session_start(root, principal, address, title, start, deciding),
+            Err(error) => refuse(error),
+        },
         HookEvent::Prompt {
             actor,
             text,
@@ -709,7 +758,8 @@ impl Dispatcher<'_> {
     /// A start that names the address its launcher bound makes the family reachable by peer
     /// messages. An identity that did not land leaves the family unreachable, which only
     /// refuses sends to it, so the start goes on. A launched start opens the family its
-    /// launch runs, which a host id the launch continues under does not change.
+    /// launch runs, which a host id the launch continues under does not change; it holds
+    /// its launch's `deciding` through the identity it records.
     fn session_start(
         &mut self,
         root: TrajectoryId,
@@ -717,12 +767,12 @@ impl Dispatcher<'_> {
         address: Option<PeerAddress>,
         title: Option<SessionTitle>,
         start: Option<StartKind>,
-        launch: Option<LaunchStart>,
+        launch: Option<Deciding<'_>>,
     ) -> HookDecision {
         let runtime = self.runtime;
         let launched = match (&principal, &launch) {
             (_, None) => Ok(LaunchedStart::Opened(root)),
-            (None, Some(launch)) => runtime.launched_start(&root, start, launch),
+            (None, Some(deciding)) => runtime.launched_start(&root, start, deciding),
             (Some(_), Some(_)) => Err(EventError::PrincipalMismatch),
         };
         let launched = match launched {
@@ -737,6 +787,8 @@ impl Dispatcher<'_> {
         {
             tracing::warn!(root = %root.0, %error, "the session's peer identity was not recorded");
         }
+        // The rest only reads, and another start of the launch need not wait on it.
+        drop(launch);
         let context = [matches!(launched, LaunchedStart::ClearKept(_)).then_some(CLEAR_KEPT.to_owned())]
             .into_iter()
             .flatten()
@@ -1536,6 +1588,147 @@ mod tests {
 
     fn open_runtime(dir: &tempfile::TempDir) -> Runtime {
         Runtime::open(config(), dir.path().join("appa.db"), None).expect("the fixture deployment opens")
+    }
+
+    fn launch(token: &str) -> appa_runtime_api::LaunchStart {
+        appa_runtime_api::LaunchStart {
+            launch: appa_runtime_api::LaunchToken::parse(token).expect("the token parses"),
+            forked_from: None,
+        }
+    }
+
+    /// Claude Code's start of `session` from `source` inside `launch`, as the dispatcher reads it.
+    fn launched(session: &str, source: &str, launch: appa_runtime_api::LaunchStart) -> HookEvent {
+        let host = serde_json::json!({"hook_event_name": "SessionStart", "session_id": session, "source": source});
+        let Some(HookEvent::SessionStart {
+            root,
+            principal,
+            address,
+            title,
+            start,
+            launch: None,
+        }) = through_the_codec(&host)
+        else {
+            panic!("a session start parses as one");
+        };
+        HookEvent::SessionStart {
+            root,
+            principal,
+            address,
+            title,
+            start,
+            launch: Some(launch),
+        }
+    }
+
+    /// The live path: the start on the wire, answered as `appa hook` posts it.
+    async fn answered_start(runtime: &Runtime, event: &HookEvent) -> HookDecision {
+        let wire = WireEvent::from_event(appa_runtime_api::AdapterName::ClaudeCode, event).expect("translates");
+        let body = serde_json::to_vec(&wire).expect("serializes");
+        let (_, answer) = answer(
+            runtime,
+            &appa_adapter_claude_code::adapter(),
+            PrincipalSource::None,
+            &body,
+        )
+        .await;
+        serde_json::from_value::<WireDecision>(answer)
+            .expect("a wire decision")
+            .into_decision()
+            .expect("a decision")
+    }
+
+    fn session_of(runtime: &Runtime, event: &HookEvent) -> Result<Session, EventError> {
+        let root = hook_root(event);
+        runtime.session(root, root)
+    }
+
+    fn contended(decision: &HookDecision) -> bool {
+        matches!(
+            decision,
+            HookDecision::Refuse {
+                class: appa_runtime_api::RefusalClass::LaunchDeciding,
+                ..
+            }
+        )
+    }
+
+    /// While a start of a launch decides, another start of it is refused as contended and
+    /// opens nothing, on the wire and embedded alike. Another launch starts alongside, and
+    /// the launch starts once the first start is done.
+    #[tokio::test]
+    async fn a_start_overlapping_its_launchs_deciding_start_is_refused_and_opens_nothing() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let first = launch("first-launch");
+        let deciding = runtime.decide_launch(first.clone()).expect("the first start decides");
+        assert!(matches!(
+            runtime.decide_launch(first.clone()),
+            Err(EventError::LaunchDeciding)
+        ));
+
+        let wired = launched("0f1e2d3c-4b5a-4968-8776-655443322110", "startup", first.clone());
+        assert!(contended(&answered_start(&runtime, &wired).await));
+        assert!(matches!(
+            session_of(&runtime, &wired),
+            Err(EventError::UnknownTrajectory)
+        ));
+        let embedded = launched("1a2b3c4d-5e6f-4a0b-9c1d-2e3f4a5b6c7d", "startup", first);
+        assert!(contended(&handle(&runtime, embedded.clone()).await));
+        assert!(matches!(
+            session_of(&runtime, &embedded),
+            Err(EventError::UnknownTrajectory)
+        ));
+
+        let other = launched(
+            "2b3c4d5e-6f7a-4b1c-8d2e-3f4a5b6c7d8e",
+            "startup",
+            launch("other-launch"),
+        );
+        assert_eq!(answered_start(&runtime, &other).await, HookDecision::Ack);
+        assert!(session_of(&runtime, &other).is_ok());
+
+        drop(deciding);
+        assert_eq!(answered_start(&runtime, &wired).await, HookDecision::Ack);
+        assert!(session_of(&runtime, &wired).is_ok());
+    }
+
+    /// A launched start takes its launch's guard before the alias lookup reads anything:
+    /// while another start of the launch decides, it is refused as contended even where the
+    /// lookup itself would refuse.
+    #[tokio::test]
+    async fn a_launched_start_is_contended_before_its_alias_lookup() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        for (session, token) in [
+            ("3c4d5e6f-7a8b-4c2d-9e3f-4a5b6c7d8e9f", "first-launch"),
+            ("4d5e6f7a-8b9c-4d3e-8f4a-5b6c7d8e9fa0", "second-launch"),
+        ] {
+            let start = launched(session, "startup", launch(token));
+            assert_eq!(answered_start(&runtime, &start).await, HookDecision::Ack);
+        }
+        let compacted = launched(
+            "5e6f7a8b-9c0d-4e4f-9a5b-6c7d8e9fa0b1",
+            "compact",
+            launch("first-launch"),
+        );
+        assert_eq!(answered_start(&runtime, &compacted).await, HookDecision::Ack);
+        let second = runtime
+            .decide_launch(launch("second-launch"))
+            .expect("the second launch decides");
+        runtime
+            .launched_start(hook_root(&compacted), Some(StartKind::Compact), &second)
+            .expect("the compacted id aliases the second family too");
+        drop(second);
+        assert!(matches!(
+            runtime.alias_of(hook_root(&compacted)),
+            Err(EventError::EngineInvariant(_))
+        ));
+
+        let _deciding = runtime
+            .decide_launch(launch("first-launch"))
+            .expect("the first launch decides");
+        assert!(contended(&answered_start(&runtime, &compacted).await));
     }
 
     fn spawn_call() -> crate::api::ProposedCall {

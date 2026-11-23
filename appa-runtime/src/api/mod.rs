@@ -28,7 +28,7 @@ pub use appa_runtime_api::{
     TrajectoryId,
 };
 pub use embedded::{EmbeddedPeerArrival, EmbeddedPeerError, EmbeddedPeerId, EmbeddedPeerNotice};
-pub(crate) use launch::LaunchedStart;
+pub(crate) use launch::{Deciding, LaunchedStart};
 pub(crate) use session::{LateOpen, Session, Stop, is_control_tool};
 
 /// Why a host could not read a root's current status.
@@ -759,6 +759,9 @@ pub(crate) enum EventError {
     SpawnNeverStarted,
     #[error("the family log stayed contended after {attempts} replays")]
     Contended { attempts: u32 },
+    /// Another start of the same launch was deciding its family; this start read nothing.
+    #[error("another start of this launch is in progress; start again once it is done")]
+    LaunchDeciding,
     #[error("external resolution did not settle after {rounds} rounds")]
     ResolutionDiverged { rounds: u32 },
     #[error("the engine returned a follow-up this event cannot deliver")]
@@ -837,6 +840,7 @@ impl EventError {
             EventError::InventoryRefused(_) => RefusalClass::InventoryRefused,
             EventError::EngineInvariant(_) | EventError::UnexpectedDecision => RefusalClass::EngineInvariant,
             EventError::Contended { .. } => RefusalClass::Contended,
+            EventError::LaunchDeciding => RefusalClass::LaunchDeciding,
             EventError::ResolutionDiverged { .. } => RefusalClass::ResolutionDiverged,
             EventError::AnnotationRefused { .. } => RefusalClass::AnnotationRefused,
             EventError::UndeclaredTool { .. } => RefusalClass::UndeclaredTool,
@@ -885,6 +889,7 @@ impl EventError {
             | EventError::InventoryRefused(_)
             | EventError::EngineInvariant(_)
             | EventError::Contended { .. }
+            | EventError::LaunchDeciding
             | EventError::ResolutionDiverged { .. }
             | EventError::AnnotationRefused { .. }
             | EventError::UndeclaredTool { .. }
@@ -1387,7 +1392,10 @@ impl Prepared {
     }
 
     fn with_store(self, store: Arc<LogStore>, line: DeploymentName) -> Result<Runtime, OpenError> {
-        let (deployment, _) = serve(&store, &line, &self.deployment)?;
+        let (deployment, new) = serve(&store, &line, &self.deployment)?;
+        if new {
+            trace_published(&line, &deployment);
+        }
         Ok(Runtime {
             inner: Arc::new(Inner {
                 shared: Arc::new(Shared {
@@ -1401,6 +1409,8 @@ impl Prepared {
                     naming: self.naming,
                     working_directories: std::sync::Mutex::new(std::collections::HashMap::new()),
                     spawn_holds: spawn_hold::SpawnHolds::default(),
+                    launches: launch::Launches::default(),
+                    installing: std::sync::Mutex::new(()),
                 }),
                 store,
                 transcriber: None,
@@ -1453,13 +1463,19 @@ fn publish_at_head(
         return Ok((deployment.at(line, head.revision.value()), false));
     }
     let published = store.publish(line, head.map(|head| head.revision), bytes)?;
+    Ok((deployment.at(line, published.revision.value()), true))
+}
+
+/// Traced by the caller once it holds nothing, so a subscriber may call back into the runtime.
+fn trace_published(line: &DeploymentName, published: &Deployment) {
     tracing::info!(
         deployment = %line,
-        policy_revision = published.revision.value(),
-        policy_key = %published.key.as_str(),
+        policy_revision = published
+            .revision()
+            .expect("a served deployment decides at a revision of its line"),
+        policy_key = %published.key(),
         "published the policy as the deployment's head"
     );
-    Ok((deployment.at(line, published.revision.value()), true))
 }
 
 struct Inner {
@@ -1527,6 +1543,11 @@ struct Shared {
     /// only; after a restart the next proposal reports it again.
     working_directories: std::sync::Mutex<std::collections::HashMap<TrajectoryId, String>>,
     spawn_holds: spawn_hold::SpawnHolds,
+    launches: launch::Launches,
+    /// Taken by [`Runtime::install`] from its publish through its swap, gate sizing and cache
+    /// clear, so concurrent installs on this runtime swap in their deployments in the order
+    /// they publish.
+    installing: std::sync::Mutex<()>,
 }
 
 /// The trajectory an actor's events belong to: the child when the harness names one.
@@ -1742,6 +1763,7 @@ impl Runtime {
 
     fn published(&self, line: &DeploymentName, published: Deployment, new: bool) -> PublishedDeployment {
         if new {
+            trace_published(line, &published);
             self.record(
                 None,
                 crate::events::RuntimeEvent::PolicyPublished {
@@ -1869,6 +1891,12 @@ impl Inner {
     /// `Runtime`, and the consults worth timing happen inside a session.
     pub(crate) fn record(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
         crate::telemetry::runtime_event(root, &event);
+        self.insert_event(root, event);
+    }
+
+    /// [`Inner::record`] without its telemetry, for a caller that emits that only once it
+    /// holds no lock.
+    fn insert_event(&self, root: Option<&TrajectoryId>, event: crate::events::RuntimeEvent) {
         self.shared
             .events
             .lock()
@@ -2448,7 +2476,18 @@ impl Runtime {
     ///
     /// On a deployment another runtime prepared.
     pub fn install(&self, prepared: PreparedDeployment) -> Result<Reloaded, OpenError> {
-        let (deployment, new) = serve(&self.inner.store, &self.inner.shared.line, &self.own(&prepared))?;
+        let prepared = self.own(&prepared);
+        let key = prepared.key();
+        // Held from the publish to the cache clear, so a concurrent install cannot swap in an
+        // older publish after this one's. It guards no data: a panic under it leaves nothing
+        // to recover.
+        let installing = self
+            .inner
+            .shared
+            .installing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (deployment, new) = serve(&self.inner.store, &self.inner.shared.line, &prepared)?;
         let deployment = Arc::new(deployment);
         let identity = deployment.resident().identity_hex();
         let previous = std::mem::replace(
@@ -2470,11 +2509,27 @@ impl Runtime {
             .lock()
             .expect("the revision-engine mutex is never poisoned: no panic runs while it is held")
             .clear();
-
-        let key = deployment.key();
         let revision = deployment
             .revision()
             .expect("a served deployment decides at a revision of its line");
+        // Deployment-wide: a publish belongs to no trajectory, and every trajectory alive
+        // across it needs to see that its policy moved under it. Installing bytes the head
+        // already names publishes nothing. Inserted under the lock, so reports read publishes
+        // in swap order; its telemetry waits for the release.
+        let publication = new.then(|| crate::events::RuntimeEvent::PolicyPublished {
+            deployment: self.inner.shared.line.to_string(),
+            revision,
+            policy_key: key.clone(),
+        });
+        if let Some(publication) = &publication {
+            self.inner.insert_event(None, publication.clone());
+        }
+        drop(installing);
+        if let Some(publication) = &publication {
+            trace_published(&self.inner.shared.line, &deployment);
+            crate::telemetry::runtime_event(None, publication);
+        }
+
         let changed = previous.revision() != Some(revision);
         tracing::info!(
             deployment = %self.inner.shared.line,
@@ -2484,19 +2539,6 @@ impl Runtime {
             changed,
             "reloaded the serving deployment"
         );
-        // Deployment-wide: a publish belongs to no trajectory, and every trajectory alive
-        // across it needs to see that its policy moved under it. Installing bytes the head
-        // already names publishes nothing.
-        if new {
-            self.record(
-                None,
-                crate::events::RuntimeEvent::PolicyPublished {
-                    deployment: self.inner.shared.line.to_string(),
-                    revision,
-                    policy_key: key.clone(),
-                },
-            );
-        }
         Ok(Reloaded {
             policy_key: key,
             policy_identity: identity,
@@ -5721,6 +5763,96 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             description = "{description}"
             "#
         ))
+    }
+
+    /// A synchronous subscriber that installs another deployment from the first event an
+    /// install traces, as an embedding host's subscriber might.
+    struct Reinstalling {
+        runtime: Arc<Runtime>,
+        pending: std::sync::Mutex<Option<PreparedDeployment>>,
+        nested: Arc<std::sync::Mutex<Option<Result<Reloaded, OpenError>>>>,
+    }
+
+    impl tracing::Subscriber for Reinstalling {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {
+            let pending = self.pending.lock().expect("no panic held the slot").take();
+            if let Some(prepared) = pending {
+                let reloaded = self.runtime.install(prepared);
+                *self.nested.lock().expect("no panic held the slot") = Some(reloaded);
+            }
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// An install traces nothing while it holds the install lock, so a subscriber that
+    /// installs again from the trace runs its install, and the later publish serves.
+    #[test]
+    fn a_subscriber_installing_from_an_installs_trace_does_not_wait_on_it() {
+        let runtime = Arc::new(
+            Runtime::open_in_memory(versioned_policy("first"), None, Remedies::StandIn).expect("the deployment opens"),
+        );
+        let outer = runtime.prepare_deployment(versioned_policy("second")).expect("loads");
+        let nested = Arc::new(std::sync::Mutex::new(None));
+        let subscriber = Reinstalling {
+            runtime: Arc::clone(&runtime),
+            pending: std::sync::Mutex::new(Some(
+                runtime.prepare_deployment(versioned_policy("third")).expect("loads"),
+            )),
+            nested: Arc::clone(&nested),
+        };
+        // A trajectory alive across both installs, whose report reads their publishes.
+        let root = TrajectoryId("across".to_string());
+        runtime.record(
+            Some(&root),
+            crate::events::RuntimeEvent::Hook {
+                event: crate::events::HookKind::SessionStart,
+                tool: None,
+                dispatch: None,
+                outcome: crate::events::HookOutcome::Acked,
+                offers: Vec::new(),
+            },
+        );
+        let (sent, installed) = std::sync::mpsc::channel();
+        let installing = Arc::clone(&runtime);
+        std::thread::spawn(move || {
+            let reloaded = tracing::subscriber::with_default(subscriber, || installing.install(outer));
+            let _ = sent.send(reloaded.map(|reloaded| reloaded.policy_revision));
+        });
+        let outer = installed
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .expect("the install returns: its subscriber does not wait on it")
+            .expect("the install succeeds");
+        let nested = nested
+            .lock()
+            .expect("no panic held the slot")
+            .take()
+            .expect("the subscriber installed")
+            .expect("the subscriber's install succeeds");
+        assert_eq!((outer, nested.policy_revision), (2, 3));
+        assert_eq!(runtime.inner.deployment().revision(), Some(3));
+        #[cfg(feature = "daemon")]
+        {
+            let publications: Vec<_> = runtime
+                .inner
+                .events(&root)
+                .deployment
+                .iter()
+                .filter_map(|entry| match &entry.event {
+                    crate::events::RuntimeEvent::PolicyPublished { revision, .. } => Some(*revision),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(publications, vec![2, 3], "a report reads the publishes in swap order");
+        }
     }
 
     #[tokio::test]

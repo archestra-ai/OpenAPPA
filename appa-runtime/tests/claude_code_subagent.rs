@@ -1141,6 +1141,40 @@ async fn a_launched_fork_starts_from_its_parents_label() {
 
 const THIRD_LAUNCH: &str = "c4e9a1b7-2d3f-4a5b-9c8d-7e6f5a4b3c2d";
 
+/// A launch that resumes another held conversation and then comes back runs its first
+/// family again: a later compact under a new id continues that family, label and all.
+#[tokio::test]
+async fn a_launch_that_resumes_back_runs_its_first_family_again() {
+    let runtime = deployment("", "", "delta = { trust = \"suspicious\" }");
+    let family = ASYNC.root();
+    let events = ASYNC.events();
+    let other = "6e1d2c3b-4a59-4876-9f0e-1d2c3b4a5968";
+    let (status, _) = launched_start(&runtime, other, "startup", OTHER_LAUNCH, None).await;
+    assert_eq!(status, 200);
+    let (status, _) = launched_start(&runtime, ASYNC.session, "startup", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    root_bash(&runtime, &events).await;
+    let narrowed = trust(&runtime, &family);
+
+    let (status, _) = launched_start(&runtime, other, "resume", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    let (status, _) = launched_start(&runtime, ASYNC.session, "resume", LAUNCH, None).await;
+    assert_eq!(status, 200);
+
+    let compacted = cc(CLEARED);
+    let (status, _) = launched_start(&runtime, CLEARED, "compact", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(family_of(&runtime, &compacted), Some(family.0.clone()));
+    assert_eq!(trust(&runtime, &compacted), narrowed);
+
+    let (status, _) = launched_start(&runtime, other, "resume", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    let recompacted = cc("8f7e6d5c-4b3a-4291-8e7f-6d5c4b3a2918");
+    let (status, _) = launched_start(&runtime, &recompacted.0[3..], "compact", LAUNCH, None).await;
+    assert_eq!(status, 200);
+    assert_eq!(family_of(&runtime, &recompacted), Some(cc(other).0));
+}
+
 /// A subagent's stop whose return APPA cannot check is held, and the stop that carries the
 /// withheld return ends it.
 #[tokio::test]
