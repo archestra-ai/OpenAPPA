@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use appa_runtime::api::{ProbeError, Remedies, RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime_api::{HookDecision, HookEvent, Outcome, Outcomes, ProposedCall, RetryHint};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -266,6 +266,59 @@ async fn no_answer_leaves_the_call_unchecked_and_the_log_unchanged() {
     );
     assert!(audit_len(&runtime) > before);
     ran(&runtime, send("@team")).await;
+}
+
+/// A source that answers 500 leaves the check without the fact it reads: the call is denied
+/// on the missing fact alone, with no plan, and a later proposal may obtain it.
+#[tokio::test]
+async fn an_unanswered_source_denies_on_a_missing_fact() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let runtime = narrowed(&dir, &url).await;
+
+    source.members(None);
+    let decision = propose(&runtime, send("@team")).await;
+    let HookDecision::DenyCall { offers, outcomes, .. } = decision else {
+        panic!("the call is denied, got {decision:?}");
+    };
+    assert!(offers.is_empty());
+    assert_eq!(outcomes, Some(Outcomes::missing(RetryHint::Later)));
+}
+
+/// `send` with the reserved `blocked` mark beside its recipient check.
+const BLOCKED_SEND: &str = r#"
+[[policy.tool]]
+name = "send_blocked"
+parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
+requires = { audience = { contains = ["$to"] }, attention = ["blocked"] }
+delta = {}
+
+"#;
+
+/// The recipient check needs `@team`'s members, which no answer pins yet. The `blocked` mark
+/// decides the call first: a hard block with no plan, and the source is never asked.
+#[tokio::test]
+async fn a_blocked_call_is_a_hard_block_before_membership_is_known() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let policy = POLICY.replace("[externals]", &format!("{BLOCKED_SEND}[externals]"));
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+
+    let decision = propose(
+        &runtime,
+        ProposedCall {
+            tool: "send_blocked".to_string(),
+            arguments: raw(serde_json::json!({ "to": "@team" })),
+            cwd: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { offers, outcomes, .. } = decision else {
+        panic!("the call is denied, got {decision:?}");
+    };
+    assert!(offers.is_empty());
+    assert_eq!(outcomes, Some(Outcomes::of(Outcome::HardBlock)));
+    assert!(source.requests().is_empty(), "no membership is read for a blocked call");
 }
 
 #[tokio::test]

@@ -590,6 +590,43 @@ async fn a_bound_annotator_decides_the_step() {
     );
 }
 
+/// `expect deny` holds only for a call the policy refused. A call refused because its
+/// Annotator gave no answer was not judged: its step cannot run. The `blocked` mark is a
+/// policy refusal like any other.
+#[tokio::test]
+async fn a_missing_fact_never_passes_as_a_deny() {
+    let router = Router::new().route(
+        "/annotate",
+        post(|_body: String| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+    );
+    let url = format!("{}/annotate", serve(router).await);
+    let binding = format!("\n[externals.annotators.classifier]\nurl = \"{url}\"\n");
+    let policy = format!(
+        "{ANNOTATED_POLICY}\n[[policy.tool]]\nname = \"mcp/ops/wipe\"\nrequires = {{ attention = [\"blocked\"] }}\n"
+    );
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = runtime(&dir, &policy, &binding);
+
+    let reports = run(
+        &runtime,
+        &[
+            trace(
+                "unanswered.appa",
+                "mcp/web/fetch {\n  url: \"https://example.com\"\n}\nexpect deny\n",
+            ),
+            trace("blocked.appa", "mcp/ops/wipe {}\nexpect deny\n"),
+        ],
+    )
+    .await;
+    assert!(
+        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(_)),
+        "{:?}",
+        reports[0]
+    );
+    assert_eq!(reports[0].verdict(), Verdict::CannotRun);
+    assert_eq!(outcomes(&reports[1]), vec![(1, &DENIED)]);
+}
+
 /// `appa/do_something` asks what the trajectory allows: public before the HR read, and only
 /// HR after it. The steps that ask change nothing, so the real email after them is judged
 /// as if they had not been proposed.

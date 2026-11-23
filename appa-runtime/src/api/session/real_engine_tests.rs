@@ -1323,6 +1323,34 @@ async fn a_suspicious_result_blocks_a_trusted_floor_sink() {
     assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
 }
 
+/// A block that only narrows asks the agent's consent; a trust floor the narrowed
+/// trajectory misses is a gap a remedy may waive. Each block holds its one outcome.
+#[tokio::test]
+async fn a_narrowing_block_asks_consent_and_a_trust_gap_is_waivable() {
+    use appa_runtime_api::{Outcome, Outcomes};
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let outcomes = |decision: ToolCallDecision| match decision {
+        ToolCallDecision::Deny { outcomes, offers, .. } => (outcomes, offers.len()),
+        allowed => panic!("the call is blocked, got {allowed:?}"),
+    };
+
+    let narrowing = session
+        .on_tool_call(taint(serde_json::json!({"a": 1})), false)
+        .await
+        .expect("the block is delivered");
+    assert_eq!(outcomes(narrowing), (Outcomes::of(Outcome::Consent), 1));
+
+    admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
+    let gap = session
+        .on_tool_call(trusted_send(), false)
+        .await
+        .expect("the block is delivered");
+    assert_eq!(outcomes(gap), (Outcomes::of(Outcome::WaivableGap), 0));
+}
+
 #[tokio::test]
 async fn a_subject_a_concurrent_event_moved_reads_as_lifecycle_not_a_fault() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

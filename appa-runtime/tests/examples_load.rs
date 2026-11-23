@@ -594,6 +594,7 @@ async fn the_coding_battery_judges_relative_credentials_and_offers_review_for_pu
             feedback,
             offers,
             review,
+            ..
         } = blocked
         else {
             panic!("`{command}` is blocked with the narrowing offered, got {blocked:?}");
@@ -685,6 +686,7 @@ async fn the_coding_battery_judges_relative_credentials_and_offers_review_for_pu
         feedback,
         offers,
         review,
+        ..
     } = publication
     else {
         panic!("a trajectory narrowed to `self` requires a remedy before publishing: {publication:?}");
@@ -996,6 +998,7 @@ async fn the_coding_battery_covers_grep_write_and_edit_of_the_requesters_secrets
         feedback,
         offers,
         review,
+        ..
     } = refused
     else {
         panic!("a session that read untrusted content does not write a credential path, got {refused:?}");

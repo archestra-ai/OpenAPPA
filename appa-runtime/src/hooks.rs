@@ -4,9 +4,9 @@
 use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
-    Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, ParseRefusal, PeerAddress, PeerFrame,
-    PrincipalSource, PromptKey, ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind, ToolOutcome,
-    TrajectoryId, WireDecision, WireEvent,
+    Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcome, Outcomes, ParseRefusal, PeerAddress,
+    PeerFrame, PrincipalSource, PromptKey, ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind,
+    ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
@@ -978,6 +978,7 @@ impl Dispatcher<'_> {
             }
             Ok(ToolCallDecision::Deny {
                 feedback,
+                outcomes,
                 offers,
                 display,
                 review,
@@ -999,6 +1000,7 @@ impl Dispatcher<'_> {
                     feedback,
                     offers,
                     review,
+                    outcomes: Some(outcomes),
                 }
             }
             Err(error) => fold(error, Refusal::Deny),
@@ -1234,6 +1236,7 @@ fn presentation_for(decision: &HookDecision) -> Option<RemedyPresentation> {
             feedback,
             offers,
             review,
+            ..
         } => Some(RemedyPresentation {
             feedback: feedback.clone(),
             offers: offers.clone(),
@@ -1454,10 +1457,11 @@ enum Refusal {
 }
 
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
-    match (error.is_operational(), refusal) {
-        (true, _) => refuse(error),
-        (false, Refusal::Deny) => deny(error.to_string()),
-        (false, Refusal::Block) => block(error.to_string()),
+    match (error.missing_fact(), error.is_operational(), refusal) {
+        (Some(retry), _, Refusal::Deny) => denied(error.to_string(), Outcomes::missing(retry)),
+        (_, true, _) => refuse(error),
+        (_, false, Refusal::Deny) => deny(error.to_string()),
+        (_, false, Refusal::Block) => block(error.to_string()),
     }
 }
 
@@ -1465,10 +1469,15 @@ fn fold(error: EventError, refusal: Refusal) -> HookDecision {
 /// once, here, so a session can tell a runtime refusal from its harness's;
 /// a block is marked by the adapter's withheld-result rendering instead.
 fn deny(feedback: String) -> HookDecision {
+    denied(feedback, Outcomes::of(Outcome::Integrity))
+}
+
+fn denied(feedback: String, outcomes: Outcomes) -> HookDecision {
     HookDecision::DenyCall {
         feedback: format!("[appa] {feedback}"),
         offers: Vec::new(),
         review: Vec::new(),
+        outcomes: Some(outcomes),
     }
 }
 

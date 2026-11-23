@@ -299,6 +299,7 @@ pub(crate) enum ToolCallDecision {
     },
     Deny {
         feedback: String,
+        outcomes: appa_runtime_api::Outcomes,
         offers: Vec<OfferedRemedy>,
         display: Vec<RemedyDisplay>,
         review: Vec<appa_runtime_api::Review>,
@@ -825,6 +826,17 @@ impl EventError {
             reason,
             next_action,
             no_answer,
+        }
+    }
+
+    /// What asking again can do, when the failure is a fact the check reads and could not
+    /// obtain: an Annotator that gave no answer.
+    pub(crate) fn missing_fact(&self) -> Option<appa_runtime_api::RetryHint> {
+        match self {
+            EventError::AnnotationRefused {
+                no_answer: Some(class), ..
+            } => Some(crate::engine::retry_hint(*class)),
+            _ => None,
         }
     }
 

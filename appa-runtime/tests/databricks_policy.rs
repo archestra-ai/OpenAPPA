@@ -7,10 +7,10 @@ use appa_package::BatteryTarget;
 use appa_runtime::api::{AuditEvent, OpenError, RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults, HostedBattery};
 use appa_runtime::hooks;
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime_api::{HookDecision, HookEvent, ProposedCall, RetryHint};
 use common::{
-    Classifier, actor, members_source, propose, ran, raw, repo_root, root, serve_runtime, session_runtime,
-    unsanitized_offer_of,
+    Classifier, actor, members_source, missing_fact, propose, ran, raw, repo_root, root, serve_runtime,
+    session_runtime, unsanitized_offer_of,
 };
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -259,7 +259,7 @@ async fn an_answer_outside_the_mandate_refuses_the_statement() {
         &[],
     );
     let decision = propose(&runtime, statement("SELECT 1")).await;
-    assert!(matches!(decision, HookDecision::Refuse { .. }), "{decision:?}");
+    assert_eq!(missing_fact(&decision), Some(RetryHint::AfterRepair), "{decision:?}");
 
     classifier.answers(
         serde_json::json!({}),
@@ -267,7 +267,7 @@ async fn an_answer_outside_the_mandate_refuses_the_statement() {
         &["databricks.deleted"],
     );
     let decision = propose(&runtime, statement("DROP TABLE sales")).await;
-    assert!(matches!(decision, HookDecision::Refuse { .. }), "{decision:?}");
+    assert_eq!(missing_fact(&decision), Some(RetryHint::AfterRepair), "{decision:?}");
     assert!(effects_of(&runtime).is_empty());
 }
 

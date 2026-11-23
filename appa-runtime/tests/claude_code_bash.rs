@@ -8,7 +8,9 @@ use crate::common;
 
 use appa_runtime::api::{ConsultRecord, ConsultTranscriber, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{fake_claude, including_coding_on_native_claude_code_tools, propose, raw, repo_root, session_runtime};
+use common::{
+    fake_claude, including_coding_on_native_claude_code_tools, missing_fact, propose, raw, repo_root, session_runtime,
+};
 use std::sync::Arc;
 
 fn bash(command: &str) -> ProposedCall {
@@ -68,7 +70,7 @@ async fn a_credential_command_narrows_to_self_without_a_classifier() {
 
     let decision = propose(&runtime, bash("databricks catalogs list --profile dev")).await;
     assert!(
-        matches!(decision, HookDecision::Refuse { .. }),
+        missing_fact(&decision).is_some(),
         "any other command is the annotator's: {decision:?}"
     );
 }
@@ -117,7 +119,7 @@ async fn a_publishing_command_naming_a_credential_narrows_before_the_repository_
 
     let decision = propose(&runtime, bash("git push origin main")).await;
     assert!(
-        matches!(decision, HookDecision::Refuse { .. }),
+        missing_fact(&decision).is_some(),
         "a push naming no credential is the repository annotator's: {decision:?}"
     );
 }
@@ -149,7 +151,7 @@ async fn a_powershell_command_naming_a_credential_narrows_with_either_path_separ
     for command in ["git push origin main", "Get-ChildItem -Recurse"] {
         let decision = propose(&runtime, powershell(command)).await;
         assert!(
-            matches!(decision, HookDecision::Refuse { .. }),
+            missing_fact(&decision).is_some(),
             "{command} is an Annotator's: {decision:?}"
         );
     }
@@ -198,7 +200,7 @@ async fn a_command_naming_a_dotenv_file_narrows_and_one_merely_containing_env_do
     ] {
         let decision = propose(&runtime, bash(command)).await;
         assert!(
-            matches!(decision, HookDecision::Refuse { .. }),
+            missing_fact(&decision).is_some(),
             "{command} is the Annotator's: {decision:?}"
         );
     }
@@ -219,7 +221,7 @@ async fn a_command_naming_a_dotenv_file_narrows_and_one_merely_containing_env_do
     for command in ["Select-String process.env install.mjs", "Get-Content .envrc"] {
         let decision = propose(&runtime, powershell(command)).await;
         assert!(
-            matches!(decision, HookDecision::Refuse { .. }),
+            missing_fact(&decision).is_some(),
             "{command} is the Annotator's: {decision:?}"
         );
     }
@@ -251,7 +253,7 @@ async fn assert_annotators(runtime: &Arc<Runtime>, consulted: &Consulted, call: 
     let arguments = call.arguments.get().to_string();
     let decision = propose(runtime, call).await;
     assert!(
-        matches!(decision, HookDecision::Refuse { .. }),
+        missing_fact(&decision).is_some(),
         "{arguments} is the Annotator's: {decision:?}"
     );
     assert_eq!(consulted.taken(), [annotator], "{arguments}");

@@ -97,7 +97,7 @@ use crate::consult::{
     ToolNameAuthor,
 };
 pub(crate) use appa_engine::engine::DeferredReturn;
-use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling};
+use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Outcome, Outcomes, RetryHint, Ruling};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -124,6 +124,7 @@ pub struct ReleasedCall {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Feedback {
     pub text: String,
+    pub outcomes: Outcomes,
     pub offers: Vec<OfferedRemedy>,
     pub display: Option<RemedyDisplay>,
     /// Every authority an offered plan would consult, with the review a person would read.
@@ -1667,7 +1668,12 @@ impl RuntimeEngine {
             // A tool no declaration and no wildcard covers is refused before anything is
             // judged: a typed refusal, never model feedback, and nothing is appended.
             Err(EngineError::UnknownTool(tool)) => return Err(EngineRefusal::UndeclaredTool { tool }),
-            Err(error) => return Ok(deny(malformed_feedback(&error, self.naming))),
+            Err(error) => {
+                return Ok(deny(
+                    malformed_feedback(&error, self.naming),
+                    Outcomes::of(Outcome::Integrity),
+                ));
+            }
         };
         let Some(views) = view.views(trajectory) else {
             return Err(EngineRefusal::Invariant {
@@ -1862,7 +1868,11 @@ impl RuntimeEngine {
                     }
                 } else {
                     let _ = spent;
-                    deny("[appa] this call's earlier decision no longer stands; propose it again".to_string()).then
+                    deny(
+                        "[appa] this call's earlier decision no longer stands; propose it again".to_string(),
+                        Outcomes::of(Outcome::Integrity),
+                    )
+                    .then
                 }
             }
             other => {
@@ -1905,13 +1915,17 @@ impl RuntimeEngine {
                 if !spent.is_empty() || !settled.is_empty() {
                     return Ok(deny_next(
                         "[appa] this call's earlier decision no longer stands; propose it again".to_string(),
+                        Outcomes::of(Outcome::Integrity),
                     ));
                 }
                 Err(EngineRefusal::Invariant {
                     detail: "a non-empty proposal produced no release, block, or repeat answer".to_string(),
                 })
             }
-            FollowUp::Malformed { error, .. } => Ok(deny_next(malformed_feedback(&error, self.naming))),
+            FollowUp::Malformed { error, .. } => Ok(deny_next(
+                malformed_feedback(&error, self.naming),
+                Outcomes::of(Outcome::Integrity),
+            )),
             other => Err(EngineRefusal::Invariant {
                 detail: format!("a proposal produced a non-proposal follow-up: {other:?}"),
             }),
@@ -1962,6 +1976,7 @@ impl RuntimeEngine {
         let review = self.pending_reviews(block, &offers);
         Feedback {
             text: rendered.text,
+            outcomes: block_outcomes(&block.block.raw),
             offers: self.offered_remedies(block, offers.into_iter().map(|(offer, _)| offer).collect()),
             display: Some(rendered.display),
             review,
@@ -2422,6 +2437,7 @@ impl RuntimeEngine {
             offers,
             display,
             review,
+            ..
         } = self.block_delivery(block, bounds, presentation);
         let feedback = match denied_by {
             Some(authority) => format!("[appa] authority {} denied this plan.\n{text}", authority.as_str()),
@@ -2873,7 +2889,11 @@ impl RuntimeEngine {
                 return blocked(shape_feedback(&mismatch, policy.as_ref()));
             }
             AudienceRound::Failed(TransitionError::SanitizerUnapplicable) => {
-                return Ok(withheld.present("the return sanitizer's derivation was not usable", self.naming));
+                let unusable = Unobtained {
+                    detail: "the return sanitizer's derivation was not usable".to_string(),
+                    retry: RetryHint::AfterRepair,
+                };
+                return Ok(withheld.present(&unusable, self.naming));
             }
             AudienceRound::Failed(error) => return Err(child_refusal(error)),
         };
@@ -3310,8 +3330,8 @@ impl RuntimeEngine {
                     Next::ResolveExternal(requests),
                 )));
             }
-            Err(AudienceFailure::Refused(detail)) => {
-                return Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)));
+            Err(AudienceFailure::Refused(unobtained)) => {
+                return Ok(AudienceRound::Presented(unresolved.present(&unobtained, self.naming)));
             }
         };
         match judge(&act.payload) {
@@ -3321,8 +3341,8 @@ impl RuntimeEngine {
                     AudienceConsult::Requests(requests) => Ok(AudienceRound::Presented(EngineDecision::deliver(
                         Next::ResolveExternal(requests),
                     ))),
-                    AudienceConsult::Unresolved(detail) => {
-                        Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)))
+                    AudienceConsult::Unresolved(unobtained) => {
+                        Ok(AudienceRound::Presented(unresolved.present(&unobtained, self.naming)))
                     }
                     AudienceConsult::Unconfigured(level) => Ok(AudienceRound::Presented(
                         unresolved.present_unconfigured(level, self.naming),
@@ -3407,10 +3427,13 @@ impl RuntimeEngine {
             // the model has not seen; the model-visible detail names only the failure class
             // and its provider/selector.
             tracing::debug!(%refusal, "gathered audience evidence refused");
-            return Err(AudienceFailure::Refused(format!(
-                "the gathered audience evidence is not admissible: {}",
-                refusal_class(&refusal)
-            )));
+            return Err(AudienceFailure::Refused(Unobtained {
+                detail: format!(
+                    "the gathered audience evidence is not admissible: {}",
+                    refusal_class(&refusal)
+                ),
+                retry: RetryHint::AfterRepair,
+            }));
         }
         let mut requests: Vec<ExternalRequest> = Vec::new();
         for owed in audience.member_lookups_owed(&payload) {
@@ -3448,7 +3471,12 @@ impl RuntimeEngine {
             Err(Unroutable::UnmappedChain(level)) => return Ok(AudienceConsult::Unconfigured(level)),
             // A dynamically supplied reference no source serves: an operational failure,
             // never a policy state. (A statically written one refuses at policy load.)
-            Err(unroutable) => return Ok(AudienceConsult::Unresolved(unroutable.to_string())),
+            Err(unroutable) => {
+                return Ok(AudienceConsult::Unresolved(Unobtained {
+                    detail: unroutable.to_string(),
+                    retry: RetryHint::AfterRepair,
+                }));
+            }
         };
         let mut requests: Vec<ExternalRequest> = Vec::new();
         for spec in &primitives.selectors {
@@ -3608,7 +3636,22 @@ fn unresolved_audience(tool: &str, detail: &str) -> String {
 /// Safe model-visible guidance for one audience consult failure. The class carries no
 /// external response or stderr. In particular, a non-success status says nothing about
 /// retryability.
-fn audience_failure(provider: &str, subject: &str, reason: crate::events::NoAnswerClass) -> String {
+fn audience_failure(provider: &str, subject: &str, reason: crate::events::NoAnswerClass) -> Unobtained {
+    Unobtained {
+        detail: audience_failure_detail(provider, subject, reason),
+        retry: retry_hint(reason),
+    }
+}
+
+/// What asking again can do for a fact whose consult failed for `reason`.
+pub(crate) fn retry_hint(reason: crate::events::NoAnswerClass) -> RetryHint {
+    match reason.is_transient() {
+        true => RetryHint::Later,
+        false => RetryHint::AfterRepair,
+    }
+}
+
+fn audience_failure_detail(provider: &str, subject: &str, reason: crate::events::NoAnswerClass) -> String {
     use crate::events::NoAnswerClass;
 
     let failure = format!("audience source {provider} gave no answer for {subject}");
@@ -3676,7 +3719,7 @@ enum AudienceConsult {
     Requests(Vec<ExternalRequest>),
     /// An answer this trajectory did not obtain, with safe guidance based on the known
     /// failure class.
-    Unresolved(String),
+    Unresolved(Unobtained),
     /// A built-in level the loaded policy maps to no sources; proposing again cannot
     /// change the answer.
     Unconfigured(ChainAudience),
@@ -3696,9 +3739,13 @@ enum UnresolvedAudience<'a> {
 }
 
 impl UnresolvedAudience<'_> {
-    fn present(self, detail: &str, naming: ToolNaming) -> EngineDecision {
+    fn present(self, unobtained: &Unobtained, naming: ToolNaming) -> EngineDecision {
+        let detail = &unobtained.detail;
         match self {
-            UnresolvedAudience::Denied { tool } => deny(unresolved_audience(&naming.model_spelling(tool), detail)),
+            UnresolvedAudience::Denied { tool } => deny(
+                unresolved_audience(&naming.model_spelling(tool), detail),
+                Outcomes::missing(unobtained.retry),
+            ),
             UnresolvedAudience::Withheld { subject } => EngineDecision::deliver(Next::PresentToModel(
                 blocked_without_offers(format!("[appa] {detail}; the {subject} is withheld")),
             )),
@@ -3711,10 +3758,10 @@ impl UnresolvedAudience<'_> {
     fn present_unconfigured(self, level: ChainAudience, naming: ToolNaming) -> EngineDecision {
         let detail = unconfigured_audience(level);
         match self {
-            UnresolvedAudience::Denied { tool } => deny(format!(
-                "[appa] {}: {detail}; the call is denied",
-                naming.model_spelling(tool)
-            )),
+            UnresolvedAudience::Denied { tool } => deny(
+                format!("[appa] {}: {detail}; the call is denied", naming.model_spelling(tool)),
+                Outcomes::missing(RetryHint::AfterRepair),
+            ),
             UnresolvedAudience::Withheld { subject } => EngineDecision::deliver(Next::PresentToModel(
                 blocked_without_offers(format!("[appa] {detail}; the {subject} is withheld")),
             )),
@@ -3735,7 +3782,14 @@ enum AudienceRound<T> {
 /// operational refusal a failed or inadmissible answer forces.
 enum AudienceFailure {
     Consult(Vec<ExternalRequest>),
-    Refused(String),
+    Refused(Unobtained),
+}
+
+/// An audience answer an act could not obtain: safe guidance on the failure, and what asking
+/// again can do.
+struct Unobtained {
+    detail: String,
+    retry: RetryHint,
 }
 
 /// One act's validated audience payload — what the act pins — beside the consults that
@@ -3781,15 +3835,28 @@ struct Unanswered {
     members: BTreeMap<String, crate::events::NoAnswerClass>,
 }
 
-fn deny(text: String) -> EngineDecision {
-    EngineDecision::deliver(deny_next(text))
+/// A planned block as a host reads it: the `blocked` mark is a hard block, every other gap a
+/// waivable one, and a narrowing the agent's consent. A marked spawn awaiting only its return
+/// declaration holds neither; declaring it is the agent's consent too.
+fn block_outcomes(raw: &appa_engine::check::RawBlock) -> Outcomes {
+    let gaps = raw.requirement_gaps.iter().map(|gap| match gap.is_blocked() {
+        true => Outcome::HardBlock,
+        false => Outcome::WaivableGap,
+    });
+    let consent = raw.narrowing.as_ref().map(|_| Outcome::Consent);
+    Outcomes::new(gaps.chain(consent)).unwrap_or_else(|| Outcomes::of(Outcome::Consent))
 }
 
-fn deny_next(text: String) -> Next {
+fn deny(text: String, outcomes: Outcomes) -> EngineDecision {
+    EngineDecision::deliver(deny_next(text, outcomes))
+}
+
+fn deny_next(text: String, outcomes: Outcomes) -> Next {
     Next::ModelResponse {
         invocations: Vec::new(),
         feedback: vec![Feedback {
             text,
+            outcomes,
             offers: Vec::new(),
             display: None,
             review: Vec::new(),
@@ -5300,7 +5367,7 @@ mod tests {
     use super::{
         BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
         Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId,
-        audience_failure, audience_wire, block_feedback, outcome_presentation, remedy_instruction, remedy_lines,
+        audience_failure_detail, audience_wire, block_feedback, outcome_presentation, remedy_instruction, remedy_lines,
         terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
@@ -5318,14 +5385,14 @@ mod tests {
     fn audience_failure_guidance_distinguishes_repair_retry_and_unknown() {
         use crate::events::NoAnswerClass;
 
-        let unregistered = audience_failure("slack", "channel/eng", NoAnswerClass::Unregistered);
+        let unregistered = audience_failure_detail("slack", "channel/eng", NoAnswerClass::Unregistered);
         assert!(unregistered.contains("operator must repair the deployment configuration"));
         assert!(!unregistered.contains("retrying"));
 
-        let timeout = audience_failure("slack", "channel/eng", NoAnswerClass::Timeout);
+        let timeout = audience_failure_detail("slack", "channel/eng", NoAnswerClass::Timeout);
         assert!(timeout.contains("timed out; retrying later may succeed"));
 
-        let failed = audience_failure("slack", "channel/eng", NoAnswerClass::NonSuccess { status: 7 });
+        let failed = audience_failure_detail("slack", "channel/eng", NoAnswerClass::NonSuccess { status: 7 });
         assert!(failed.contains("non-success status 7"));
         assert!(failed.contains("cause and retryability are unknown"));
         assert!(!failed.contains("propose it again"));
@@ -5346,7 +5413,7 @@ mod tests {
                 "it returned non-success status 502",
             ),
         ] {
-            let detail = audience_failure("slack", "a member lookup", (&reason).into());
+            let detail = audience_failure_detail("slack", "a member lookup", (&reason).into());
             let feedback = unresolved_audience("SlackSend", &detail);
 
             assert!(

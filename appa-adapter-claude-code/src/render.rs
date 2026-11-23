@@ -275,6 +275,7 @@ mod tests {
                     feedback: "blocked: the recipient cannot read this".to_string(),
                     offers: Vec::new(),
                     review: Vec::new(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({
@@ -309,6 +310,7 @@ mod tests {
             feedback: "blocked: the recipient cannot read this".to_string(),
             offers: Vec::new(),
             review: Vec::new(),
+            outcomes: None,
         };
         assert_eq!(answer(&host("auto"), &event, &release), serde_json::json!({}));
         assert_eq!(answer(&host("auto"), &event, &denial), render(&event, &denial));
@@ -685,6 +687,7 @@ mod tests {
                 feedback: "denied".to_string(),
                 offers: Vec::new(),
                 review: Vec::new(),
+                outcomes: None,
             },
             HookDecision::Block {
                 reason: "held".to_string(),

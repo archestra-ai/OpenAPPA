@@ -228,8 +228,8 @@ impl Session {
                         .map_err(crate::external::NoAnswerReason::MalformedAnswer),
                     ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };
-                // Annotation failure is an operational refusal, never model feedback: the
-                // call is not judged, nothing is appended, and the harness fails closed.
+                // An unanswered annotation is a missing fact, never a policy denial: the call
+                // is not judged, nothing is appended, and no plan is offered.
                 let answer = match answer {
                     Ok(answer) => answer,
                     Err(reason) => {

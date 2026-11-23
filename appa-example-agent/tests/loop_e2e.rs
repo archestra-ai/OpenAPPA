@@ -1203,7 +1203,7 @@ async fn an_observer_receives_every_record_typed() {
 }
 
 #[tokio::test]
-async fn a_call_its_annotator_cannot_classify_is_refused_and_the_run_goes_on() {
+async fn a_call_its_annotator_cannot_classify_is_denied_and_the_run_goes_on() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
 version = 2
@@ -1256,17 +1256,15 @@ name = "send_email"
     );
     let reply = provider.tool_result(1, "call_0");
     assert!(
-        reply.starts_with(
-            "[appa] this call was refused and did not run: annotator=classify error=non_success status=404"
-        ),
-        "the model reads the runtime's own refusal: {reply}",
+        reply.starts_with("[appa] annotator=classify error=non_success status=404"),
+        "the model reads the runtime's denial on the missing annotation: {reply}",
     );
     assert!(
         decisions
             .recorded()
             .iter()
-            .any(|line| line.starts_with("appa: [agent-test] refused read_hr: annotator=classify")),
-        "the refusal is a decision line of its own: {:?}",
+            .any(|line| line.starts_with("appa: [agent-test] blocked read_hr: [appa] annotator=classify")),
+        "the denial is a decision line of its own: {:?}",
         decisions.recorded(),
     );
 }

@@ -690,6 +690,124 @@ pub enum RefusalClass {
     Spawn,
 }
 
+/// Why a call was refused, as a host branches on it. Variants are ordered by
+/// precedence: the first one a refusal holds decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// Nothing was judged: the event, the log or the deployment is at fault.
+    Integrity,
+    /// The call meets the reserved `blocked` mark, which no authority permits.
+    HardBlock,
+    /// A fact the check reads was not obtained: an Annotator or an audience
+    /// source gave no answer. No plan is offered.
+    MissingFact,
+    /// A trust, audience, history or attention requirement a remedy may clear.
+    WaivableGap,
+    /// The call narrows the trajectory, and the agent may accept the narrowing.
+    Consent,
+}
+
+/// What asking again for a fact a refusal misses can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryHint {
+    /// The fault may be transient: the same call proposed later may obtain it.
+    Later,
+    /// An operator must repair the deployment before the fact can be obtained.
+    AfterRepair,
+}
+
+/// The outcomes one refusal holds: never empty, and `deciding` is the one of
+/// highest precedence. `retry` is set when a missing fact refused the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outcomes {
+    held: std::collections::BTreeSet<Outcome>,
+    retry: Option<RetryHint>,
+}
+
+impl Outcomes {
+    /// The outcomes `held` names, or `None` when it names none.
+    pub fn new(held: impl IntoIterator<Item = Outcome>) -> Option<Outcomes> {
+        let held: std::collections::BTreeSet<Outcome> = held.into_iter().collect();
+        (!held.is_empty()).then_some(Outcomes { held, retry: None })
+    }
+
+    pub fn of(outcome: Outcome) -> Outcomes {
+        Outcomes {
+            held: std::collections::BTreeSet::from([outcome]),
+            retry: None,
+        }
+    }
+
+    /// A refusal for a fact the check could not obtain.
+    pub fn missing(retry: RetryHint) -> Outcomes {
+        Outcomes {
+            retry: Some(retry),
+            ..Outcomes::of(Outcome::MissingFact)
+        }
+    }
+
+    pub fn deciding(&self) -> Outcome {
+        *self.held.first().expect("outcomes are never empty")
+    }
+
+    pub fn held(&self) -> impl Iterator<Item = Outcome> + '_ {
+        self.held.iter().copied()
+    }
+
+    pub fn retry(&self) -> Option<RetryHint> {
+        self.retry
+    }
+
+    /// Both refusals' outcomes, as one refusal that holds them all.
+    pub fn union(mut self, other: &Outcomes) -> Outcomes {
+        self.held.extend(other.held.iter().copied());
+        self.retry = self.retry.or(other.retry);
+        self
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::{Outcome, Outcomes, RetryHint};
+
+    #[test]
+    fn the_outcome_of_highest_precedence_decides_every_mixed_set() {
+        use Outcome::*;
+        let matrix: [(&[Outcome], Outcome); 12] = [
+            (&[Consent], Consent),
+            (&[WaivableGap], WaivableGap),
+            (&[WaivableGap, Consent], WaivableGap),
+            (&[MissingFact, Consent], MissingFact),
+            (&[MissingFact, WaivableGap, Consent], MissingFact),
+            (&[HardBlock, Consent], HardBlock),
+            (&[HardBlock, WaivableGap], HardBlock),
+            (&[HardBlock, MissingFact], HardBlock),
+            (&[Integrity, HardBlock], Integrity),
+            (&[Integrity, MissingFact, Consent], Integrity),
+            (&[Consent, WaivableGap, MissingFact, HardBlock, Integrity], Integrity),
+            (&[Consent, Consent], Consent),
+        ];
+        for (held, deciding) in matrix {
+            let outcomes = Outcomes::new(held.iter().copied()).expect("the set names an outcome");
+            assert_eq!(outcomes.deciding(), deciding, "{held:?}");
+        }
+        assert_eq!(Outcomes::new([]), None);
+    }
+
+    #[test]
+    fn a_union_holds_both_refusals_and_keeps_the_retry_hint() {
+        let union = Outcomes::of(Outcome::Consent).union(&Outcomes::missing(RetryHint::Later));
+        assert_eq!(union.deciding(), Outcome::MissingFact);
+        assert_eq!(
+            union.held().collect::<Vec<_>>(),
+            vec![Outcome::MissingFact, Outcome::Consent]
+        );
+        assert_eq!(union.retry(), Some(RetryHint::Later));
+    }
+}
+
 /// The runtime's answer to one hook event. The adapter renders each
 /// variant into its harness's wire; it interprets nothing.
 #[derive(Debug, Clone, PartialEq)]
@@ -711,6 +829,10 @@ pub enum HookDecision {
         /// The offers whose plans consult a human authority, for a
         /// harness that reviews through its own channel.
         review: Vec<Review>,
+        /// Why the call was refused, for a host that branches on it. The
+        /// runtime states it on every denial; `None` only for a decision
+        /// read from a wire that did not.
+        outcomes: Option<Outcomes>,
     },
     Block {
         reason: String,
@@ -754,9 +876,11 @@ pub enum HookDecision {
         text: String,
     },
     /// The runtime judged nothing for this event because of an
-    /// operational fault it classes in `class` and names in `detail`: an
-    /// annotator or store that did not answer, a policy that would not
-    /// load. A host routes on `class`, never on `detail`. Fail the one
+    /// operational fault it classes in `class` and names in `detail`: a
+    /// store that did not answer, a policy that would not load. Its
+    /// outcome is [`Outcome::Integrity`]. A call whose Annotator gave no
+    /// answer is a [`HookDecision::DenyCall`] instead, deciding on
+    /// [`Outcome::MissingFact`]. A host routes on `class`, never on `detail`. Fail the one
     /// event closed — the call does not run, the result is not admitted
     /// — and hand the model `detail` as the runtime's words, never as
     /// policy feedback: nothing was decided and no remedy is offered.

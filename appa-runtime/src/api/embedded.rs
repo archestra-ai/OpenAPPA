@@ -455,6 +455,7 @@ impl Runtime {
             {
                 ToolCallDecision::Deny {
                     feedback,
+                    outcomes,
                     offers,
                     review,
                     ..
@@ -464,6 +465,7 @@ impl Runtime {
                             feedback: feedback.clone(),
                             offers: offers.clone(),
                             review: review.clone(),
+                            outcomes: Some(outcomes),
                         },
                         presentation: Some(RemedyPresentation {
                             feedback,

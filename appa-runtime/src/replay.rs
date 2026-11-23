@@ -13,7 +13,9 @@
 //! call is blocked and the offer runs it without returning its result; the runner takes it.
 //! `authority`: the call is blocked and the offer names an authority; the runner takes it.
 //! `sanitizer`: the call is blocked and the offer names a sanitizer; the runner takes it.
-//! `deny`: the call is blocked and nothing is offered. Taking an offer goes through the
+//! `deny`: the policy blocks the call and nothing is offered. A call refused because a fact
+//! the check reads was not obtained, such as an Annotator's answer, was not judged: its step
+//! cannot run, whatever it expects. Taking an offer goes through the
 //! runtime's own remedy path. A remedy that releases the call is followed by the released call,
 //! and the trace continues from it; a remedy that answers with a value releases no call.
 //!
@@ -48,8 +50,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_runtime_api::{
-    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, OutcomeBody, ProposedCall,
-    ToolOutcome, TrajectoryId,
+    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, Outcome, OutcomeBody,
+    ProposedCall, ToolOutcome, TrajectoryId,
 };
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -678,7 +680,17 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
     };
     match hooks::handle(runtime, event).await {
         HookDecision::AllowCall { .. } => Proposed::Allowed(call),
-        HookDecision::DenyCall { feedback, offers, .. } => Proposed::Denied { feedback, offers },
+        // Only a policy outcome is a step's answer. A fact the check could not obtain, or an
+        // event nothing judged, leaves the step unjudged, never a deny.
+        HookDecision::DenyCall {
+            feedback,
+            offers,
+            outcomes: Some(outcomes),
+            ..
+        } => match outcomes.deciding() {
+            Outcome::HardBlock | Outcome::WaivableGap | Outcome::Consent => Proposed::Denied { feedback, offers },
+            Outcome::MissingFact | Outcome::Integrity => Proposed::CannotRun(feedback),
+        },
         HookDecision::Refuse { detail, .. } => Proposed::CannotRun(detail),
         other => Proposed::CannotRun(format!("the call answered {other:?}")),
     }

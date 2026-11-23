@@ -15,9 +15,24 @@ use appa_runtime::api::{OfferId, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    Actor, AdapterName, HookDecision, HookEvent, OutcomeBody, ParseRefusal, PrincipalSource, ProposedCall, ToolOutcome,
-    TrajectoryId, WireDecision, WireEvent,
+    Actor, AdapterName, HookDecision, HookEvent, Outcome, OutcomeBody, ParseRefusal, PrincipalSource, ProposedCall,
+    RetryHint, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
+
+/// The retry hint of a call refused only because a fact its check reads was not obtained,
+/// such as an Annotator's answer: a denial deciding on the missing fact, holding nothing
+/// else, and offering no plan. `None` for any other decision.
+pub fn missing_fact(decision: &HookDecision) -> Option<RetryHint> {
+    match decision {
+        HookDecision::DenyCall {
+            offers,
+            review,
+            outcomes: Some(outcomes),
+            ..
+        } if offers.is_empty() && review.is_empty() && outcomes.held().eq([Outcome::MissingFact]) => outcomes.retry(),
+        _ => None,
+    }
+}
 
 /// The Claude Code hook JSON a suite is written in, as the served runtime
 /// reads it: translated onto the wire by the client-side codec (as `appa
