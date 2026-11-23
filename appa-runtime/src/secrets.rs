@@ -4,8 +4,9 @@
 //! Where a quoted value ends depends on what a backslash does inside the quotes, which
 //! the text does not say. The keyed pass reads the text four ways, a backslash escaping
 //! or literal in double and in single quotes, finds assignments and netrc entries under
-//! each, and masks the union. The guarantee: an assignment's or a netrc entry's secret is
-//! masked whenever the text is consistent with at least one of the four readings.
+//! each, and masks the union. Every key is searched for, inside other values too. The
+//! guarantee: an assignment's or a netrc entry's secret is masked whenever the text is
+//! consistent with at least one of the four readings.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -95,47 +96,25 @@ const READINGS: [Reading; 4] = [
 ];
 
 impl Backslash {
-    /// A value in `quote`s: to its closing quote, or to the end of the text.
-    fn quoted(self, quote: char) -> String {
+    /// Whether a quote after `before` closes its value: an escaping backslash escapes it
+    /// when an odd run of them stands right before it.
+    fn closes(self, before: &[u8]) -> bool {
         match self {
-            Backslash::Escapes => format!(r"{quote}(?: [^{quote}\\] | \\[\s\S] )*(?: {quote} | \\?\z )"),
-            Backslash::Literal => format!(r"{quote}[^{quote}]*(?: {quote} | \z )"),
-        }
-    }
-
-    fn closes(self, inside: &[u8]) -> bool {
-        match self {
-            Backslash::Escapes => inside.iter().rev().take_while(|byte| **byte == b'\\').count() % 2 == 0,
+            Backslash::Escapes => before.iter().rev().take_while(|byte| **byte == b'\\').count() % 2 == 0,
             Backslash::Literal => true,
         }
     }
 }
 
-/// An assignment whose key names a secret, under one reading: `KEY=value`, `key: value`,
-/// or JSON's `"key": "value"`. A key names a secret when it contains one of the longer
-/// words, or when `key`, `pass`, `pwd` or `auth` is one of its segments, separated or
-/// camel-cased. The value is masked whatever its shape: a quoted value to its closing
-/// quote, or to the end of the text; an HTTP credential with its scheme word; a bare one
-/// to the next space or delimiter. Its quotes stay.
-struct ReadingScan {
-    reading: Reading,
-    assignment: Regex,
-}
+/// The key of an assignment whose key names a secret: `KEY=`, `key: `, or JSON's
+/// `"key": `. A key names a secret when it contains one of the longer words, or when
+/// `key`, `pass`, `pwd` or `auth` is one of its segments, separated or camel-cased.
+static SECRET_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r#"(?ix) ["']? {SECRET_NAME} ["']? \s*[=:]\s*"#)).expect("a fixed pattern"));
 
-static READING_SCANS: LazyLock<[ReadingScan; 4]> = LazyLock::new(|| {
-    READINGS.map(|reading| ReadingScan {
-        reading,
-        assignment: Regex::new(&format!(
-            r#"(?ix)
-            ( ["']? {SECRET_NAME} ["']? \s*[=:]\s* )
-            ( {} | {} | (?: bearer | basic ) \s+ [^\s"'`,;&)\]}}]+ | [^\s"'`,;&)\]}}]+ )
-            "#,
-            reading.double.quoted('"'),
-            reading.single.quoted('\''),
-        ))
-        .expect("a fixed pattern"),
-    })
-});
+/// An HTTP credential's scheme word, masked with the credential it starts.
+static HTTP_SCHEME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(?:bearer|basic)\s+").expect("a fixed pattern"));
 
 const SECRET_NAME: &str = r"(?: [A-Za-z0-9_.-]* (?: password | passwd | passphrase | secret | token | api_?key | private_?key | access_?key | credential | authorization ) [A-Za-z0-9_.-]*
     | \b (?: [A-Za-z0-9]+ [_.-] )* (?: key | pass | pwd | auth ) (?: [_.-] [A-Za-z0-9]+ )*
@@ -154,28 +133,24 @@ static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
 /// Every secret assignment's value and every netrc password replaced, quotes kept, under
 /// every reading at once.
 fn mask_keyed_values(text: &str) -> Cow<'_, str> {
-    mask_keyed_values_under(text, READING_SCANS.as_slice())
+    mask_keyed_values_under(text, &READINGS)
 }
 
-fn mask_keyed_values_under<'a>(text: &'a str, scans: &[ReadingScan]) -> Cow<'a, str> {
+fn mask_keyed_values_under<'a>(text: &'a str, readings: &[Reading]) -> Cow<'a, str> {
     let mut spans: Vec<Range<usize>> = NETRC_PASSWORD
         .captures_iter(text)
         .map(|found| found.get(2).expect("the pattern captures a password").range())
         .collect();
-    for scan in scans {
-        spans.extend(keyed_spans(text, scan));
+    for reading in readings {
+        spans.extend(keyed_spans(text, *reading));
     }
     mask_spans(text, &merged(spans))
 }
 
 /// One reading's spans: every assignment's value, and every netrc password found on the
 /// text with those values masked, so a value with a space in it cannot hide the entry.
-fn keyed_spans(text: &str, scan: &ReadingScan) -> Vec<Range<usize>> {
-    let values: Vec<Range<usize>> = scan
-        .assignment
-        .captures_iter(text)
-        .map(|found| value_span(found.get(2).expect("the pattern captures a value"), scan.reading))
-        .collect();
+fn keyed_spans(text: &str, reading: Reading) -> Vec<Range<usize>> {
+    let values = merged(assignment_values(text, reading));
     let masked = mask_spans(text, &values);
     let mut source = SourceOffsets::new(&values);
     let passwords: Vec<Range<usize>> = NETRC_PASSWORD
@@ -188,16 +163,82 @@ fn keyed_spans(text: &str, scan: &ReadingScan) -> Vec<Range<usize>> {
     values.into_iter().chain(passwords).collect()
 }
 
-/// A value inside its quotes: up to a closing quote, or to the end of the text.
-fn value_span(value: regex::Match<'_>, reading: Reading) -> Range<usize> {
-    let backslash = match value.as_str().as_bytes().first() {
-        Some(b'"') => reading.double,
-        Some(b'\'') => reading.single,
-        _ => return value.range(),
-    };
-    match value.as_str().as_bytes() {
-        [open, inside @ .., close] if open == close && backslash.closes(inside) => value.start() + 1..value.end() - 1,
-        _ => value.start() + 1..value.end(),
+/// Every secret assignment's value under one reading, quotes kept: a quoted value to its
+/// closing quote or to the end of the text, an HTTP credential with its scheme word, a bare
+/// one to the next space or delimiter. The search for the next key resumes after each key,
+/// not after its value, so a key that seems to start a value inside another value cannot
+/// hide the assignment after it.
+fn assignment_values(text: &str, reading: Reading) -> Vec<Range<usize>> {
+    let mut double = EndCursor::new(ValueEnd::Quote(b'"', reading.double));
+    let mut single = EndCursor::new(ValueEnd::Quote(b'\'', reading.single));
+    let mut delimiter = EndCursor::new(ValueEnd::Delimiter);
+    let mut values = Vec::new();
+    let mut resume = 0;
+    while let Some(key) = SECRET_KEY.find_at(text, resume) {
+        let start = key.end();
+        resume = start;
+        let value = match text.as_bytes().get(start) {
+            Some(b'"') => Some(start + 1..double.next(text, start + 1)),
+            Some(b'\'') => Some(start + 1..single.next(text, start + 1)),
+            _ => {
+                let credential = HTTP_SCHEME
+                    .find(&text[start..])
+                    .map(|scheme| start + scheme.end())
+                    .filter(|credential| delimiter.next(text, *credential) > *credential);
+                let end = delimiter.next(text, credential.unwrap_or(start));
+                (end > start).then_some(start..end)
+            }
+        };
+        values.extend(value);
+    }
+    values
+}
+
+/// What ends a value: a closing quote of one kind, or a delimiter after a bare value.
+#[derive(Debug, Clone, Copy)]
+enum ValueEnd {
+    Quote(u8, Backslash),
+    Delimiter,
+}
+
+impl ValueEnd {
+    fn is_at(self, text: &str, index: usize) -> bool {
+        match self {
+            ValueEnd::Quote(quote, backslash) => {
+                text.as_bytes()[index] == quote && backslash.closes(&text.as_bytes()[..index])
+            }
+            ValueEnd::Delimiter => {
+                text.is_char_boundary(index)
+                    && text[index..]
+                        .chars()
+                        .next()
+                        .is_some_and(|next| next.is_whitespace() || "\"'`,;&)]}".contains(next))
+            }
+        }
+    }
+}
+
+/// The first end at or after a start, or the end of the text. A start inside the stretch
+/// searched last reuses its answer, so starts that only grow cost one pass over the text.
+struct EndCursor {
+    end: ValueEnd,
+    from: usize,
+    found: usize,
+}
+
+impl EndCursor {
+    fn new(end: ValueEnd) -> EndCursor {
+        EndCursor { end, from: 1, found: 0 }
+    }
+
+    fn next(&mut self, text: &str, start: usize) -> usize {
+        if !(self.from..=self.found).contains(&start) {
+            self.from = start;
+            self.found = (start..text.len())
+                .find(|index| self.end.is_at(text, *index))
+                .unwrap_or(text.len());
+        }
+        self.found
     }
 }
 
@@ -491,7 +532,7 @@ mod tests {
                 "machine h login me password api_key=abc\nnext",
                 format!("machine h login me password {masked}\nnext"),
             ),
-            ("password=token=\"public\"", format!("password={masked}\"public\"")),
+            ("password=token=\"public\"", format!("password={masked}\"{masked}\"")),
             (
                 "{\"password\": \"hunter2\", \"user\": \"me\"}",
                 format!("{{\"password\": \"{masked}\", \"user\": \"me\"}}"),
@@ -716,6 +757,26 @@ mod tests {
                 "machine TOKEN=\"a\\\"b\" login SECRET=\"foo bar\" password\nhunter2",
                 format!("machine TOKEN=\"{masked}\" login SECRET=\"{masked}\" password\n{masked}"),
             ),
+            (
+                "export TOKEN=\"a\\\"b\" NOTE='password=\"' PASSWORD=\"hunter2\"",
+                format!("export TOKEN=\"{masked}\" NOTE='password=\"{masked}\"{masked}\""),
+            ),
+            (
+                "token=pass=\"hunter 2\" next",
+                format!("token={masked}\"{masked}\" next"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD=\"hunter2\"",
+                format!("DIR_PASSWORD=\"{masked}\"{masked}\""),
+            ),
+            (
+                "password='ab\\'cd' token='hunter2'",
+                format!("password='{masked}' token='{masked}'"),
+            ),
+            (
+                "password='C:\\dir\\' token='hunter2'",
+                format!("password='{masked}'{masked}'"),
+            ),
         ];
         for (input, expected) in cases {
             assert_eq!(redact_secrets(input), expected, "input {input:?}");
@@ -729,54 +790,53 @@ mod tests {
         let m = "[redacted-secret]";
         let cases = [
             (
-                "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD=\"hunter2\"",
-                format!("DIR_PASSWORD=\"{m}\"{m}\""),
+                "password=\"ab\\\"cd ef\" next",
+                format!("password=\"{m}\" next"),
                 [
-                    format!("DIR_PASSWORD=\"{m}\"hunter2\""),
-                    format!("DIR_PASSWORD=\"{m}\"hunter2\""),
-                    format!("DIR_PASSWORD=\"{m}\"\nDB_PASSWORD=\"{m}\""),
-                    format!("DIR_PASSWORD=\"{m}\"\nDB_PASSWORD=\"{m}\""),
+                    format!("password=\"{m}\" next"),
+                    format!("password=\"{m}\" next"),
+                    format!("password=\"{m}\"cd ef\" next"),
+                    format!("password=\"{m}\"cd ef\" next"),
                 ],
             ),
             (
-                "{\"password\":\"ab\\\"cd\",\"token\":\n  \"hunter2\"}",
-                format!("{{\"password\":\"{m}\",\"token\":\n  \"{m}\"}}"),
+                "password='ab\\'cd ef' next",
+                format!("password='{m}' next"),
                 [
-                    format!("{{\"password\":\"{m}\",\"token\":\n  \"{m}\"}}"),
-                    format!("{{\"password\":\"{m}\",\"token\":\n  \"{m}\"}}"),
-                    format!("{{\"password\":\"{m}\"cd\",\"token\":\n  \"{m}\"}}"),
-                    format!("{{\"password\":\"{m}\"cd\",\"token\":\n  \"{m}\"}}"),
+                    format!("password='{m}' next"),
+                    format!("password='{m}'cd ef' next"),
+                    format!("password='{m}' next"),
+                    format!("password='{m}'cd ef' next"),
                 ],
             ),
             (
-                "password='ab\\'cd' token='hunter2'",
-                format!("password='{m}' token='{m}'"),
+                "DIR_PASSWORD=\"C:\\dir\\\"\nmachine h login token=\"a b\" password hunter2",
+                format!("DIR_PASSWORD=\"{m}\"{m}\" password {m}"),
                 [
-                    format!("password='{m}' token='{m}'"),
-                    format!("password='{m}'cd' token='{m}'"),
-                    format!("password='{m}' token='{m}'"),
-                    format!("password='{m}'cd' token='{m}'"),
+                    format!("DIR_PASSWORD=\"{m}\"{m}\" password hunter2"),
+                    format!("DIR_PASSWORD=\"{m}\"{m}\" password hunter2"),
+                    format!("DIR_PASSWORD=\"{m}\"\nmachine h login token=\"{m}\" password {m}"),
+                    format!("DIR_PASSWORD=\"{m}\"\nmachine h login token=\"{m}\" password {m}"),
                 ],
             ),
             (
-                "password='C:\\dir\\' token='hunter2'",
-                format!("password='{m}'{m}'"),
+                "DIR_PASSWORD='C:\\dir\\'\nmachine h login token='a b' password hunter2",
+                format!("DIR_PASSWORD='{m}'{m}' password {m}"),
                 [
-                    format!("password='{m}'hunter2'"),
-                    format!("password='{m}' token='{m}'"),
-                    format!("password='{m}'hunter2'"),
-                    format!("password='{m}' token='{m}'"),
+                    format!("DIR_PASSWORD='{m}'{m}' password hunter2"),
+                    format!("DIR_PASSWORD='{m}'\nmachine h login token='{m}' password {m}"),
+                    format!("DIR_PASSWORD='{m}'{m}' password hunter2"),
+                    format!("DIR_PASSWORD='{m}'\nmachine h login token='{m}' password {m}"),
                 ],
             ),
         ];
         for (input, union, alone) in cases {
             assert_eq!(mask_keyed_values(input), union, "input {input:?}");
-            for (scan, expected) in READING_SCANS.iter().zip(alone) {
+            for (reading, expected) in READINGS.iter().zip(alone) {
                 assert_eq!(
-                    mask_keyed_values_under(input, std::slice::from_ref(scan)),
+                    mask_keyed_values_under(input, std::slice::from_ref(reading)),
                     expected,
-                    "input {input:?} under {:?}",
-                    scan.reading
+                    "input {input:?} under {reading:?}"
                 );
             }
         }
