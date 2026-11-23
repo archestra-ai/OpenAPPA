@@ -18,10 +18,11 @@ impl Engine {
         }
         let withholds_output = views.withholds_output(dispatch);
         // What the trajectory does not get: the plan withheld the output at release, the
-        // release bound an output sanitizer this revision no longer registers, or a failure's
-        // body sits behind a bound sanitizer. The observation below keys on the plan alone, so
-        // a digest checkpointed before a revision dropped the sanitizer still matches.
-        let withheld = self.withholds(&views, dispatch)
+        // release bound an output sanitizer this revision no longer registers or applies to the
+        // result, or a failure's body sits behind a bound sanitizer. The observation below keys
+        // on the plan alone, so a digest checkpointed before a revision dropped the sanitizer
+        // still matches.
+        let withheld = self.withholds(&views, dispatch, &call, act)
             || matches!(report.outcome, ToolOutcome::FailureWithBody { .. })
                 && views.bound_sanitizer(dispatch).is_some();
         let observed = match (&report.outcome, withholds_output) {
@@ -194,7 +195,8 @@ impl Engine {
         admission: ResultAdmission,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
-        let withheld = self.withholds(views, dispatch) || matches!(admission, ResultAdmission::FailureNoValue { .. });
+        let withheld =
+            self.withholds(views, dispatch, call, act) || matches!(admission, ResultAdmission::FailureNoValue { .. });
         let batch = admit::admit_result(
             &self.registry,
             views,
@@ -216,12 +218,29 @@ impl Engine {
     }
 
     /// Whether this revision withholds `dispatch`'s result from its trajectory: a plan withheld
-    /// it at release, or release bound an output sanitizer this revision no longer registers.
-    fn withholds(&self, views: &Views, dispatch: &DispatchId) -> bool {
-        views.withholds_output(dispatch)
-            || views
-                .bound_sanitizer(dispatch)
-                .is_some_and(|sanitizer| self.registry.sanitizer(sanitizer).is_none())
+    /// it at release, or release bound an output sanitizer this revision no longer registers or
+    /// no longer derives the result's output with. A derivation that awaits membership answers
+    /// is not settled here; admission asks for them.
+    fn withholds(&self, views: &Views, dispatch: &DispatchId, call: &ResolvedCall, act: &ActEvidence) -> bool {
+        if views.withholds_output(dispatch) {
+            return true;
+        }
+        let Some(sanitizer) = views.bound_sanitizer(dispatch) else {
+            return false;
+        };
+        let Some(registered) = self.registry.sanitizer(sanitizer) else {
+            return true;
+        };
+        self.outcome_contract(views, dispatch, call).is_ok_and(|contract| {
+            matches!(
+                registered.derive_output(
+                    &call.output_label_from(&contract.output_label()),
+                    &contract.contract.tags,
+                    &self.context(act),
+                ),
+                Ok(None)
+            )
+        })
     }
 
     /// The remedy menu a confined result's stage offers under its dispatch's contract, with the

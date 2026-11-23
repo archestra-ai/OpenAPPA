@@ -148,7 +148,7 @@
 //! [`fact::ReleaseTerms`] its `DispatchOpened` record pinned, met with the later revision's
 //! declaration of the call: the result's label is the meet of both, and the effects are those
 //! the release reserved. A result whose release bound an output sanitizer that the later
-//! revision no longer registers is withheld.
+//! revision no longer registers, or no longer applies to that result, is withheld.
 //!
 pub mod admit;
 pub mod audience;
