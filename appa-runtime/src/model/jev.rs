@@ -5,8 +5,9 @@
 //! never answers an effect, a `history` entry or an attention mark.
 //!
 //! The call's name, description and arguments leave for the TypeSafe API, after the
-//! best-effort redaction every model provider gets ([`crate::secrets::redact_args`]). Each
-//! label is Jev's likeliest option, and a tie goes to the safer one: the narrower result
+//! best-effort redaction every model provider gets
+//! ([`crate::consult::AnnotationArtifact::redacted_args`]). Each label is Jev's likeliest
+//! option, and a tie goes to the safer one: the narrower result
 //! audience, the lower trust rank, the wider required audience. A label the mandate does not
 //! admit, a consult that is not a complete call, and every provider failure are no answer.
 //!
@@ -20,7 +21,7 @@
 mod questions;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
@@ -28,10 +29,10 @@ use futures_util::stream::FuturesUnordered;
 use serde::Serialize;
 use tokio::time::Instant;
 
-use super::MAX_ATTEMPTS;
+use super::{MAX_ATTEMPTS, RETRY_BACKOFF};
 use crate::config::{Endpoint, EndpointHost, JevProfile, ProfileKey, Token};
 use crate::consult::{AnnotationArtifact, Consult, ConsultBody};
-use crate::external::{ConsultGates, NoAnswerReason, acquire_within};
+use crate::external::{ConsultGates, NoAnswerReason, RECORD_READ_GRACE, acquire_within, read_body};
 use crate::label_guide::{Call, Labels, RequiredAudience, ResultAudience, ResultTrust, annotation};
 use appa_engine::contract::{AnnotationContext, ContextEntry};
 use appa_policy::AnnotatorBuiltin;
@@ -187,7 +188,7 @@ impl JevBackend {
             }
             &trimmed
         };
-        let args = crate::secrets::redact_args(&artifact.args);
+        let args = artifact.redacted_args(declaration);
         let context = (!artifact.context.is_empty()).then(|| {
             crate::secrets::redact_args(
                 &serde_json::to_value(&artifact.context).expect("context serializes: it holds JSON"),
@@ -207,27 +208,33 @@ impl JevBackend {
         let body = serde_json::to_vec(&request).expect("the request serializes: strings and JSON values");
         // One deadline covers the permit wait and the attempts, as for command consults.
         let deadline = started + self.budget;
-        let gate = self.gates.model(AnnotatorBuiltin::Jev);
-        let permit = acquire_within(&gate, deadline, "jev", &consult.name)
-            .await
-            .map_err(|reason| (JevFailure::NoAnswer, reason))?;
-        let labels = self.ask(&body, key, deadline, exchange).await;
-        drop(permit);
-        let labels = labels?;
+        let labels = self.ask(&body, key, deadline, &consult.name, exchange).await?;
         annotation(&labels, declaration)
             .map_err(|detail| (JevFailure::OutsideMandate, NoAnswerReason::MalformedAnswer(detail)))
     }
 
     /// Jev's labels: the first attempt that answers them, hedged when an attempt is slow and
-    /// retried after a 5xx or a connection failure while the budget allows.
+    /// retried after a 429, a 5xx or a connection failure while the budget allows. Once an
+    /// attempt settles with a 429, no attempt of the consult starts for [`RETRY_BACKOFF`].
+    ///
+    /// One permit of the `jev` gate is held while an attempt is in flight. The wait for it
+    /// spends the same `deadline`.
     async fn ask(
         &self,
         body: &[u8],
         key: &str,
         deadline: Instant,
+        name: &str,
         exchange: &mut Exchange,
     ) -> Result<Labels, (JevFailure, NoAnswerReason)> {
+        let gate = self.gates.model(AnnotatorBuiltin::Jev);
+        let mut permit = acquire_within(&gate, deadline, "jev", name)
+            .await
+            .map_err(|reason| (JevFailure::NoAnswer, reason))?;
         let pool = &self.gates.jev;
+        // Each attempt's error status from the moment its headers arrive, while its body is
+        // still read for the record: the deadline does not hide a status already known.
+        let error_statuses: [OnceLock<u16>; MAX_ATTEMPTS] = std::array::from_fn(|_| OnceLock::new());
         let mut launched: Vec<(Arc<ClientSlot>, Instant, Duration)> = Vec::new();
         let mut in_flight = FuturesUnordered::new();
         macro_rules! launch {
@@ -237,18 +244,28 @@ impl JevBackend {
                     true => self.timing.hedge_delay,
                     false => self.timing.cold_hedge_delay,
                 };
-                in_flight.push(self.attempt(launched.len(), Arc::clone(&slot), body.to_vec(), key));
+                let index = launched.len();
+                in_flight.push(self.attempt(
+                    index,
+                    Arc::clone(&slot),
+                    body.to_vec(),
+                    key,
+                    deadline,
+                    &error_statuses[index],
+                ));
                 launched.push((slot, Instant::now(), patience));
                 exchange.attempts.push(None);
             }};
         }
         let mut prompt = None;
+        // A 429 holds every later retry and hedge of this consult back by `RETRY_BACKOFF`.
+        let mut not_before = Instant::now();
         launch!(pool.current(&self.url, self.timing.pool_idle_timeout));
         let settled = loop {
             let (_, last_start, patience) = launched.last().expect("an attempt is launched first");
-            let hedge_at = *last_start + *patience;
+            let hedge_at = (*last_start + *patience).max(not_before);
             let may_hedge =
-                in_flight.len() == 1 && launched.len() < MAX_ATTEMPTS && hedge_at + self.timing.min_attempt <= deadline;
+                in_flight.len() == 1 && self.may_launch(launched.len(), hedge_at.max(Instant::now()), deadline);
             tokio::select! {
                 biased;
                 Some(Attempted { index, reply }) = in_flight.next() => {
@@ -273,21 +290,69 @@ impl JevBackend {
                         Reply::Status { status, body } => {
                             exchange.last = Some((status, body));
                             let reason = NoAnswerReason::NonSuccess { status, detail: None };
-                            if status < 500 {
-                                break Err((JevFailure::NoAnswer, reason));
+                            match status {
+                                429 => not_before = not_before.max(Instant::now() + RETRY_BACKOFF),
+                                500.. => {}
+                                _ => break Err((JevFailure::NoAnswer, reason)),
                             }
                             reason
                         }
                         Reply::Connection => NoAnswerReason::Transport,
                     };
-                    match (in_flight.is_empty(), self.may_retry(launched.len(), deadline)) {
-                        (false, _) => {}
-                        (true, true) => launch!(pool.current(&self.url, self.timing.pool_idle_timeout)),
-                        (true, false) => break Err((JevFailure::NoAnswer, failed)),
+                    if in_flight.is_empty() {
+                        let at = not_before.max(Instant::now());
+                        if !self.may_launch(launched.len(), at, deadline) {
+                            break Err((JevFailure::NoAnswer, failed));
+                        }
+                        if at > Instant::now() {
+                            // As in the shared backoff, no permit is held across the pause.
+                            drop(permit);
+                            tokio::time::sleep_until(at).await;
+                            let Ok(reacquired) = acquire_within(&gate, deadline - self.timing.min_attempt, "jev", name).await
+                            else {
+                                break Err((JevFailure::NoAnswer, failed));
+                            };
+                            permit = reacquired;
+                            // The wake can come late: the budget is checked again before the attempt.
+                            if !self.may_launch(launched.len(), Instant::now(), deadline) {
+                                break Err((JevFailure::NoAnswer, failed));
+                            }
+                        }
+                        launch!(pool.current(&self.url, self.timing.pool_idle_timeout));
                     }
                 }
-                _ = tokio::time::sleep_until(hedge_at), if may_hedge => launch!(pool.fresh(&self.url, self.timing.pool_idle_timeout)),
-                _ = tokio::time::sleep_until(deadline) => break Err((JevFailure::NoAnswer, NoAnswerReason::Timeout)),
+                _ = tokio::time::sleep_until(hedge_at), if may_hedge => {
+                    if self.may_launch(launched.len(), Instant::now(), deadline) {
+                        launch!(pool.fresh(&self.url, self.timing.pool_idle_timeout));
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    // An attempt whose error status arrived settles as that status. The
+                    // consult is that status only when no attempt is left unanswered.
+                    let mut unanswered = false;
+                    let mut status_at_deadline = None;
+                    for ((outcome, error_status), (slot, at, patience)) in
+                        exchange.attempts.iter_mut().zip(&error_statuses).zip(&launched)
+                    {
+                        match (*outcome, error_status.get()) {
+                            (Some(_), _) => {}
+                            (None, Some(&status)) => {
+                                *outcome = Some(AttemptOutcome::Http(status));
+                                exchange.last = Some((status, Vec::new()));
+                                status_at_deadline = Some(status);
+                                if at.elapsed() > *patience {
+                                    pool.evict(slot);
+                                }
+                            }
+                            (None, None) => unanswered = true,
+                        }
+                    }
+                    let reason = match (unanswered, status_at_deadline) {
+                        (false, Some(status)) => NoAnswerReason::NonSuccess { status, detail: None },
+                        _ => NoAnswerReason::Timeout,
+                    };
+                    break Err((JevFailure::NoAnswer, reason));
+                }
             }
         };
         // What is still in flight lost the race or ran out the budget. A connection that
@@ -311,19 +376,34 @@ impl JevBackend {
         settled
     }
 
-    fn may_retry(&self, launched: usize, deadline: Instant) -> bool {
-        launched < MAX_ATTEMPTS && Instant::now() + self.timing.min_attempt <= deadline
+    fn may_launch(&self, launched: usize, at: Instant, deadline: Instant) -> bool {
+        launched < MAX_ATTEMPTS && at + self.timing.min_attempt <= deadline
     }
 
-    async fn attempt(&self, index: usize, slot: Arc<ClientSlot>, body: Vec<u8>, key: &str) -> Attempted {
-        let reply = self.exchange(&slot.client, body, key).await;
+    async fn attempt(
+        &self,
+        index: usize,
+        slot: Arc<ClientSlot>,
+        body: Vec<u8>,
+        key: &str,
+        deadline: Instant,
+        error_status: &OnceLock<u16>,
+    ) -> Attempted {
+        let reply = self.exchange(&slot.client, body, key, deadline, error_status).await;
         if !matches!(reply, Reply::Connection) {
             *slot.answered.lock().expect("the slot mutex is never poisoned") = Some(Instant::now());
         }
         Attempted { index, reply }
     }
 
-    async fn exchange(&self, client: &reqwest::Client, body: Vec<u8>, key: &str) -> Reply {
+    async fn exchange(
+        &self,
+        client: &reqwest::Client,
+        body: Vec<u8>,
+        key: &str,
+        deadline: Instant,
+        error_status: &OnceLock<u16>,
+    ) -> Reply {
         let sent = client
             .post(&self.url)
             .bearer_auth(key)
@@ -335,18 +415,25 @@ impl JevBackend {
             return Reply::Connection;
         };
         let status = response.status().as_u16();
+        let cap = self.max_body_bytes as u64;
         let mut body = Vec::new();
-        let read = crate::external::read_body(&mut response, self.max_body_bytes as u64, &mut body).await;
-        match (read, response.status().is_success()) {
-            (_, false) => Reply::Status { status, body },
-            (Err(NoAnswerReason::Oversized), true) => Reply::Invalid {
+        if !response.status().is_success() {
+            let _ = error_status.set(status);
+            // The status is the outcome; the body is read for the record alone, and never
+            // past the deadline, where the status would be lost to a timeout.
+            let read_until = deadline.min(Instant::now() + RECORD_READ_GRACE);
+            let _ = tokio::time::timeout_at(read_until, read_body(&mut response, cap, &mut body)).await;
+            return Reply::Status { status, body };
+        }
+        match read_body(&mut response, cap, &mut body).await {
+            Err(NoAnswerReason::Oversized) => Reply::Invalid {
                 trace: LabelTrace::default(),
                 status,
                 body,
                 reason: NoAnswerReason::Oversized,
             },
-            (Err(_), true) => Reply::Connection,
-            (Ok(()), true) => {
+            Err(_) => Reply::Connection,
+            Ok(()) => {
                 let mut trace = LabelTrace::default();
                 match labels_of(&body, &mut trace) {
                     Some(labels) => Reply::Labels {
@@ -529,6 +616,7 @@ fn without_largest_answers(
     Ok(AnnotationArtifact {
         args: artifact.args.clone(),
         context: AnnotationContext::new(entries),
+        tool_name: artifact.tool_name,
     })
 }
 
@@ -830,6 +918,7 @@ mod tests {
                 artifact: AnnotationArtifact {
                     args,
                     context: Default::default(),
+                    tool_name: crate::consult::ToolNameAuthor::Policy,
                 },
             },
         }
@@ -889,6 +978,7 @@ mod tests {
         peers: Vec<SocketAddr>,
         per_connection: Vec<usize>,
         requests: Vec<(HeaderMap, serde_json::Value)>,
+        arrivals: Vec<Instant>,
     }
 
     /// A local Jev API. The n-th request gets the n-th scripted reply (the last one
@@ -908,6 +998,12 @@ mod tests {
 
         fn requests(&self) -> Vec<(HeaderMap, serde_json::Value)> {
             self.seen.lock().unwrap().requests.clone()
+        }
+
+        /// The time between the arrivals of the `earlier`-th and the `later`-th request.
+        fn gap(&self, earlier: usize, later: usize) -> Duration {
+            let arrivals = &self.seen.lock().unwrap().arrivals;
+            arrivals[later] - arrivals[earlier]
         }
     }
 
@@ -938,6 +1034,7 @@ mod tests {
                             seen.per_connection[connection] += 1;
                             let request = serde_json::from_str(&body).expect("the request is JSON");
                             seen.requests.push((headers, request));
+                            seen.arrivals.push(Instant::now());
                             (connection, seen.requests.len() - 1)
                         };
                         tokio::time::sleep(stub.delays.get(connection).copied().unwrap_or_default()).await;
@@ -1313,6 +1410,66 @@ mod tests {
         assert_eq!(stub.requests().len(), 2);
     }
 
+    /// A 429 is retried after [`RETRY_BACKOFF`], and only while the budget leaves room for
+    /// the backoff and another attempt.
+    #[tokio::test]
+    async fn a_rate_limit_is_retried_after_the_backoff() {
+        let (url, stub) = serve(vec![Scripted::Status(429), Scripted::Answers], vec![]).await;
+        let (answered, record) = backend(&url, Duration::from_secs(2), FAST).consult(&call()).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        assert_eq!(attempts(&record), json!(["http_429", "ok"]));
+        assert_eq!(stub.requests().len(), 2);
+        assert!(stub.gap(0, 1) >= RETRY_BACKOFF, "{:?}", stub.gap(0, 1));
+
+        let (url, stub) = serve(
+            vec![Scripted::Status(429), Scripted::Status(429), Scripted::Answers],
+            vec![],
+        )
+        .await;
+        // No hedge races the retries: each attempt settles on its own status.
+        let unhedged = JevTiming {
+            hedge_delay: Duration::from_secs(5),
+            cold_hedge_delay: Duration::from_secs(5),
+            ..FAST
+        };
+        let (answered, record) = backend(&url, Duration::from_secs(2), unhedged).consult(&call()).await;
+        assert_eq!(answered, Ok(jev_annotation()));
+        assert_eq!(attempts(&record), json!(["http_429", "http_429", "ok"]));
+        assert!(stub.gap(1, 2) >= RETRY_BACKOFF, "{:?}", stub.gap(1, 2));
+
+        // The budget left after the 429 holds the backoff, but not another attempt after it.
+        let timeout = FAST.budget_margin + RETRY_BACKOFF + FAST.min_attempt - Duration::from_millis(10);
+        let (url, stub) = serve(vec![Scripted::Status(429), Scripted::Answers], vec![]).await;
+        let (answered, record) = backend(&url, timeout, FAST).consult(&call()).await;
+        assert_eq!(
+            answered,
+            Err(NoAnswerReason::NonSuccess {
+                status: 429,
+                detail: None
+            })
+        );
+        assert_eq!(attempts(&record), json!(["http_429"]));
+        assert_eq!(stub.requests().len(), 1);
+    }
+
+    /// A 429 on a hedge holds back the consult's next attempt while the first is still in
+    /// flight: the retry after the first attempt's 503, and a second hedge beside it.
+    #[tokio::test]
+    async fn a_rate_limit_on_a_hedge_holds_back_the_next_attempt() {
+        // FAST hedges the first attempt after 300 ms, and its 429 comes back at once: the
+        // first attempt settles well after it, and the held-back attempt goes out at about
+        // 800 ms, well before the first attempt's 1.5 s answer.
+        let slow = Duration::from_millis(600);
+        let slower = Duration::from_millis(1500);
+        for (first, delay) in [(Scripted::Status(503), slow), (Scripted::Answers, slower)] {
+            let (url, stub) = serve(vec![first, Scripted::Status(429), Scripted::Answers], vec![delay]).await;
+            let (answered, _) = backend(&url, Duration::from_secs(2), FAST).consult(&call()).await;
+            assert_eq!(answered, Ok(jev_annotation()), "{delay:?}");
+            assert_eq!(stub.requests().len(), 3, "{delay:?}");
+            assert!(stub.gap(1, 2) >= RETRY_BACKOFF, "{delay:?}: {:?}", stub.gap(1, 2));
+        }
+    }
+
     #[tokio::test]
     async fn a_client_error_is_not_retried() {
         let (url, stub) = serve(vec![Scripted::Status(400), Scripted::Answers], vec![]).await;
@@ -1328,6 +1485,74 @@ mod tests {
         assert_eq!(diagnostics(&record)["error"], "no_answer");
         assert_eq!(record.http_status, Some(400));
         assert_eq!(stub.requests().len(), 1);
+    }
+
+    /// An error status whose body stalls is that status within the record-read grace, not
+    /// a timeout at the end of the budget. No retry fits the budget, so the status is the
+    /// consult's outcome.
+    #[tokio::test]
+    async fn an_error_status_with_a_stalled_body_is_still_that_status() {
+        const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
+        let url = crate::test_support::raw_stub(STALLED, true).await;
+        let one_attempt = JevTiming {
+            min_attempt: Duration::from_secs(5),
+            ..FAST
+        };
+        let started = Instant::now();
+        let (answered, record) = backend(&url, Duration::from_secs(5), one_attempt)
+            .consult(&call())
+            .await;
+        assert_eq!(
+            answered,
+            Err(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: None
+            })
+        );
+        assert_eq!(record.http_status, Some(503));
+        // The grace, not the five-second budget, ends the read; the slack is for a loaded suite.
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    }
+
+    /// An error status that lands with less than the record-read grace left is still that
+    /// status: its body is read only until the deadline, not past it into a timeout, and the
+    /// deadline itself settles an attempt whose status has arrived as that status.
+    #[tokio::test]
+    async fn an_error_status_near_the_deadline_is_still_that_status() {
+        const STALLED: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 100\r\n\r\npartial";
+        let timeout = Duration::from_secs(2);
+        let deadline = Instant::now() + timeout - FAST.budget_margin;
+        let respond_at = deadline - RECORD_READ_GRACE / 2;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("an ephemeral loopback port binds");
+        let url = format!(
+            "http://{}/",
+            listener.local_addr().expect("the bound address is readable")
+        );
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let (mut socket, _) = listener.accept().await.expect("the stub accepts");
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request).await;
+            tokio::time::sleep_until(respond_at).await;
+            socket.write_all(STALLED).await.expect("the stub writes");
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let one_attempt = JevTiming {
+            min_attempt: Duration::from_secs(5),
+            ..FAST
+        };
+        let (answered, record) = backend(&url, timeout, one_attempt).consult(&call()).await;
+        assert_eq!(
+            answered,
+            Err(NoAnswerReason::NonSuccess {
+                status: 503,
+                detail: None
+            })
+        );
+        assert_eq!(record.http_status, Some(503));
+        assert_eq!(attempts(&record), json!(["http_503"]));
     }
 
     #[tokio::test]
@@ -1676,6 +1901,29 @@ mod tests {
         assert_eq!(attempts(&record), json!([]));
         assert_eq!(diagnostics(&record)["error"], "no_answer");
         assert_eq!(stub.requests().len(), 2, "the first consult and its hedge");
+    }
+
+    /// A consult backing off after a 429 holds no permit: a second consult with a budget
+    /// shorter than the backoff takes the one permit and answers meanwhile.
+    #[tokio::test]
+    async fn a_rate_limit_backoff_holds_no_permit() {
+        let (url, stub) = serve(vec![Scripted::Status(429), Scripted::Answers], vec![]).await;
+        let patient = backend_limited(&url, Duration::from_secs(2), 1, FAST);
+        let hasty = JevBackend {
+            budget: Duration::from_millis(300),
+            ..patient.clone()
+        };
+        let consult = call();
+        let late = async {
+            tokio::time::sleep(RETRY_BACKOFF / 5).await;
+            hasty.consult(&consult).await
+        };
+        let ((first, _), (second, _)) = tokio::join!(patient.consult(&consult), late);
+        assert_eq!(first, Ok(jev_annotation()));
+        assert_eq!(second, Ok(jev_annotation()));
+        assert_eq!(stub.requests().len(), 3);
+        // The second consult's request goes out during the backoff, not after the retry.
+        assert!(stub.gap(0, 1) < RETRY_BACKOFF, "{:?}", stub.gap(0, 1));
     }
 
     #[tokio::test]

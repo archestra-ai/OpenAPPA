@@ -537,6 +537,30 @@ impl AnnotationDeclaration {
 pub struct AnnotationArtifact {
     pub args: serde_json::Value,
     pub context: AnnotationContext,
+    /// Who wrote the call's tool name. A model provider reads it only to decide whether that
+    /// name leaves redacted; the consult wire never carries it.
+    #[serde(skip)]
+    pub tool_name: ToolNameAuthor,
+}
+
+/// `Policy` when the selected declaration names the call's tool exactly. `Harness` when the
+/// harness's name matched a declaration's pattern or the wildcard: the policy never wrote
+/// it, so a model provider gets it redacted like any other string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolNameAuthor {
+    Policy,
+    Harness,
+}
+
+impl AnnotationArtifact {
+    /// `args` as they leave for a model provider: [`crate::secrets::redact_call`] for the
+    /// complete call of a tool the policy names, [`crate::secrets::redact_args`] otherwise.
+    pub(crate) fn redacted_args(&self, declaration: &AnnotationDeclaration) -> serde_json::Value {
+        match (declaration.inputs.is_empty(), self.tool_name) {
+            (true, ToolNameAuthor::Policy) => crate::secrets::redact_call(&self.args),
+            _ => crate::secrets::redact_args(&self.args),
+        }
+    }
 }
 
 // ---------------------------------------------------------------- context
@@ -895,10 +919,11 @@ const ANNOTATION_ANSWER: &str = concat!(
 );
 
 impl ModelPrompt {
-    /// An annotation's `args` and `context` go through [`crate::secrets::redact_args`]; a
-    /// sanitizer sees the value it rewrites, and the consult record keeps both whole. `None`
-    /// for an audience or context consult: no model serves a directory read or a provider's
-    /// finding, and the configuration refuses the binding before a consult can reach here.
+    /// An annotation's `args` go through [`AnnotationArtifact::redacted_args`] and its
+    /// `context` through [`crate::secrets::redact_args`]; a sanitizer sees the value it
+    /// rewrites, and the consult record keeps both whole. `None` for an audience or context
+    /// consult: no model serves a directory read or a provider's finding, and the
+    /// configuration refuses the binding before a consult can reach here.
     pub fn new(consult: &Consult) -> Option<ModelPrompt> {
         let (preamble, schema) = match &consult.body {
             ConsultBody::Authority { .. } => (AUTHORITY_PREAMBLE.to_string(), authority_schema()),
@@ -912,7 +937,7 @@ impl ModelPrompt {
         let declaration = consult.declaration_json();
         let artifact = match &consult.body {
             ConsultBody::Annotation { declaration, artifact } => {
-                let args = crate::secrets::redact_args(&artifact.args);
+                let args = artifact.redacted_args(declaration);
                 let context = crate::secrets::redact_args(
                     &serde_json::to_value(&artifact.context).expect("context serializes: it holds JSON"),
                 );
@@ -1668,6 +1693,7 @@ mod tests {
                 artifact: AnnotationArtifact {
                     args: serde_json::json!({"name": "Bash", "arguments": {"command": "pwd"}}),
                     context,
+                    tool_name: ToolNameAuthor::Policy,
                 },
             },
         };
@@ -1695,6 +1721,7 @@ mod tests {
                 artifact: AnnotationArtifact {
                     args: serde_json::json!({"name": "Bash", "arguments": {"command": "pwd"}}),
                     context: AnnotationContext::default(),
+                    tool_name: ToolNameAuthor::Policy,
                 },
             },
         })
@@ -1741,6 +1768,7 @@ mod tests {
                 artifact: AnnotationArtifact {
                     args: serde_json::json!({"name": "Bash", "arguments": {"command": "pwd"}}),
                     context,
+                    tool_name: ToolNameAuthor::Policy,
                 },
             },
         };
@@ -1784,6 +1812,7 @@ mod tests {
                         ]
                         .into(),
                     ),
+                    tool_name: ToolNameAuthor::Policy,
                 },
             },
         };
@@ -1814,6 +1843,7 @@ mod tests {
                 artifact: AnnotationArtifact {
                     args: serde_json::json!({"command": "pwd"}),
                     context: AnnotationContext::new(Default::default()),
+                    tool_name: ToolNameAuthor::Policy,
                 },
             },
             ..consult.clone()
@@ -1823,6 +1853,50 @@ mod tests {
                 .expect("the input is JSON"),
             serde_json::json!({"args": {"command": "pwd"}, "context": {}}),
             "declared inputs leave as `args`"
+        );
+        let token = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+        let named_name = Consult {
+            body: ConsultBody::Annotation {
+                declaration: AnnotationDeclaration {
+                    inputs: vec!["name".to_string()],
+                    ..declaration.clone()
+                },
+                artifact: AnnotationArtifact {
+                    args: serde_json::json!({"name": token}),
+                    context: AnnotationContext::new(Default::default()),
+                    tool_name: ToolNameAuthor::Policy,
+                },
+            },
+            ..consult.clone()
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&ModelPrompt::new(&named_name).expect("renders").input)
+                .expect("the input is JSON"),
+            serde_json::json!({"args": {"name": "[redacted-secret]"}, "context": {}}),
+            "a declared input named `name` leaves redacted: only the complete call keeps its tool name"
+        );
+        let random_name = "c3VwZXJzZWNyZXQtcmFuZG9tLXZhbHVl";
+        let rendered_tool = |tool_name| {
+            let call = Consult {
+                body: ConsultBody::Annotation {
+                    declaration: declaration.clone(),
+                    artifact: AnnotationArtifact {
+                        args: serde_json::json!({"name": random_name, "arguments": {}}),
+                        context: AnnotationContext::new(Default::default()),
+                        tool_name,
+                    },
+                },
+                ..consult.clone()
+            };
+            serde_json::from_str::<serde_json::Value>(&ModelPrompt::new(&call).expect("renders").input)
+                .expect("the input is JSON")["tool"]
+                .clone()
+        };
+        assert_eq!(rendered_tool(ToolNameAuthor::Policy), random_name);
+        assert_eq!(
+            rendered_tool(ToolNameAuthor::Harness),
+            "[redacted-secret]",
+            "a tool name the policy never wrote leaves redacted"
         );
         let sanitizer = Consult {
             name: "scrub".to_string(),

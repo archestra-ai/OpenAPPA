@@ -1,6 +1,8 @@
 //! Value-safe operational telemetry. Exporters belong to the daemon, never the engine.
-//! Only the `appa_telemetry` target leaves the process. Ordinary diagnostics can
-//! contain values and remain on stderr, even when verbose logging is enabled.
+//! Only the `appa_telemetry` target leaves the process, and the `appa_yell_snapshot`
+//! log target when `APPA_OTEL_YELL_SNAPSHOT=true` opts the filtered agent reports in.
+//! Ordinary diagnostics can contain values and remain on stderr, even when verbose
+//! logging is enabled.
 
 use opentelemetry::{KeyValue, global};
 

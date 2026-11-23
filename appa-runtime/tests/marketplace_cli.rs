@@ -342,6 +342,58 @@ fn plugin_removal_reports_completed_recovery_before_an_idle_result() {
     }
 }
 
+/// A switch interrupted after its config was written leaves a config that
+/// includes a battery the store does not hold yet. Each command that changes
+/// the selection finishes that switch before it loads the config.
+#[test]
+fn selection_commands_finish_an_interrupted_switch_before_loading_the_config() {
+    let commands: [(&[&str], bool); 3] = [
+        (&["battery", "install", "github"], true),
+        (&["battery", "remove", "github"], false),
+        (&["plugin", "install", "kagent"], true),
+    ];
+    for (command, included) in commands {
+        let root = tempfile::tempdir().unwrap();
+        let config = stage(root.path(), Some(&[]), &["github"]);
+        let state = root.path().join("config/.appa/appa.toml");
+        let active = state.join("active.json");
+        let previous: serde_json::Value = serde_json::from_slice(&std::fs::read(&active).unwrap()).unwrap();
+        let mut selection = previous.clone();
+        selection["batteries"] = serde_json::json!(["github"]);
+        let before = std::fs::read(&config).unwrap();
+        let after = [b"include = ['batteries/github/appa.toml']\n".as_slice(), &before].concat();
+        let journal = state.join("transaction.json");
+        std::fs::write(
+            &journal,
+            serde_json::to_vec(&serde_json::json!({
+                "before":before,"after":after,"selection":selection,
+                "activation":"none","previous":previous
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&config, &after).unwrap();
+        std::fs::remove_dir_all(root.path().join("config/batteries")).unwrap();
+        let args = [command, &["--config", config.to_str().unwrap(), "--json"]].concat();
+        let output = run(root.path(), &args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(!journal.exists());
+        let selected: serde_json::Value = serde_json::from_slice(&std::fs::read(&active).unwrap()).unwrap();
+        assert_eq!(
+            selected["batteries"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("github")),
+            included,
+            "{args:?}"
+        );
+    }
+}
+
 #[test]
 fn plugin_removal_requires_the_selected_native_artifact_before_changing_state() {
     let root = tempfile::tempdir().unwrap();
@@ -697,6 +749,35 @@ fn a_kagent_install_includes_no_battery_and_a_battery_install_includes_one() {
     assert_eq!(again["result"]["batteries"], serde_json::json!([]));
     let listed = invoke(&["battery", "list", "--config", config_name, "--json"]);
     assert_eq!(listed["result"]["packages"][0]["included"], false);
+}
+
+/// A store battery that is a link to a tree elsewhere is listed as not
+/// stored, as the loader does not find it.
+#[cfg(unix)]
+#[test]
+fn a_linked_store_battery_is_listed_as_not_stored() {
+    let source = tempfile::tempdir().unwrap();
+    let config = stage(source.path(), Some(&[]), &["github"]);
+    let config_name = config.to_str().unwrap();
+    let list = || {
+        let output = run(source.path(), &["battery", "list", "--config", config_name, "--json"]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["result"]["packages"][0]["stored"].clone()
+    };
+    assert!(
+        run(
+            source.path(),
+            &["plugin", "install", "kagent", "--config", config_name, "--json"]
+        )
+        .status
+        .success()
+    );
+    assert_eq!(list(), true);
+    let stored = config.parent().unwrap().join("batteries/github");
+    let elsewhere = source.path().join("elsewhere");
+    std::fs::rename(&stored, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &stored).unwrap();
+    assert_eq!(list(), false);
 }
 
 #[test]

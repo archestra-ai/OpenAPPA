@@ -53,7 +53,8 @@ APPROVAL = "approval"
 # (`appa-runtime/src/mcp.rs`, `render`).
 AUTHORIZED = "Authorized"
 
-# One offer id as blocking feedback quotes it. A case reads the ids the
+# One offer id as blocking feedback quotes it, by the offer-line contract on
+# `remedy_lines` in `appa-runtime/src/engine.rs`. A case reads the ids the
 # gate opened, so a remedy is checked against the offers of this session.
 OFFER_ID = re.compile(r'execute_remedy_plan\(offer_id: "([a-f0-9]+)"\)')
 

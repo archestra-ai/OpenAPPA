@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{CLAUDE_CODE_BUILTIN, LLM_BUILTIN, Section};
 use crate::consult::{AuthorityAnswer, Consult, ConsultBody};
-use crate::secrets::redact_secrets;
+use crate::secrets::redact_body;
 use appa_builtin::{ABI_VERSION, DescriptorV1, KIND_AUTHORITY, KIND_SANITIZER};
 use appa_runtime_api::Ruling;
 
@@ -15,7 +15,10 @@ use appa_runtime_api::Ruling;
 /// only — the HTTP path's cap behavior is untouched.
 pub(crate) const MODULE_OUTPUT_CEILING: usize = 16 * 1024 * 1024;
 
-const REFUSED_MODULE_NAMES: [&str; 7] = [
+/// The `builtin` names the runtime answers itself for an authority or a sanitizer. Module
+/// names are one namespace across both kinds, so a module cannot take a name the runtime
+/// answers for either kind. `jev` serves Annotators only, which no module can be.
+const REFUSED_MODULE_NAMES: &[&str] = &[
     "hitl",
     "attest-schema",
     "approve",
@@ -23,6 +26,8 @@ const REFUSED_MODULE_NAMES: [&str; 7] = [
     "redact-secrets",
     CLAUDE_CODE_BUILTIN,
     LLM_BUILTIN,
+    #[cfg(feature = "archestra")]
+    crate::config::ARCHESTRA_BUILTIN,
 ];
 
 /// The implementation-name grammar: 1..=64 bytes of ASCII lowercase
@@ -74,7 +79,7 @@ impl Stock {
                 Some(serde_json::json!({ "body": redact_email(&artifact.body) }))
             }
             (Stock::RedactSecrets, ConsultBody::Sanitizer { artifact, .. }) => {
-                Some(serde_json::json!({ "body": redact_secrets(&artifact.body) }))
+                Some(serde_json::json!({ "body": redact_body(&artifact.body) }))
             }
             _ => None,
         }

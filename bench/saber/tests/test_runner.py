@@ -56,6 +56,8 @@ def test_real_engine_sequence_changes_same_call_decision():
             assert "isError" not in await bridge.dispatch("send", {"body": "hello"})
             read = await bridge.dispatch("read", {})
             if read.get("isError"):
+                # The bridge answers as the model sees it: text only. The offer
+                # line is a contract on `remedy_lines` in appa-runtime/src/engine.rs.
                 feedback = read["content"][0]["text"]
                 offer = feedback.split('offer_id: "')[1].split('"')[0]
                 await bridge.dispatch("execute_remedy_plan", {"offer_id": offer})

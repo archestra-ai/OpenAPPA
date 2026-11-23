@@ -1,14 +1,24 @@
 //! The engine boundary: the one module that speaks to `appa-engine`.
 //!
-//! [`RuntimeEngine::rebuild_view`] turns the store's opaque batch rows back into
-//! typed facts and refuses the log before it is trusted: the log opens under
-//! this root's own policy, and
-//! [`appa_engine::engine::Engine::view`] then admits every record through the
-//! engine's one sequential transition validator, so a log whose records could
-//! not have followed one another never reaches a decision. Because
-//! this runtime stores no view and rebuilds from the durable log on every
-//! event, that decode step is the store-reopen trust
-//! gate. [`RuntimeEngine::handle`] then translates one runtime event onto
+//! [`RuntimeEngine::rebuild_view`] refuses the store's decoded log before it is
+//! trusted. A whole replay opens the log under this root's own policy, and
+//! [`appa_engine::engine::Engine::replay`] then admits every engine fact, under
+//! the revision that decided it, through the engine's one sequential
+//! transition validator, so a log whose records could not have followed one
+//! another never reaches a decision.
+//!
+//! The durable log is authoritative and every event reads it. Each engine
+//! keeps a view derived from that log for each of a bounded number of
+//! families, and [`appa_engine::engine::Engine::extend`] advances it through
+//! the same validator over the batches the log accepted since. The advance
+//! trusts that the prefix it matched — lineage, basis, length and last record
+//! — is unchanged; it does not validate that prefix again. Any miss — a
+//! family's first read by this engine (a reload installs a fresh one), an
+//! evicted view, a prefix that no longer matches — and any batch the advance
+//! refuses fall back to a whole replay, so that replay is the store-reopen
+//! trust gate.
+//!
+//! [`RuntimeEngine::handle`] then translates one runtime event onto
 //! [`appa_engine::engine::Engine::handle`], the engine's one mutation
 //! boundary, and translates its typed follow-up back into a delivery. It
 //! returns one decision: an optional fact batch to append under
@@ -84,6 +94,7 @@ pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, Tr
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AnswerDelta, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration,
     ContextArtifact, HistoryEntry, ReviewedNarrowing, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    ToolNameAuthor,
 };
 pub(crate) use appa_engine::engine::DeferredReturn;
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling};
@@ -170,6 +181,7 @@ pub enum ExternalRequest {
         /// The consult artifact: the complete call, or one value per declared input that
         /// reads the call.
         args: serde_json::Value,
+        tool_name: ToolNameAuthor,
         /// What every bound context provider is asked before the Annotator; their answers
         /// join the Annotator's artifact as its `context`.
         context: ContextArtifact,
@@ -588,6 +600,9 @@ pub enum EngineRefusal {
     DispatchClosed,
     #[error("the offer is not one this family carries")]
     UnknownOffer,
+    /// The call already carries a current approval another plan recorded.
+    #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
+    ApprovalPending,
     #[error("the fork and the child are already bound elsewhere")]
     Unbindable,
     #[error("the host reused a call id")]
@@ -621,6 +636,7 @@ impl EngineRefusal {
             EngineRefusal::Ended => ReplayRefusalClass("ended"),
             EngineRefusal::DispatchClosed => ReplayRefusalClass("dispatch_closed"),
             EngineRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
+            EngineRefusal::ApprovalPending => ReplayRefusalClass("approval_pending"),
             EngineRefusal::Unbindable => ReplayRefusalClass("unbindable"),
             EngineRefusal::CallIdReused => ReplayRefusalClass("call_id_reused"),
             EngineRefusal::OutcomeMismatch => ReplayRefusalClass("outcome_mismatch"),
@@ -810,8 +826,9 @@ impl<'a> PolicyEngine<'a> {
 /// The one engine boundary the session drives: the immutable
 /// registry-backed decision core, plus the reads of one rebuilt view
 /// the runtime needs to route an event. It owns every judgment and
-/// every fact; the runtime holds no engine state, and offers are the
-/// engine's own durable facts. A family decides at its deployment's head
+/// every fact; the durable log is the only engine state, and offers are the
+/// engine's own durable facts. The views it keeps per family are derived from
+/// that log, and a whole replay rebuilds any of them. A family decides at its deployment's head
 /// revision, so the deciding engine arrives per event as a [`PolicyEngine`].
 pub struct RuntimeEngine {
     engine: Engine,
@@ -1176,18 +1193,6 @@ impl RuntimeEngine {
     /// Only while it does is the denied call's repeat answered from the record.
     pub(crate) fn denial_stands(&self, view: &EngineView, batch: &ProposalBatchId) -> bool {
         self.engine.denial_stands(view, batch)
-    }
-
-    /// Whether executing this offer replays its recorded end: the execution re-answers from
-    /// the record and appends nothing, so a delivery retry of it spends nothing twice.
-    pub(crate) fn offer_replays(&self, view: &EngineView, trajectory: &TrajectoryId, offer: &OfferId) -> bool {
-        let Some(engine_offer) = parse_offer(offer) else {
-            return false;
-        };
-        matches!(
-            self.engine.offer_consults(view, trajectory, &engine_offer),
-            Ok(OfferConsult::Replay(_))
-        )
     }
 
     /// Where one fork stands in the rebuilt view. The runtime uses it
@@ -2332,6 +2337,10 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
+    /// The plan's authority answers combine independently of plan order: any deny denies
+    /// the plan, even beside an abstention; otherwise any abstention leaves the offer
+    /// standing; otherwise the authorities not yet answered are consulted, and the plan is
+    /// approved only once every one of them approved.
     fn offer_authorities(
         &self,
         views: &Views,
@@ -2346,12 +2355,9 @@ impl RuntimeEngine {
         let narrows = ReviewedNarrowing::unjudged(narrowing);
         let mut approvals = Vec::new();
         let mut requests = Vec::new();
+        let mut abstained = None;
         for requirement in required {
             let name = requirement.authority.as_str().to_string();
-            let review = AuthorityReview {
-                tool: call.tool().clone(),
-                trajectory_label: views.current_label(),
-            };
             match authority_verdict(evidence, &name) {
                 None => {
                     let registered = registry
@@ -2361,7 +2367,10 @@ impl RuntimeEngine {
                         authority: name,
                         declaration: AuthorityDeclaration::of(registered, chain),
                         artifact: AuthorityArtifact::of(call, requirement, narrows.as_ref(), chain),
-                        review,
+                        review: AuthorityReview {
+                            tool: call.tool().clone(),
+                            trajectory_label: views.current_label(),
+                        },
                     });
                 }
                 Some((AuthorityVerdict::Approve, review)) => approvals.push(AuthorityEvidence {
@@ -2375,30 +2384,27 @@ impl RuntimeEngine {
                         authority: requirement.authority.clone(),
                     });
                 }
-                Some((AuthorityVerdict::Abstain(Abstention::Unanswered), _)) => {
-                    return AuthorityOutcome::NoAnswer(format!(
-                        "[appa] authority {name} gave no answer; the offer stands and may be executed again"
-                    ));
-                }
-                Some((AuthorityVerdict::Abstain(Abstention::Unreachable), _)) => {
-                    return AuthorityOutcome::NoAnswer(format!(
-                        "[appa] authority {name} cannot be reached from this session, so executing the offer \
-                         again obtains no ruling. Tell the user that the call waits on {name}."
-                    ));
-                }
-                Some((AuthorityVerdict::Abstain(Abstention::Unregistered), _)) => {
-                    return AuthorityOutcome::NoAnswer(format!(
-                        "[appa] this deployment binds no implementation to authority {name}, so executing the \
-                         offer again obtains no ruling. Tell the user that the deployment's configuration must \
-                         bind {name} under [externals.authorities]."
-                    ));
+                Some((AuthorityVerdict::Abstain(abstention), _)) => {
+                    abstained.get_or_insert((name, abstention));
                 }
             }
         }
-        if !requests.is_empty() {
-            return AuthorityOutcome::Consult(requests);
+        match abstained {
+            Some((name, Abstention::Unanswered)) => AuthorityOutcome::NoAnswer(format!(
+                "[appa] authority {name} gave no answer; the offer stands and may be executed again"
+            )),
+            Some((name, Abstention::Unreachable)) => AuthorityOutcome::NoAnswer(format!(
+                "[appa] authority {name} cannot be reached from this session, so executing the offer \
+                 again obtains no ruling. Tell the user that the call waits on {name}."
+            )),
+            Some((name, Abstention::Unregistered)) => AuthorityOutcome::NoAnswer(format!(
+                "[appa] this deployment binds no implementation to authority {name}, so executing the \
+                 offer again obtains no ruling. Tell the user that the deployment's configuration must \
+                 bind {name} under [externals.authorities]."
+            )),
+            None if !requests.is_empty() => AuthorityOutcome::Consult(requests),
+            None => AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals)),
         }
-        AuthorityOutcome::Outcome(OfferOutcome::Approved(approvals))
     }
 
     /// The call's block after an offer ended without approval. A denial leads with the
@@ -2996,6 +3002,10 @@ impl RuntimeEngine {
             call: resolved.digest(),
             declaration: self.annotation_declaration(annotator, binding, resolved),
             args: annotation_args(&binding.inputs, declaration, resolved),
+            tool_name: match declaration.name() == resolved.tool() {
+                true => ToolNameAuthor::Policy,
+                false => ToolNameAuthor::Harness,
+            },
             context: ContextArtifact {
                 tool: resolved.tool().as_str().to_string(),
                 arguments: resolved.arguments().clone(),
@@ -4136,6 +4146,11 @@ fn control_spelling(naming: ToolNaming, presentation: &EmbeddedPresentationOptio
     }
 }
 
+/// The feedback on a staged tool result or child return. Its offers follow the line
+/// `To accept this change and receive the output:`, one `  - <control>(offer_id: "<id>")`
+/// line each. That call line is part of the contract on [`remedy_lines`], and here the text
+/// is the only carrier: `HookDecision::ReplaceOutput` and `HookDecision::Block` name no
+/// offers as data.
 fn stage_feedback(
     headline: &str,
     residual: &appa_engine::check::Narrowing,
@@ -4189,6 +4204,7 @@ fn outcome_refusal(error: TransitionError) -> EngineRefusal {
 fn offer_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::UnknownOffer | TransitionError::OfferElsewhere => EngineRefusal::UnknownOffer,
+        TransitionError::ApprovalPending => EngineRefusal::ApprovalPending,
         TransitionError::BranchEnded => EngineRefusal::Ended,
         error => EngineRefusal::Invariant {
             detail: format!("deciding an offer: {error}"),
@@ -4852,6 +4868,35 @@ struct RemedyRenderContext<'a> {
     presentation: &'a EmbeddedPresentationOptions,
 }
 
+/// The lines under the block's `Continue:` heading, one remedy each.
+///
+/// Without a display plan, two of these shapes are a wire contract, not only prose:
+///
+/// ```text
+///   - <action>:
+///     <control>(offer_id: "<id>")
+///   - Run <tool> first; it clears: <gaps>.
+/// ```
+///
+/// The first is an executable offer that declares no return; `<action>` is one line, `<id>`
+/// is the offer's lowercase hex id, and any further line of the offer is indented four
+/// spaces. The second is redispatch advice, which carries no offer. A staged result quotes
+/// its offers with the same call line (`stage_feedback`).
+///
+/// Consumers that see only this text find offers by the first shape. These are the
+/// scripted models that stand in for an LLM (`integrations/kagent/tests/conftest.py`,
+/// `integrations/kagent/e2e/marketplace/fixtures.py`,
+/// `marketplace/plugins/claude-code/claude_model_fixture.py`,
+/// `bench/saber/tests/test_runner.py`) and the plugin tests that read a denial message
+/// (`integrations/amp/amppa.test.ts`, `integrations/opencode/appencode.test.ts`,
+/// `integrations/opencode/foreground.test.ts`, `integrations/opencode/smoke/run.py`). The
+/// scripts choose an offer by words of its `<action>`, which stay the runtime's wording and
+/// are not part of this contract. The tau-bench harness reads the `Continue:` heading
+/// and the second shape (`bench/taubench/src/appa_taubench/native.py`, `bench.py`), because
+/// no decision carries redispatch advice as data. A host that holds the decision reads offer
+/// ids from `HookDecision::DenyCall::offers` instead of this text; the Python binding passes
+/// them on as `offer_ids`.
+/// `the_remedy_lines_are_a_contract_that_scripted_models_parse` pins these shapes.
 fn remedy_lines(
     planned: &PlannedBlock,
     offers: &[(OfferId, PlanId)],
@@ -5255,7 +5300,7 @@ mod tests {
         terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
-    use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint};
+    use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint, ToolNameAuthor};
     use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::AnnotationContext;
     use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
@@ -5791,6 +5836,43 @@ mod tests {
             .annotation_for(&views, declaration, &resolved, None, &[contradicting])
             .expect("the recorded annotation pins over contradicting evidence");
         assert_eq!(pinned, pin);
+    }
+
+    #[test]
+    fn an_annotation_request_marks_a_tool_name_the_policy_never_wrote() {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 2
+                [[annotator]]
+                name = "classifier"
+                [[tool]]
+                name = "lookup"
+                annotator = "classifier"
+                [[tool]]
+                name = "*"
+                annotator = "classifier"
+            "#,
+        )
+        .expect("the wildcard policy compiles");
+        let engine = annotator_engine(&policy);
+        let author = |tool: &str| {
+            let call = engine
+                .engine
+                .resolve_call(ToolName::new(tool), b"{}")
+                .expect("the call resolves");
+            let declaration = engine
+                .engine
+                .registry()
+                .declaration(&call)
+                .expect("the call names its declaration");
+            let annotator = declaration.annotator().expect("the declaration is annotated");
+            match engine.annotation_request(annotator, declaration, &call, None) {
+                ExternalRequest::Annotation { tool_name, .. } => tool_name,
+                other => panic!("an annotation request, not {other:?}"),
+            }
+        };
+        assert_eq!(author("lookup"), ToolNameAuthor::Policy);
+        assert_eq!(author("ghost"), ToolNameAuthor::Harness);
     }
 
     #[test]
@@ -6382,6 +6464,129 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The remedy lines are the wire format of every scripted model that stands in for an LLM
+    /// (`remedy_lines` names them). A rewording may change any `<action>`; it may not change
+    /// the lines around it.
+    #[test]
+    fn the_remedy_lines_are_a_contract_that_scripted_models_parse() {
+        use appa_engine::check::Narrowing;
+        use appa_engine::label::{Audience, Label};
+
+        let narrowing = Narrowing {
+            from: Label::new(Trust::new(2), Audience::public()),
+            to: Label::new(Trust::new(0), Audience::public()),
+        };
+        let accept = |id, required| {
+            RemedyPlan::Executable(ExecutableRemedyPlan {
+                id: PlanId::new(id),
+                steps: vec![RemedyStep::Accept(narrowing.clone())],
+                required,
+            })
+        };
+        let planned = PlannedBlock {
+            raw: RawBlock {
+                requirement_gaps: vec![],
+                narrowing: Some(narrowing.clone()),
+            },
+            plans: vec![
+                accept(1, Vec::new()),
+                accept(
+                    2,
+                    vec![appa_engine::plan::RequiredRuling {
+                        authority: appa_engine::names::AuthorityName::new("officer"),
+                        covers: Vec::new(),
+                    }],
+                ),
+                RemedyPlan::Redispatch(
+                    appa_engine::plan::RedispatchPlan::new(
+                        ToolName::new("log_verification"),
+                        vec![Gap::Prior(EffectKind::new("identity.verified"))],
+                    )
+                    .expect("a prior gap is one of the redispatch shapes"),
+                ),
+            ],
+            fork_advice: None,
+            narrowing_impact: None,
+        };
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("the policy compiles");
+        let text = block_feedback(
+            &planned,
+            &[
+                (OfferId("0123456789abcdef".to_string()), PlanId::new(1)),
+                (OfferId("fedcba9876543210".to_string()), PlanId::new(2)),
+            ],
+            policy.engine().registry(),
+            &ReturnBounds {
+                label: Label::top(),
+                lowest: Trust::new(0),
+            },
+            ToolNaming::AsAuthored,
+            "send_mail",
+            None,
+            &EmbeddedPresentationOptions::default(),
+        )
+        .text;
+
+        // Only the shape is the contract; `<action>` and the offer's further lines are the
+        // runtime's wording, which this test leaves free.
+        let continued = text
+            .split("\nContinue:\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("the offers follow a Continue: heading: {text}"));
+        let mut remedies: Vec<Vec<&str>> = Vec::new();
+        for line in continued.lines().take_while(|line| line.starts_with("  ")) {
+            match line.strip_prefix("  - ") {
+                Some(_) => remedies.push(vec![line]),
+                None => remedies
+                    .last_mut()
+                    .unwrap_or_else(|| panic!("a continuation line follows a remedy: {text}"))
+                    .push(line),
+            }
+        }
+        assert_eq!(remedies.len(), 3, "two offers and one redispatch: {text}");
+        for (remedy, id) in remedies.iter().zip(["0123456789abcdef", "fedcba9876543210"]) {
+            let action = &remedy[0]["  - ".len()..];
+            assert!(
+                action.ends_with(':') && !action.trim_end_matches(':').is_empty(),
+                "the action line ends with a colon: {text}"
+            );
+            assert_eq!(
+                remedy.get(1).copied(),
+                Some(format!("    execute_remedy_plan(offer_id: \"{id}\")").as_str()),
+                "the call line follows the action line: {text}"
+            );
+            assert!(
+                remedy[2..].iter().all(|line| line.starts_with("    ")),
+                "further lines of an offer are indented four spaces: {text}"
+            );
+        }
+        assert_eq!(
+            remedies[1].len(),
+            3,
+            "the approval offer carries one further line: {text}"
+        );
+        assert_eq!(
+            remedies[2],
+            ["  - Run log_verification first; it clears: requires a prior identity.verified effect."],
+            "{text}"
+        );
+
+        let staged = super::stage_feedback(
+            "[appa] Blocked: this result cannot be delivered yet.",
+            &narrowing,
+            &[OfferId("0123456789abcdef".to_string())],
+            &TrustChain::new(Vec::new()),
+            ToolNaming::AsAuthored,
+            &EmbeddedPresentationOptions::default(),
+        );
+        assert!(
+            staged.ends_with(
+                "\nTo accept this change and receive the output:\n  - execute_remedy_plan(offer_id: \"0123456789abcdef\")"
+            ),
+            "{staged}"
+        );
     }
 
     #[test]

@@ -199,6 +199,7 @@ impl Session {
                 declaration,
                 args,
                 context,
+                tool_name,
             } => {
                 // Every context provider answers first, together; one that does not leaves
                 // an error in the context and the Annotator is still asked.
@@ -218,6 +219,7 @@ impl Session {
                         artifact: AnnotationArtifact {
                             args: args.clone(),
                             context: context.clone(),
+                            tool_name: *tool_name,
                         },
                     },
                 };

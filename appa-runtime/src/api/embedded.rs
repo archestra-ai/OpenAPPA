@@ -242,8 +242,14 @@ impl Runtime {
         let call_id = bounded(call_id, "call id")?;
         let recipient = super::acting_trajectory(actor);
         named_id(&call, id)?;
-        self.read_tool_preserves_source_label(&actor.root, &call)?;
         let arguments = call_fingerprint(&call);
+        // An exact retry of a completed read gets its receipt without a claim, even when its
+        // tool is no longer fit for a new read or its held label no longer matches its dispatch's.
+        if let Err(unfit) = self.read_tool_preserves_source_label(&actor.root, &call)? {
+            return self
+                .completed_receipt(&actor.root, id, recipient, &call_id, &arguments)?
+                .ok_or(unfit);
+        }
         let loaded = self
             .inner
             .store
@@ -252,6 +258,12 @@ impl Runtime {
             .ok_or_else(|| refused("no peer message with this id is held for this family"))?;
         if loaded.recipient != recipient.as_str() {
             return Err(refused("no peer message with this id is held for this recipient"));
+        }
+        if loaded.status == EmbeddedStatus::Read
+            && loaded.read_call_id.as_deref() == Some(call_id.as_str())
+            && let Some(outcome) = self.completed_receipt(&actor.root, id, recipient, &call_id, &arguments)?
+        {
+            return Ok(outcome);
         }
         let log = self.inner.log(&actor.root).map_err(peer_error)?;
         let chain = self
@@ -269,7 +281,7 @@ impl Runtime {
             .claim_embedded_read(&actor.root, id.as_str(), recipient, &call_id, &arguments)
             .map_err(store_error)?;
         let claim = match claim {
-            ReadTake::Done(row) => return stored_outcome(&row),
+            ReadTake::Done(row) => return self.replay_receipt(&actor.root, &row),
             ReadTake::Ready(claim) => claim,
             ReadTake::Busy => return Err(refused("this call id is not waiting to read this message")),
             ReadTake::Missing => return Err(refused("no peer message with this id is held for this recipient")),
@@ -299,6 +311,32 @@ impl Runtime {
         }
         self.store_decision(&actor.root, id, &call_id, generation, &outcome, &claim.row)?;
         Ok(outcome)
+    }
+
+    fn completed_receipt(
+        &self,
+        root: &TrajectoryId,
+        id: &EmbeddedPeerId,
+        recipient: &TrajectoryId,
+        call_id: &str,
+        arguments: &str,
+    ) -> Result<Option<EmbeddedHookOutcome>, EmbeddedPeerError> {
+        self.inner
+            .store
+            .embedded_read_receipt(root, id.as_str(), recipient, call_id, arguments)
+            .map_err(store_error)?
+            .map(|row| self.replay_receipt(root, &row))
+            .transpose()
+    }
+
+    /// A stored receipt, served only while this view still serves the family's policy: the
+    /// read may have completed under a revision this view has not reached.
+    fn replay_receipt(&self, root: &TrajectoryId, row: &EmbeddedRow) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
+        let log = self.inner.log(root).map_err(peer_error)?;
+        self.inner
+            .resolve_policy(&self.inner.deployment(), &log)
+            .map_err(peer_error)?;
+        stored_outcome(row)
     }
 
     fn release_if_unopened(
@@ -478,7 +516,7 @@ impl Runtime {
         let call_id = bounded(call_id, "call id")?;
         let recipient = super::acting_trajectory(actor);
         named_id(&call, id)?;
-        self.read_tool_preserves_source_label(&actor.root, &call)?;
+        self.read_tool_preserves_source_label(&actor.root, &call)??;
         let arguments = call_fingerprint(&call);
         let loaded = self
             .inner
@@ -518,43 +556,48 @@ impl Runtime {
             .await
     }
 
+    /// Whether `call`'s tool is fit for a new peer read under the family's policy. The outer
+    /// error is this view refusing the family's policy; the inner one is an unfit tool.
     fn read_tool_preserves_source_label(
         &self,
         family: &TrajectoryId,
         call: &ProposedCall,
-    ) -> Result<(), EmbeddedPeerError> {
+    ) -> Result<Result<(), EmbeddedPeerError>, EmbeddedPeerError> {
         let log = self.inner.log(family).map_err(peer_error)?;
         let deployment = self.inner.deployment();
         let policy = self.inner.resolve_policy(&deployment, &log).map_err(peer_error)?;
-        let registry = policy.engine().registry();
-        let name = appa_engine::value::ToolName::new(&call.tool);
-        if registry.classify(&name) != Some(appa_engine::registry::ToolKind::Declared) {
-            return Err(refused("a peer read needs an exact declared tool with an empty delta"));
-        }
-        let variants: Vec<_> = registry.variants(&name).collect();
-        if variants.is_empty() || variants.iter().any(|declaration| declaration.declared().is_none()) {
-            return Err(refused("a peer read cannot use an annotator"));
-        }
-        if variants.iter().any(|declaration| {
-            declaration
-                .declared()
-                .is_none_or(|annotation| !annotation.delta.is_none())
-        }) {
-            return Err(refused("a peer read tool must declare an empty delta"));
-        }
-        // The engine offers an output sanitizer only on a confined result, judged on the
-        // concrete call name, so an unconfined read delivers the stored body under its source
-        // label whatever sanitizers are scoped.
-        let profile = registry.profile();
-        if profile.confines_result(&name)
-            || variants
-                .iter()
-                .any(|declaration| profile.confines_result(declaration.name()))
-        {
-            return Err(refused("a peer read tool's result must not be confined"));
-        }
-        Ok(())
+        Ok(read_tool_fit(policy.engine().registry(), call))
     }
+}
+
+fn read_tool_fit(registry: &appa_engine::registry::Registry, call: &ProposedCall) -> Result<(), EmbeddedPeerError> {
+    let name = appa_engine::value::ToolName::new(&call.tool);
+    if registry.classify(&name) != Some(appa_engine::registry::ToolKind::Declared) {
+        return Err(refused("a peer read needs an exact declared tool with an empty delta"));
+    }
+    let variants: Vec<_> = registry.variants(&name).collect();
+    if variants.is_empty() || variants.iter().any(|declaration| declaration.declared().is_none()) {
+        return Err(refused("a peer read cannot use an annotator"));
+    }
+    if variants.iter().any(|declaration| {
+        declaration
+            .declared()
+            .is_none_or(|annotation| !annotation.delta.is_none())
+    }) {
+        return Err(refused("a peer read tool must declare an empty delta"));
+    }
+    // The engine offers an output sanitizer only on a confined result, judged on the
+    // concrete call name, so an unconfined read delivers the stored body under its source
+    // label whatever sanitizers are scoped.
+    let profile = registry.profile();
+    if profile.confines_result(&name)
+        || variants
+            .iter()
+            .any(|declaration| profile.confines_result(declaration.name()))
+    {
+        return Err(refused("a peer read tool's result must not be confined"));
+    }
+    Ok(())
 }
 
 fn governed_delivery(row: &EmbeddedRow, admitted: &str) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
@@ -1168,11 +1211,41 @@ max_body_bytes = 65536
         let direct = runtime
             .send_embedded_peer(&family(), &family(), &family(), None, "send-1", "direct-secret")
             .expect("the direct send records");
+        let received = runtime
+            .receive_embedded_peer(&family(), &family(), &direct.id, &family(), &direct.digest)
+            .expect("the fresh message is received");
+        assert_eq!(
+            received,
+            EmbeddedPeerArrival::Direct {
+                id: direct.id.clone(),
+                body: "direct-secret".to_string(),
+            }
+        );
+        let stored = runtime
+            .inner
+            .store
+            .load_embedded_peer(&family(), direct.id.as_str())
+            .expect("the row loads")
+            .expect("the row is stored");
+        assert_eq!(
+            (stored.status, stored.body.as_deref()),
+            (EmbeddedStatus::Direct, Some("direct-secret"))
+        );
         runtime
             .inner
             .store
             .testing_expire_embedded(&family(), direct.id.as_str())
             .expect("the direct row expires");
+        let unpurged = runtime
+            .inner
+            .store
+            .load_embedded_peer(&family(), direct.id.as_str())
+            .expect("the row loads")
+            .expect("the row is stored");
+        assert!(
+            matches!(direct_body(&unpurged), Err(EmbeddedPeerError::Refused(_))),
+            "an expired body the purge has not reached is not returned"
+        );
         let expired = runtime.receive_embedded_peer(&family(), &family(), &direct.id, &family(), &direct.digest);
         assert!(
             expired.is_err(),
@@ -1185,7 +1258,61 @@ max_body_bytes = 65536
             .expect("the row loads")
             .expect("the proof row stays");
         assert!(purged.body.is_none(), "the expired direct body is nulled");
+        assert_eq!(purged.status, EmbeddedStatus::Direct);
         assert_eq!(purged.digest, direct.digest.to_string());
+
+        let released = crate::hooks::handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: Actor {
+                    root: family(),
+                    child: None,
+                },
+                call: ProposedCall {
+                    tool: "send".to_string(),
+                    arguments: RawValue::from_string("{}".to_string()).expect("json"),
+                    cwd: None,
+                },
+                call_id: Some("send-3".to_string()),
+                spawn: None,
+                prompt: None,
+                ruling: None,
+                declares: None,
+            },
+        )
+        .await;
+        assert!(matches!(released, HookDecision::AllowCall { .. }), "{released:?}");
+        let held = runtime
+            .send_embedded_peer(&family(), &family(), &family(), None, "send-3", "held-secret")
+            .expect("the held send records");
+        let stored = runtime
+            .inner
+            .store
+            .load_embedded_peer(&family(), held.id.as_str())
+            .expect("the row loads")
+            .expect("the row is stored");
+        assert_eq!(
+            (stored.status, stored.body.as_deref()),
+            (EmbeddedStatus::Held, Some("held-secret"))
+        );
+        runtime
+            .inner
+            .store
+            .testing_expire_embedded(&family(), held.id.as_str())
+            .expect("the held row expires");
+        let expired = runtime.receive_embedded_peer(&family(), &family(), &held.id, &family(), &held.digest);
+        assert!(
+            expired.is_err(),
+            "an expired held body is not returned, got {expired:?}"
+        );
+        let purged = runtime
+            .inner
+            .store
+            .load_embedded_peer(&family(), held.id.as_str())
+            .expect("the row loads")
+            .expect("the proof row stays");
+        assert!(purged.body.is_none(), "the expired held body is nulled");
+        assert_eq!(purged.status, EmbeddedStatus::Held, "an expired message is not taken");
 
         let released = crate::hooks::handle(
             &runtime,

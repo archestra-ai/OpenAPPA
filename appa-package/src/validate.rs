@@ -160,19 +160,25 @@ pub enum PackageError {
 }
 
 /// Read `<dir>/appa-package.toml` and refuse a package that is not
-/// distributable: a tree with a symlink or beyond the source caps, a declared
-/// path that is absent or escapes, or a battery policy that reaches outside its
-/// own package.
+/// distributable: a tree with a symlink, the package directory itself
+/// included, or beyond the source caps, a declared path that is absent or
+/// escapes, or a battery policy that reaches outside its own package.
 pub fn validate_package(dir: &Path) -> Result<Package, PackageError> {
+    let tree_error = |source| PackageError::Tree {
+        root: dir.to_path_buf(),
+        source,
+    };
+    if std::fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(tree_error(TreeDigestError::UnsupportedEntry {
+            path: dir.to_path_buf(),
+        }));
+    }
     let manifest_path = dir.join(MANIFEST_FILE);
     let mut package = Package::read(&manifest_path)?;
 
     // Symlinks and the source caps are refused by the same walk the digest
     // uses, so a package that validates can be digested and shipped.
-    tree::walk(dir).map_err(|source| PackageError::Tree {
-        root: dir.to_path_buf(),
-        source,
-    })?;
+    tree::walk(dir).map_err(tree_error)?;
 
     let contained = Contained::new(dir, &manifest_path);
     match &mut package.role {
@@ -1080,16 +1086,16 @@ fn string_argv(command: &Value) -> Option<Vec<&str>> {
 fn check_confinement(policy: &Path, declared: &toml::Table, deployment: &Value) -> Result<(), PackageError> {
     let refused = |field: &str| PackageError::PolicyField {
         policy: policy.to_path_buf(),
-        field: format!("deployment.{field}"),
+        field: field.to_owned(),
     };
-    let deployment = deployment.as_table().ok_or_else(|| refused(""))?;
+    let deployment = deployment.as_table().ok_or_else(|| refused("deployment"))?;
     if let Some(field) = deployment.keys().find(|field| field.as_str() != "confined_results") {
-        return Err(refused(field));
+        return Err(refused(&format!("deployment.{field}")));
     }
     let confined = deployment
         .get("confined_results")
         .and_then(Value::as_array)
-        .ok_or_else(|| refused("confined_results"))?;
+        .ok_or_else(|| refused("deployment.confined_results"))?;
     let tools: Vec<&str> = declared
         .get("tool")
         .and_then(Value::as_array)
@@ -1099,7 +1105,7 @@ fn check_confinement(policy: &Path, declared: &toml::Table, deployment: &Value) 
         .map(|name| name.split('(').next().unwrap_or(name))
         .collect();
     for entry in confined {
-        let tool = entry.as_str().ok_or_else(|| refused("confined_results"))?;
+        let tool = entry.as_str().ok_or_else(|| refused("deployment.confined_results"))?;
         if !tools.contains(&tool) {
             return Err(PackageError::PolicyConfinesForeignTool {
                 policy: policy.to_path_buf(),
@@ -1804,6 +1810,60 @@ mod tests {
     }
 
     #[test]
+    fn a_package_directory_that_is_a_symlink_is_refused() {
+        let directory = battery(BATTERY_POLICY);
+        let beside = tempfile::tempdir().unwrap();
+        let linked = beside.path().join("linked");
+        std::os::unix::fs::symlink(directory.path(), &linked).unwrap();
+
+        assert!(validate_package(directory.path()).is_ok());
+        assert!(matches!(
+            validate_package(&linked),
+            Err(PackageError::Tree {
+                source: TreeDigestError::UnsupportedEntry { .. },
+                ..
+            })
+        ));
+    }
+
+    /// A manifest that is a FIFO, a link or oversized is refused before
+    /// anything waits on it or reads it whole.
+    #[test]
+    fn a_manifest_that_is_not_a_bounded_regular_file_is_refused() {
+        let refused = |directory: &tempfile::TempDir| {
+            let path = directory.path().to_path_buf();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || sender.send(validate_package(&path)).unwrap());
+            let result = receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("validation does not wait on the manifest");
+            matches!(result, Err(PackageError::Manifest(ManifestError::Read { .. })))
+        };
+        let manifest = |directory: &tempfile::TempDir| directory.path().join(MANIFEST_FILE);
+
+        let fifo = battery(BATTERY_POLICY);
+        fs::remove_file(manifest(&fifo)).unwrap();
+        let path = std::ffi::CString::new(manifest(&fifo).into_os_string().into_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+        assert!(refused(&fifo), "a FIFO manifest");
+
+        let linked = battery(BATTERY_POLICY);
+        let elsewhere = tempfile::tempdir().unwrap();
+        fs::rename(manifest(&linked), elsewhere.path().join(MANIFEST_FILE)).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join(MANIFEST_FILE), manifest(&linked)).unwrap();
+        assert!(refused(&linked), "a linked manifest");
+
+        let oversized = battery(BATTERY_POLICY);
+        let mut text = fs::read_to_string(manifest(&oversized)).unwrap();
+        text.push_str(&format!(
+            "\n#{}\n",
+            "x".repeat(crate::package::MAX_MANIFEST_BYTES as usize)
+        ));
+        fs::write(manifest(&oversized), text).unwrap();
+        assert!(refused(&oversized), "an oversized manifest");
+    }
+
+    #[test]
     fn a_declared_path_that_is_absent_is_refused() {
         let directory = battery(BATTERY_POLICY);
         fs::remove_file(directory.path().join("audience-source.py")).unwrap();
@@ -2300,6 +2360,15 @@ mod tests {
                 "accepted {what}"
             );
         }
+    }
+
+    #[test]
+    fn a_battery_deployment_that_is_no_table_is_refused_under_its_own_name() {
+        let head = "[policy]\nversion = 2\n\n";
+        assert!(matches!(
+            validate_package(battery(&BATTERY_POLICY.replace(head, "[policy]\nversion = 2\ndeployment = 1\n\n")).path()),
+            Err(PackageError::PolicyField { field, .. }) if field == "deployment"
+        ));
     }
 
     /// A targeted battery with `base` as its base and `multi_user` as its multi-user target policy.

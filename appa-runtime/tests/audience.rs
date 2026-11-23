@@ -974,3 +974,288 @@ async fn a_selector_placeholder_asks_the_source_for_the_collection_the_call_spel
     assert_eq!(requests[1]["artifact"], serde_json::json!({ "selector": "channel/C2" }));
     assert!(audit_len(&runtime) > 0, "the decided acts read back");
 }
+
+/// `groups` input sanitizers that each widen to a different group, served by a redirected
+/// directory: each group's selector and its member's lookup are separate asks.
+fn staged_groups_policy(groups: u32) -> String {
+    let each = |template: &str| -> String { (1..=groups).map(|k| template.replace("{k}", &k.to_string())).collect() };
+    let named = each("\n[policy.audience.group.g{k}]\nfrom = [\"slack:user-group/g{k}\"]\n");
+    let sanitizers = each(
+        "\n[[policy.sanitizer]]\nname = \"via-g{k}\"\non = [\"tool_input\"]\npermits = { audience = { from = [\"alice@corp.example\", \"bob@corp.example\"], to = [\"@g{k}\"] } }\n",
+    );
+    let bound = each("\n[externals.sanitizers.via-g{k}]\nbuiltin = \"redact-email\"\n");
+    format!(
+        r#"
+[policy]
+version = 2
+{named}
+[[policy.tool]]
+name = "read_hr"
+delta = {{ audience = ["alice@corp.example", "bob@corp.example"] }}
+
+[[policy.tool]]
+name = "publish"
+parameters = {{ type = "object", properties = {{ body = {{ type = "string" }} }}, required = ["body"] }}
+requires = {{ audience = {{ contains = ["partner@corp.example"] }} }}
+effects = ["egress"]
+delta = {{}}
+{sanitizers}
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+{bound}
+[externals.audience.slack]
+url = "AUDIENCE_URL"
+selectors = [{{ template = "user-group/<handle>" }}]
+lookup = "people"
+
+[externals.audience.people]
+url = "AUDIENCE_URL"
+"#
+    )
+}
+
+/// A directory that answers each selector and each member lookup from its own entry.
+#[derive(Clone, Default)]
+struct Directory {
+    members: Arc<Mutex<std::collections::BTreeMap<String, Vec<String>>>>,
+    principals: Arc<Mutex<std::collections::BTreeMap<String, Option<String>>>>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+impl Directory {
+    fn group(&self, selector: &str, member: &str, principal: Option<&str>) {
+        self.members
+            .lock()
+            .unwrap()
+            .insert(selector.to_string(), vec![member.to_string()]);
+        self.principals
+            .lock()
+            .unwrap()
+            .insert(member.to_string(), principal.map(str::to_string));
+    }
+
+    fn requests(&self) -> Vec<serde_json::Value> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+async fn serve_directory() -> (String, Directory) {
+    let directory = Directory::default();
+    let router = Router::new()
+        .route(
+            "/audience",
+            post(|State(directory): State<Directory>, body: String| async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                let artifact = request["artifact"].clone();
+                directory.requests.lock().unwrap().push(request);
+                let answer = match (artifact["selector"].as_str(), artifact["member"].as_str()) {
+                    (Some(selector), None) => directory
+                        .members
+                        .lock()
+                        .unwrap()
+                        .get(selector)
+                        .map(|members| serde_json::json!({ "members": members })),
+                    (None, Some(member)) => directory
+                        .principals
+                        .lock()
+                        .unwrap()
+                        .get(member)
+                        .map(|principal| serde_json::json!({ "principal": principal })),
+                    _ => None,
+                };
+                match answer {
+                    Some(answer) => (
+                        axum::http::StatusCode::OK,
+                        serde_json::json!({ "version": 1, "answer": answer }).to_string(),
+                    ),
+                    None => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()),
+                }
+            }),
+        )
+        .with_state(directory.clone());
+    (format!("{}/audience", serve(router).await), directory)
+}
+
+fn publish(body: &str) -> ProposedCall {
+    ProposedCall {
+        tool: "publish".to_string(),
+        arguments: raw(serde_json::json!({ "body": body })),
+        cwd: None,
+    }
+}
+
+/// Stage one rewrite per group for the same raw body: each hop takes its group's sanitizer
+/// plan, and every hop derives the same bytes, which are returned.
+async fn stage_group_rewrites(runtime: &Runtime, groups: u32) -> String {
+    const RAW: &str = "mail alice@corp.example today";
+    let mut derived: Option<String> = None;
+    for k in 1..=groups {
+        let blocked = hooks::handle_embedded(
+            runtime,
+            HookEvent::ToolCall {
+                actor: actor(),
+                call: publish(RAW),
+                call_id: None,
+                spawn: None,
+                prompt: None,
+                ruling: None,
+                declares: None,
+            },
+        )
+        .await;
+        let presentation = blocked
+            .presentation
+            .unwrap_or_else(|| panic!("the raw call blocks with remedies (hop {k}): {:?}", blocked.decision));
+        let name = format!("via-g{k}");
+        let hop = presentation
+            .offers
+            .iter()
+            .find(|offer| {
+                offer
+                    .input_sanitizer
+                    .as_ref()
+                    .is_some_and(|sanitizer| sanitizer.name == name)
+            })
+            .map(|offer| appa_runtime::api::OfferId(offer.id.clone()))
+            .unwrap_or_else(|| panic!("{name} is offered: {:?}", presentation.offers));
+        let RemedyOutcome::Authorized { call } = runtime.execute_remedy(&actor(), hop).await else {
+            panic!("{name}'s hop stages a derivation");
+        };
+        let arguments: serde_json::Value = serde_json::from_str(call.arguments.get()).expect("canonical JSON");
+        let body = arguments["body"].as_str().expect("a body").to_string();
+        match &derived {
+            None => derived = Some(body),
+            Some(first) => assert_eq!(first, &body, "every rewrite derives the same bytes"),
+        }
+    }
+    derived.expect("every hop ran")
+}
+
+/// One ordinary proposal can owe eight consult batches that all answer: four rewrites staged
+/// for the same bytes widen to four groups of a redirected directory, and the proposal is
+/// judged under each in subject order, a selector read then a member lookup apiece. The
+/// engine pass after the eighth batch decides. Subject order follows the random batch ids,
+/// so the first proposal, where no group clears, reads the order off the directory.
+#[tokio::test]
+async fn four_staged_group_rewrites_resolve_through_eight_consult_batches() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, directory) = serve_directory().await;
+    for k in 1..=4 {
+        directory.group(
+            &format!("user-group/g{k}"),
+            &format!("slack:U{k}"),
+            Some("partner@corp.example"),
+        );
+    }
+    let runtime = narrowed_under(&dir, &staged_groups_policy(4), &url).await;
+
+    let derived = stage_group_rewrites(&runtime, 4).await;
+
+    // The asks one proposal of the derived bytes makes, as (entry, selector or member).
+    let asks_of = |runtime: Arc<Runtime>, directory: Directory, derived: String| async move {
+        let asked = directory.requests().len();
+        let decision = propose(&runtime, publish(&derived)).await;
+        let asks: Vec<(String, String)> = directory.requests()[asked..]
+            .iter()
+            .map(|request| {
+                let artifact = &request["artifact"];
+                let asked_for = artifact["selector"].as_str().or(artifact["member"].as_str());
+                (
+                    request["name"].as_str().expect("an entry name").to_string(),
+                    asked_for.expect("a selector or a member").to_string(),
+                )
+            })
+            .collect();
+        (decision, asks)
+    };
+
+    // No group holds the partner desk any more: every derivation is judged and none clears.
+    for k in 1..=4 {
+        directory.group(
+            &format!("user-group/g{k}"),
+            &format!("slack:U{k}"),
+            Some(&format!("other{k}@corp.example")),
+        );
+    }
+    let (decision, asks) = asks_of(runtime.clone(), directory.clone(), derived.clone()).await;
+    assert!(
+        matches!(decision, HookDecision::DenyCall { .. }),
+        "the eighth batch's answers reach the engine, which blocks: {decision:?}"
+    );
+    assert_eq!(asks.len(), 8, "four selector reads and four lookups: {asks:?}");
+    let mut groups: Vec<u32> = Vec::new();
+    for pair in asks.chunks(2) {
+        let [(source, selector), (lookup, member)] = pair else {
+            unreachable!("eight asks pair up");
+        };
+        let k: u32 = selector
+            .strip_prefix("user-group/g")
+            .and_then(|k| k.parse().ok())
+            .unwrap_or_else(|| panic!("a group selector: {selector}"));
+        assert_eq!((source.as_str(), lookup.as_str()), ("slack", "people"));
+        assert_eq!(
+            member,
+            &format!("slack:U{k}"),
+            "each selector's member is looked up next"
+        );
+        groups.push(k);
+    }
+    groups.sort_unstable();
+    assert_eq!(
+        groups,
+        vec![1, 2, 3, 4],
+        "each derivation's group is read once: {asks:?}"
+    );
+
+    // Only the group judged last holds the partner desk again: the first three derivations
+    // fail on their answers, and the fourth clears on the eighth batch's.
+    let last = &asks[6].1;
+    let last_member = &asks[7].1;
+    directory.group(last, last_member, Some("partner@corp.example"));
+    let (decision, again) = asks_of(runtime.clone(), directory.clone(), derived.clone()).await;
+    assert_eq!(decision, HookDecision::AllowCall { spawn: None });
+    assert_eq!(again, asks, "the same eight asks, in the same order");
+    ran(&runtime, publish(&derived)).await;
+}
+
+/// A proposal that owes a ninth consult batch refuses as diverged after the eighth, and the
+/// ninth is never asked: five staged rewrites, none of whose groups clears the call.
+#[tokio::test]
+async fn a_ninth_consult_batch_is_refused_without_being_asked() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, directory) = serve_directory().await;
+    for k in 1..=5 {
+        directory.group(
+            &format!("user-group/g{k}"),
+            &format!("slack:U{k}"),
+            Some("partner@corp.example"),
+        );
+    }
+    let runtime = narrowed_under(&dir, &staged_groups_policy(5), &url).await;
+    let derived = stage_group_rewrites(&runtime, 5).await;
+    for k in 1..=5 {
+        directory.group(
+            &format!("user-group/g{k}"),
+            &format!("slack:U{k}"),
+            Some(&format!("other{k}@corp.example")),
+        );
+    }
+    let asked = directory.requests().len();
+    let decision = propose(&runtime, publish(&derived)).await;
+    assert!(
+        matches!(
+            decision,
+            HookDecision::Refuse {
+                class: appa_runtime_api::RefusalClass::ResolutionDiverged,
+                ..
+            }
+        ),
+        "{decision:?}"
+    );
+    assert_eq!(
+        directory.requests().len() - asked,
+        8,
+        "four selector reads and four lookups"
+    );
+}

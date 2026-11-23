@@ -6,15 +6,35 @@
 
 use crate::external::NoAnswerReason;
 
+/// Where a launch may still be refused.
+pub(crate) enum Launch<'a> {
+    /// Just before the spawn, where the command may still be configured.
+    Spawn(&'a mut tokio::process::Command),
+    /// The child is created suspended in its job, and has not run yet.
+    #[cfg(windows)]
+    Resume,
+}
+
 /// Spawn `command` as a process tree: confined before it starts, adopted once it has.
 /// A command that does not start is unreachable; a child that cannot be adopted is
-/// refused, and its `kill_on_drop` ends it.
+/// refused, and its `kill_on_drop` ends it. A launch `ready` refuses at any [`Launch`]
+/// never runs, and is refused with its reason.
 pub(crate) fn spawn(
     command: &mut tokio::process::Command,
+    mut ready: impl FnMut(Launch<'_>) -> Result<(), NoAnswerReason>,
 ) -> Result<(tokio::process::Child, ProcessTree), NoAnswerReason> {
     confine(command);
-    let child = crate::child_process::spawn_async(command).map_err(|_| NoAnswerReason::Unreachable)?;
+    let child = crate::child_process::spawn_async_when(command, |command| ready(Launch::Spawn(command)))?
+        .map_err(|_| NoAnswerReason::Unreachable)?;
     let tree = ProcessTree::adopt(&child)?;
+    #[cfg(windows)]
+    {
+        let thread = tree.suspended_thread(&child)?;
+        // The last check before the child runs. The job's termination ends a refused
+        // child while it is still suspended.
+        ready(Launch::Resume).inspect_err(|_| tree.kill())?;
+        tree.resume(&thread)?;
+    }
     Ok((child, tree))
 }
 
@@ -58,6 +78,28 @@ impl ProcessTree {
                 NoAnswerReason::Transport
             })
         }
+    }
+
+    /// The suspended child's one thread, opened to resume it.
+    #[cfg(windows)]
+    fn suspended_thread(
+        &self,
+        child: &tokio::process::Child,
+    ) -> Result<std::os::windows::io::OwnedHandle, NoAnswerReason> {
+        windows::only_thread(child).map_err(|error| self.not_resumed(error))
+    }
+
+    /// Let the suspended child run: everything it starts joins the job too.
+    #[cfg(windows)]
+    fn resume(&self, thread: &std::os::windows::io::OwnedHandle) -> Result<(), NoAnswerReason> {
+        windows::resume(thread).map_err(|error| self.not_resumed(error))
+    }
+
+    #[cfg(windows)]
+    fn not_resumed(&self, error: std::io::Error) -> NoAnswerReason {
+        tracing::warn!(%error, "the consult process could not be resumed in its job");
+        self.kill();
+        NoAnswerReason::Transport
     }
 
     /// End the child and every descendant. Cleanup runs after every outcome, so a
@@ -142,21 +184,23 @@ mod windows {
         let process = child
             .raw_handle()
             .ok_or_else(|| io::Error::other("the child has already been reaped"))?;
-        let pid = child
-            .id()
-            .ok_or_else(|| io::Error::other("the child has already been reaped"))?;
         let job = owned(unsafe { CreateJobObjectW(null(), null()) })?;
         kill_on_close(&job)?;
         if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        let tree = ProcessTree {
+        Ok(ProcessTree {
             root: duplicate(process)?,
             job,
-        };
-        // Once in the job, the child may run: everything it starts joins the job too.
-        resume_only_thread(pid).inspect_err(|_| kill(&tree.job))?;
-        Ok(tree)
+        })
+    }
+
+    /// Once in the job, the child may run.
+    pub(super) fn resume(thread: &OwnedHandle) -> io::Result<()> {
+        if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub(super) fn kill(job: &OwnedHandle) {
@@ -210,7 +254,10 @@ mod windows {
 
     /// A process created suspended has exactly one thread, which has not run yet.
     /// Anything else means the pid is not the child this tree adopted.
-    fn resume_only_thread(pid: u32) -> io::Result<()> {
+    pub(super) fn only_thread(child: &tokio::process::Child) -> io::Result<OwnedHandle> {
+        let pid = child
+            .id()
+            .ok_or_else(|| io::Error::other("the child has already been reaped"))?;
         let snapshot = owned(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
         let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
         entry.dwSize = size_of::<THREADENTRY32>() as u32;
@@ -228,11 +275,7 @@ mod windows {
                 threads.len()
             )));
         };
-        let thread = owned(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread) })?;
-        if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        owned(unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread) })
     }
 }
 
@@ -293,7 +336,8 @@ mod tests {
 
     #[tokio::test]
     async fn killing_the_tree_ends_every_process_holding_the_pipe() {
-        let (mut child, tree) = super::spawn(&mut shell(&format!("{HELPER} {BLOCK}"))).expect("the shell starts");
+        let (mut child, tree) =
+            super::spawn(&mut shell(&format!("{HELPER} {BLOCK}")), |_| Ok(())).expect("the shell starts");
         let mut stdout = child.stdout.take().expect("stdout is piped");
         tree.kill();
         let mut rest = Vec::new();
@@ -302,5 +346,34 @@ mod tests {
             .expect("no process of the tree keeps the pipe open")
             .expect("the pipe reads to its end");
         tree.root_exited().await.expect("the root's exit is observed");
+    }
+
+    /// A launch refused while the child is suspended in its job is refused with its reason,
+    /// and the child never runs. The same launch unrefused runs, so the check can fail.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_launch_refused_before_its_child_resumes_never_runs() {
+        use super::Launch;
+        use crate::external::NoAnswerReason;
+
+        let marker = |name: &str| std::env::temp_dir().join(format!("appa-{name}-{}", std::process::id()));
+        let (refused, resumed) = (marker("refused"), marker("resumed"));
+        let writes = |path: &std::path::Path| shell(&format!("echo ran > \"{}\"", path.display()));
+
+        let outcome = super::spawn(&mut writes(&refused), |launch| match launch {
+            Launch::Spawn(_) => Ok(()),
+            Launch::Resume => Err(NoAnswerReason::Timeout),
+        });
+        assert_eq!(outcome.err(), Some(NoAnswerReason::Timeout));
+
+        let (mut child, _tree) = super::spawn(&mut writes(&resumed), |_| Ok(())).expect("the shell starts");
+        let status = tokio::time::timeout(WITHIN, child.wait())
+            .await
+            .expect("the shell exits")
+            .expect("the exit is observed");
+        assert!(status.success());
+        assert!(resumed.exists());
+        assert!(!refused.exists());
+        let _ = std::fs::remove_file(&resumed);
     }
 }

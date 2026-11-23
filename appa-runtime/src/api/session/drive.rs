@@ -154,9 +154,14 @@ impl<Refusal> From<EventError> for Judged<Refusal> {
     }
 }
 
-/// The most external-resolution rounds one invocation runs before refusing operationally.
-/// Gathering is designed to close at least one ask per round, so this cap never fires on a
-/// healthy deployment; it bounds the blast radius of a gathering bug or a hostile external.
+/// The most external-resolution rounds (consult batches) one decision at one policy revision
+/// gathers before refusing operationally. A decision whose append meets a moved head, while
+/// this view now serves that head, is made again there with fresh evidence and a fresh
+/// budget; [`PUBLISHES_FOLLOWED`] bounds those attempts, the first one included.
+/// Gathering closes at least one ask per round, so the cap bounds how long one decision
+/// asks, not whether it converges: it stops a gathering bug or a hostile external, and also
+/// a call whose staged rewrites owe more batches than this (each candidate judged in turn
+/// can owe a selector read and a member lookup).
 pub(in crate::api) const RESOLUTION_ROUNDS: u32 = 8;
 
 /// How many publishes one event follows before it refuses. Each one means the head moved
@@ -798,11 +803,13 @@ impl Session {
         // did not hold. Rounds are finite, so a round that changes nothing is the only
         // way this loop fails to converge.
         let mut evidence: Vec<ExternalEvidence> = Vec::new();
-        for _ in 0..RESOLUTION_ROUNDS {
+        // One engine pass beyond the last batch hands that batch's answers to the engine.
+        for consulted in 0..=RESOLUTION_ROUNDS {
             let carried = evidence.clone();
             let entering = carried.is_empty();
             let decision = self.drive(&policy, entering, opening, |context| event(context, carried.clone()))?;
             match decision.then {
+                Next::ResolveExternal(_) if consulted == RESOLUTION_ROUNDS => break,
                 // The engine batches every missing answer into one request set, and evidence
                 // is matched by name, never by position. Without a reviewer the
                 // consults run concurrently — an annotation consult can take a model call's
@@ -834,9 +841,8 @@ impl Session {
                 return Err(EventError::UnexpectedDecision);
             }
         }
-        // Every round is supposed to close at least one ask for good; a run this long is a
-        // gathering bug or a hostile external, and the invocation refuses operationally
-        // rather than hold the turn lease against a source forever.
+        // The invocation refuses operationally rather than hold the turn lease against its
+        // sources for longer than the cap allows.
         Err(EventError::ResolutionDiverged {
             rounds: RESOLUTION_ROUNDS,
         })
@@ -962,7 +968,7 @@ impl Session {
             };
             match appended {
                 Ok(()) => {
-                    self.inner.shared.spawn_holds.appended();
+                    self.inner.shared.spawn_holds.appended(&self.root);
                     self.inner.deliver_records(&self.root);
                     if let Some(slot) = opening.took {
                         *slot.lock().expect("the slot's lock is never poisoned") = took;

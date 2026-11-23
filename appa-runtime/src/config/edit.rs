@@ -42,8 +42,9 @@ fn include_list(document: &mut DocumentMut) -> Result<&mut toml_edit::Array, Con
 }
 
 /// The text with `include` in its include list once: unchanged when it is
-/// there, under any spelling that names the same battery. A spelling no loader
-/// would resolve is refused here rather than written.
+/// there, under any spelling that names the same battery. A spelling the hosted
+/// loader would refuse, absolute or holding a `..` segment, is refused here rather
+/// than written.
 pub fn add_include(text: &str, include: &str) -> Result<String, ConfigError> {
     add_include_before(text, include, &[])
 }
@@ -341,8 +342,8 @@ mod tests {
         assert_eq!(ordered(&appended), ["github", "coding", "claude-code", "slack"]);
     }
 
-    /// A spelling no loader resolves is refused before it reaches the document, with
-    /// the refusal the loader itself would answer.
+    /// A spelling the hosted loader refuses is refused before it reaches the document,
+    /// with the refusal that loader itself would answer.
     #[test]
     fn an_include_the_loader_would_refuse_is_never_written() {
         assert!(matches!(

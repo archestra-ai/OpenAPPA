@@ -118,14 +118,12 @@ async fn run(runtime: &Arc<Runtime>, root: &str, proposed: ProposedCall, body: &
 /// its result.
 async fn run_then(runtime: &Arc<Runtime>, root: &str, proposed: ProposedCall, body: &str, command: impl FnOnce()) {
     let mut decision = propose(runtime, root, clone(&proposed)).await;
-    if let HookDecision::DenyCall { feedback, .. } = &decision {
-        let offer = feedback
-            .split("offer_id: \"")
-            .nth(1)
-            .and_then(|rest| rest.split('"').next())
+    if let HookDecision::DenyCall { feedback, offers, .. } = &decision {
+        let offer = offers
+            .first()
             .unwrap_or_else(|| panic!("a refused call offers a remedy: {feedback}"));
         assert!(matches!(
-            runtime.execute_remedy(&actor(root), OfferId(offer.to_string())).await,
+            runtime.execute_remedy(&actor(root), OfferId(offer.id.clone())).await,
             RemedyOutcome::Authorized { .. }
         ));
         decision = propose(runtime, root, clone(&proposed)).await;
