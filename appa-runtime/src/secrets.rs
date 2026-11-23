@@ -7,6 +7,11 @@
 //! each, and masks the union. Every key is searched for, inside other values too. The
 //! guarantee: an assignment's or a netrc entry's secret is masked whenever the text is
 //! consistent with at least one of the four readings.
+//!
+//! A known residual: a key inside a value, whose own value then runs over a line break,
+//! can hide a netrc entry on the next line from every reading's masked view. The scan of
+//! the text as given misses that entry too when its login holds a space, as in
+//! `PASSWORD="x TOKEN='y"` followed by `machine h login token='a b' password hunter2`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
