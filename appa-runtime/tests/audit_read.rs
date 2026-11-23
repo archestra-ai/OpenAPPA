@@ -220,7 +220,7 @@ fn first_offer(feedback: &str) -> OfferId {
 
 fn feedback_of(decision: &HookDecision) -> String {
     match decision {
-        HookDecision::DenyCall { feedback, .. } | HookDecision::Block { reason: feedback } => feedback.clone(),
+        HookDecision::DenyCall { feedback, .. } | HookDecision::Block { reason: feedback, .. } => feedback.clone(),
         other => panic!("expected a refusal carrying feedback, got {other:?}"),
     }
 }

@@ -143,9 +143,19 @@ pub(crate) enum CallReads<'a> {
     Static,
 }
 
+/// How a check meets the comparisons its membership context leaves undecided.
+#[derive(Clone, Copy)]
+enum Undecided {
+    /// A `blocked` mark decides the call whatever they answer, so the check closes without them.
+    ClosedByBlocked,
+    /// Each is asked: an advisory reading, and the check before a `blocked` mark closed it.
+    Asked,
+}
+
 /// The state-only evaluation of an argument-independent annotation — the one path a recovery
 /// route may check a tool over before any call to it exists (RMD-20). Same gap logic as
-/// [`evaluate_state`], at the origin stage, reading no call.
+/// [`evaluate_state`], at the origin stage, reading no call. Advisory, so it asks every
+/// undecided comparison.
 pub(crate) fn evaluate_static(
     annotation: &StaticAnnotation<'_>,
     current: &Label,
@@ -153,7 +163,7 @@ pub(crate) fn evaluate_static(
     has_reserved: &impl Fn(&EffectKind) -> bool,
     context: &MembershipContext<'_>,
 ) -> Result<RawBlock, MembershipNeeded> {
-    evaluate_state(
+    evaluate_state_under(
         annotation.annotation(),
         current,
         has_committed,
@@ -161,7 +171,30 @@ pub(crate) fn evaluate_static(
         CallReads::Static,
         &CallStage::default(),
         context,
+        Undecided::Asked,
     )
+}
+
+/// Whether the check decides this call under `context` with every undecided comparison asked:
+/// the check a hard block's planning gate stood behind before a `blocked` mark closed it.
+pub(crate) fn decides_asking(
+    annotation: &ToolAnnotation,
+    views: &Views,
+    call: &ResolvedCall,
+    stage: &CallStage,
+    context: &MembershipContext<'_>,
+) -> bool {
+    evaluate_state_under(
+        annotation,
+        &views.current_label(),
+        &|kind| views.has_effect(kind),
+        &|kind| views.has_reservation(kind),
+        CallReads::Resolved(call),
+        stage,
+        context,
+        Undecided::Asked,
+    )
+    .is_ok()
 }
 
 /// Evaluate one call against the branch views. Pure: a function of the annotation, the views,
@@ -206,6 +239,29 @@ pub(crate) fn evaluate_state(
     stage: &CallStage,
     context: &MembershipContext<'_>,
 ) -> Result<RawBlock, MembershipNeeded> {
+    evaluate_state_under(
+        annotation,
+        current,
+        has_committed,
+        has_reserved,
+        reads,
+        stage,
+        context,
+        Undecided::ClosedByBlocked,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_state_under(
+    annotation: &ToolAnnotation,
+    current: &Label,
+    has_committed: &impl Fn(&EffectKind) -> bool,
+    has_reserved: &impl Fn(&EffectKind) -> bool,
+    reads: CallReads<'_>,
+    stage: &CallStage,
+    context: &MembershipContext<'_>,
+    undecided: Undecided,
+) -> Result<RawBlock, MembershipNeeded> {
     let committed = match reads {
         CallReads::Resolved(call) => current.combine(&call.output_label(annotation)),
         CallReads::Static => committed_label(annotation, current),
@@ -234,8 +290,12 @@ pub(crate) fn evaluate_state(
     }
     // An undecided comparison keeps the check open, because a requirement that is neither held
     // nor refuted cannot be planned over yet. A `blocked` mark decides the call whatever the
-    // comparison answers, so the check closes without it.
-    if !needed.is_empty() && !gaps.iter().any(Gap::is_blocked) {
+    // comparison answers, so a live check closes without it.
+    let closed = match undecided {
+        Undecided::ClosedByBlocked => gaps.iter().any(Gap::is_blocked),
+        Undecided::Asked => false,
+    };
+    if !needed.is_empty() && !closed {
         needed.sort();
         needed.dedup();
         return Err(MembershipNeeded { needed });

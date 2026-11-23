@@ -598,13 +598,14 @@ pub struct Accepted {
     pub names_children: Vec<TrajectoryId>,
 }
 
-/// A denial's outcomes as the wire states them, held to the invariants [`Outcomes`] keeps.
+/// A refusal's outcomes as the wire states them, held to the invariants [`Outcomes`] keeps;
+/// `remedies` says the decision names offers or reviews, which a missing fact never does.
 /// A remediable denial's deciding outcome is the cheapest offer's, so it is read, not derived.
 fn refusal_outcomes(
     held: Option<Vec<Outcome>>,
     deciding: Option<Outcome>,
     retry: Option<RetryHint>,
-    offered: bool,
+    remedies: bool,
 ) -> Result<Option<Outcomes>, &'static str> {
     let (held, deciding) = match (held, deciding, retry) {
         (None, None, None) => return Ok(None),
@@ -612,11 +613,13 @@ fn refusal_outcomes(
         (Some(_), None, _) => return Err("outcomes without their deciding one"),
         (Some(held), Some(deciding), _) => (held, deciding),
     };
-    Ok(Some(match (held.as_slice(), deciding, retry, offered) {
+    Ok(Some(match (held.as_slice(), deciding, retry, remedies) {
         ([Outcome::Integrity], Outcome::Integrity, None, _) => Outcomes::Integrity,
         ([Outcome::HardBlock], Outcome::HardBlock, None, _) => Outcomes::HardBlock,
         ([Outcome::MissingFact], Outcome::MissingFact, Some(retry), false) => Outcomes::MissingFact(retry),
-        (_, _, Some(_), _) => return Err("a retry hint on anything but a missing fact alone, with no offers"),
+        (_, _, Some(_), _) => {
+            return Err("a retry hint on anything but a missing fact alone, with no offers or reviews");
+        }
         (_, deciding, None, _) => {
             let deciding = deciding
                 .remedy()
@@ -1490,13 +1493,13 @@ impl WireDecision {
                 ),
                 ..Self::refusal(outcomes.as_ref(), DecisionName::DenyCall)
             },
-            HookDecision::Block { reason } => Self {
+            HookDecision::Block { reason, outcomes } => Self {
                 reason: Some(reason.clone()),
-                ..Self::bare(DecisionName::Block)
+                ..Self::refusal(outcomes.as_ref(), DecisionName::Block)
             },
-            HookDecision::ReplaceOutput { output } => Self {
+            HookDecision::ReplaceOutput { output, outcomes } => Self {
                 output: Some(output.clone()),
-                ..Self::bare(DecisionName::ReplaceOutput)
+                ..Self::refusal(outcomes.as_ref(), DecisionName::ReplaceOutput)
             },
             HookDecision::DeliverValue { value } => Self {
                 value: Some(value.clone()),
@@ -1535,6 +1538,18 @@ impl WireDecision {
         let name = self.decision;
         let missing = |field: &str| malformed(format!("{name:?} without its {field}"));
         let required = |field: &str, value: Option<String>| value.ok_or_else(|| missing(field));
+        let (held, deciding, retry) = (self.outcomes, self.deciding, self.retry);
+        let stated = |remedies: bool| {
+            refusal_outcomes(held.clone(), deciding, retry, remedies)
+                .map_err(|problem| malformed(format!("{name:?} with {problem}")))
+        };
+        match name {
+            DecisionName::DenyCall | DecisionName::Block | DecisionName::ReplaceOutput | DecisionName::Refuse => {}
+            _ if held.is_some() || deciding.is_some() || retry.is_some() => {
+                return Err(malformed(format!("{name:?} with refusal outcomes")));
+            }
+            _ => {}
+        }
         Ok(match name {
             DecisionName::Ack => HookDecision::Ack,
             DecisionName::AllowCall => HookDecision::AllowCall {
@@ -1542,9 +1557,9 @@ impl WireDecision {
             },
             DecisionName::PassControl => HookDecision::PassControl,
             DecisionName::DenyCall => {
-                let offered = self.offers.as_ref().is_some_and(|offers| !offers.is_empty());
-                let outcomes = refusal_outcomes(self.outcomes, self.deciding, self.retry, offered)
-                    .map_err(|problem| malformed(format!("{name:?} with {problem}")))?;
+                let remedies = self.offers.as_ref().is_some_and(|offers| !offers.is_empty())
+                    || self.review.as_ref().is_some_and(|review| !review.is_empty());
+                let outcomes = stated(remedies)?;
                 HookDecision::DenyCall {
                     feedback: required("feedback", self.feedback)?,
                     offers: self
@@ -1582,9 +1597,11 @@ impl WireDecision {
             }
             DecisionName::Block => HookDecision::Block {
                 reason: required("reason", self.reason)?,
+                outcomes: stated(false)?,
             },
             DecisionName::ReplaceOutput => HookDecision::ReplaceOutput {
                 output: required("output", self.output)?,
+                outcomes: stated(false)?,
             },
             DecisionName::DeliverValue => HookDecision::DeliverValue {
                 value: required("value", self.value)?,
@@ -1596,9 +1613,12 @@ impl WireDecision {
             DecisionName::Context => HookDecision::Context {
                 text: required("text", self.text)?,
             },
-            DecisionName::Refuse => HookDecision::Refuse {
-                class: self.class.ok_or_else(|| missing("class"))?,
-                detail: required("detail", self.detail)?,
+            DecisionName::Refuse => match stated(false)? {
+                None | Some(Outcomes::Integrity) => HookDecision::Refuse {
+                    class: self.class.ok_or_else(|| missing("class"))?,
+                    detail: required("detail", self.detail)?,
+                },
+                Some(_) => return Err(malformed(format!("{name:?} with an outcome other than integrity"))),
             },
             DecisionName::Held => HookDecision::Held {
                 running: self.running.ok_or_else(|| missing("running"))?,
@@ -1706,6 +1726,26 @@ mod tests {
             assert!(
                 matches!(wire.into_decision(), Err(ParseRefusal::Malformed { .. })),
                 "{fields}"
+            );
+        }
+        let missing = r#""outcomes":["missing_fact"],"deciding":"missing_fact","retry":"later""#;
+        let integrity = r#""outcomes":["integrity"],"deciding":"integrity""#;
+        for body in [
+            format!(
+                r#"{{"protocol":1,"decision":"deny_call","feedback":"no","review":[{{"offer_id":"o1","text":"approve?"}}],{missing}}}"#
+            ),
+            format!(r#"{{"protocol":1,"decision":"allow_call",{integrity}}}"#),
+            r#"{"protocol":1,"decision":"ack","deciding":"integrity"}"#.to_string(),
+            r#"{"protocol":1,"decision":"deliver_value","value":"v","retry":"later"}"#.to_string(),
+            r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"d","outcomes":["hard_block"],"deciding":"hard_block"}"#
+                .to_string(),
+            r#"{"protocol":1,"decision":"block","reason":"r","outcomes":["missing_fact"],"deciding":"missing_fact"}"#
+                .to_string(),
+        ] {
+            let wire: WireDecision = serde_json::from_str(&body).expect("reads");
+            assert!(
+                matches!(wire.into_decision(), Err(ParseRefusal::Malformed { .. })),
+                "{body}"
             );
         }
     }
@@ -3142,9 +3182,15 @@ mod tests {
             },
             HookDecision::Block {
                 reason: "r".to_string(),
+                outcomes: None,
+            },
+            HookDecision::Block {
+                reason: "r".to_string(),
+                outcomes: Some(Outcomes::MissingFact(RetryHint::AfterRepair)),
             },
             HookDecision::ReplaceOutput {
                 output: "o".to_string(),
+                outcomes: Some(Outcomes::Remediable(Remediable::new(Remedy::Consent, []))),
             },
             HookDecision::DeliverValue { value: "v".to_string() },
             HookDecision::ChildReturn { value: "v".to_string() },

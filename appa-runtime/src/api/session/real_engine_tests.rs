@@ -3379,10 +3379,21 @@ async fn a_bound_sanitizer_no_answer_withholds_and_stays_retryable() {
         ToolCallDecision::Deny { .. },
     ));
     let decision = run_sanitize_offer(&runtime, &mut session).await;
-    let ToolResultDecision::Replace { placeholder, .. } = decision else {
+    let ToolResultDecision::Replace {
+        placeholder,
+        presentation,
+    } = decision
+    else {
         panic!("the raw must be withheld");
     };
     assert!(!placeholder.contains("pii"), "the raw body never reaches the model");
+    assert_eq!(
+        presentation.and_then(|presentation| presentation.outcomes),
+        Some(appa_runtime_api::Outcomes::MissingFact(
+            appa_runtime_api::RetryHint::AfterRepair
+        )),
+        "a malformed derivation is repaired, not waited out",
+    );
     assert!(
         runtime.open_dispatches(&root(), &root()).pop().is_some(),
         "a no-answer sanitizer leaves the dispatch open so the return may be retried",
@@ -6033,6 +6044,48 @@ async fn a_permanently_contended_proposal_is_denied_on_a_missing_fact() {
         ),
         "{decision:?}"
     );
+}
+
+/// So does the inventory a contended proposal carries: it cannot land, and the call is
+/// denied on the same missing fact rather than refused as a fault.
+#[tokio::test]
+async fn a_contended_proposals_inventory_denies_it_on_a_missing_fact() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open_runtime(&dir);
+    let adapter = appa_adapter_claude_code::adapter();
+    let inventory = |tool: &str| {
+        format!(
+            r#""inventory":{{"tools":[{{"name":"{tool}","tool":"{tool}"}}],"sources":[{{"server":"builtin","status":"complete","dynamic":false}}]}}"#
+        )
+    };
+    let opening = format!(
+        r#"{{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"busy",{}}}"#,
+        inventory("Bash")
+    );
+    let answer = |body: String| {
+        let runtime = &runtime;
+        let adapter = &adapter;
+        async move {
+            crate::hooks::answer(
+                runtime,
+                adapter,
+                appa_runtime_api::PrincipalSource::None,
+                body.as_bytes(),
+            )
+            .await
+        }
+    };
+    assert_eq!(answer(opening).await.0, 200);
+    runtime.store().contend_next_appends(REPLAY_LIMIT as u64 * 4);
+    let (status, reply) = answer(format!(
+        r#"{{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"busy","call_id":"toolu-1","tool":"Read","spawn":false,"arguments":{{"file_path":"a"}},{}}}"#,
+        inventory("Read")
+    ))
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["decision"], "deny_call", "{reply}");
+    assert_eq!(reply["deciding"], "missing_fact", "{reply}");
+    assert_eq!(reply["retry"], "later", "{reply}");
 }
 
 fn control_call(name: &str) -> ProposedCall {

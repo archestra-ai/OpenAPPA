@@ -291,6 +291,51 @@ async fn an_unanswered_source_denies_on_a_missing_fact() {
     );
 }
 
+/// A call that reads two groups: one source answers 404, which only a repair fixes; the other
+/// reports a member whose lookup answers 503, which a later try may get past. The repair
+/// decides the hint, whichever consult round failed last.
+#[tokio::test]
+async fn a_lost_selector_outranks_a_later_lookup_failure() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let router = Router::new().route(
+        "/audience",
+        post(|body: String| async move {
+            let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+            match (
+                request["artifact"]["member"].is_string(),
+                body.contains("user-group/gone"),
+            ) {
+                (true, _) => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "busy".to_string()),
+                (false, true) => (axum::http::StatusCode::NOT_FOUND, "missing".to_string()),
+                (false, false) => (
+                    axum::http::StatusCode::OK,
+                    serde_json::json!({ "version": 1, "answer": { "members": ["slack:U-bob"] } }).to_string(),
+                ),
+            }
+        }),
+    );
+    let url = format!("{}/audience", serve(router).await);
+    let both = "[[policy.tool]]\nname = \"send_both\"\nrequires = { audience = { contains = [\"@slack:user-group/gone\", \"@slack:user-group/team\"] } }\ndelta = {}\n\n";
+    let policy = POLICY
+        .replace(SLACK_BINDING, LOOKUP_URL_BINDINGS)
+        .replace("[externals]", &format!("{both}[externals]"));
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+
+    let decision = propose(
+        &runtime,
+        ProposedCall {
+            tool: "send_both".to_string(),
+            arguments: raw(serde_json::json!({})),
+            cwd: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { outcomes, .. } = decision else {
+        panic!("the call is denied, got {decision:?}");
+    };
+    assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::AfterRepair)));
+}
+
 /// `send` with the reserved `blocked` mark beside its recipient check.
 const BLOCKED_SEND: &str = r#"
 [[policy.tool]]

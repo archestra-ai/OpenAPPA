@@ -569,10 +569,10 @@ impl SessionInner {
             // `DeliverValue` carries what the engine admitted in place of the
             // raw result, so it is sealed for the reason `ChildReturn` is
             // substituted: the model reads it, and the tool did not write it.
-            HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
+            HookDecision::ReplaceOutput { output, .. } | HookDecision::DeliverValue { value: output } => {
                 (output, DeliveryDisposition::Sealed)
             }
-            HookDecision::Block { reason } => (reason, DeliveryDisposition::Sealed),
+            HookDecision::Block { reason, .. } => (reason, DeliveryDisposition::Sealed),
             other => return failed(format!("the runtime answered a tool outcome with {other:?}")),
         };
         encode(DispatchResponse::Delivered {
@@ -788,7 +788,7 @@ impl SessionInner {
                 other => return failed(format!("the runtime answered the echoed return with {other:?}")),
             },
             // A held return keeps the branch live: the child may return again.
-            HookDecision::Block { reason } => return encode(ReturnResponse::Blocked { feedback: reason }),
+            HookDecision::Block { reason, .. } => return encode(ReturnResponse::Blocked { feedback: reason }),
             other => return failed(format!("the runtime answered a child return with {other:?}")),
         };
         let decision = self.event(HookEvent::SpawnResult {
@@ -816,7 +816,7 @@ impl SessionInner {
                     disposition,
                 }
             }
-            HookDecision::Block { reason } => ReturnResponse::Blocked { feedback: reason },
+            HookDecision::Block { reason, .. } => ReturnResponse::Blocked { feedback: reason },
             other => return failed(format!("the runtime answered a spawn result with {other:?}")),
         })
     }

@@ -887,6 +887,8 @@ pub enum HookDecision {
     },
     Block {
         reason: String,
+        /// Why the value was refused, as on [`HookDecision::DenyCall`].
+        outcomes: Option<Outcomes>,
     },
     /// The runtime's own words in place of the result: a notice that
     /// nothing was admitted, or the narrowing this result would cause
@@ -895,6 +897,8 @@ pub enum HookDecision {
     /// into names its model dispatches spells this text.
     ReplaceOutput {
         output: String,
+        /// Why the result was withheld, when a refusal withheld it.
+        outcomes: Option<Outcomes>,
     },
     /// The value the engine admitted in place of the raw result: a
     /// confined result the check let through, or a sanitizer's

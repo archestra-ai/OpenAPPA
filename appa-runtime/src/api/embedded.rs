@@ -448,11 +448,10 @@ impl Runtime {
             PriorCall::Open
         );
         if !open {
-            match session
+            let proposed = session
                 .propose_with_held(call.clone(), Some(call_id.to_string()), message.clone())
-                .await
-                .map_err(peer_error)?
-            {
+                .await;
+            match proposed.or_else(|error| ToolCallDecision::missing_fact(&error).ok_or_else(|| peer_error(error)))? {
                 ToolCallDecision::Deny {
                     feedback,
                     outcomes,
@@ -621,7 +620,10 @@ fn outcome_of(decision: ToolResultDecision, proved: PriorCall) -> Result<Embedde
             placeholder,
             presentation,
         } => Ok(EmbeddedHookOutcome {
-            decision: HookDecision::ReplaceOutput { output: placeholder },
+            decision: HookDecision::ReplaceOutput {
+                output: placeholder,
+                outcomes: presentation.as_ref().and_then(|presentation| presentation.outcomes),
+            },
             presentation,
         }),
         ToolResultDecision::Keep => {
@@ -777,7 +779,7 @@ impl TryFrom<&HookDecision> for StoredOutcome {
     fn try_from(decision: &HookDecision) -> Result<Self, Self::Error> {
         match decision {
             HookDecision::DeliverValue { value } => Ok(Self::Deliver { value: value.clone() }),
-            HookDecision::ReplaceOutput { output } => Ok(Self::Replace { output: output.clone() }),
+            HookDecision::ReplaceOutput { output, .. } => Ok(Self::Replace { output: output.clone() }),
             HookDecision::Ack => Err(refused("the read was acknowledged without an admitted body")),
             HookDecision::AllowCall { .. }
             | HookDecision::PassControl
@@ -796,7 +798,7 @@ impl From<StoredOutcome> for HookDecision {
     fn from(stored: StoredOutcome) -> Self {
         match stored {
             StoredOutcome::Deliver { value } => HookDecision::DeliverValue { value },
-            StoredOutcome::Replace { output } => HookDecision::ReplaceOutput { output },
+            StoredOutcome::Replace { output } => HookDecision::ReplaceOutput { output, outcomes: None },
         }
     }
 }

@@ -179,10 +179,10 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::Context { text } => {
             let _: String = text;
         }
-        HookDecision::Block { reason } => {
+        HookDecision::Block { reason, .. } => {
             let _: String = reason;
         }
-        HookDecision::ReplaceOutput { output } => {
+        HookDecision::ReplaceOutput { output, .. } => {
             let _: String = output;
         }
         HookDecision::DeliverValue { value } => {

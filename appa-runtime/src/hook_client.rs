@@ -417,6 +417,7 @@ fn refused(event: &HookEvent, answered: Option<HookDecision>, failure: &str) -> 
             Some(decision) if stands_in_for_a_result(&decision) => decision,
             _ => HookDecision::Block {
                 reason: unchecked_reason(event, &format!("the runtime refused this hook: {failure}")),
+                outcomes: None,
             },
         }),
     }
@@ -496,6 +497,7 @@ fn withholding(codec: &Codec, hook: Unanswered<'_>, failure: &str) -> Option<ser
                 event,
                 &HookDecision::Block {
                     reason: unchecked_reason(event, &format!("the runtime did not answer this hook: {failure}")),
+                    outcomes: None,
                 },
             )
         }),

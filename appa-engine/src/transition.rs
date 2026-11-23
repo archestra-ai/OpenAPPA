@@ -1948,7 +1948,9 @@ impl<'a> Sequence<'a> {
                 };
                 // The live act answered this whole gate before planning; the enumeration may
                 // read less, but the gathered evidence is still the operation's own ask.
-                self.audit_atoms(crate::plan::gate_atoms(self.engine.registry(), &contract, &block));
+                self.audit_gate(&contract, &block, || {
+                    crate::check::decides_asking(&contract, views, candidate, &stage, &context)
+                });
                 let blocked = || crate::plan::BlockedCall {
                     call: candidate,
                     contract: &contract,
@@ -2159,10 +2161,11 @@ impl<'a> Sequence<'a> {
         // atoms and the chosen plan's — before ruling; mirror the same ask here.
         let stage = views.call_stage(&recorded.subject);
         let role = views.call_role(&recorded.subject);
-        if let Ok(CheckOutcome::Block(raw)) =
-            crate::check::evaluate(&contract, &views, call, &stage, role, &self.context(&expansions))
-        {
-            self.audit_atoms(crate::plan::gate_atoms(self.engine.registry(), &contract, &raw));
+        let context = self.context(&expansions);
+        if let Ok(CheckOutcome::Block(raw)) = crate::check::evaluate(&contract, &views, call, &stage, role, &context) {
+            self.audit_gate(&contract, &raw, || {
+                crate::check::decides_asking(&contract, &views, call, &stage, &context)
+            });
         }
         self.audit_atoms(crate::plan::plan_atoms(self.engine.registry(), offered));
         self.audit_reads(&expansions);
@@ -2758,7 +2761,9 @@ impl<'a> Sequence<'a> {
             if let Ok(CheckOutcome::Block(raw)) =
                 crate::check::evaluate(&contract, &final_views, call, &CallStage::default(), role, &context)
             {
-                self.audit_atoms(crate::plan::gate_atoms(self.engine.registry(), &contract, &raw));
+                self.audit_gate(&contract, &raw, || {
+                    crate::check::decides_asking(&contract, &final_views, call, &CallStage::default(), &context)
+                });
             }
         }
         let expected: Vec<&DispatchId> = composed.iter().flatten().map(|release| &release.dispatch).collect();
@@ -3296,6 +3301,15 @@ impl<'a> Sequence<'a> {
         self.audit.borrow_mut().read(expansions.reads());
     }
 
+    /// Count a block's planning gate as asked where the act that recorded it reached the gate:
+    /// every act reaches a soft block's. A hard block's was reached only by a planner whose
+    /// check asked every comparison, so only where `asked_all` says the evidence answered them.
+    fn audit_gate(&self, contract: &ToolAnnotation, raw: &crate::check::RawBlock, asked_all: impl FnOnce() -> bool) {
+        if !raw.is_hard() || asked_all() {
+            self.audit_atoms(crate::plan::gate_atoms(self.engine.registry(), contract, raw));
+        }
+    }
+
     /// Contribute the deterministic gate atoms the live act answered before this record's
     /// decision ran — a validation that re-derives less than the live gates demanded still
     /// justifies the evidence those gates gathered.
@@ -3610,7 +3624,9 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         // The live hop's act gated the standing block's whole atom set before offering.
-        self.audit_atoms(crate::plan::gate_atoms(registry, &before_contract, &before));
+        self.audit_gate(&before_contract, &before, || {
+            crate::check::decides_asking(&before_contract, &views, predecessor, &stage, &context)
+        });
         self.audit_inherit(&recorded.evidence)?;
         self.audit_reads(expansions);
         Ok(())

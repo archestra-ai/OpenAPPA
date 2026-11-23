@@ -374,6 +374,7 @@ impl Session {
                     outcome_decision(decision, &self.deployment().externals)?;
                     return Ok(SpawnResultDecision::Return(ChildReturnDecision::Blocked {
                         feedback: UNCHECKED_RETURN.to_string(),
+                        outcomes: appa_runtime_api::Outcomes::Integrity,
                     }));
                 }
             }

@@ -601,7 +601,7 @@ impl Run<'_> {
                     other => return Err(unexpected("an echoed child return", &other)),
                 }
             }
-            HookDecision::Block { reason } => self.unadmitted_return(parent, reason).await,
+            HookDecision::Block { reason, .. } => self.unadmitted_return(parent, reason).await,
             // The return could not be judged; it is withheld like a blocked one and the
             // parent goes on. Only a refused lifecycle event ends the run.
             HookDecision::Refuse { detail, .. } => self.unadmitted_return(parent, withheld(&detail)).await,
@@ -692,7 +692,7 @@ impl Run<'_> {
                 .await;
                 Ok(raw)
             }
-            HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
+            HookDecision::ReplaceOutput { output, .. } | HookDecision::DeliverValue { value: output } => {
                 self.record(
                     frame,
                     Record::Substituted {
@@ -703,7 +703,7 @@ impl Run<'_> {
                 .await;
                 Ok(output)
             }
-            HookDecision::Block { reason } => {
+            HookDecision::Block { reason, .. } => {
                 self.record(
                     frame,
                     Record::OutputBlocked {

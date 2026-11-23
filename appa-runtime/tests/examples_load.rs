@@ -320,9 +320,14 @@ async fn a_bound_secret_masker_delivers_the_masked_shell_output() {
         },
     )
     .await;
-    let HookDecision::ReplaceOutput { output } = delivered else {
+    let HookDecision::ReplaceOutput { output, outcomes } = delivered else {
         panic!("the masked output carries `internal`, a residual on a public session, got {delivered:?}");
     };
+    assert_eq!(
+        outcomes.map(|outcomes| outcomes.deciding()),
+        Some(appa_runtime_api::Outcome::Consent),
+        "the host learns the staged residual waits on consent"
+    );
     assert!(output.contains("public -> internal"), "never `self`: {output}");
     let RemedyOutcome::Returned { value } = runtime.execute_remedy(&actor(), last_offer(&output)).await else {
         panic!("accepting the residual returns the masked output");

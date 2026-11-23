@@ -306,6 +306,20 @@ pub(crate) enum ToolCallDecision {
     },
 }
 
+impl ToolCallDecision {
+    /// The denial a proposal gets when judging it met a fact it could not obtain, as every
+    /// proposal exit classifies it; `None` for any other error.
+    pub(crate) fn missing_fact(error: &EventError) -> Option<ToolCallDecision> {
+        error.missing_fact().map(|missing| ToolCallDecision::Deny {
+            feedback: format!("[appa] {}", missing.detail),
+            outcomes: appa_runtime_api::Outcomes::MissingFact(missing.retry),
+            offers: Vec::new(),
+            display: Vec::new(),
+            review: Vec::new(),
+        })
+    }
+}
+
 /// What the adapter gives the harness as the tool output. `Keep`: use
 /// the output as it is. `Deliver`: use this admitted value — a confined
 /// result the check let through, or a sanitizer's derivation — as it
@@ -463,9 +477,16 @@ impl RemedyRefusal {
                  blocked tool again with the same arguments; it will be checked again."
             }
             Self::Unanswered { annotator, class } => {
+                let retry = crate::engine::retry_hint(*class);
+                let again = match retry {
+                    appa_runtime_api::RetryHint::Later => ": call execute_remedy_plan again with the same offer id",
+                    appa_runtime_api::RetryHint::AfterRepair => "",
+                };
                 return std::borrow::Cow::Owned(format!(
-                    "annotator {annotator} gave no answer ({class}), so the plan was not applied. Nothing changed \
-                     and the offer still stands: call execute_remedy_plan again with the same offer id."
+                    "annotator {annotator} gave no answer: {}, so the plan was not applied. Nothing changed and the \
+                     offer still stands; {}{again}.",
+                    crate::engine::no_answer_description(*class),
+                    crate::engine::next_action(retry)
                 ));
             }
             Self::Runtime { detail } => detail,
@@ -595,6 +616,7 @@ pub(crate) enum ChildReturnDecision {
     Deferred,
     Blocked {
         feedback: String,
+        outcomes: appa_runtime_api::Outcomes,
     },
 }
 

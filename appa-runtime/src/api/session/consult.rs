@@ -184,8 +184,10 @@ impl Session {
                     },
                 };
                 let derived = match self.timed_consult(&consult, None, None, occasion, None).await {
-                    ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer).map(|answer| answer.body),
-                    ConsultOutcome::NoAnswer(_) => None,
+                    ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer)
+                        .map(|answer| answer.body)
+                        .ok_or(crate::events::NoAnswerClass::Malformed),
+                    ConsultOutcome::NoAnswer(reason) => Err((&reason).into()),
                 };
                 ExternalEvidence::Sanitizer {
                     sanitizer: sanitizer.clone(),

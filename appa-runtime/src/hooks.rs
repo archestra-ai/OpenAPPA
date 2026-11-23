@@ -75,7 +75,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
     {
         return answered;
     }
-    if let Some(answered) = names_a_childs_transcript(runtime, &event, &root, &names_children) {
+    if !refused_at_dispatch && let Some(answered) = names_a_childs_transcript(runtime, &event, &root, &names_children) {
         return answered;
     }
     let presentation = EmbeddedPresentationOptions {
@@ -367,10 +367,17 @@ fn observed(
 }
 
 /// One hook refused before it was dispatched, recorded against the trajectory it was about.
+/// A proposal refused on a fact it could not obtain is denied on it, as at dispatch.
 fn refused_hook(runtime: &Runtime, root: &TrajectoryId, event: &HookEvent, error: EventError) -> Answered {
     let (kind, tool) = hook_shape(event);
-    runtime.record(Some(root), bare_hook(kind, crate::events::HookOutcome::Refused, tool));
-    (409, wire(&refuse(error)))
+    let (status, decision) = match (event, error.missing_fact()) {
+        (HookEvent::ToolCall { .. }, Some(missing)) => {
+            (200, denied(missing.detail, Outcomes::MissingFact(missing.retry)))
+        }
+        _ => (409, refuse(error)),
+    };
+    runtime.record(Some(root), bare_hook(kind, hook_result(&decision).0, tool));
+    (status, wire(&decision))
 }
 
 /// A call whose arguments name a child of this family is refused before it runs: a
@@ -832,11 +839,14 @@ impl Dispatcher<'_> {
         let decision = match peer {
             Some(frame) => match self.runtime.receive_peer(&actor.root, &frame, &text) {
                 Ok(Received::Direct) => HookDecision::Ack,
-                Ok(Received::Held(notice)) => block(format!(
-                    "[appa] Peer message {} is held: taking it in would narrow this session, or no \
-                     protected sender stands behind it. The model can read it with read_peer_message.",
-                    notice.id.as_str()
-                )),
+                Ok(Received::Held(notice)) => HookDecision::Block {
+                    reason: format!(
+                        "[appa] Peer message {} is held: taking it in would narrow this session, or no \
+                         protected sender stands behind it. The model can read it with read_peer_message.",
+                        notice.id.as_str()
+                    ),
+                    outcomes: None,
+                },
                 Err(error) => {
                     tracing::warn!(root = %actor.root.0, %error, "the peer message was neither admitted nor held");
                     return refuse(error);
@@ -1187,7 +1197,7 @@ impl Dispatcher<'_> {
             }
             Err(error) if error.is_operational() => refuse(error),
             Err(_) if is_withheld_return(said.as_deref()) => HookDecision::Ack,
-            Err(error) => block(withheld_return_instruction(&error.to_string())),
+            Err(error) => block(withheld_return_instruction(&error.to_string()), Outcomes::Integrity),
         }
     }
 
@@ -1225,8 +1235,12 @@ fn outcome_decision(
             placeholder,
             presentation,
         } => {
+            let outcomes = presentation.as_ref().and_then(|presentation| presentation.outcomes);
             *embedded_presentation = presentation;
-            HookDecision::ReplaceOutput { output: placeholder }
+            HookDecision::ReplaceOutput {
+                output: placeholder,
+                outcomes,
+            }
         }
     }
 }
@@ -1260,7 +1274,7 @@ fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookD
         ChildReturnDecision::Staged { value } => HookDecision::ChildReturn { value },
         ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => HookDecision::Ack,
         ChildReturnDecision::Deferred => HookDecision::DeferReturn,
-        ChildReturnDecision::Blocked { feedback } => block(feedback),
+        ChildReturnDecision::Blocked { feedback, outcomes } => block(feedback, outcomes),
     }
 }
 
@@ -1461,10 +1475,10 @@ enum Refusal {
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
     match (error.missing_fact(), error.is_operational(), refusal) {
         (Some(missing), _, Refusal::Deny) => denied(missing.detail, Outcomes::MissingFact(missing.retry)),
-        (Some(missing), _, Refusal::Block) => block(missing.detail),
+        (Some(missing), _, Refusal::Block) => block(missing.detail, Outcomes::MissingFact(missing.retry)),
         (_, true, _) => refuse(error),
         (_, false, Refusal::Deny) => deny(error.to_string()),
-        (_, false, Refusal::Block) => block(error.to_string()),
+        (_, false, Refusal::Block) => block(error.to_string(), Outcomes::Integrity),
     }
 }
 
@@ -1484,8 +1498,11 @@ fn denied(feedback: String, outcomes: Outcomes) -> HookDecision {
     }
 }
 
-fn block(reason: String) -> HookDecision {
-    HookDecision::Block { reason }
+fn block(reason: String, outcomes: Outcomes) -> HookDecision {
+    HookDecision::Block {
+        reason,
+        outcomes: Some(outcomes),
+    }
 }
 
 /// An acknowledged root event carries the notice of peer messages held for the session.
@@ -2096,6 +2113,52 @@ mod tests {
                 "{root_id}: the refusal appended nothing"
             );
             assert_eq!(runtime.status(&root).is_some(), root == open, "{root_id}: {reply}");
+        }
+    }
+
+    /// A malformed proposal is an integrity refusal even when it also names a child's
+    /// transcript: the guard reads only a call the dispatcher would judge.
+    #[tokio::test]
+    async fn an_empty_call_id_outranks_a_named_transcript() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let root = TrajectoryId("cc:open".to_string());
+        let spawn = || HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: spawn_call(),
+            call_id: Some("toolu-spawn".to_string()),
+            spawn: Some(appa_runtime_api::SpawnKind::Single),
+            prompt: None,
+            ruling: None,
+            declares: None,
+        };
+        let HookDecision::DenyCall { offers, .. } = handle(&runtime, spawn()).await else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(&runtime, &root, &offers).await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = handle(&runtime, spawn()).await else {
+            panic!("the declared spawn releases with its binding");
+        };
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: TrajectoryId("cc:open:a1".to_string()),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+        for (call_id, deciding) in [("toolu-1", "hard_block"), ("", "integrity")] {
+            let proposal = format!(
+                r#"{{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"open","call_id":"{call_id}","tool":"Read","spawn":false,"arguments":{{"file_path":"/home/u/subagents/agent-a1.jsonl"}}}}"#
+            );
+            let (_, reply) = answer(&runtime, &adapter, PrincipalSource::None, proposal.as_bytes()).await;
+            assert_eq!(reply["decision"], "deny_call", "{call_id:?}: {reply}");
+            assert_eq!(reply["deciding"], deciding, "{call_id:?}: {reply}");
         }
     }
 

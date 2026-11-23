@@ -228,7 +228,7 @@ pub enum ExternalEvidence {
     Sanitizer {
         sanitizer: String,
         source: RawResultDigest,
-        derived: Option<String>,
+        derived: Result<String, crate::events::NoAnswerClass>,
     },
     /// The annotation produced for one exact call, by canonical digest: evidence for a
     /// rewritten call never matches, so every rewrite is annotated afresh.
@@ -2150,7 +2150,7 @@ impl RuntimeEngine {
                 Some(dispatch),
                 request,
                 evidence,
-                "[appa] no registered sanitizer answered; the result is withheld and may be retried",
+                UnresolvedAudience::Withheld { subject: "result" },
             )?,
             FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
@@ -2914,14 +2914,9 @@ impl RuntimeEngine {
             }),
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
             FollowUp::Child(ChildFollowUp::Deferred) => Next::PresentToModel(Presentation::Deferred),
-            FollowUp::Child(ChildFollowUp::Resolve(request)) => self.resolve_or_withhold(
-                view,
-                child,
-                None,
-                request,
-                evidence,
-                "[appa] no registered return sanitizer answered; the return is withheld and may be retried",
-            )?,
+            FollowUp::Child(ChildFollowUp::Resolve(request)) => {
+                self.resolve_or_withhold(view, child, None, request, evidence, withheld)?
+            }
             other => {
                 return Err(EngineRefusal::Invariant {
                     detail: format!("a child return produced an unexpected follow-up: {other:?}"),
@@ -3266,10 +3261,9 @@ impl RuntimeEngine {
             SanitizerAnswer::Missing => Err(Box::new(EngineDecision::deliver(Next::ResolveExternal(vec![
                 self.sanitizer_request(sanitizer, source, body, subject),
             ])))),
-            SanitizerAnswer::NoAnswer => Err(Box::new(no_answer(format!(
-                "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
-                sanitizer.as_str()
-            )))),
+            SanitizerAnswer::NoAnswer(class) => Err(Box::new(
+                UnresolvedAudience::OfferStands.present(&sanitizer_unobtained(sanitizer.as_str(), class), self.naming),
+            )),
         }
     }
 
@@ -3282,25 +3276,18 @@ impl RuntimeEngine {
         dispatch: Option<&EngineDispatchId>,
         request: EvidenceRequest,
         evidence: &[ExternalEvidence],
-        withheld: &str,
+        withheld: UnresolvedAudience<'_>,
     ) -> Result<Next, EngineRefusal> {
-        let blocked = || {
-            Ok(Next::PresentToModel(blocked_without_offers(
-                withheld.to_string(),
-                Outcomes::MissingFact(RetryHint::Later),
-            )))
-        };
         match request {
             EvidenceRequest::Sanitizer {
                 sanitizer,
                 source,
                 body,
             } => {
-                if matches!(
-                    sanitizer_derivation(evidence, sanitizer.as_str(), &source),
-                    SanitizerAnswer::NoAnswer
-                ) {
-                    return blocked();
+                if let SanitizerAnswer::NoAnswer(class) = sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
+                    return Ok(withheld
+                        .present(&sanitizer_unobtained(sanitizer.as_str(), class), self.naming)
+                        .then);
                 }
                 let tool = dispatch.and_then(|dispatch| {
                     view.views(trajectory)
@@ -3458,6 +3445,15 @@ impl RuntimeEngine {
             let templates = selector_templates(audience, &owed.provider)
                 .expect("an owed lookup names the registered provider of a pinned source");
             requests.push(member_lookup(audience, owed.provider, owed.member, templates));
+        }
+        // A failed lookup ends the act before its judgment can name the selectors it needs, so
+        // every selector this act asked and lost ranks beside it.
+        if !failed.is_empty() {
+            failed.extend(unanswered.selectors.iter().map(|(spec, reason)| NoAnswer {
+                provider: spec.provider.clone(),
+                subject: spec.selector.clone(),
+                reason: *reason,
+            }));
         }
         if let Some(unobtained) = unobtained(&failed) {
             return Err(AudienceFailure::Refused(unobtained));
@@ -3687,6 +3683,19 @@ fn unobtained(failed: &[NoAnswer]) -> Option<Unobtained> {
     })
 }
 
+/// A sanitizer's missing derivation, guided by its failure class like any other fact.
+fn sanitizer_unobtained(sanitizer: &str, reason: crate::events::NoAnswerClass) -> Unobtained {
+    let retry = retry_hint(reason);
+    Unobtained {
+        detail: format!(
+            "sanitizer {sanitizer} gave no answer: {}; {}",
+            no_answer_description(reason),
+            next_action(retry)
+        ),
+        retry,
+    }
+}
+
 /// What asking again can do for a fact whose consult failed for `reason`.
 pub(crate) fn retry_hint(reason: crate::events::NoAnswerClass) -> RetryHint {
     use crate::events::NoAnswerClass;
@@ -3747,7 +3756,7 @@ enum AuthorityOutcome {
 
 enum SanitizerAnswer {
     Missing,
-    NoAnswer,
+    NoAnswer(crate::events::NoAnswerClass),
     Derived(ValueBody),
 }
 
@@ -4206,7 +4215,7 @@ fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
             ExternalEvidence::Sanitizer {
                 sanitizer,
                 source,
-                derived: Some(derived),
+                derived: Ok(derived),
             } => Some(Evidence::Sanitizer {
                 sanitizer: appa_engine::names::SanitizerName::new(sanitizer.clone()),
                 source: *source,
@@ -4235,8 +4244,8 @@ fn sanitizer_derivation(evidence: &[ExternalEvidence], name: &str, source: &RawR
             && reported == source
         {
             return match derived {
-                Some(derived) => SanitizerAnswer::Derived(ValueBody::new(derived.clone())),
-                None => SanitizerAnswer::NoAnswer,
+                Ok(derived) => SanitizerAnswer::Derived(ValueBody::new(derived.clone())),
+                Err(class) => SanitizerAnswer::NoAnswer(*class),
             };
         }
     }

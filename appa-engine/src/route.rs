@@ -486,6 +486,9 @@ impl<'a> Search<'a> {
             &context.stage,
             &membership,
         )?;
+        if eval.is_hard() {
+            return Ok(());
+        }
         if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
             found.push(self.found(
                 path.steps.clone(),
@@ -493,7 +496,7 @@ impl<'a> Search<'a> {
                 state,
                 &eval.requirement_gaps,
             ));
-        } else if !eval.is_hard() {
+        } else {
             // The same gate live planning holds a surfaced block to: every atom the
             // enumeration may consult is answered, or the missing ones are the ask. Without
             // it, an unanswered mandate would silently drop this state's plans from the
