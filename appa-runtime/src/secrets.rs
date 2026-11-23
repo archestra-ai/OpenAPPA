@@ -117,9 +117,15 @@ impl Backslash {
 /// camel-cased. The value is masked whatever its shape: a quoted value to its closing
 /// quote, or to the end of the text; an HTTP credential with its scheme word; a bare one
 /// to the next space or delimiter. Its quotes stay.
-static SECRET_ASSIGNMENTS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
-    READINGS.map(|reading| {
-        Regex::new(&format!(
+struct ReadingScan {
+    reading: Reading,
+    assignment: Regex,
+}
+
+static READING_SCANS: LazyLock<[ReadingScan; 4]> = LazyLock::new(|| {
+    READINGS.map(|reading| ReadingScan {
+        reading,
+        assignment: Regex::new(&format!(
             r#"(?ix)
             ( ["']? {SECRET_NAME} ["']? \s*[=:]\s* )
             ( {} | {} | (?: bearer | basic ) \s+ [^\s"'`,;&)\]}}]+ | [^\s"'`,;&)\]}}]+ )
@@ -127,7 +133,7 @@ static SECRET_ASSIGNMENTS: LazyLock<[Regex; 4]> = LazyLock::new(|| {
             reading.double.quoted('"'),
             reading.single.quoted('\''),
         ))
-        .expect("a fixed pattern")
+        .expect("a fixed pattern"),
     })
 });
 
@@ -135,9 +141,10 @@ const SECRET_NAME: &str = r"(?: [A-Za-z0-9_.-]* (?: password | passwd | passphra
     | \b (?: [A-Za-z0-9]+ [_.-] )* (?: key | pass | pwd | auth ) (?: [_.-] [A-Za-z0-9]+ )*
     | \b (?-i: [A-Za-z0-9]+ (?: Key | Pass | Pwd | Auth ) ) [A-Za-z0-9]* )";
 
-/// A whole name an assignment of a secret may use.
-static SECRET_NAME_WHOLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(&format!(r"(?ix) ^ {SECRET_NAME} $")).expect("a fixed pattern"));
+/// A field name the assignment pattern takes for a secret's: one that ends in a name it
+/// matches.
+static SECRET_NAME_ENDING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"(?ix) {SECRET_NAME} $")).expect("a fixed pattern"));
 
 /// A netrc `password` entry, on its own line or after the machine and login it belongs to.
 static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
@@ -147,26 +154,27 @@ static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
 /// Every secret assignment's value and every netrc password replaced, quotes kept, under
 /// every reading at once.
 fn mask_keyed_values(text: &str) -> Cow<'_, str> {
-    mask_keyed_values_under(text, READINGS.iter().copied().zip(SECRET_ASSIGNMENTS.iter()))
+    mask_keyed_values_under(text, READING_SCANS.as_slice())
 }
 
-fn mask_keyed_values_under<'r>(text: &str, readings: impl Iterator<Item = (Reading, &'r Regex)>) -> Cow<'_, str> {
+fn mask_keyed_values_under<'a>(text: &'a str, scans: &[ReadingScan]) -> Cow<'a, str> {
     let mut spans: Vec<Range<usize>> = NETRC_PASSWORD
         .captures_iter(text)
         .map(|found| found.get(2).expect("the pattern captures a password").range())
         .collect();
-    for (reading, assignment) in readings {
-        spans.extend(keyed_spans(text, reading, assignment));
+    for scan in scans {
+        spans.extend(keyed_spans(text, scan));
     }
     mask_spans(text, &merged(spans))
 }
 
 /// One reading's spans: every assignment's value, and every netrc password found on the
 /// text with those values masked, so a value with a space in it cannot hide the entry.
-fn keyed_spans(text: &str, reading: Reading, assignment: &Regex) -> Vec<Range<usize>> {
-    let values: Vec<Range<usize>> = assignment
+fn keyed_spans(text: &str, scan: &ReadingScan) -> Vec<Range<usize>> {
+    let values: Vec<Range<usize>> = scan
+        .assignment
         .captures_iter(text)
-        .map(|found| value_span(found.get(2).expect("the pattern captures a value"), reading))
+        .map(|found| value_span(found.get(2).expect("the pattern captures a value"), scan.reading))
         .collect();
     let masked = mask_spans(text, &values);
     let mut source = SourceOffsets::new(&values);
@@ -398,7 +406,7 @@ fn redact_value(value: &serde_json::Value) -> serde_json::Value {
 }
 
 fn redact_field(key: &str, value: &serde_json::Value) -> serde_json::Value {
-    match SECRET_FIELD.is_match(key) || SECRET_NAME_WHOLE.is_match(key) {
+    match SECRET_FIELD.is_match(key) || SECRET_NAME_ENDING.is_match(key) {
         true => serde_json::Value::String(SECRET_PLACEHOLDER.to_string()),
         false => redact_value(value),
     }
@@ -763,12 +771,12 @@ mod tests {
         ];
         for (input, union, alone) in cases {
             assert_eq!(mask_keyed_values(input), union, "input {input:?}");
-            for ((reading, assignment), expected) in READINGS.iter().copied().zip(SECRET_ASSIGNMENTS.iter()).zip(alone)
-            {
+            for (scan, expected) in READING_SCANS.iter().zip(alone) {
                 assert_eq!(
-                    mask_keyed_values_under(input, std::iter::once((reading, assignment))),
+                    mask_keyed_values_under(input, std::slice::from_ref(scan)),
                     expected,
-                    "input {input:?} under {reading:?}"
+                    "input {input:?} under {:?}",
+                    scan.reading
                 );
             }
         }
@@ -785,6 +793,10 @@ mod tests {
             (
                 r#"{"password":"abc\\","user":"me"}"#,
                 json!({"password": masked, "user": "me"}),
+            ),
+            (
+                r#"{"db pass":"hunter2","author":"Ada","oauth_scope":"read","keyboard":"us","password hint":"pet"}"#,
+                json!({"db pass": masked, "author": "Ada", "oauth_scope": "read", "keyboard": "us", "password hint": masked}),
             ),
             (
                 r#"{"sshKey":"hunter2","db.pass":"hunter2","note":"token=abc","api_key":12345,"n":[1,"x"]}"#,
