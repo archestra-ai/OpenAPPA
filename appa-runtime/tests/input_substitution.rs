@@ -76,9 +76,9 @@ fn feedback_of(decision: &HookDecision) -> String {
     }
 }
 
-async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId) {
+async fn narrowed_and_blocked(dir: &tempfile::TempDir, policy: &str, raw_body: &str) -> (Arc<Runtime>, OfferId) {
     let path = dir.path().join("appa.toml");
-    std::fs::write(&path, POLICY).expect("the fixture writes");
+    std::fs::write(&path, policy).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
     let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
     assert_eq!(
@@ -113,7 +113,7 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir) -> (Arc<Runtime>, OfferId
         &runtime,
         HookEvent::ToolCall {
             actor: actor(),
-            call: send(RAW_BODY),
+            call: send(raw_body),
             call_id: None,
             spawn: None,
             prompt: None,
@@ -186,7 +186,7 @@ fn nothing_ran(runtime: &Runtime) -> bool {
 #[tokio::test]
 async fn the_replaced_call_runs_through_the_hooks_and_closes() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (runtime, hop) = narrowed_and_blocked(&dir).await;
+    let (runtime, hop) = narrowed_and_blocked(&dir, POLICY, RAW_BODY).await;
 
     let derived = take_hop(&runtime, hop.clone()).await;
     assert!(
@@ -235,7 +235,7 @@ async fn the_replaced_call_runs_through_the_hooks_and_closes() {
 #[tokio::test]
 async fn another_call_leaves_the_staged_derivation_alone() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (runtime, hop) = narrowed_and_blocked(&dir).await;
+    let (runtime, hop) = narrowed_and_blocked(&dir, POLICY, RAW_BODY).await;
     let derived = take_hop(&runtime, hop).await;
     assert!(nothing_ran(&runtime), "the remedy runs nothing of its own");
 
@@ -265,7 +265,7 @@ async fn another_call_leaves_the_staged_derivation_alone() {
 #[tokio::test]
 async fn the_staged_derivation_survives_a_reopen() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let (runtime, hop) = narrowed_and_blocked(&dir).await;
+    let (runtime, hop) = narrowed_and_blocked(&dir, POLICY, RAW_BODY).await;
     let derived = take_hop(&runtime, hop).await;
     assert!(nothing_ran(&runtime), "the remedy runs nothing of its own");
     drop(runtime);
@@ -277,4 +277,24 @@ async fn the_staged_derivation_survives_a_reopen() {
         HookDecision::AllowCall { spawn: None }
     );
     assert_eq!(report(&runtime, send(&derived), "sent").await, HookDecision::Ack);
+}
+
+/// The stock secret masker rewrites the arguments as the JSON they are, so a quoted
+/// credential holding an escaped quote leaves a call the engine resolves and runs.
+#[tokio::test]
+async fn a_secret_masked_out_of_the_arguments_leaves_a_call_that_runs() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let policy = POLICY.replace("builtin = \"redact-email\"", "builtin = \"redact-secrets\"");
+    let (runtime, hop) = narrowed_and_blocked(&dir, &policy, r#"export PASSWORD="a\"b" && deploy"#).await;
+    let RemedyOutcome::Authorized { call } = runtime.execute_remedy(&actor(), hop).await else {
+        panic!("the masker's hop approves the substituted call");
+    };
+    let derived = r#"export PASSWORD="[redacted-secret]" && deploy"#;
+    let arguments = serde_json::from_str::<serde_json::Value>(call.arguments.get()).expect("canonical JSON");
+    assert_eq!(arguments, serde_json::json!({"body": derived}));
+    assert_eq!(
+        propose(&runtime, send(derived)).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(report(&runtime, send(derived), "sent").await, HookDecision::Ack);
 }

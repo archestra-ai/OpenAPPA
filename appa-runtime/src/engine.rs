@@ -94,6 +94,7 @@ pub(crate) use crate::api::{OfferId, ProposedCall, SpawnBinding, ToolOutcome, Tr
 use crate::consult::{
     AnnotationAnswer, AnnotationDeclaration, AnswerDelta, AuthorityAnswer, AuthorityArtifact, AuthorityDeclaration,
     ContextArtifact, HistoryEntry, ReviewedNarrowing, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint,
+    ToolNameAuthor,
 };
 pub(crate) use appa_engine::engine::DeferredReturn;
 use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling};
@@ -180,6 +181,7 @@ pub enum ExternalRequest {
         /// The consult artifact: the complete call, or one value per declared input that
         /// reads the call.
         args: serde_json::Value,
+        tool_name: ToolNameAuthor,
         /// What every bound context provider is asked before the Annotator; their answers
         /// join the Annotator's artifact as its `context`.
         context: ContextArtifact,
@@ -3000,6 +3002,10 @@ impl RuntimeEngine {
             call: resolved.digest(),
             declaration: self.annotation_declaration(annotator, binding, resolved),
             args: annotation_args(&binding.inputs, declaration, resolved),
+            tool_name: match declaration.name() == resolved.tool() {
+                true => ToolNameAuthor::Policy,
+                false => ToolNameAuthor::Harness,
+            },
             context: ContextArtifact {
                 tool: resolved.tool().as_str().to_string(),
                 arguments: resolved.arguments().clone(),
@@ -5294,7 +5300,7 @@ mod tests {
         terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
-    use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint};
+    use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint, ToolNameAuthor};
     use appa_engine::check::{Gap, RawBlock};
     use appa_engine::contract::AnnotationContext;
     use appa_engine::contract::{AudienceRequirement, DeltaAudience, HistoryRequirement, RecipientSpec};
@@ -5830,6 +5836,43 @@ mod tests {
             .annotation_for(&views, declaration, &resolved, None, &[contradicting])
             .expect("the recorded annotation pins over contradicting evidence");
         assert_eq!(pinned, pin);
+    }
+
+    #[test]
+    fn an_annotation_request_marks_a_tool_name_the_policy_never_wrote() {
+        let policy = appa_policy::Config::from_toml_str(
+            r#"
+                version = 2
+                [[annotator]]
+                name = "classifier"
+                [[tool]]
+                name = "lookup"
+                annotator = "classifier"
+                [[tool]]
+                name = "*"
+                annotator = "classifier"
+            "#,
+        )
+        .expect("the wildcard policy compiles");
+        let engine = annotator_engine(&policy);
+        let author = |tool: &str| {
+            let call = engine
+                .engine
+                .resolve_call(ToolName::new(tool), b"{}")
+                .expect("the call resolves");
+            let declaration = engine
+                .engine
+                .registry()
+                .declaration(&call)
+                .expect("the call names its declaration");
+            let annotator = declaration.annotator().expect("the declaration is annotated");
+            match engine.annotation_request(annotator, declaration, &call, None) {
+                ExternalRequest::Annotation { tool_name, .. } => tool_name,
+                other => panic!("an annotation request, not {other:?}"),
+            }
+        };
+        assert_eq!(author("lookup"), ToolNameAuthor::Policy);
+        assert_eq!(author("ghost"), ToolNameAuthor::Harness);
     }
 
     #[test]

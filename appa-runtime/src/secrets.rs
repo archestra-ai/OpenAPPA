@@ -1,6 +1,21 @@
 //! Secret redaction: the stock `redact-secrets` sanitizer's text pass, and the same pass
 //! over an annotation's call before it leaves for a model provider.
+//!
+//! Where a quoted value ends depends on what a backslash does inside the quotes, which
+//! the text does not say. The keyed pass reads the text four ways, a backslash escaping
+//! or literal in double and in single quotes, finds assignments and netrc entries under
+//! each, and masks the union. Every key is searched for, inside other values too. The
+//! guarantee: an assignment's or a netrc entry's secret is masked whenever the text is
+//! consistent with at least one of the four readings.
+//!
+//! A known residual: a key inside a value, whose own value then runs over a line break,
+//! can hide a netrc entry on the next line from every reading's masked view. The scan of
+//! the text as given misses that entry too when its login holds a space, as in
+//! `PASSWORD="x TOKEN='y"` followed by `machine h login token='a b' password hunter2`.
 
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -36,11 +51,12 @@ static KNOWN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
 /// it by, and 40 characters of base64 instead. `/` belongs to that alphabet, so the
 /// candidate run below cannot see such a key whole — the run breaks at every slash and
 /// each piece falls under the length floor. The pattern takes a whole run of the alphabet
-/// and the caller keeps the length exact: a longer run, which is what a path or a URL is,
-/// is no 40-character match. Every character outside the alphabet ends a run, `=`, `-`,
-/// `_` and `.` included, and the match consumes none of them, so a key is found whatever
-/// stands next to it.
-static AWS_SECRET_KEY_RUN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]+").expect("a fixed pattern"));
+/// at least a key long, and the caller keeps the length exact: a longer run, which is what
+/// a path or a URL is, is no 40-character match. Every character outside the alphabet
+/// ends a run, `=`, `-`, `_` and `.` included, and the match consumes none of them, so a
+/// key is found whatever stands next to it.
+static AWS_SECRET_KEY_RUN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]{40,}").expect("a fixed pattern"));
 
 const AWS_SECRET_KEY_LENGTH: usize = 40;
 
@@ -48,30 +64,252 @@ const AWS_SECRET_KEY_LENGTH: usize = 40;
 static URL_PASSWORD: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(://[^/?#@:\s"']*:)([^/?#@\s"']+)@"#).expect("a fixed pattern"));
 
-/// An assignment whose key names a secret: `KEY=value`, `key: value`, or JSON's
-/// `"key": "value"`. A key names a secret when it contains one of the longer words, or
-/// when `key`, `pass`, `pwd` or `auth` is one of its segments, separated or camel-cased.
-/// The value is masked whatever its shape: a quoted value to its closing quote, an HTTP
-/// credential with its scheme word, a bare one to the next space or delimiter; its
-/// quotes stay.
-static SECRET_ASSIGNMENT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?ix)
-        ( ["']?
-          (?: [A-Za-z0-9_.-]* (?: password | passwd | passphrase | secret | token | api_?key | private_?key | access_?key | credential | authorization ) [A-Za-z0-9_.-]*
-            | \b (?: [A-Za-z0-9]+ [_.-] )* (?: key | pass | pwd | auth ) (?: [_.-] [A-Za-z0-9]+ )*
-            | \b (?-i: [A-Za-z0-9]+ (?: Key | Pass | Pwd | Auth ) ) [A-Za-z0-9]* )
-          ["']? \s*[=:]\s* )
-        ( "[^"]*" | '[^']*' | (?: bearer | basic ) \s+ [^\s"'`,;&)\]}]+ | [^\s"'`,;&)\]}]+ )
-        "#,
-    )
-    .expect("a fixed pattern")
-});
+/// Whether a backslash inside quotes of one kind escapes the next character, as in JSON
+/// or a shell's double quotes, or stands for itself, as in a shell's single quotes.
+#[derive(Debug, Clone, Copy)]
+enum Backslash {
+    Escapes,
+    Literal,
+}
+
+/// One reading of quoted text: what a backslash does in double and in single quotes.
+#[derive(Debug, Clone, Copy)]
+struct Reading {
+    double: Backslash,
+    single: Backslash,
+}
+
+/// Every combination. Text written in any of them, JSON, a shell, a `.env` file with
+/// Windows paths, reads the same as in one of these.
+const READINGS: [Reading; 4] = [
+    Reading {
+        double: Backslash::Escapes,
+        single: Backslash::Escapes,
+    },
+    Reading {
+        double: Backslash::Escapes,
+        single: Backslash::Literal,
+    },
+    Reading {
+        double: Backslash::Literal,
+        single: Backslash::Escapes,
+    },
+    Reading {
+        double: Backslash::Literal,
+        single: Backslash::Literal,
+    },
+];
+
+impl Backslash {
+    /// Whether a quote after `before` closes its value: an escaping backslash escapes it
+    /// when an odd run of them stands right before it.
+    fn closes(self, before: &[u8]) -> bool {
+        match self {
+            Backslash::Escapes => before.iter().rev().take_while(|byte| **byte == b'\\').count() % 2 == 0,
+            Backslash::Literal => true,
+        }
+    }
+}
+
+/// The key of an assignment whose key names a secret: `KEY=`, `key: `, or JSON's
+/// `"key": `. A key names a secret when it contains one of the longer words, or when
+/// `key`, `pass`, `pwd` or `auth` is one of its segments, separated or camel-cased.
+static SECRET_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r#"(?ix) ["']? {SECRET_NAME} ["']? \s*[=:]\s*"#)).expect("a fixed pattern"));
+
+/// An HTTP credential's scheme word, masked with the credential it starts.
+static HTTP_SCHEME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(?:bearer|basic)\s+").expect("a fixed pattern"));
+
+const SECRET_NAME: &str = r"(?: [A-Za-z0-9_.-]* (?: password | passwd | passphrase | secret | token | api_?key | private_?key | access_?key | credential | authorization ) [A-Za-z0-9_.-]*
+    | \b (?: [A-Za-z0-9]+ [_.-] )* (?: key | pass | pwd | auth ) (?: [_.-] [A-Za-z0-9]+ )*
+    | \b (?-i: [A-Za-z0-9]+ (?: Key | Pass | Pwd | Auth ) ) [A-Za-z0-9]* )";
+
+/// A field name the assignment pattern takes for a secret's: one that ends in a name it
+/// matches.
+static SECRET_NAME_ENDING: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"(?ix) {SECRET_NAME} $")).expect("a fixed pattern"));
 
 /// A netrc `password` entry, on its own line or after the machine and login it belongs to.
 static NETRC_PASSWORD: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?m)^(\s*(?:machine\s+\S+\s+(?:login\s+\S+\s+)?)?password\s+)(\S+)").expect("a fixed pattern")
 });
+
+/// Every secret assignment's value and every netrc password replaced, quotes kept, under
+/// every reading at once.
+fn mask_keyed_values(text: &str) -> Cow<'_, str> {
+    mask_keyed_values_under(text, &READINGS)
+}
+
+fn mask_keyed_values_under<'a>(text: &'a str, readings: &[Reading]) -> Cow<'a, str> {
+    let mut spans: Vec<Range<usize>> = NETRC_PASSWORD
+        .captures_iter(text)
+        .map(|found| found.get(2).expect("the pattern captures a password").range())
+        .collect();
+    for reading in readings {
+        spans.extend(keyed_spans(text, *reading));
+    }
+    mask_spans(text, &merged(spans))
+}
+
+/// One reading's spans: every assignment's value, and every netrc password found on the
+/// text with those values masked, so a value with a space in it cannot hide the entry.
+fn keyed_spans(text: &str, reading: Reading) -> Vec<Range<usize>> {
+    let values = merged(assignment_values(text, reading));
+    let masked = mask_spans(text, &values);
+    let mut source = SourceOffsets::new(&values);
+    let passwords: Vec<Range<usize>> = NETRC_PASSWORD
+        .captures_iter(&masked)
+        .map(|found| {
+            let password = found.get(2).expect("the pattern captures a password");
+            source.of(password.start())..source.of(password.end())
+        })
+        .collect();
+    values.into_iter().chain(passwords).collect()
+}
+
+/// Every secret assignment's value under one reading, quotes kept: a quoted value to its
+/// closing quote or to the end of the text, an HTTP credential with its scheme word, a bare
+/// one to the next space or delimiter. The search for the next key resumes after each key,
+/// not after its value, so a key that seems to start a value inside another value cannot
+/// hide the assignment after it.
+fn assignment_values(text: &str, reading: Reading) -> Vec<Range<usize>> {
+    let mut double = EndCursor::new(ValueEnd::Quote(b'"', reading.double));
+    let mut single = EndCursor::new(ValueEnd::Quote(b'\'', reading.single));
+    let mut delimiter = EndCursor::new(ValueEnd::Delimiter);
+    let mut values = Vec::new();
+    let mut resume = 0;
+    while let Some(key) = SECRET_KEY.find_at(text, resume) {
+        let start = key.end();
+        resume = start;
+        let value = match text.as_bytes().get(start) {
+            Some(b'"') => Some(start + 1..double.next(text, start + 1)),
+            Some(b'\'') => Some(start + 1..single.next(text, start + 1)),
+            _ => {
+                let credential = HTTP_SCHEME
+                    .find(&text[start..])
+                    .map(|scheme| start + scheme.end())
+                    .filter(|credential| delimiter.next(text, *credential) > *credential);
+                let end = delimiter.next(text, credential.unwrap_or(start));
+                (end > start).then_some(start..end)
+            }
+        };
+        values.extend(value);
+    }
+    values
+}
+
+/// What ends a value: a closing quote of one kind, or a delimiter after a bare value.
+#[derive(Debug, Clone, Copy)]
+enum ValueEnd {
+    Quote(u8, Backslash),
+    Delimiter,
+}
+
+impl ValueEnd {
+    fn is_at(self, text: &str, index: usize) -> bool {
+        match self {
+            ValueEnd::Quote(quote, backslash) => {
+                text.as_bytes()[index] == quote && backslash.closes(&text.as_bytes()[..index])
+            }
+            ValueEnd::Delimiter => {
+                text.is_char_boundary(index)
+                    && text[index..]
+                        .chars()
+                        .next()
+                        .is_some_and(|next| next.is_whitespace() || "\"'`,;&)]}".contains(next))
+            }
+        }
+    }
+}
+
+/// The first end at or after a start, or the end of the text. A start inside the stretch
+/// searched last reuses its answer, so starts that only grow cost one pass over the text.
+struct EndCursor {
+    end: ValueEnd,
+    from: usize,
+    found: usize,
+}
+
+impl EndCursor {
+    fn new(end: ValueEnd) -> EndCursor {
+        EndCursor { end, from: 1, found: 0 }
+    }
+
+    fn next(&mut self, text: &str, start: usize) -> usize {
+        if !(self.from..=self.found).contains(&start) {
+            self.from = start;
+            self.found = (start..text.len())
+                .find(|index| self.end.is_at(text, *index))
+                .unwrap_or(text.len());
+        }
+        self.found
+    }
+}
+
+/// The spans sorted, with every overlapping or adjacent pair joined.
+fn merged(mut spans: Vec<Range<usize>>) -> Vec<Range<usize>> {
+    spans.sort_by_key(|span| (span.start, span.end));
+    spans.dedup_by(|next, kept| match next.start <= kept.end {
+        true => {
+            kept.end = kept.end.max(next.end);
+            true
+        }
+        false => false,
+    });
+    spans
+}
+
+/// The text with each span, sorted and disjoint, replaced by the placeholder.
+fn mask_spans<'a>(text: &'a str, spans: &[Range<usize>]) -> Cow<'a, str> {
+    if spans.is_empty() {
+        return Cow::Borrowed(text);
+    }
+    let mut masked = String::with_capacity(text.len());
+    let mut copied = 0;
+    for span in spans {
+        masked.push_str(&text[copied..span.start]);
+        masked.push_str(SECRET_PLACEHOLDER);
+        copied = span.end;
+    }
+    masked.push_str(&text[copied..]);
+    Cow::Owned(masked)
+}
+
+/// Offsets in [`mask_spans`]'s output mapped back to its input, asked in nondecreasing
+/// order. None falls inside a placeholder: a netrc password starts after whitespace and
+/// ends before it or at the end of the text, and the placeholder holds no whitespace.
+struct SourceOffsets<'a> {
+    spans: std::slice::Iter<'a, Range<usize>>,
+    next: Option<&'a Range<usize>>,
+    source_passed: usize,
+    masked_passed: usize,
+}
+
+impl<'a> SourceOffsets<'a> {
+    fn new(spans: &'a [Range<usize>]) -> SourceOffsets<'a> {
+        let mut spans = spans.iter();
+        let next = spans.next();
+        SourceOffsets {
+            spans,
+            next,
+            source_passed: 0,
+            masked_passed: 0,
+        }
+    }
+
+    fn of(&mut self, offset: usize) -> usize {
+        while let Some(span) = self
+            .next
+            .filter(|span| offset > span.start + self.masked_passed - self.source_passed)
+        {
+            self.source_passed += span.len();
+            self.masked_passed += SECRET_PLACEHOLDER.len();
+            self.next = self.spans.next();
+        }
+        offset + self.source_passed - self.masked_passed
+    }
+}
 
 /// A run long enough to be a credential and shaped like one; the entropy test decides. `=`
 /// is a separator here, not base64 padding: the run before it is what carries the entropy.
@@ -84,26 +322,9 @@ pub(crate) fn redact_secrets(input: &str) -> String {
     let masked = URL_PASSWORD.replace_all(&masked, |found: &regex::Captures<'_>| {
         format!("{}{SECRET_PLACEHOLDER}@", &found[1])
     });
-    let masked = SECRET_ASSIGNMENT.replace_all(&masked, |found: &regex::Captures<'_>| {
-        let quote = match found[2].as_bytes().first() {
-            Some(b'"') => "\"",
-            Some(b'\'') => "'",
-            _ => "",
-        };
-        format!("{}{quote}{SECRET_PLACEHOLDER}{quote}", &found[1])
-    });
-    let masked = NETRC_PASSWORD.replace_all(&masked, |found: &regex::Captures<'_>| {
-        format!("{}{SECRET_PLACEHOLDER}", &found[1])
-    });
+    let masked = mask_keyed_values(&masked);
     let masked = KNOWN_TOKEN.replace_all(&masked, SECRET_PLACEHOLDER);
-    let masked = AWS_SECRET_KEY_RUN.replace_all(&masked, |found: &regex::Captures<'_>| {
-        let run = &found[0];
-        if run.len() == AWS_SECRET_KEY_LENGTH && is_base64_key(run) {
-            SECRET_PLACEHOLDER.to_string()
-        } else {
-            run.to_string()
-        }
-    });
+    let masked = mask_aws_secret_keys(&masked);
     CANDIDATE_RUN
         .replace_all(&masked, |found: &regex::Captures<'_>| {
             let run = &found[0];
@@ -114,6 +335,29 @@ pub(crate) fn redact_secrets(input: &str) -> String {
             }
         })
         .into_owned()
+}
+
+/// An object key through the passes that know a credential by its own shape. The keyed
+/// and entropy passes stay out: a key is a name, and an ordinary name such as
+/// `Customer-Billing-Zone_V2` clears the entropy floor.
+fn redact_key(key: &str) -> String {
+    let masked = PRIVATE_KEY_BLOCK.replace_all(key, SECRET_PLACEHOLDER);
+    let masked = URL_PASSWORD.replace_all(&masked, |found: &regex::Captures<'_>| {
+        format!("{}{SECRET_PLACEHOLDER}@", &found[1])
+    });
+    let masked = KNOWN_TOKEN.replace_all(&masked, SECRET_PLACEHOLDER);
+    mask_aws_secret_keys(&masked).into_owned()
+}
+
+fn mask_aws_secret_keys(text: &str) -> Cow<'_, str> {
+    AWS_SECRET_KEY_RUN.replace_all(text, |found: &regex::Captures<'_>| {
+        let run = &found[0];
+        if run.len() == AWS_SECRET_KEY_LENGTH && is_base64_key(run) {
+            SECRET_PLACEHOLDER.to_string()
+        } else {
+            run.to_string()
+        }
+    })
 }
 
 /// Whether a run the length of an AWS secret access key is one, rather than a path of the
@@ -160,13 +404,38 @@ static SECRET_FIELD: LazyLock<Regex> = LazyLock::new(|| {
     .expect("a fixed pattern")
 });
 
-/// An annotation's `args` as they leave for a model provider: every string through
-/// [`redact_secrets`], and the whole value of a field named for a secret replaced. The
-/// complete call's tool `name` leaves as written.
+/// An annotation's declared inputs, or its context, as they leave for a model provider:
+/// every string through [`redact_secrets`], every object key below the top level through
+/// [`redact_key`], and the whole value of a field named for a secret replaced. Top-level
+/// keys are the declaration's own names, which the provider reads in the declaration as
+/// written, so they leave as written too.
 pub(crate) fn redact_args(args: &serde_json::Value) -> serde_json::Value {
-    let mut redacted = redact_value(args);
+    match args {
+        serde_json::Value::Object(fields) => serde_json::Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), redact_field(key, value)))
+                .collect(),
+        ),
+        other => redact_value(other),
+    }
+}
+
+/// The stock `redact-secrets` sanitizer's derivation. A body that is JSON is redacted as
+/// its tree, so the derivation stays JSON of the same shape; any other body as text.
+pub(crate) fn redact_body(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(value) => redact_value(&value).to_string(),
+        Err(_) => redact_secrets(body),
+    }
+}
+
+/// An annotation's complete call as it leaves for a model provider: [`redact_args`], with
+/// the tool `name` left as written.
+pub(crate) fn redact_call(call: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = redact_args(call);
     if let (Some(name), serde_json::Value::Object(fields)) =
-        (args.get("name").filter(|name| name.is_string()), &mut redacted)
+        (call.get("name").filter(|name| name.is_string()), &mut redacted)
     {
         fields.insert("name".to_string(), name.clone());
     }
@@ -176,18 +445,47 @@ pub(crate) fn redact_args(args: &serde_json::Value) -> serde_json::Value {
 fn redact_value(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::String(text) => serde_json::Value::String(redact_secrets(text)),
-        serde_json::Value::Object(fields) => serde_json::Value::Object(
-            fields
-                .iter()
-                .map(|(key, value)| match SECRET_FIELD.is_match(key) {
-                    true => (key.clone(), serde_json::Value::String(SECRET_PLACEHOLDER.to_string())),
-                    false => (key.clone(), redact_value(value)),
-                })
-                .collect(),
-        ),
+        serde_json::Value::Object(fields) => serde_json::Value::Object(redact_keys(fields)),
         serde_json::Value::Array(items) => serde_json::Value::Array(items.iter().map(redact_value).collect()),
         other => other.clone(),
     }
+}
+
+fn redact_field(key: &str, value: &serde_json::Value) -> serde_json::Value {
+    match SECRET_FIELD.is_match(key) || SECRET_NAME_ENDING.is_match(key) {
+        true => serde_json::Value::String(SECRET_PLACEHOLDER.to_string()),
+        false => redact_value(value),
+    }
+}
+
+/// Keys that [`redact_key`] leaves alone keep their names; a rewritten key that collides
+/// with one already kept takes its base's next free `-2`, `-3`, … suffix, so every entry
+/// survives, numbered in the map's key order.
+fn redact_keys(fields: &serde_json::Map<String, serde_json::Value>) -> serde_json::Map<String, serde_json::Value> {
+    let (unchanged, rewritten): (Vec<_>, Vec<_>) = fields
+        .iter()
+        .map(|(key, value)| (redact_key(key), key, value))
+        .partition(|(redacted_key, key, _)| redacted_key == *key);
+    let mut redacted: serde_json::Map<String, serde_json::Value> = unchanged
+        .into_iter()
+        .map(|(redacted_key, key, value)| (redacted_key, redact_field(key, value)))
+        .collect();
+    let mut next_suffix: HashMap<String, usize> = HashMap::new();
+    for (base, key, value) in rewritten {
+        let suffix = next_suffix.entry(base.clone()).or_insert(1);
+        let free = loop {
+            let candidate = match *suffix {
+                1 => base.clone(),
+                n => format!("{base}-{n}"),
+            };
+            *suffix += 1;
+            if !redacted.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        redacted.insert(free, redact_field(key, value));
+    }
+    redacted
 }
 
 #[cfg(test)]
@@ -229,6 +527,17 @@ mod tests {
                 format!("machine api.example.com login me password {masked}"),
             ),
             ("DB_PASSWORD='p@ss'", format!("DB_PASSWORD='{masked}'")),
+            ("DB_PASSWORD=\"\"", format!("DB_PASSWORD=\"{masked}\"")),
+            ("token=\"x\npassword inner\"suffix\"", format!("token=\"{masked}")),
+            (
+                "machine h login token=\"\" password hunter2",
+                format!("machine h login token=\"{masked}\" password {masked}"),
+            ),
+            (
+                "machine h login me password api_key=abc\nnext",
+                format!("machine h login me password {masked}\nnext"),
+            ),
+            ("password=token=\"public\"", format!("password={masked}\"{masked}\"")),
             (
                 "{\"password\": \"hunter2\", \"user\": \"me\"}",
                 format!("{{\"password\": \"{masked}\", \"user\": \"me\"}}"),
@@ -328,6 +637,13 @@ mod tests {
                 "3f7a9c2e1b8d4f6a0c5e7b9d1f3a5c7e9b2d4f68,Zq3/tVb8LmXw2Rk/9pHsYcD4nGfJ7uEoA1iTz/Bx",
                 format!("{masked},{masked}"),
             ),
+            ("wJalrXUtnFEMI+K7MDENG/bPxRfiCYEXAMPLEKEY", masked.to_string()),
+            // A run longer than a key is taken whole, and no 40-character piece of it is
+            // masked.
+            (
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEX/AMPLEKEY12",
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEX/AMPLEKEY12".to_string(),
+            ),
             // A path and a URL are runs of the same alphabet; neither holds 40 characters
             // of it between two delimiters.
             (
@@ -351,11 +667,221 @@ mod tests {
     }
 
     #[test]
+    fn a_quoted_secret_is_masked_under_every_quote_reading() {
+        let masked = "[redacted-secret]";
+        let cases = [
+            (r#"password="ab\"cdefgh" next"#, format!(r#"password="{masked}" next"#)),
+            (r"password='ab\'cdefgh' next", format!("password='{masked}' next")),
+            (r#"PASSWORD="a\"b\"c\"tail">out"#, format!(r#"PASSWORD="{masked}">out"#)),
+            (r"PASSWORD='a\'b\'tail'>out", format!("PASSWORD='{masked}'>out")),
+            (
+                r#"export DB_PASSWORD="ab\"cdefgh">out"#,
+                format!(r#"export DB_PASSWORD="{masked}">out"#),
+            ),
+            (
+                r#"{"password": "a\\\"b\\c", "user": "me"}"#,
+                format!(r#"{{"password": "{masked}", "user": "me"}}"#),
+            ),
+            (
+                "{\"password\":\"ab\\\"cd\u{2028}efgh\"}",
+                format!("{{\"password\":\"{masked}\"}}"),
+            ),
+            (r#"password="abc\\" next"#, format!(r#"password="{masked}" next"#)),
+            (r#"password="a\\\"b" next"#, format!(r#"password="{masked}" next"#)),
+            (r"password='abc\\' next", format!("password='{masked}' next")),
+            (
+                r#"{"password":"abc\\","user":"me"}"#,
+                format!(r#"{{"password":"{masked}","user":"me"}}"#),
+            ),
+            ("PASSWORD=\"a\\\"b\nshort tail\"", format!("PASSWORD=\"{masked}\"")),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD=\"hunter2\"\nUSER=me",
+                format!("DIR_PASSWORD=\"{masked}\"{masked}\"\nUSER=me"),
+            ),
+            (
+                "PASSWORD=\"ab\\\"cd\"\r\nUSER=me",
+                format!("PASSWORD=\"{masked}\"\r\nUSER=me"),
+            ),
+            (
+                "token=\"ab\ncd\\\"ef\" tail\nNEXT=1",
+                format!("token=\"{masked}\" tail\nNEXT=1"),
+            ),
+            (
+                "token=\"ab\\\"cd\nmachine h login me password hunter2",
+                format!("token=\"{masked}"),
+            ),
+            (
+                r#"machine api.example.com login token="ab\" password "hunter2""#,
+                format!(r#"machine api.example.com login token="{masked}"#),
+            ),
+            (
+                "machine h login token=\"a\\\"b\" password\nhunter2",
+                format!("machine h login token=\"{masked}\" password\n{masked}"),
+            ),
+            (
+                "password=\"a\\\"b\" TOKEN=\"\"\r\npassword hunter2",
+                format!("password=\"{masked}\" TOKEN=\"{masked}\"\r\npassword {masked}"),
+            ),
+            (
+                "PASSWORD=\"x\\\"TOKEN='y\"\nDB_PASSWORD='hunter2'",
+                format!("PASSWORD=\"{masked}'{masked}'"),
+            ),
+            (
+                "PASSWORD=\"x\\\"TOKEN='foo\"\nPASSWORD=\"a\\\"b\" TOKEN=\n  'hunter2'",
+                format!("PASSWORD=\"{masked}'{masked}'"),
+            ),
+            (
+                "PASSWORD=\"x\\\"TOKEN='y\"\nmachine h login me' password hunter2",
+                format!("PASSWORD=\"{masked}' password {masked}"),
+            ),
+            (
+                "PASSWORD=\"x\\\"TOKEN='y\"\nmachine h login o'neil password\nhunter2",
+                format!("PASSWORD=\"{masked}'neil password\n{masked}"),
+            ),
+            (
+                "{\"password\":\"ab\\\"cd\",\"token\":\n  \"hunter2\"}",
+                format!("{{\"password\":\"{masked}\",\"token\":\n  \"{masked}\"}}"),
+            ),
+            (
+                "{\"password\":\"x\\\"TOKEN='y\",\n \"secret\":\"a\\\"b\",\"token\":\n \"'hunter2\"}",
+                format!("{{\"password\":\"{masked}\"}}"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD='x\"y\\'hunter2'",
+                format!("DIR_PASSWORD=\"{masked}'"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nmachine h login token=\"a b\" password hunter2",
+                format!("DIR_PASSWORD=\"{masked}\"{masked}\" password {masked}"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\" DB_PASSWORD='x\n\" hunter2'",
+                format!("DIR_PASSWORD=\"{masked}'"),
+            ),
+            (
+                "machine TOKEN=\"a\\\"b\" login SECRET=\"foo bar\" password\nhunter2",
+                format!("machine TOKEN=\"{masked}\" login SECRET=\"{masked}\" password\n{masked}"),
+            ),
+            (
+                "export TOKEN=\"a\\\"b\" NOTE='password=\"' PASSWORD=\"hunter2\"",
+                format!("export TOKEN=\"{masked}\" NOTE='password=\"{masked}\"{masked}\""),
+            ),
+            (
+                "token=pass=\"hunter 2\" next",
+                format!("token={masked}\"{masked}\" next"),
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nDB_PASSWORD=\"hunter2\"",
+                format!("DIR_PASSWORD=\"{masked}\"{masked}\""),
+            ),
+            (
+                "password='ab\\'cd' token='hunter2'",
+                format!("password='{masked}' token='{masked}'"),
+            ),
+            (
+                "password='C:\\dir\\' token='hunter2'",
+                format!("password='{masked}'{masked}'"),
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(redact_secrets(input), expected, "input {input:?}");
+        }
+    }
+
+    /// Each reading alone leaves a credential that another reading finds, in the order of
+    /// [`READINGS`]: double then single quotes, a backslash escaping (E) or literal (L).
+    #[test]
+    fn every_quote_reading_alone_leaves_a_credential_the_union_masks() {
+        let m = "[redacted-secret]";
+        let cases = [
+            (
+                "password=\"ab\\\"cd ef\" next",
+                format!("password=\"{m}\" next"),
+                [
+                    format!("password=\"{m}\" next"),
+                    format!("password=\"{m}\" next"),
+                    format!("password=\"{m}\"cd ef\" next"),
+                    format!("password=\"{m}\"cd ef\" next"),
+                ],
+            ),
+            (
+                "password='ab\\'cd ef' next",
+                format!("password='{m}' next"),
+                [
+                    format!("password='{m}' next"),
+                    format!("password='{m}'cd ef' next"),
+                    format!("password='{m}' next"),
+                    format!("password='{m}'cd ef' next"),
+                ],
+            ),
+            (
+                "DIR_PASSWORD=\"C:\\dir\\\"\nmachine h login token=\"a b\" password hunter2",
+                format!("DIR_PASSWORD=\"{m}\"{m}\" password {m}"),
+                [
+                    format!("DIR_PASSWORD=\"{m}\"{m}\" password hunter2"),
+                    format!("DIR_PASSWORD=\"{m}\"{m}\" password hunter2"),
+                    format!("DIR_PASSWORD=\"{m}\"\nmachine h login token=\"{m}\" password {m}"),
+                    format!("DIR_PASSWORD=\"{m}\"\nmachine h login token=\"{m}\" password {m}"),
+                ],
+            ),
+            (
+                "DIR_PASSWORD='C:\\dir\\'\nmachine h login token='a b' password hunter2",
+                format!("DIR_PASSWORD='{m}'{m}' password {m}"),
+                [
+                    format!("DIR_PASSWORD='{m}'{m}' password hunter2"),
+                    format!("DIR_PASSWORD='{m}'\nmachine h login token='{m}' password {m}"),
+                    format!("DIR_PASSWORD='{m}'{m}' password hunter2"),
+                    format!("DIR_PASSWORD='{m}'\nmachine h login token='{m}' password {m}"),
+                ],
+            ),
+        ];
+        for (input, union, alone) in cases {
+            assert_eq!(mask_keyed_values(input), union, "input {input:?}");
+            for (reading, expected) in READINGS.iter().zip(alone) {
+                assert_eq!(
+                    mask_keyed_values_under(input, std::slice::from_ref(reading)),
+                    expected,
+                    "input {input:?} under {reading:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_json_body_is_redacted_as_its_tree_and_stays_json_of_the_same_shape() {
+        let masked = "[redacted-secret]";
+        let cases = [
+            (
+                r#"{"password":"a\"b","user":"me"}"#,
+                json!({"password": masked, "user": "me"}),
+            ),
+            (
+                r#"{"password":"abc\\","user":"me"}"#,
+                json!({"password": masked, "user": "me"}),
+            ),
+            (
+                r#"{"db pass":"hunter2","author":"Ada","oauth_scope":"read","keyboard":"us","password hint":"pet"}"#,
+                json!({"db pass": masked, "author": "Ada", "oauth_scope": "read", "keyboard": "us", "password hint": masked}),
+            ),
+            (
+                r#"{"sshKey":"hunter2","db.pass":"hunter2","note":"token=abc","api_key":12345,"n":[1,"x"]}"#,
+                json!({"sshKey": masked, "db.pass": masked, "note": format!("token={masked}"), "api_key": masked, "n": [1, "x"]}),
+            ),
+        ];
+        for (body, expected) in cases {
+            let redacted: serde_json::Value =
+                serde_json::from_str(&redact_body(body)).unwrap_or_else(|error| panic!("{error}: {body}"));
+            assert_eq!(redacted, expected, "body {body:?}");
+        }
+        assert_eq!(redact_body("export TOKEN=abc"), format!("export TOKEN={masked}"));
+    }
+
+    #[test]
     fn a_call_leaves_with_every_string_redacted_and_every_secret_field_masked() {
         let token = "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
         let masked = "[redacted-secret]";
         assert_eq!(
-            redact_args(&json!({
+            redact_call(&json!({
                 "name": "mcp__claude_ai_Google_Drive__search_files",
                 "description": format!("uses {token}"),
                 "arguments": {
@@ -394,6 +920,47 @@ mod tests {
             redact_args(&json!({"query": format!("key {token}"), "established": "internal"})),
             json!({"query": format!("key {masked}"), "established": "internal"}),
             "one value per declared input is redacted the same way"
+        );
+        assert_eq!(
+            redact_args(&json!({"name": token, "query": "x"})),
+            json!({"name": masked, "query": "x"}),
+            "a declared input named `name` is no tool name"
+        );
+    }
+
+    #[test]
+    fn a_credential_used_as_a_key_is_redacted_and_keys_that_redact_alike_keep_one_entry_each() {
+        let masked = "[redacted-secret]";
+        assert_eq!(
+            redact_call(&json!({
+                "name": "write",
+                "arguments": {
+                    "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789": 1,
+                    "ghp_ZyXwVuTsRqPoNmLkJiHgFeDcBa9876543210": 2,
+                    "AKIAIOSFODNN7EXAMPLE": 3,
+                    "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY": 4,
+                    format!("{masked}-2"): 5,
+                    "Customer-Billing-Zone_V2": {"configuration_management_enabled": 6},
+                    "https://alice:hunter2@example.com": 7,
+                },
+            })),
+            json!({
+                "name": "write",
+                "arguments": {
+                    masked: 3,
+                    format!("{masked}-2"): masked,
+                    format!("{masked}-3"): 1,
+                    format!("{masked}-4"): 2,
+                    format!("{masked}-5"): 4,
+                    "Customer-Billing-Zone_V2": {"configuration_management_enabled": 6},
+                    format!("https://alice:{masked}@example.com"): 7,
+                },
+            })
+        );
+        assert_eq!(
+            redact_args(&json!({"AKIAIOSFODNN7EXAMPLE": {"AKIAIOSFODNN7EXAMPLE": "write"}})),
+            json!({"AKIAIOSFODNN7EXAMPLE": {masked: "write"}}),
+            "a top-level key is a declared input's name"
         );
     }
 }
