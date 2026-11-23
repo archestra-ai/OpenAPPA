@@ -3,8 +3,8 @@
   "@id": "https://github.com/archestra-ai/OpenAPPA/blob/main/vex/openvex.json",
   "author": "Archestra (https://archestra.ai)",
   "role": "Document Creator",
-  "timestamp": "2026-11-20T01:22:09Z",
-  "version": 12,
+  "timestamp": "2026-11-23T07:57:44Z",
+  "version": 42,
   "statements": [
     {
       "vulnerability": {
@@ -27,6 +27,237 @@
       "timestamp": "2026-11-20T01:22:09Z",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "The use-after-free needs CURLOPT_STREAM_DEPENDS(_E) followed by curl_easy_reset(). The only libcurl user in the image is /usr/bin/curl, which does not import curl_easy_reset and whose tool source (curl 8.14.1 src/) never sets CURLOPT_STREAM_DEPENDS; libcurl itself never calls curl_easy_reset."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-10536"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:38Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The use-after-free needs CURLOPT_STREAM_DEPENDS(_E) followed by curl_easy_reset(). The only libcurl user in appa-runtime is /usr/bin/curl, which does not import curl_easy_reset and whose tool source (curl 8.14.1 src/) never sets CURLOPT_STREAM_DEPENDS; libcurl itself never calls curl_easy_reset."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-107493"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:43Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The use-after-free needs a caller that passes an existing stack to PEM_X509_INFO_read_bio(_ex). Every caller in these images passes NULL: libcurl (lib/vtls/openssl.c), the openssl CLI (apps/rehash.c, apps/crl2pkcs7.c) and libcrypto's own X509_load_cert_crl_file (crypto/x509/by_file.c); Python's _ssl and _hashlib do not import it."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-107496"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:43Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The loop is in CMS_encrypt(). The only process these images run is the Python entrypoint (/srv/demo_tools.py or /srv/mock_externals.py), which starts no other program; Python's _ssl and _hashlib modules, the only OpenSSL users it loads, import no CMS_ function."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-107928"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:39Z",
+      "justification": "vulnerable_code_not_present",
+      "impact_statement": "The out-of-bounds read is in libcurl's GnuTLS backend. The libcurl in appa-runtime (libcurl4t64, /usr/lib/x86_64-linux-gnu/libcurl.so.4) is the OpenSSL build: it links libssl.so.3 and libcrypto.so.3 and does not link libgnutls."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-109383"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:40Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw drops function-valued TLS options such as checkServerIdentity. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options (connect, requestTls, proxyTls = { ca }); it passes no function-valued TLS option, so nothing is dropped."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-109829"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:40Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw needs an Agent composed with the redirect and cache interceptors. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it composes no interceptors, and undici's dispatchers and fetch do not add the cache interceptor themselves."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-109841"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:42Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in fetch's Subresource Integrity check, which runs only when a request carries integrity metadata. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options and request options of only headers and dispatcher; it never sets integrity."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-109924"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:42Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in undici's EventSource client. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it never opens an EventSource."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-109932"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:41Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in undici's WebSocket client. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it never opens a WebSocket."
     },
     {
       "vulnerability": {
@@ -87,6 +318,98 @@
     },
     {
       "vulnerability": {
+        "name": "CVE-2026-121482"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:43Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in CMS and PKCS#7 SignedData verification. The only process these images run is the Python entrypoint (/srv/demo_tools.py or /srv/mock_externals.py), which starts no other program; Python's _ssl and _hashlib modules, the only OpenSSL users it loads, import no CMS_ or PKCS7_verify function."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-124709"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:42Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The leak is in OpenSSL's QUIC server. No ELF file in these images that links libssl.so.3 or libcrypto.so.3 imports OSSL_QUIC_server_method or SSL_new_listener (the openssl CLI and libcurl import only OSSL_QUIC_client_method), so nothing in the image runs a QUIC server."
+    },
+    {
+      "vulnerability": {
         "name": "CVE-2026-18924"
       },
       "products": [
@@ -128,6 +451,28 @@
       "timestamp": "2026-11-20T01:22:09Z",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "libcurl only accepts HTTP/2 server push when the application sets CURLMOPT_PUSHFUNCTION; otherwise it advertises SETTINGS_ENABLE_PUSH=0 and refuses pushes (lib/http2.c). The only libcurl user in the image, /usr/bin/curl, does not import curl_multi_setopt and its tool source never sets CURLMOPT_PUSHFUNCTION."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-18924"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:38Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "libcurl only accepts HTTP/2 server push when the application sets CURLMOPT_PUSHFUNCTION; otherwise it advertises SETTINGS_ENABLE_PUSH=0 and refuses pushes (lib/http2.c). The only libcurl user in appa-runtime, /usr/bin/curl, does not import curl_multi_setopt, so it never sets a push callback."
     },
     {
       "vulnerability": {
@@ -185,6 +530,28 @@
     },
     {
       "vulnerability": {
+        "name": "CVE-2026-63073"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/libcrypto3@3.6.3-r3?arch=x86_64&distro=wolfi-20230201&upstream=openssl"
+            },
+            {
+              "@id": "pkg:apk/wolfi/libssl3@3.6.3-r3?arch=x86_64&distro=wolfi-20230201&upstream=openssl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:40Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in the OpenSSL CMP client's response validation. The image removes the openssl CLI (integrations/kagent/appa-kagent-adk/Dockerfile: apk del openssl), and no ELF file in the image that links libcrypto.so.3 imports any OSSL_CMP_ function, so nothing in the image runs a CMP client."
+    },
+    {
+      "vulnerability": {
         "name": "CVE-2026-8376"
       },
       "products": [
@@ -217,6 +584,226 @@
       "timestamp": "2026-11-20T01:22:09Z",
       "justification": "vulnerable_code_not_present",
       "impact_statement": "The overflow only affects 32-bit perl builds. These images are linux/amd64 and ship a 64-bit perl (/usr/bin/perl is ELF64 x86-64; Config ptrsize=8, ivsize=8)."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-84786"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:44Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The crash needs a DANE-enabled TLS client. The only process these images run is the Python entrypoint (/srv/demo_tools.py or /srv/mock_externals.py), which starts no other program; Python's _ssl and _hashlib modules, the only OpenSSL users it loads, import no SSL_dane_ or SSL_CTX_dane_ function, so DANE is never enabled."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-84933"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:41Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in undici's cache interceptor. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it composes no interceptors, and undici's dispatchers and fetch do not add the cache interceptor themselves."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-84961"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:40Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in undici's BalancedPool. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it never constructs a BalancedPool, and the nested undici under /usr/lib/node_modules/node-gyp is resolvable only from node-gyp."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-85014"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:41Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in undici's WebSocketStream client. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it never opens a WebSocket."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-86409"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:39Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The leak needs a handle that had CURLOPT_AWS_SIGV4 set and is then reused after it is set to NULL. The only libcurl user in appa-runtime, /usr/bin/curl, creates a new easy handle for every transfer and applies its options once (curl 8.14.1 src/tool_operate.c single_transfer), so no handle carries SigV4 state into a later transfer."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-87029"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:apk/wolfi/node-gyp@13.0.1-r0?arch=x86_64&distro=wolfi-20230201"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:41Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in undici's decompress interceptor. node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it composes no interceptors, and fetch decompresses bodies without that interceptor."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-87865"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:39Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The misreport only reaches an application's CURLOPT_SSH_KEYFUNCTION callback. /usr/bin/curl, the only libcurl user in appa-runtime, never sets one (curl 8.14.1 src/), and libcurl's default callback rejects both a mismatched and a missing host key (lib/vssh/libssh2.c sshkeycallback)."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-88823"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:44Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in the AES-GCM-SIV cipher, used only through the EVP cipher API. The only process these images run is the Python entrypoint (/srv/demo_tools.py or /srv/mock_externals.py), which starts no other program; Python's _ssl and _hashlib modules, the only OpenSSL users it loads, import no EVP_Cipher, EVP_Encrypt or EVP_Decrypt function, and AES-GCM-SIV is not a TLS cipher suite libssl can negotiate."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-9080"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:39Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The use-after-free needs curl_easy_pause() called from a CURLMOPT_SOCKETFUNCTION callback. The only libcurl user in appa-runtime, /usr/bin/curl, does not import curl_multi_setopt, so it never installs a socket callback (its libuv event code is a debug-build-only path not in this binary)."
     },
     {
       "vulnerability": {
@@ -258,6 +845,201 @@
       "timestamp": "2026-11-20T01:22:09Z",
       "justification": "vulnerable_code_not_in_execute_path",
       "impact_statement": "The flaw needs an FTP wildcard transfer (CURLOPT_WILDCARDMATCH). The only libcurl user in the image is /usr/bin/curl, whose tool source (curl 8.14.1 src/) never sets CURLOPT_WILDCARDMATCH."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-92388"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-runtime",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/curl@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7"
+            },
+            {
+              "@id": "pkg:deb/debian/libcurl4t64@8.14.1-2%2Bdeb13u7%2Bdhi1?arch=amd64&distro=debian-13.7&upstream=curl"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:39Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw needs an FTP wildcard transfer (CURLOPT_WILDCARDMATCH). The only libcurl user in appa-runtime is /usr/bin/curl, whose tool source (curl 8.14.1 src/) never sets CURLOPT_WILDCARDMATCH and which does not import curl_easy_duphandle."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-95691"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:43Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The use-after-free is in OpenSSL's QUIC client. The only process these images run is the Python entrypoint (/srv/demo_tools.py or /srv/mock_externals.py), which starts no other program; Python's _ssl and _hashlib modules, the only OpenSSL users it loads, do not import OSSL_QUIC_client_method or any QUIC stream function; Python's ssl module has no QUIC support."
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-95692"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-demo-tools",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        },
+        {
+          "@id": "pkg:oci/appa-demo-mocks",
+          "subcomponents": [
+            {
+              "@id": "pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7&upstream=openssl"
+            },
+            {
+              "@id": "pkg:deb/debian/openssl@3.5.7-1~deb13u3%2Bdhi3?arch=amd64&distro=debian-13.7"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:44Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in the AES-GCM-SIV cipher's IV handling, used only through the EVP cipher API. The only process these images run is the Python entrypoint (/srv/demo_tools.py or /srv/mock_externals.py), which starts no other program; Python's _ssl and _hashlib modules, the only OpenSSL users it loads, import no EVP_Cipher, EVP_Encrypt or EVP_Decrypt function, and AES-GCM-SIV is not a TLS cipher suite libssl can negotiate."
+    },
+    {
+      "vulnerability": {
+        "name": "GHSA-2m5v-pch6-74hx"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:npm/undici@8.6.0"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:40Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw drops function-valued TLS options such as checkServerIdentity. undici 8.6.0 ships only inside node-gyp, and node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options (connect, requestTls, proxyTls = { ca }); it passes no function-valued TLS option."
+    },
+    {
+      "vulnerability": {
+        "name": "GHSA-4cwx-7wf7-3272"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:npm/undici@8.6.0"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:41Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in the cache-control parsing of undici's cache interceptor (lib/util/cache.js, used only by lib/interceptor/cache.js and lib/handler/cache-handler.js). undici 8.6.0 ships only inside node-gyp, and node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it composes no interceptors."
+    },
+    {
+      "vulnerability": {
+        "name": "GHSA-4w7w-5xrc-9h26"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:npm/undici@8.6.0"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:40Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw needs an Agent composed with the redirect and cache interceptors. undici 8.6.0 ships only inside node-gyp, and node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it composes no interceptors, and undici's dispatchers and fetch do not add the cache interceptor themselves."
+    },
+    {
+      "vulnerability": {
+        "name": "GHSA-rfgv-xxqx-mfg5"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:npm/undici@8.6.0"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:41Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in undici's WebSocket client. undici 8.6.0 ships only inside node-gyp, and node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it never opens a WebSocket."
+    },
+    {
+      "vulnerability": {
+        "name": "GHSA-w293-vg96-wgc3"
+      },
+      "products": [
+        {
+          "@id": "pkg:oci/appa-kagent-adk",
+          "subcomponents": [
+            {
+              "@id": "pkg:npm/undici@8.6.0"
+            }
+          ]
+        }
+      ],
+      "status": "not_affected",
+      "timestamp": "2026-11-23T07:57:40Z",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "The flaw is in undici's BalancedPool. undici 8.6.0 ships only inside node-gyp (/usr/lib/node_modules/node-gyp/node_modules/undici), and node-gyp's only undici use is lib/download.js, which fetches with an Agent or EnvHttpProxyAgent wrapped in RetryAgent and passes only string ca options; it never constructs a BalancedPool."
     },
     {
       "vulnerability": {
