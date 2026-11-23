@@ -1978,6 +1978,13 @@ impl<'a> Sequence<'a> {
                         return Ok(bundled);
                     }
                 }
+                if !menu.contains(plan) && block.is_hard() {
+                    let legacy = crate::plan::hard_block_menu(self.engine.registry(), views, blocked(), &context)
+                        .map_err(TransitionRefusal::from)?;
+                    if legacy.contains(plan) {
+                        return Ok(legacy);
+                    }
+                }
                 Ok(menu)
             }
             crate::basis::SubjectKey::ConfinedResult(dispatch) => {

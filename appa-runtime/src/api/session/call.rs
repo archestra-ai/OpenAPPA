@@ -433,14 +433,14 @@ impl Session {
                         dispatch: released.dispatch.clone(),
                     })
                 }
-                ([], feedback @ [entry]) => {
+                ([], [entry]) => {
                     tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
                     Ok(ToolCallDecision::Deny {
-                        feedback: join_feedback(feedback),
+                        feedback: entry.text.clone(),
                         outcomes: entry.outcomes,
-                        offers: feedback.iter().flat_map(|entry| entry.offers.clone()).collect(),
-                        display: feedback.iter().filter_map(|entry| entry.display.clone()).collect(),
-                        review: join_review(feedback, &self.deployment().externals),
+                        offers: entry.offers.clone(),
+                        display: entry.display.iter().cloned().collect(),
+                        review: reviews(&entry.review, &self.deployment().externals),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),

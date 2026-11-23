@@ -2073,7 +2073,7 @@ fn a_blocked_call_reads_no_mandate_live_or_on_replay() {
         .expect("the blocked call is decided without membership");
     let (released, blocked) = answered(&decision);
     assert!(released.is_empty());
-    assert!(blocked[0].block.raw.is_terminal());
+    assert!(blocked[0].block.raw.is_hard());
     assert!(!blocked[0].block.is_curable());
     assert!(blocked[0].offers.is_empty());
     let facts = appended_facts(decision);

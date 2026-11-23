@@ -98,7 +98,9 @@ use crate::consult::{
     ToolNameAuthor,
 };
 pub(crate) use appa_engine::engine::DeferredReturn;
-use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Outcome, Outcomes, RetryHint, Ruling};
+use appa_runtime_api::{
+    OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Outcomes, Remediable, Remedy, RetryHint, Ruling,
+};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -394,9 +396,8 @@ pub enum Presentation {
     Discarded,
     Blocked {
         feedback: String,
-        /// Why the value or the call is held back; `None` for a staged result, which
-        /// refuses nothing and waits only for the agent's next step.
-        outcomes: Option<Outcomes>,
+        /// Why the value or the call is held back.
+        outcomes: Outcomes,
         offers: Vec<OfferedRemedy>,
         review: Vec<PendingReview>,
         display: Option<RemedyDisplay>,
@@ -1673,7 +1674,7 @@ impl RuntimeEngine {
             // judged: a typed refusal, never model feedback, and nothing is appended.
             Err(EngineError::UnknownTool(tool)) => return Err(EngineRefusal::UndeclaredTool { tool }),
             Err(error) => {
-                return Ok(deny(malformed_feedback(&error, self.naming), Outcomes::integrity()));
+                return Ok(deny(malformed_feedback(&error, self.naming), Outcomes::Integrity));
             }
         };
         let Some(views) = view.views(trajectory) else {
@@ -1871,7 +1872,7 @@ impl RuntimeEngine {
                     let _ = spent;
                     deny(
                         "[appa] this call's earlier decision no longer stands; propose it again".to_string(),
-                        Outcomes::integrity(),
+                        Outcomes::Integrity,
                     )
                     .then
                 }
@@ -1916,17 +1917,16 @@ impl RuntimeEngine {
                 if !spent.is_empty() || !settled.is_empty() {
                     return Ok(deny_next(
                         "[appa] this call's earlier decision no longer stands; propose it again".to_string(),
-                        Outcomes::integrity(),
+                        Outcomes::Integrity,
                     ));
                 }
                 Err(EngineRefusal::Invariant {
                     detail: "a non-empty proposal produced no release, block, or repeat answer".to_string(),
                 })
             }
-            FollowUp::Malformed { error, .. } => Ok(deny_next(
-                malformed_feedback(&error, self.naming),
-                Outcomes::integrity(),
-            )),
+            FollowUp::Malformed { error, .. } => {
+                Ok(deny_next(malformed_feedback(&error, self.naming), Outcomes::Integrity))
+            }
             other => Err(EngineRefusal::Invariant {
                 detail: format!("a proposal produced a non-proposal follow-up: {other:?}"),
             }),
@@ -2446,7 +2446,7 @@ impl RuntimeEngine {
         };
         Presentation::Blocked {
             feedback,
-            outcomes: Some(outcomes),
+            outcomes,
             offers,
             review,
             display,
@@ -2692,7 +2692,7 @@ impl RuntimeEngine {
         );
         Presentation::Blocked {
             feedback,
-            outcomes: None,
+            outcomes: Outcomes::Remediable(Remediable::new(Remedy::Consent, [])),
             offers: offers
                 .into_iter()
                 .map(|offer| OfferedRemedy {
@@ -2880,7 +2880,7 @@ impl RuntimeEngine {
                      message (send no text or explanation) to end without a return.",
                         self.label_text(&floor)
                     ),
-                    Outcomes::hard_block(),
+                    Outcomes::HardBlock,
                 );
             }
             AudienceRound::Failed(TransitionError::ReturnVoid) => {
@@ -2888,12 +2888,12 @@ impl RuntimeEngine {
                     "[appa] your parent takes no return from this session, so your final message cannot cross. \
                      Stop with an empty final message (send no text or explanation)."
                         .to_string(),
-                    Outcomes::hard_block(),
+                    Outcomes::HardBlock,
                 );
             }
             AudienceRound::Failed(TransitionError::ReturnShapeMismatch(mismatch)) => {
                 let policy = self.engine.return_policy_of(view, child);
-                return blocked(shape_feedback(&mismatch, policy.as_ref()), Outcomes::integrity());
+                return blocked(shape_feedback(&mismatch, policy.as_ref()), Outcomes::Integrity);
             }
             AudienceRound::Failed(TransitionError::SanitizerUnapplicable) => {
                 let unusable = Unobtained {
@@ -3287,7 +3287,7 @@ impl RuntimeEngine {
         let blocked = || {
             Ok(Next::PresentToModel(blocked_without_offers(
                 withheld.to_string(),
-                Outcomes::missing(RetryHint::Later),
+                Outcomes::MissingFact(RetryHint::Later),
             )))
         };
         match request {
@@ -3784,12 +3784,12 @@ impl UnresolvedAudience<'_> {
         match self {
             UnresolvedAudience::Denied { tool } => deny(
                 unresolved_audience(&naming.model_spelling(tool), detail),
-                Outcomes::missing(unobtained.retry),
+                Outcomes::MissingFact(unobtained.retry),
             ),
             UnresolvedAudience::Withheld { subject } => {
                 EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
                     format!("[appa] {detail}; the {subject} is withheld"),
-                    Outcomes::missing(unobtained.retry),
+                    Outcomes::MissingFact(unobtained.retry),
                 )))
             }
             UnresolvedAudience::OfferStands => no_answer(format!("[appa] {detail}; the offer stands")),
@@ -3803,12 +3803,12 @@ impl UnresolvedAudience<'_> {
         match self {
             UnresolvedAudience::Denied { tool } => deny(
                 format!("[appa] {}: {detail}; the call is denied", naming.model_spelling(tool)),
-                Outcomes::missing(RetryHint::AfterRepair),
+                Outcomes::MissingFact(RetryHint::AfterRepair),
             ),
             UnresolvedAudience::Withheld { subject } => {
                 EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
                     format!("[appa] {detail}; the {subject} is withheld"),
-                    Outcomes::missing(RetryHint::AfterRepair),
+                    Outcomes::MissingFact(RetryHint::AfterRepair),
                 )))
             }
             UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
@@ -3881,9 +3881,11 @@ struct Unanswered {
     members: BTreeMap<String, crate::events::NoAnswerClass>,
 }
 
-/// A block as its offered plans settle it: an authority's ruling clears a waivable gap,
-/// accepting a narrowing is consent, and every other step, like calling another tool first,
-/// is the agent's own choice. A block nothing is offered for is a hard block.
+/// A block as its offered plans settle it. A step is an authority's ruling (a waivable gap),
+/// accepting a narrowing (consent), or the agent's own choice, as calling another tool first
+/// is. The plans are alternatives, each asking its most demanding step, so the cheapest one
+/// decides; the rest are held for a host to show. A block nothing is offered for is a hard
+/// block.
 fn block_outcomes(block: &CoreBlocked) -> Outcomes {
     let offered = block.offers.iter().filter_map(|(_, id)| {
         block
@@ -3892,20 +3894,31 @@ fn block_outcomes(block: &CoreBlocked) -> Outcomes {
             .iter()
             .find_map(|plan| plan.executable().filter(|plan| plan.id == *id))
     });
-    let steps = offered.flat_map(|plan| &plan.steps).map(|step| match step {
-        RemedyStep::Authorize(_) => Outcome::WaivableGap,
-        RemedyStep::Accept(_) => Outcome::Consent,
+    let mut routes: Vec<Vec<Remedy>> = offered
+        .map(|plan| plan.steps.iter().map(step_remedy).collect())
+        .collect();
+    routes.extend(
+        block
+            .block
+            .plans
+            .iter()
+            .filter(|plan| matches!(plan, RemedyPlan::Redispatch(_)))
+            .map(|_| vec![Remedy::AgentChoice]),
+    );
+    match routes.iter().filter_map(|steps| steps.iter().min()).max() {
+        Some(&deciding) => Outcomes::Remediable(Remediable::new(deciding, routes.into_iter().flatten())),
+        None => Outcomes::HardBlock,
+    }
+}
+
+fn step_remedy(step: &RemedyStep) -> Remedy {
+    match step {
+        RemedyStep::Authorize(_) => Remedy::WaivableGap,
+        RemedyStep::Accept(_) => Remedy::Consent,
         RemedyStep::Withhold | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => {
-            Outcome::AgentChoice
+            Remedy::AgentChoice
         }
-    });
-    let redispatch = block
-        .block
-        .plans
-        .iter()
-        .any(|plan| matches!(plan, RemedyPlan::Redispatch(_)))
-        .then_some(Outcome::AgentChoice);
-    Outcomes::new(steps.chain(redispatch)).unwrap_or_else(Outcomes::hard_block)
+    }
 }
 
 fn deny(text: String, outcomes: Outcomes) -> EngineDecision {
@@ -3928,7 +3941,7 @@ fn deny_next(text: String, outcomes: Outcomes) -> Next {
 fn blocked_without_offers(feedback: String, outcomes: Outcomes) -> Presentation {
     Presentation::Blocked {
         feedback,
-        outcomes: Some(outcomes),
+        outcomes,
         offers: Vec::new(),
         review: Vec::new(),
         display: None,
@@ -5430,7 +5443,7 @@ mod tests {
         BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, NoAnswer, OfferId,
         OfferNonce, Presentation, ProposedCall, Resolution, RetryHint, ReturnBounds, RuntimeEngine, SanitizerSubject,
         TrajectoryId, audience_wire, block_feedback, outcome_presentation, remedy_instruction, remedy_lines,
-        terminal_safe, unobtained, unresolved_audience,
+        terminal_safe, unobtained,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
     use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint, ToolNameAuthor};
@@ -5478,21 +5491,6 @@ mod tests {
         ] {
             assert_eq!(failed(&reasons), retry, "{reasons:?}");
         }
-    }
-
-    #[test]
-    fn audience_failure_feedback_carries_nothing_the_source_said() {
-        use crate::external::NoAnswerReason;
-        // What the source itself said: it reaches the runtime diagnostics, never the model.
-        const SENTINEL: &str = "upstream-said-xyzzy";
-        let reason = NoAnswerReason::NonSuccess {
-            status: 502,
-            detail: Some(SENTINEL.to_string()),
-        };
-        let unobtained = unobtained(&[NoAnswer::lookup("slack", (&reason).into())]).expect("one fact failed");
-        let feedback = unresolved_audience("SlackSend", &unobtained.detail);
-        assert!(!feedback.contains(SENTINEL), "{feedback}");
-        assert_eq!(unobtained.retry, RetryHint::Later);
     }
 
     #[test]

@@ -956,3 +956,37 @@ fn a_call_released_under_the_default_stage_over_a_standing_derivation_replays() 
     let facts = appended_facts(decided.expect("the batch decides"));
     assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
 }
+
+/// A planner before hard blocks offered an input hop for a `blocked` call's recipient gap.
+/// The log it recorded replays; the same call proposed now is offered nothing.
+#[test]
+fn a_hop_an_earlier_planner_offered_a_blocked_call_replays_and_is_offered_no_more() {
+    let e = substituting_engine(TRUSTED);
+    let recorded: Vec<Fact> = serde_json::from_str(include_str!("fixtures/hard-block-hop-log.json"))
+        .expect("a log recorded at the base commit decodes");
+    assert_eq!(
+        opened_offers(&recorded)
+            .into_iter()
+            .map(|(_, plan)| plan.steps)
+            .collect::<Vec<_>>(),
+        vec![vec![plan::RemedyStep::Derive(crate::names::SanitizerName::new(
+            "redact"
+        ))]],
+        "the fixture offers the hop for the blocked call"
+    );
+    assert_eq!(e.validate_replay(&recorded), Ok(()));
+
+    let log = internal_log(&e);
+    let facts = appended_facts(
+        proposed(
+            &e,
+            &log,
+            "b1",
+            nonce(),
+            call("post_blocked", json!({ "body": "ssn 123" })),
+        )
+        .expect("the batch decides"),
+    );
+    assert!(opened_offers(&facts).is_empty());
+    assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+}

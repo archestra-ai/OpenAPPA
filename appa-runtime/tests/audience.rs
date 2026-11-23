@@ -282,7 +282,7 @@ async fn an_unanswered_source_denies_on_a_missing_fact() {
         panic!("the call is denied, got {decision:?}");
     };
     assert!(offers.is_empty());
-    assert_eq!(outcomes, Some(Outcomes::missing(RetryHint::Later)));
+    assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::Later)));
 
     source.members(Some(vec!["bob@corp.example"]));
     assert_eq!(
@@ -323,7 +323,7 @@ async fn a_blocked_call_is_a_hard_block_before_membership_is_known() {
         panic!("the call is denied, got {decision:?}");
     };
     assert!(offers.is_empty());
-    assert_eq!(outcomes, Some(Outcomes::hard_block()));
+    assert_eq!(outcomes, Some(Outcomes::HardBlock));
     assert!(source.requests().is_empty(), "no membership is read for a blocked call");
 }
 

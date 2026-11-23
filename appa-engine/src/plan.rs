@@ -355,8 +355,41 @@ pub(crate) struct BlockedCall<'a> {
 /// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
 /// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
 /// the one `plans` list; fork advice is separate and never a remedy.
-/// See the module docs for the direct-clearing model.
+/// See the module docs for the direct-clearing model. A hard block plans nothing.
 pub(crate) fn plan(
+    registry: &Registry,
+    views: &Views,
+    blocked: BlockedCall<'_>,
+    context: &MembershipContext<'_>,
+) -> Result<PlannedBlock, MembershipNeeded> {
+    match blocked.raw.is_hard() {
+        true => Ok(PlannedBlock {
+            raw: blocked.raw.clone(),
+            plans: Vec::new(),
+            fork_advice: None,
+            narrowing_impact: None,
+        }),
+        false => planned(registry, views, blocked, context),
+    }
+}
+
+/// The menu a planner before hard blocks recorded for one: what it planned for the block's
+/// other gaps. Replay reads it for offers such a log carries; no block offers it.
+pub(crate) fn hard_block_menu(
+    registry: &Registry,
+    views: &Views,
+    blocked: BlockedCall<'_>,
+    context: &MembershipContext<'_>,
+) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
+    Ok(planned(registry, views, blocked, context)?
+        .plans
+        .iter()
+        .filter_map(RemedyPlan::executable)
+        .cloned()
+        .collect())
+}
+
+fn planned(
     registry: &Registry,
     views: &Views,
     blocked: BlockedCall<'_>,
@@ -369,14 +402,6 @@ pub(crate) fn plan(
         stage,
         role,
     } = blocked;
-    if raw.is_terminal() {
-        return Ok(PlannedBlock {
-            raw: raw.clone(),
-            plans: Vec::new(),
-            fork_advice: None,
-            narrowing_impact: None,
-        });
-    }
     let current = views.current_label();
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
@@ -1594,15 +1619,15 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], con
 /// admission derives from the value's label first and asks for members only where the
 /// enumeration itself finds derivation short, so the gate would demand atoms the decision
 /// never reads. The check's own reads — the call's contract — are the check stage's.
-/// A terminal block plans nothing, so it reads nothing.
+/// A hard block plans nothing, so it reads nothing.
 pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &RawBlock) -> Vec<SymbolicAtom> {
-    match raw.is_terminal() {
+    match raw.is_hard() {
         true => Vec::new(),
         false => gate_atoms(registry, contract, raw),
     }
 }
 
-/// The atoms any planner's gate may have asked for this block, a terminal one included.
+/// The atoms any planner's gate may have asked for this block, a hard one included.
 /// Replay counts them as asked, so a log whose act gathered a blocked call's mandates
 /// still settles.
 pub(crate) fn gate_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &RawBlock) -> Vec<SymbolicAtom> {

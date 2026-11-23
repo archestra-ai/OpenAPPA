@@ -64,9 +64,9 @@ pub struct RawBlock {
 }
 
 impl RawBlock {
-    /// Does a `blocked` gap make this block terminal? No remedy can lift it, so planning
+    /// Does a `blocked` gap make this a hard block? No remedy can lift it, so planning
     /// gathers nothing and offers nothing.
-    pub fn is_terminal(&self) -> bool {
+    pub fn is_hard(&self) -> bool {
         self.requirement_gaps.iter().any(Gap::is_blocked)
     }
 }

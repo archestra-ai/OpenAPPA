@@ -545,6 +545,11 @@ pub(super) fn substituting_engine(trust: Trust) -> Engine {
                 let mut tools = declared(vec![
                     post("post", vec![crate::names::TagName::new("outbound")]),
                     post("post_untagged", vec![]),
+                    {
+                        let mut blocked = post("post_blocked", vec![crate::names::TagName::new("outbound")]);
+                        blocked.requires.attention = vec![crate::names::MarkName::new(crate::names::MarkName::BLOCKED)];
+                        blocked
+                    },
                     restrictable_tool("ping"),
                 ]);
                 tools.push(annotated(

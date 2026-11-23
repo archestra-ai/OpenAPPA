@@ -345,8 +345,8 @@ pub(crate) enum SettlementDecision {
 pub struct RemedyPresentation {
     /// Model-facing explanation in plain text.
     pub feedback: String,
-    /// Why the call or the value is held back; `None` where nothing is refused: a staged
-    /// result, a declined offer, a settlement not taken.
+    /// Why the call or the value is held back; `None` where nothing new is refused: a
+    /// declined offer, a settlement not taken.
     pub outcomes: Option<appa_runtime_api::Outcomes>,
     /// Machine-readable remedy offers available for this block.
     pub offers: Vec<OfferedRemedy>,
@@ -499,9 +499,28 @@ pub enum RemedyOutcome {
     Refused { reason: RemedyRefusal },
 }
 
+/// A family log other writers kept contended: nothing was decided, and asking again later
+/// may decide it.
+fn contended() -> crate::engine::Unobtained {
+    let retry = appa_runtime_api::RetryHint::Later;
+    crate::engine::Unobtained {
+        detail: format!(
+            "this session's log was contended by other writers; {}",
+            crate::engine::next_action(retry)
+        ),
+        retry,
+    }
+}
+
 impl From<EventError> for RemedyOutcome {
     fn from(error: EventError) -> RemedyOutcome {
         let reason = match error {
+            // Contention leaves the offer standing, as a consult with no answer does.
+            EventError::Contended { .. } => {
+                return RemedyOutcome::NoAnswer {
+                    feedback: contended().detail,
+                };
+            }
             EventError::AnnotationRefused {
                 annotator,
                 no_answer: Some(class),
@@ -837,7 +856,6 @@ impl EventError {
     /// detail is built from the failure class alone, never from what an external said.
     pub(crate) fn missing_fact(&self) -> Option<crate::engine::Unobtained> {
         use crate::engine::{next_action, no_answer_description, retry_hint};
-        use appa_runtime_api::RetryHint;
         match self {
             EventError::AnnotationRefused {
                 annotator,
@@ -855,13 +873,7 @@ impl EventError {
                     retry,
                 })
             }
-            EventError::Contended { .. } => Some(crate::engine::Unobtained {
-                detail: format!(
-                    "this session's log was contended by other writers; {}",
-                    next_action(RetryHint::Later)
-                ),
-                retry: RetryHint::Later,
-            }),
+            EventError::Contended { .. } => Some(contended()),
             _ => None,
         }
     }

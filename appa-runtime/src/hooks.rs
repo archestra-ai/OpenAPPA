@@ -387,7 +387,7 @@ fn names_a_childs_transcript(
     let (status, decision) = match runtime.opened_among(&actor.root, names_children) {
         Ok(Some(child)) => {
             tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
-            (200, denied(NAMED_TRANSCRIPT.to_string(), Outcomes::hard_block()))
+            (200, denied(NAMED_TRANSCRIPT.to_string(), Outcomes::HardBlock))
         }
         Ok(None) => return None,
         Err(error) => (409, refuse(error)),
@@ -1460,7 +1460,8 @@ enum Refusal {
 
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
     match (error.missing_fact(), error.is_operational(), refusal) {
-        (Some(missing), _, Refusal::Deny) => denied(missing.detail, Outcomes::missing(missing.retry)),
+        (Some(missing), _, Refusal::Deny) => denied(missing.detail, Outcomes::MissingFact(missing.retry)),
+        (Some(missing), _, Refusal::Block) => block(missing.detail),
         (_, true, _) => refuse(error),
         (_, false, Refusal::Deny) => deny(error.to_string()),
         (_, false, Refusal::Block) => block(error.to_string()),
@@ -1471,7 +1472,7 @@ fn fold(error: EventError, refusal: Refusal) -> HookDecision {
 /// once, here, so a session can tell a runtime refusal from its harness's;
 /// a block is marked by the adapter's withheld-result rendering instead.
 fn deny(feedback: String) -> HookDecision {
-    denied(feedback, Outcomes::integrity())
+    denied(feedback, Outcomes::Integrity)
 }
 
 fn denied(feedback: String, outcomes: Outcomes) -> HookDecision {

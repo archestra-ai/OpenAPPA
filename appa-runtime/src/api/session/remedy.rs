@@ -21,20 +21,6 @@ pub(super) fn remedy_presentation(
 /// `hitl` authority, the texts of several such authorities joined. A joined review names no
 /// one authority, hint or scope, so those read as unknown and a host shows the whole text.
 /// Authorities of every other backend answer themselves and need no person here.
-pub(super) fn join_review(
-    feedback: &[Feedback],
-    externals: &crate::external::ExternalServices,
-) -> Vec<appa_runtime_api::Review> {
-    reviews(
-        &feedback
-            .iter()
-            .flat_map(|entry| entry.review.iter())
-            .cloned()
-            .collect::<Vec<_>>(),
-        externals,
-    )
-}
-
 pub(in crate::api) fn reviews(
     pending_reviews: &[PendingReview],
     externals: &crate::external::ExternalServices,
@@ -62,14 +48,6 @@ pub(in crate::api) fn reviews(
         }
     }
     reviews
-}
-
-pub(super) fn join_feedback(feedback: &[Feedback]) -> String {
-    feedback
-        .iter()
-        .map(|entry| entry.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// The return and the decision a reference names among the deferred returns one parent owns.
@@ -269,7 +247,7 @@ impl Session {
             }) => Ok(RemedyDecision::Declined {
                 presentation: remedy_presentation(
                     feedback,
-                    outcomes,
+                    Some(outcomes),
                     offers,
                     review,
                     display.into_iter().collect(),

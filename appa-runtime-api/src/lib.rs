@@ -690,9 +690,9 @@ pub enum RefusalClass {
     Spawn,
 }
 
-/// Why a call was refused, as a host branches on it. Variants are ordered by
-/// precedence: the first one a refusal holds decides it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+/// Why a call was refused, as a host branches on it: one kind of [`Outcomes`], as the wire
+/// spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
     /// The event, the log or the deployment is at fault, or the call breaks its contract.
@@ -711,6 +711,36 @@ pub enum Outcome {
     Consent,
 }
 
+impl Outcome {
+    pub(crate) fn remedy(self) -> Option<Remedy> {
+        match self {
+            Outcome::AgentChoice => Some(Remedy::AgentChoice),
+            Outcome::WaivableGap => Some(Remedy::WaivableGap),
+            Outcome::Consent => Some(Remedy::Consent),
+            Outcome::Integrity | Outcome::HardBlock | Outcome::MissingFact => None,
+        }
+    }
+}
+
+/// What a step of an offered remedy asks, ordered from the most to the least the agent
+/// must do itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Remedy {
+    AgentChoice,
+    WaivableGap,
+    Consent,
+}
+
+impl From<Remedy> for Outcome {
+    fn from(remedy: Remedy) -> Outcome {
+        match remedy {
+            Remedy::AgentChoice => Outcome::AgentChoice,
+            Remedy::WaivableGap => Outcome::WaivableGap,
+            Remedy::Consent => Outcome::Consent,
+        }
+    }
+}
+
 /// What asking again for a fact a refusal misses can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -721,116 +751,109 @@ pub enum RetryHint {
     AfterRepair,
 }
 
-/// The outcomes one refusal holds: never empty, and `deciding` is the one of
-/// highest precedence. A missing fact is held alone, with its retry hint.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Outcomes {
-    /// One bit per [`Outcome`], by its precedence.
-    held: u8,
-    retry: Option<RetryHint>,
-}
-
-impl Outcome {
-    const ALL: [Outcome; 6] = [
-        Outcome::Integrity,
-        Outcome::HardBlock,
-        Outcome::MissingFact,
-        Outcome::AgentChoice,
-        Outcome::WaivableGap,
-        Outcome::Consent,
-    ];
-
-    fn bit(self) -> u8 {
-        1 << self as u8
-    }
+/// Why one refusal stands. An integrity fault, a hard block and a missing fact are each
+/// the whole answer; a block its offers can lift is [`Remediable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcomes {
+    Integrity,
+    HardBlock,
+    MissingFact(RetryHint),
+    Remediable(Remediable),
 }
 
 impl Outcomes {
-    /// The outcomes `held` names, or `None` when it names none or names a missing fact,
-    /// which only [`Outcomes::missing`] states.
-    pub fn new(held: impl IntoIterator<Item = Outcome>) -> Option<Outcomes> {
-        let held = held.into_iter().fold(0, |bits, outcome| bits | outcome.bit());
-        (held != 0 && held & Outcome::MissingFact.bit() == 0).then_some(Outcomes { held, retry: None })
-    }
-
-    pub fn integrity() -> Outcomes {
-        Outcomes::judged(Outcome::Integrity)
-    }
-
-    pub fn hard_block() -> Outcomes {
-        Outcomes::judged(Outcome::HardBlock)
-    }
-
-    /// A refusal for a fact the check could not obtain.
-    pub fn missing(retry: RetryHint) -> Outcomes {
-        Outcomes {
-            retry: Some(retry),
-            ..Outcomes::judged(Outcome::MissingFact)
-        }
-    }
-
-    fn judged(outcome: Outcome) -> Outcomes {
-        Outcomes {
-            held: outcome.bit(),
-            retry: None,
-        }
-    }
-
     pub fn deciding(&self) -> Outcome {
-        self.held().next().expect("outcomes are never empty")
+        match self {
+            Outcomes::Integrity => Outcome::Integrity,
+            Outcomes::HardBlock => Outcome::HardBlock,
+            Outcomes::MissingFact(_) => Outcome::MissingFact,
+            Outcomes::Remediable(remediable) => remediable.deciding.into(),
+        }
     }
 
-    /// Every outcome held, in precedence order.
+    /// Every outcome held, the remedies from the most the agent must do itself.
     pub fn held(&self) -> impl Iterator<Item = Outcome> + '_ {
-        Outcome::ALL
+        let (alone, remedies) = match self {
+            Outcomes::Remediable(remediable) => (None, Some(remediable.held())),
+            alone => (Some(alone.deciding()), None),
+        };
+        alone
             .into_iter()
-            .filter(|outcome| self.held & outcome.bit() != 0)
+            .chain(remedies.into_iter().flatten().map(Outcome::from))
     }
 
     /// Set exactly when the refusal is a missing fact.
     pub fn retry(&self) -> Option<RetryHint> {
-        self.retry
+        match self {
+            Outcomes::MissingFact(retry) => Some(*retry),
+            Outcomes::Integrity | Outcomes::HardBlock | Outcomes::Remediable(_) => None,
+        }
     }
 }
 
-impl std::fmt::Debug for Outcomes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Outcomes")
-            .field("held", &self.held().collect::<Vec<_>>())
-            .field("retry", &self.retry)
-            .finish()
+/// A block its offers can lift: every remedy kind the offers ask for, and the one the
+/// cheapest offer asks for at most, which decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Remediable {
+    deciding: Remedy,
+    agent_choice: bool,
+    waivable_gap: bool,
+    consent: bool,
+}
+
+impl Remediable {
+    /// `deciding` is held whatever `others` names.
+    pub fn new(deciding: Remedy, others: impl IntoIterator<Item = Remedy>) -> Remediable {
+        let mut remediable = Remediable {
+            deciding,
+            agent_choice: false,
+            waivable_gap: false,
+            consent: false,
+        };
+        for remedy in std::iter::once(deciding).chain(others) {
+            *match remedy {
+                Remedy::AgentChoice => &mut remediable.agent_choice,
+                Remedy::WaivableGap => &mut remediable.waivable_gap,
+                Remedy::Consent => &mut remediable.consent,
+            } = true;
+        }
+        remediable
+    }
+
+    pub fn deciding(&self) -> Remedy {
+        self.deciding
+    }
+
+    /// Every remedy kind held, from the most the agent must do itself.
+    pub fn held(&self) -> impl Iterator<Item = Remedy> {
+        [
+            (Remedy::AgentChoice, self.agent_choice),
+            (Remedy::WaivableGap, self.waivable_gap),
+            (Remedy::Consent, self.consent),
+        ]
+        .into_iter()
+        .filter_map(|(remedy, held)| held.then_some(remedy))
     }
 }
 
 #[cfg(test)]
 mod outcome_tests {
-    use super::{Outcome, Outcomes, RetryHint};
+    use super::{Outcome, Outcomes, Remediable, Remedy, RetryHint};
 
     #[test]
-    fn the_outcome_of_highest_precedence_decides_every_set_a_refusal_holds() {
-        use Outcome::*;
-        let matrix: [(&[Outcome], Outcome); 6] = [
-            (&[Consent], Consent),
-            (&[WaivableGap], WaivableGap),
-            (&[WaivableGap, Consent], WaivableGap),
-            (&[AgentChoice], AgentChoice),
-            (&[Consent, AgentChoice, WaivableGap], AgentChoice),
-            (&[HardBlock], HardBlock),
-        ];
-        for (held, deciding) in matrix {
-            let outcomes = Outcomes::new(held.iter().copied()).expect("the set names a judged outcome");
-            assert_eq!(outcomes.deciding(), deciding, "{held:?}");
-            assert_eq!(outcomes.retry(), None);
-        }
-        assert_eq!(Outcomes::integrity().deciding(), Integrity);
-        assert_eq!(Outcomes::new([]), None);
-    }
+    fn a_remediable_refusal_holds_its_deciding_remedy_and_lists_every_remedy_once() {
+        let remediable = Outcomes::Remediable(Remediable::new(
+            Remedy::Consent,
+            [Remedy::AgentChoice, Remedy::AgentChoice],
+        ));
+        assert_eq!(remediable.deciding(), Outcome::Consent);
+        assert_eq!(
+            remediable.held().collect::<Vec<_>>(),
+            vec![Outcome::AgentChoice, Outcome::Consent]
+        );
+        assert_eq!(remediable.retry(), None);
 
-    #[test]
-    fn a_missing_fact_is_held_only_with_its_retry_hint() {
-        assert_eq!(Outcomes::new([Outcome::MissingFact]), None);
-        assert_eq!(Outcomes::new([Outcome::MissingFact, Outcome::Consent]), None);
-        let missing = Outcomes::missing(RetryHint::Later);
+        let missing = Outcomes::MissingFact(RetryHint::Later);
         assert_eq!(missing.held().collect::<Vec<_>>(), vec![Outcome::MissingFact]);
         assert_eq!(missing.retry(), Some(RetryHint::Later));
     }

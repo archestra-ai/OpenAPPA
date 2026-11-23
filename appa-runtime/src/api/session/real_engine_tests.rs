@@ -1337,21 +1337,24 @@ async fn a_block_holds_what_its_offered_plans_settle() {
         Runtime::open(config_with(&policy, None), dir.path().join("appa.db"), None).expect("the deployment opens");
     let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
     let held = |decision: Result<ToolCallDecision, EventError>| match decision.expect("the call is judged") {
-        ToolCallDecision::Deny { outcomes, offers, .. } => (outcomes.held().collect::<Vec<_>>(), offers.len()),
+        ToolCallDecision::Deny { outcomes, offers, .. } => {
+            assert_eq!(outcomes.held().count(), 1, "one plan kind each: {outcomes:?}");
+            (outcomes.deciding(), offers.len())
+        }
         allowed => panic!("the call is blocked, got {allowed:?}"),
     };
 
     let narrowing = session.on_tool_call(taint(serde_json::json!({"a": 1})), false).await;
-    assert_eq!(held(narrowing), (vec![Outcome::Consent], 1));
+    assert_eq!(held(narrowing), (Outcome::Consent, 1));
 
     let spawn = fetch(serde_json::json!({"a": 9}));
-    let (outcomes, offers) = held(session.on_tool_call(spawn.clone(), true).await);
-    assert_eq!(outcomes, vec![Outcome::AgentChoice]);
+    let (deciding, offers) = held(session.on_tool_call(spawn.clone(), true).await);
+    assert_eq!(deciding, Outcome::AgentChoice);
     assert!(offers > 0);
 
     let child = open_child(&mut session, spawn.clone(), TrajectoryId("cc:root:child".to_string())).await;
     let below = child.on_tool_call(taint(serde_json::json!({"a": 2})), false).await;
-    assert_eq!(held(below), (vec![Outcome::HardBlock], 0));
+    assert_eq!(held(below), (Outcome::HardBlock, 0));
     child.on_child_end(None).await.expect("the child ends with no return");
     session
         .on_tool_result(
@@ -1365,7 +1368,7 @@ async fn a_block_holds_what_its_offered_plans_settle() {
 
     admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
     let gap = session.on_tool_call(trusted_send(), false).await;
-    assert_eq!(held(gap), (vec![Outcome::WaivableGap], 1));
+    assert_eq!(held(gap), (Outcome::WaivableGap, 1));
 }
 
 #[tokio::test]
@@ -3252,6 +3255,11 @@ async fn a_partly_cleared_derivation_is_staged_with_its_own_remedies() {
     let presentation = presentation.expect("a result-time block preserves its remedy state");
     assert!(!presentation.offers.is_empty());
     assert_eq!(presentation.feedback, placeholder);
+    assert_eq!(
+        presentation.outcomes.map(|outcomes| outcomes.deciding()),
+        Some(appa_runtime_api::Outcome::Consent),
+        "the staged result waits for the narrowing's acceptance"
+    );
 }
 
 const PARTLY_CLEARED_CHILD: &str = r#"
@@ -5987,6 +5995,43 @@ async fn a_permanently_contended_log_refuses_the_event() {
     assert!(
         runtime.open_dispatches(&root(), &root()).is_empty(),
         "no attempt of a refused event acted",
+    );
+}
+
+/// At the hook, the same contention denies the call on a fact a later proposal may obtain.
+#[tokio::test]
+async fn a_permanently_contended_proposal_is_denied_on_a_missing_fact() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open_runtime(&dir);
+    runtime.create_session(root(), None).expect("a fresh id opens");
+    runtime.store().contend_next_appends(REPLAY_LIMIT as u64);
+    let decision = crate::hooks::handle(
+        &runtime,
+        appa_runtime_api::HookEvent::ToolCall {
+            actor: Actor {
+                root: root(),
+                child: None,
+            },
+            call: fetch(serde_json::json!({"a": 1})),
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: None,
+            declares: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            decision,
+            appa_runtime_api::HookDecision::DenyCall {
+                outcomes: Some(appa_runtime_api::Outcomes::MissingFact(
+                    appa_runtime_api::RetryHint::Later
+                )),
+                ..
+            }
+        ),
+        "{decision:?}"
     );
 }
 

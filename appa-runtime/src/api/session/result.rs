@@ -72,7 +72,7 @@ pub(super) fn outcome_decision(
         }) => {
             let presentation = remedy_presentation(
                 feedback.clone(),
-                outcomes,
+                Some(outcomes),
                 offers,
                 review,
                 display.into_iter().collect(),

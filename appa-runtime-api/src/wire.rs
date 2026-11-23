@@ -51,8 +51,9 @@ use serde_json::value::RawValue;
 use crate::{
     Actor, AdapterName, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
     OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes, ParseRefusal,
-    PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, RetryHint, Review, ReviewChannel, ReviewScopeItem,
-    Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
+    PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, Remediable, Remedy, RetryHint, Review,
+    ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome,
+    TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -598,28 +599,39 @@ pub struct Accepted {
 }
 
 /// A denial's outcomes as the wire states them, held to the invariants [`Outcomes`] keeps.
+/// A remediable denial's deciding outcome is the cheapest offer's, so it is read, not derived.
 fn refusal_outcomes(
     held: Option<Vec<Outcome>>,
     deciding: Option<Outcome>,
     retry: Option<RetryHint>,
     offered: bool,
 ) -> Result<Option<Outcomes>, &'static str> {
-    let Some(held) = held else {
-        return match (deciding, retry) {
-            (None, None) => Ok(None),
-            _ => Err("a deciding outcome or a retry hint but no outcomes"),
-        };
+    let (held, deciding) = match (held, deciding, retry) {
+        (None, None, None) => return Ok(None),
+        (None, _, _) => return Err("a deciding outcome or a retry hint but no outcomes"),
+        (Some(_), None, _) => return Err("outcomes without their deciding one"),
+        (Some(held), Some(deciding), _) => (held, deciding),
     };
-    let outcomes = match (held.as_slice(), retry, offered) {
-        ([Outcome::MissingFact], Some(retry), false) => Outcomes::missing(retry),
-        ([Outcome::MissingFact], Some(_), true) => return Err("offers on a missing fact"),
-        (_, Some(_), _) => return Err("a retry hint on outcomes other than a missing fact"),
-        (_, None, _) => Outcomes::new(held).ok_or("no outcome, or a missing fact without its retry hint")?,
-    };
-    match deciding {
-        Some(deciding) if deciding != outcomes.deciding() => Err("a deciding outcome that does not lead its outcomes"),
-        _ => Ok(Some(outcomes)),
-    }
+    Ok(Some(match (held.as_slice(), deciding, retry, offered) {
+        ([Outcome::Integrity], Outcome::Integrity, None, _) => Outcomes::Integrity,
+        ([Outcome::HardBlock], Outcome::HardBlock, None, _) => Outcomes::HardBlock,
+        ([Outcome::MissingFact], Outcome::MissingFact, Some(retry), false) => Outcomes::MissingFact(retry),
+        (_, _, Some(_), _) => return Err("a retry hint on anything but a missing fact alone, with no offers"),
+        (_, deciding, None, _) => {
+            let deciding = deciding
+                .remedy()
+                .ok_or("an integrity fault, a hard block or a missing fact beside other outcomes")?;
+            let held = held
+                .iter()
+                .map(|outcome| outcome.remedy())
+                .collect::<Option<Vec<Remedy>>>()
+                .ok_or("an integrity fault, a hard block or a missing fact beside other outcomes")?;
+            if !held.contains(&deciding) {
+                return Err("a deciding outcome its outcomes do not hold");
+            }
+            Outcomes::Remediable(Remediable::new(deciding, held))
+        }
+    }))
 }
 
 fn malformed(detail: impl Into<String>) -> ParseRefusal {
@@ -1388,10 +1400,10 @@ pub struct WireDecision {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running: Option<Vec<String>>,
-    /// Every outcome a refusal holds, in precedence order.
+    /// Every outcome a refusal holds: one alone, or the remedy kinds its offers ask for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcomes: Option<Vec<Outcome>>,
-    /// The outcome of highest precedence in `outcomes`.
+    /// The outcome that decides the refusal: for remedies, what the cheapest offer asks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deciding: Option<Outcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1502,7 +1514,7 @@ impl WireDecision {
             HookDecision::Refuse { class, detail } => Self {
                 class: Some(*class),
                 detail: Some(detail.clone()),
-                ..Self::refusal(Some(&Outcomes::integrity()), DecisionName::Refuse)
+                ..Self::refusal(Some(&Outcomes::Integrity), DecisionName::Refuse)
             },
             HookDecision::Held { running } => Self {
                 running: Some(running.clone()),
@@ -1635,14 +1647,17 @@ mod tests {
             feedback: "no".to_string(),
             offers: Vec::new(),
             review: Vec::new(),
-            outcomes: Outcomes::new([Outcome::Consent, Outcome::AgentChoice, Outcome::WaivableGap]),
+            outcomes: Some(Outcomes::Remediable(Remediable::new(
+                Remedy::WaivableGap,
+                [Remedy::Consent, Remedy::AgentChoice],
+            ))),
         };
         let wire = WireDecision::of(&denied);
         assert_eq!(
             wire.outcomes,
             Some(vec![Outcome::AgentChoice, Outcome::WaivableGap, Outcome::Consent])
         );
-        assert_eq!(wire.deciding, Some(Outcome::AgentChoice));
+        assert_eq!(wire.deciding, Some(Outcome::WaivableGap));
         assert_eq!(wire.retry, None);
         assert_eq!(round_trip(&denied), denied);
 
@@ -1650,7 +1665,7 @@ mod tests {
             feedback: "no".to_string(),
             offers: Vec::new(),
             review: Vec::new(),
-            outcomes: Some(Outcomes::missing(RetryHint::AfterRepair)),
+            outcomes: Some(Outcomes::MissingFact(RetryHint::AfterRepair)),
         };
         let json = serde_json::to_value(WireDecision::of(&missing)).expect("serializes");
         assert_eq!(json["outcomes"], serde_json::json!(["missing_fact"]));
@@ -1676,13 +1691,15 @@ mod tests {
         let offer = r#""offers":[{"offer_id":"o1"}]"#;
         for fields in [
             r#""outcomes":["hard_block","consent"],"deciding":"consent""#.to_string(),
+            r#""outcomes":["agent_choice"],"deciding":"consent""#.to_string(),
+            r#""outcomes":["consent"]"#.to_string(),
             r#""deciding":"consent""#.to_string(),
             r#""retry":"later""#.to_string(),
-            r#""outcomes":["consent"],"retry":"later""#.to_string(),
-            r#""outcomes":["missing_fact"]"#.to_string(),
-            r#""outcomes":["missing_fact","consent"],"retry":"later""#.to_string(),
-            format!(r#""outcomes":["missing_fact"],"retry":"later",{offer}"#),
-            r#""outcomes":[]"#.to_string(),
+            r#""outcomes":["consent"],"deciding":"consent","retry":"later""#.to_string(),
+            r#""outcomes":["missing_fact"],"deciding":"missing_fact""#.to_string(),
+            r#""outcomes":["missing_fact","consent"],"deciding":"missing_fact","retry":"later""#.to_string(),
+            format!(r#""outcomes":["missing_fact"],"deciding":"missing_fact","retry":"later",{offer}"#),
+            r#""outcomes":[],"deciding":"consent""#.to_string(),
         ] {
             let body = format!(r#"{{"protocol":1,"decision":"deny_call","feedback":"no",{fields}}}"#);
             let wire: WireDecision = serde_json::from_str(&body).expect("reads");
@@ -3112,13 +3129,16 @@ mod tests {
                     hint: None,
                     scope: None,
                 }],
-                outcomes: Outcomes::new([Outcome::WaivableGap, Outcome::Consent]),
+                outcomes: Some(Outcomes::Remediable(Remediable::new(
+                    Remedy::Consent,
+                    [Remedy::WaivableGap],
+                ))),
             },
             HookDecision::DenyCall {
                 feedback: "no".to_string(),
                 offers: Vec::new(),
                 review: Vec::new(),
-                outcomes: Some(Outcomes::missing(RetryHint::Later)),
+                outcomes: Some(Outcomes::MissingFact(RetryHint::Later)),
             },
             HookDecision::Block {
                 reason: "r".to_string(),
