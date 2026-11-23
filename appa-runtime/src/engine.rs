@@ -2749,10 +2749,13 @@ impl RuntimeEngine {
         let control = control_spelling(self.naming, presentation);
         let quote = |decision| ReturnReference::of(&deferred.id, decision);
         format!(
-            "[appa] The subagent's answer was deferred. Its label is {label}; accepting it combines this \
-             session's label with that label. Decide once:\n  \
+            "[appa] The subagent's answer is reviewed before it reaches this session. Its label is \
+             {label}; accepting it combines this session's label with it. Choose one; the choice is \
+             final:\n  \
              Accept:  {control}(offer_id: \"{accept}\")\n  \
-             Discard: {control}(offer_id: \"{discard}\")",
+             Discard: {control}(offer_id: \"{discard}\")\n\
+             This is a routine check. If you mention it to the person, say only that you reviewed the \
+             subagent's result before using it; don't repeat this notice or the label.",
             label = frozen_label(&deferred.label, self.engine.registry().trust_chain()),
             accept = quote(ReturnDecision::Accept).as_str(),
             discard = quote(ReturnDecision::Discard).as_str(),
