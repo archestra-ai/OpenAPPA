@@ -5,9 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::ResolverCommand;
+use crate::config::{PLATFORM_NAME_CASE, RUNTIME_VARIABLE_PREFIX, ResolverCommand};
 use crate::external::{Diagnostics, MAX_DIAGNOSTIC_BYTES, NoAnswerReason, RECORD_READ_GRACE, Transcript};
-use crate::process_tree::ProcessTree;
+use crate::process_tree::{Launch, ProcessTree};
 
 /// A command consult's stdout on a successful exit, and the transcript a record asked for.
 pub(crate) struct CommandRun {
@@ -79,7 +79,15 @@ pub(crate) struct CommandProcess {
 
 impl CommandProcess {
     pub(crate) fn spawn(command: &mut tokio::process::Command) -> Result<CommandProcess, NoAnswerReason> {
-        let (child, tree) = crate::process_tree::spawn(command)?;
+        CommandProcess::spawn_when(command, |_| Ok(()))
+    }
+
+    /// [`CommandProcess::spawn`], refused where `ready` refuses it at a [`Launch`].
+    fn spawn_when(
+        command: &mut tokio::process::Command,
+        ready: impl FnMut(Launch<'_>) -> Result<(), NoAnswerReason>,
+    ) -> Result<CommandProcess, NoAnswerReason> {
+        let (child, tree) = crate::process_tree::spawn(command, ready)?;
         Ok(CommandProcess {
             child: Some(child),
             tree: Some(tree),
@@ -254,6 +262,13 @@ impl StderrTail {
     }
 }
 
+impl Drop for StderrTail {
+    /// A tail no one reads leaves no reader behind, whatever still holds the pipe.
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 /// The stderr tail of a child that failed, given a second to close the pipe.
 pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
     tail.within(Duration::from_secs(1)).await
@@ -268,10 +283,9 @@ pub(crate) const CONSULT_TIMEOUT_VARIABLE: &str = "APPA_CONSULT_TIMEOUT_MS";
 pub(crate) fn without_runtime_variables(
     parent: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 ) -> impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)> {
-    parent.into_iter().filter(|(key, _)| {
-        !key.to_string_lossy()
-            .starts_with(crate::config::RUNTIME_VARIABLE_PREFIX)
-    })
+    parent
+        .into_iter()
+        .filter(|(key, _)| !PLATFORM_NAME_CASE.in_namespace(key, RUNTIME_VARIABLE_PREFIX))
 }
 
 async fn run_command_process(
@@ -307,14 +321,31 @@ async fn run_command_process(
     // afterwards, so a command inherits the variables it reads and no other's, and the
     // budget it has left, so it can answer within it.
     let parent: Vec<_> = std::env::vars_os().collect();
-    let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
     configured
         .env_clear()
         .envs(without_runtime_variables(parent))
-        .envs(credentials)
-        .env(CONSULT_TIMEOUT_VARIABLE, budget.as_millis().to_string());
+        .envs(credentials);
 
-    let mut process = CommandProcess::spawn(&mut configured)?;
+    // A consult already settled starts no child: a resolver with side effects never runs
+    // for an outcome that is known. The check runs at the launch itself, after any wait
+    // for the spawn lock, and again where a child created suspended would run. The budget
+    // the child is told is sampled at the spawn.
+    let mut process = CommandProcess::spawn_when(&mut configured, |launch| {
+        let budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match (cancelled.try_recv(), budget.is_zero()) {
+            (Err(tokio::sync::oneshot::error::TryRecvError::Empty), false) => {}
+            (Err(tokio::sync::oneshot::error::TryRecvError::Empty), true) => return Err(NoAnswerReason::Timeout),
+            _ => return Err(NoAnswerReason::Transport),
+        }
+        match launch {
+            Launch::Spawn(configured) => {
+                configured.env(CONSULT_TIMEOUT_VARIABLE, budget.as_millis().to_string());
+            }
+            #[cfg(windows)]
+            Launch::Resume => {}
+        }
+        Ok(())
+    })?;
     let tail = process.child_mut().stderr.take().map(stderr_tail);
     let outcome = {
         let (child, tree) = process.parts();
@@ -368,6 +399,67 @@ async fn run_command_process(
 mod tests {
     use super::*;
 
+    /// Where names ignore case, the runtime's namespace does too: a lower-case `appa_`
+    /// credential is the runtime's own, and stays out of the child.
+    #[test]
+    fn the_runtime_namespace_follows_the_platforms_name_case() {
+        use crate::config::NameCase;
+        use std::ffi::OsStr;
+        for (key, exact, insensitive) in [
+            ("APPA_TOKEN", true, true),
+            ("appa_token", false, true),
+            ("Appa_Provider_Key", false, true),
+            ("APPA", false, false),
+            ("APPAX_TOKEN", false, false),
+            ("PATH", false, false),
+            ("", false, false),
+        ] {
+            assert_eq!(
+                NameCase::Exact.in_namespace(OsStr::new(key), RUNTIME_VARIABLE_PREFIX),
+                exact,
+                "{key}"
+            );
+            assert_eq!(
+                NameCase::AsciiInsensitive.in_namespace(OsStr::new(key), RUNTIME_VARIABLE_PREFIX),
+                insensitive,
+                "{key}"
+            );
+        }
+    }
+
+    /// A command that names no executable: a consult that tries to start it is unreachable.
+    fn missing_command() -> ResolverCommand {
+        ResolverCommand {
+            argv: vec!["/nonexistent/appa-test-missing-resolver".to_string()],
+            cwd: std::env::temp_dir(),
+            token_env: vec![],
+        }
+    }
+
+    async fn run_missing(
+        deadline: tokio::time::Instant,
+        cancelled: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<Vec<u8>, NoAnswerReason> {
+        run_command_process(missing_command(), vec![], 1024, deadline, cancelled, None, vec![]).await
+    }
+
+    /// A consult cancelled or out of time before its child starts settles without starting
+    /// it: the missing executable is never tried, so the outcome is not `Unreachable`.
+    #[tokio::test]
+    async fn a_consult_settled_before_its_spawn_starts_no_child() {
+        let (cancel, cancelled) = tokio::sync::oneshot::channel();
+        cancel.send(()).expect("the receiver is alive");
+        let later = tokio::time::Instant::now() + Duration::from_secs(30);
+        assert_eq!(run_missing(later, cancelled).await, Err(NoAnswerReason::Transport));
+
+        let (_cancel, pending) = tokio::sync::oneshot::channel();
+        let past = tokio::time::Instant::now();
+        assert_eq!(run_missing(past, pending).await, Err(NoAnswerReason::Timeout));
+
+        let (_cancel, pending) = tokio::sync::oneshot::channel();
+        assert_eq!(run_missing(later, pending).await, Err(NoAnswerReason::Unreachable));
+    }
+
     /// A reader still pending when the wait runs out is aborted rather than left holding
     /// the pipe for as long as the writer lives.
     #[cfg(unix)]
@@ -387,6 +479,30 @@ mod tests {
             .await
             .expect("an aborted reader ends at once");
         assert!(joined.expect_err("the reader was aborted").is_cancelled());
+        child.kill().await.expect("sleep is killed");
+    }
+
+    /// A tail dropped unread, as on a consult that answered with no record, takes its
+    /// reader with it: the reader's share of the tail is released though the pipe is open.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_tail_takes_its_reader_with_it() {
+        let mut child = crate::child_process::spawn_async(
+            tokio::process::Command::new("sleep")
+                .arg("10")
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true),
+        )
+        .expect("sleep starts");
+        let tail = stderr_tail(child.stderr.take().expect("stderr is piped"));
+        let read = Arc::downgrade(&tail.read);
+
+        drop(tail);
+        let released = crate::test_support::wait_until(tokio::time::Instant::now() + Duration::from_secs(5), || {
+            read.upgrade().is_none().then_some(())
+        })
+        .await;
+        assert_eq!(released, Some(()), "the reader still holds the tail");
         child.kill().await.expect("sleep is killed");
     }
 }

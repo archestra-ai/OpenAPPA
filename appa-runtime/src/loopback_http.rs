@@ -145,6 +145,7 @@ pub(crate) fn request(
 
     let mut answer = Vec::new();
     let mut chunk = [0u8; 8192];
+    let mut progress = Progress::Head;
     loop {
         socket
             .set_read_timeout(Some(deadline.left()?))
@@ -152,8 +153,32 @@ pub(crate) fn request(
         match socket.read(&mut chunk) {
             Ok(0) => break,
             Ok(read) => {
+                let scanned = answer.len();
+                if scanned + read > MAX_ANSWER_BYTES {
+                    return Err(format!("the answer from {address} exceeds {MAX_ANSWER_BYTES} bytes"));
+                }
                 answer.extend_from_slice(&chunk[..read]);
-                if declared_answer_len(&answer)?.is_some_and(|length| answer.len() >= length) {
+                if let Progress::Head = progress {
+                    progress = match find_end_of_head(&answer, scanned) {
+                        Some(end) if end + 4 <= MAX_HEAD_BYTES => match declared_answer_len(&answer, end)? {
+                            Some(length) if length > MAX_ANSWER_BYTES => {
+                                return Err(format!(
+                                    "the answer from {address} declares more than {MAX_ANSWER_BYTES} bytes"
+                                ));
+                            }
+                            ends_at => Progress::Body { ends_at },
+                        },
+                        None if answer.len() < MAX_HEAD_BYTES => Progress::Head,
+                        _ => {
+                            return Err(format!(
+                                "the answer's headers from {address} exceed {MAX_HEAD_BYTES} bytes"
+                            ));
+                        }
+                    };
+                }
+                if let Progress::Body { ends_at: Some(length) } = progress
+                    && answer.len() >= length
+                {
                     break;
                 }
             }
@@ -163,14 +188,35 @@ pub(crate) fn request(
     parse(&answer)
 }
 
+/// The most of an answer's head, its terminator included, read before it is refused.
+const MAX_HEAD_BYTES: usize = 64 * 1024;
+/// The most of a whole answer read before it is refused.
+const MAX_ANSWER_BYTES: usize = 16 * 1024 * 1024;
+
+/// How far an answer has been read.
+enum Progress {
+    Head,
+    /// The head is in; the answer ends at its declared length, or when the server closes.
+    Body {
+        ends_at: Option<usize>,
+    },
+}
+
 pub(crate) fn get(endpoint: &Endpoint, path: &str, deadline: &Deadline) -> Result<Answer, String> {
     request(endpoint, "GET", path, b"", deadline)
 }
 
-fn declared_answer_len(answer: &[u8]) -> Result<Option<usize>, String> {
-    let Some(end_of_head) = answer.windows(4).position(|window| window == b"\r\n\r\n") else {
-        return Ok(None);
-    };
+/// Where the head's terminator starts, searching only what follows `scanned` bytes already
+/// searched, less the three a terminator split across reads may have begun in.
+fn find_end_of_head(answer: &[u8], scanned: usize) -> Option<usize> {
+    let from = scanned.saturating_sub(3);
+    answer[from..]
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|at| from + at)
+}
+
+fn declared_answer_len(answer: &[u8], end_of_head: usize) -> Result<Option<usize>, String> {
     let head =
         std::str::from_utf8(&answer[..end_of_head]).map_err(|_| "the answer's headers are not text".to_owned())?;
     let mut declared = None;
@@ -201,10 +247,8 @@ fn declared_answer_len(answer: &[u8]) -> Result<Option<usize>, String> {
 }
 
 fn parse(answer: &[u8]) -> Result<Answer, String> {
-    let end_of_head = answer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| "the answer ended before its headers did".to_owned())?;
+    let end_of_head =
+        find_end_of_head(answer, 0).ok_or_else(|| "the answer ended before its headers did".to_owned())?;
     let head =
         std::str::from_utf8(&answer[..end_of_head]).map_err(|_| "the answer's headers are not text".to_owned())?;
     let status = head
@@ -212,7 +256,7 @@ fn parse(answer: &[u8]) -> Result<Answer, String> {
         .nth(1)
         .and_then(|code| code.parse().ok())
         .ok_or_else(|| format!("the answer carries no status code: {head}"))?;
-    if let Some(length) = declared_answer_len(answer)?
+    if let Some(length) = declared_answer_len(answer, end_of_head)?
         && answer.len() != length
     {
         return Err("the answer body does not match its content-length".to_owned());
@@ -289,6 +333,95 @@ mod tests {
         .expect("the complete body answers before the connection closes");
         assert_eq!(answer.body, b"{}");
         server.join().expect("the server exits");
+    }
+
+    /// What a request to a server that writes `answer` and closes returns.
+    fn request_answered_by(answer: Vec<u8>) -> Result<Answer, String> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        let address = listener.local_addr().expect("the listener has an address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("the client connects");
+            // The request is read whole first: closing on unread bytes resets the connection.
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut chunk).expect("the request arrives");
+                assert_ne!(read, 0, "the client closed before its request ended");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            // The client may refuse and close part-way; the write failing then is expected.
+            let _ = socket.write_all(&answer);
+        });
+        let endpoint = Endpoint::parse(&format!("http://{address}")).expect("the endpoint parses");
+        let answered = request(
+            &endpoint,
+            "GET",
+            "/health",
+            b"",
+            &Deadline::spanning(Duration::from_secs(10)),
+        );
+        server.join().expect("the server exits");
+        answered
+    }
+
+    #[test]
+    fn an_answer_within_the_caps_is_read() {
+        let mut head = b"HTTP/1.1 200 OK\r\nx-pad: ".to_vec();
+        head.resize(head.len() + MAX_HEAD_BYTES / 2, b'x');
+        head.extend_from_slice(b"\r\ncontent-length: 2\r\n\r\n{}");
+        assert_eq!(request_answered_by(head).map(|answer| answer.body), Ok(b"{}".to_vec()));
+    }
+
+    /// Whichever byte of the terminator the last search ended in, the next search finds it.
+    #[test]
+    fn the_head_scan_resumes_inside_a_split_terminator() {
+        let answer = b"HTTP/1.1 200 OK\r\n\r\n{}";
+        let end = 15;
+        for scanned in 0..=end + 3 {
+            assert_eq!(find_end_of_head(answer, scanned), Some(end), "scanned {scanned}");
+        }
+        assert_eq!(find_end_of_head(b"HTTP/1.1 200 OK\r\n\r", 0), None);
+    }
+
+    /// A head declaring a body past the answer cap is refused as soon as it is read, not
+    /// when the deadline ends the wait for a body that cannot be taken.
+    #[test]
+    fn a_declared_length_past_the_cap_is_refused_at_once() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        let address = listener.local_addr().expect("the listener has an address");
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("the client connects");
+            let head = format!("HTTP/1.1 200 OK\r\ncontent-length: {MAX_ANSWER_BYTES}\r\n\r\n");
+            socket.write_all(head.as_bytes()).expect("the server answers");
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        let endpoint = Endpoint::parse(&format!("http://{address}")).expect("the endpoint parses");
+        let started = Instant::now();
+        let answered = request(
+            &endpoint,
+            "GET",
+            "/health",
+            b"",
+            &Deadline::spanning(Duration::from_secs(4)),
+        );
+        assert!(answered.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+        server.join().expect("the server exits");
+    }
+
+    #[test]
+    fn a_head_past_its_cap_is_refused() {
+        let mut head = b"HTTP/1.1 200 OK\r\nx-pad: ".to_vec();
+        head.resize(head.len() + MAX_HEAD_BYTES, b'x');
+        head.extend_from_slice(b"\r\ncontent-length: 2\r\n\r\n{}");
+        assert!(request_answered_by(head).is_err());
+    }
+
+    #[test]
+    fn an_answer_past_its_cap_is_refused() {
+        let mut answer = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+        answer.resize(MAX_ANSWER_BYTES + 1, b'x');
+        assert!(request_answered_by(answer).is_err());
     }
 
     /// A URL naming a host that resolves to more than one address — the

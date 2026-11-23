@@ -21,6 +21,7 @@ class NativeProtocolError(RuntimeError):
 class Blocked:
     feedback: str
     recoverable: bool = False
+    offer_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -78,10 +79,15 @@ class FrameworkSession:
         )
         response = self._decode(response_json)
         match response.get("kind"):
-            case "blocked" if set(response) == {"kind", "feedback"}:
+            case "blocked" if set(response) == {"kind", "feedback", "offer_ids"}:
                 feedback = response["feedback"]
-                if isinstance(feedback, str):
-                    return Blocked(feedback, self._has_next_step(feedback))
+                offer_ids = response["offer_ids"]
+                if (
+                    isinstance(feedback, str)
+                    and isinstance(offer_ids, list)
+                    and all(isinstance(offer, str) for offer in offer_ids)
+                ):
+                    return Blocked(feedback, self._has_next_step(feedback, offer_ids), tuple(offer_ids))
             case "control" if set(response) == {"kind", "reply"}:
                 # The engine's own control tool answered. This contract mints no
                 # offers, so the reply is a refusal's next step rather than an
@@ -190,13 +196,13 @@ class FrameworkSession:
         return response
 
     @staticmethod
-    def _has_next_step(feedback: str) -> bool:
-        """Return whether block feedback names a next step the model can take.
+    def _has_next_step(feedback: str, offer_ids: list[str]) -> bool:
+        """Return whether a block names a next step the model can take.
 
-        The engine renders remedies under a ``Continue:`` heading: redispatch
-        advice ("Run log_verification first; it clears: ..."), and, where the
-        policy mints them, executable offers that quote an ``offer_id``. A
-        requirement on a prior effect — this contract's only requirement — has
-        no authority to waive it, so its remedy is redispatch advice.
+        An executable offer arrives as an id. Redispatch advice ("Run
+        log_verification first; it clears: ...") has no id: the engine renders it
+        under the ``Continue:`` heading only. A requirement on a prior effect —
+        this contract's only requirement — has no authority to waive it, so its
+        remedy is redispatch advice.
         """
-        return "Continue:" in feedback.splitlines() or "offer_id:" in feedback
+        return bool(offer_ids) or "Continue:" in feedback.splitlines()

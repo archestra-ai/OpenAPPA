@@ -96,8 +96,8 @@ expect 1 '^    app.kubernetes.io/component: policy-template$'
 expect 2 '^  name: appa-demo-mocks$'
 expect 1 "image: ghcr.io/archestra-ai/appa-demo-mocks:v${app_version}$"
 expect 1 "image: ghcr.io/archestra-ai/appa-demo-tools:v${app_version}$"
-expect 1 '^        runAsNonRoot: true$'
-expect 1 '^            readOnlyRootFilesystem: true$'
+expect 2 '^        runAsNonRoot: true$'
+expect 2 '^            readOnlyRootFilesystem: true$'
 expect 5 'http://appa-demo-mocks\.kagent\.svc\.cluster\.local:8081/'
 expect 1 '^    name = "host/kagent/skills"$'
 expect 1 '^    name = "agent/kagent/log-analyst"$'

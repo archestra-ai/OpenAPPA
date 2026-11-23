@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -13,13 +11,6 @@ from inspect_ai.tool import Tool, ToolDef
 
 BINDING_IDENTITY: str = appa_agent_python.BINDING_IDENTITY
 EXECUTE_REMEDY_PLAN = "execute_remedy_plan"
-REMEDY_OFFER_ID = re.compile(r'offer_id:\s*"([^"]+)"')
-
-
-def remedy_offer_id(feedback: str) -> str | None:
-    """Return the exact opaque offer surfaced by an engine block, if any."""
-    match = REMEDY_OFFER_ID.search(feedback)
-    return match.group(1) if match is not None else None
 
 
 class NativeProtocolError(RuntimeError):
@@ -30,6 +21,7 @@ class NativeProtocolError(RuntimeError):
 class Blocked:
     feedback: str
     recoverable: bool = False
+    offer_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -89,14 +81,18 @@ def wire_tool_schema(tool: Tool) -> dict[str, object]:
     }
 
 
-def _blocked(response: dict[str, object], has_remedy: Callable[[str], bool]) -> Blocked | None:
-    """The blocked envelope: exactly the policy feedback the engine surfaced."""
-    if set(response) != {"kind", "feedback"}:
+def _blocked(response: dict[str, object]) -> Blocked | None:
+    """The blocked envelope: the policy feedback the engine surfaced and the ids
+    of the offers it quotes. A held child return's envelope names no offer ids."""
+    if set(response) not in ({"kind", "feedback"}, {"kind", "feedback", "offer_ids"}):
         return None
     feedback = response["feedback"]
-    if not isinstance(feedback, str):
+    offer_ids = response.get("offer_ids", [])
+    if not isinstance(feedback, str) or not isinstance(offer_ids, list):
         return None
-    return Blocked(feedback, has_remedy(feedback))
+    if not all(isinstance(offer, str) for offer in offer_ids):
+        return None
+    return Blocked(feedback, bool(offer_ids), tuple(offer_ids))
 
 
 class NativeSession:
@@ -137,7 +133,7 @@ class NativeSession:
         response = self._decode(resp_json)
         match response.get("kind"):
             case "blocked" if child is None:
-                blocked = _blocked(response, self._has_remedy)
+                blocked = _blocked(response)
                 if blocked is not None:
                     return blocked, None
             case "control" if set(response) == {"kind", "reply"}:
@@ -178,7 +174,7 @@ class NativeSession:
         response = self._decode(raw)
         match response.get("kind"):
             case "blocked":
-                blocked = _blocked(response, self._has_remedy)
+                blocked = _blocked(response)
                 if blocked is not None:
                     return blocked
             case "control" if set(response) == {"kind", "reply"}:
@@ -246,10 +242,6 @@ class NativeSession:
             raise NativeProtocolError("native response is not an object")
         return response
 
-    @staticmethod
-    def _has_remedy(feedback: str) -> bool:
-        return remedy_offer_id(feedback) is not None
-
 
 class NativeChildSession:
     """Typed handle for one isolated native child trajectory."""
@@ -274,7 +266,7 @@ class NativeChildSession:
         response = NativeSession._decode(raw)
         match response.get("kind"):
             case "blocked":
-                blocked = _blocked(response, NativeSession._has_remedy)
+                blocked = _blocked(response)
                 if blocked is not None:
                     return blocked
             case "control" if set(response) == {"kind", "reply"}:
@@ -347,7 +339,7 @@ class NativeChildSession:
         match response.get("kind"):
             # A held return keeps the child live: it may return again.
             case "blocked":
-                blocked = _blocked(response, NativeSession._has_remedy)
+                blocked = _blocked(response)
                 if blocked is not None:
                     return blocked
             case "returned" if set(response) == {"kind", "value", "disposition"}:

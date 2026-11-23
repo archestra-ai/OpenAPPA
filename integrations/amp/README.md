@@ -166,7 +166,7 @@ path is what `appa amp-proxy` checks.
 Start the proxy beside the runtime, as a supervised service:
 
 ```sh
-amp orb service start amppa-proxy --command "\"$(pwd)/target/debug/appa\" amp-proxy --listen 127.0.0.1:8789 --runtime http://127.0.0.1:8788 --thread $AMP_THREAD_ID"
+amp orb service start amppa-proxy --command "\"$(pwd)/target/debug/appa\" amp-proxy --listen 127.0.0.1:8791 --runtime http://127.0.0.1:8788 --thread $AMP_THREAD_ID"
 ```
 
 Then route the orb's processes through it, for example in the orb's
@@ -174,8 +174,8 @@ environment variables. amppa leaves these out of SafeBash's environment: its
 calls were checked with their hosts, and its sandbox runs its own proxy.
 
 ```sh
-HTTP_PROXY=http://127.0.0.1:8789
-HTTPS_PROXY=http://127.0.0.1:8789
+HTTP_PROXY=http://127.0.0.1:8791
+HTTPS_PROXY=http://127.0.0.1:8791
 NO_PROXY=127.0.0.1,localhost
 ```
 

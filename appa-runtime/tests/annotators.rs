@@ -2378,6 +2378,67 @@ async fn a_recorder_rebound_under_its_name_receives_the_family_from_its_start() 
     );
 }
 
+/// A delivery task that ends without finishing, here because its async runtime shut down
+/// while a recorder held it, leaves the family to a new task: its next append delivers.
+#[cfg(unix)]
+#[test]
+fn a_delivery_task_dropped_mid_delivery_leaves_the_next_append_to_deliver() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    std::fs::write(
+        dir.path().join("answer.sh"),
+        "cat > /dev/null\nprintf '%s' '{\"version\":1,\"answer\":{\"delta\":{\"trust\":\"trusted\"},\"requires\":{\"history\":[],\"attention\":[]},\"emits\":[]}}'",
+    )
+    .expect("the annotator writes");
+    std::fs::write(
+        dir.path().join("record.sh"),
+        "if [ -e stalled ]; then cat >> delivered; printf '%s' '{\"version\":1,\"answer\":{}}'; \
+         else echo x > stalled; cat > /dev/null; exec sleep 30; fi",
+    )
+    .expect("the recorder writes");
+    let policy = command_policy("answer.sh", false).replace(
+        "annotator = \"classifier\"\n",
+        "annotator = \"classifier\"\nrecorder = \"tracker\"\n",
+    ) + "\n[externals.recorders.tracker]\ncommand = [\"/bin/sh\", \"record.sh\"]\n";
+    let current_thread = || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("an async runtime builds")
+    };
+    let appeared = |file: &str| {
+        let path = dir.path().join(file);
+        async move {
+            let written = || std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 0);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !written() && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            written()
+        }
+    };
+
+    let first = current_thread();
+    let runtime = first.block_on(async {
+        let runtime = open_runtime(&dir, &policy).await;
+        assert_eq!(
+            propose(&runtime, fetch("https://a.example")).await,
+            HookDecision::AllowCall { spawn: None }
+        );
+        assert!(appeared("stalled").await, "the first delivery reached the recorder");
+        runtime
+    });
+    drop(first);
+
+    let second = current_thread();
+    second.block_on(async {
+        ran(&runtime, fetch("https://a.example")).await;
+        assert!(
+            appeared("delivered").await,
+            "the family's next append delivered its records"
+        );
+    });
+}
+
 /// A command recorder that never answers takes no process permit a command Annotator needs:
 /// with a delivery stalled in each of many sessions, every later call is still judged
 /// promptly.

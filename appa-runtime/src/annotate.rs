@@ -8,13 +8,15 @@
 //! is opened, so an Annotator is asked afresh each time and no tool runs.
 //!
 //! An ask waits for its consult gate inside the consult's own deadline, so `--concurrency`
-//! bounds how many calls are in flight at once.
+//! bounds how many calls are in flight at once. The first answer that cannot be written
+//! ends the run with a failure: no further ask is scheduled, and the asks in flight are
+//! dropped.
 
 use std::io::{BufRead, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -60,7 +62,7 @@ struct Answered<'a> {
     outcome: Outcome,
 }
 
-async fn ask(runtime: &Runtime, call: &Call, repeat: u32) {
+async fn ask(runtime: &Runtime, call: &Call, repeat: u32) -> std::io::Result<()> {
     let started = Instant::now();
     let outcome = match runtime
         .annotate(&call.tool, call.arguments.get().as_bytes(), call.cwd.as_deref())
@@ -92,14 +94,13 @@ async fn ask(runtime: &Runtime, call: &Call, repeat: u32) {
         outcome,
     })
     .expect("an answered call serializes");
-    // A closed reader ends the run at the next write; nothing is owed to it.
-    let _ = writeln!(std::io::stdout().lock(), "{line}");
+    writeln!(std::io::stdout().lock(), "{line}")
 }
 
 pub(crate) async fn run(
     config: Config,
     modules: Option<std::path::PathBuf>,
-    repeat: u32,
+    repeat: std::num::NonZeroU32,
     concurrency: std::num::NonZeroUsize,
 ) -> ExitCode {
     let runtime = match Runtime::open_in_memory(config, modules, crate::api::Remedies::StandIn) {
@@ -124,11 +125,21 @@ pub(crate) async fn run(
     }
     let asks = calls
         .iter()
-        .flat_map(|call| (0..repeat).map(move |repeat| (call, repeat)))
+        .flat_map(|call| (0..repeat.get()).map(move |repeat| (call, repeat)))
         .map(|(call, repeat)| ask(&runtime, call, repeat));
-    futures_util::stream::iter(asks)
+    match futures_util::stream::iter(asks)
         .buffer_unordered(concurrency.get())
-        .collect::<()>()
-        .await;
-    ExitCode::SUCCESS
+        .try_collect::<()>()
+        .await
+    {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            // Standard error may share the closed pipe; the exit status carries the failure.
+            let _ = writeln!(
+                std::io::stderr(),
+                "appa runtime annotate: an answer could not be written: {error}"
+            );
+            ExitCode::FAILURE
+        }
+    }
 }

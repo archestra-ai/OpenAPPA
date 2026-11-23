@@ -141,6 +141,19 @@ fn a_value_is_asked_once_per_repeat() {
     assert_eq!(repeats, [0, 1]);
 }
 
+/// Zero repeats would ask nothing and exit as if every value had been answered.
+#[test]
+fn zero_repeats_are_refused_as_a_usage_error() {
+    let status = Command::new(env!("CARGO_BIN_EXE_appa"))
+        .args(["runtime", "sanitize", "--repeat", "0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("appa runs");
+    assert_eq!(status.code(), Some(2));
+}
+
 /// An answer that cannot be written fails the run: a reader that closed its end gets no
 /// successful exit over a partial set of answers.
 #[test]
@@ -154,15 +167,17 @@ fn an_unwritable_answer_fails_the_run() {
         .current_dir(dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("appa starts");
+    // Standard error closes too: the failure is the exit status, never a panic's.
     drop(child.stdout.take());
+    drop(child.stderr.take());
     child
         .stdin
         .take()
         .expect("stdin is piped")
         .write_all(VALUES.as_bytes())
         .expect("the values are written");
-    assert!(!child.wait().expect("appa exits").success());
+    assert_eq!(child.wait().expect("appa exits").code(), Some(1));
 }

@@ -75,3 +75,6 @@ mod tool_aliases;
 mod ui_runtime;
 mod unbound_authority;
 mod xmemory_policy;
+// Drives the `appa` binary: without `daemon` there is nothing to drive.
+#[cfg(feature = "daemon")]
+mod yell_cli;

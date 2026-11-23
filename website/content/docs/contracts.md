@@ -911,7 +911,7 @@ Standard output yields newline-delimited JSON responses in arrival order:
 | `static` | Tool has a static contract; no annotator was consulted. | |
 | `unresolved` | Tool or argument pattern is not defined in policy. | `reason` |
 
-`--repeat <n>` runs each call `n` times to assess model classification consistency (default: 1). `--concurrency <n>` limits in-flight requests (default: 4).
+`--repeat <n>` runs each call `n` times to assess model classification consistency (default: 1). `n` MUST be at least 1. `--concurrency <n>` limits in-flight requests (default: 4).
 
 Example checking Google Drive tool calls against battery rules:
 
@@ -948,7 +948,7 @@ Without the token, the `org` line is a `no_answer` with the program's error:
 {"id":"org","repeat":0,"latency_ms":67,"outcome":"no_answer","annotator":"google-workspace.drive-readers","reason":"non_success status=1 detail=\"google-workspace.drive-readers: APPA_PROVIDER_GOOGLE_WORKSPACE_TOKEN is not set\""}
 ```
 
-The command exits with status 0 after testing all input calls, regardless of individual outcomes. It exits with a non-zero status if the policy fails to load or if input JSON is malformed.
+The command exits with status 0 after testing all input calls, regardless of individual outcomes. It exits with a non-zero status if the policy fails to load or if input JSON is malformed. It also exits with a non-zero status when it cannot write an answer to standard output, for example after the reader closes the pipe. In that case no further call is scheduled, and the calls in flight are dropped.
 
 ## Recorders
 
@@ -1520,7 +1520,7 @@ OpenAPPA evaluates root declarations before included files, processing included 
 - Included files cannot include other files.
 - Included files cannot override deployment-wide settings. The sole exception is `confined_results` under `[policy.deployment]`: included files may append tools they declare. Included files must not set `[policy.deployment] hint`.
 - Root declarations for `[[policy.annotator]]` or `[[policy.sanitizer]]` replace included components sharing the same name. Omitted fields in the replacement are not inherited.
-- Multiple included files cannot declare the same annotator name.
+- Two included files cannot declare the same annotator name. They also cannot both declare an annotator or sanitizer that the root declares. OpenAPPA refuses such a configuration at load.
 - Multiple files cannot configure the same external component name within the same category (e.g. two `[externals.sanitizers.clean]` blocks).
 
 See [Batteries](/batteries) for pre-packaged policy bundles.
@@ -1598,9 +1598,9 @@ If the endpoint requires authentication, set `token_env` to the name of an envir
 
 Set `command` to an array specifying the executable and arguments (e.g. `command = ["python3", "./sanitize.py"]`). OpenAPPA executes the process directly without an intermediate shell, launching it with the configuration directory as its working directory and terminating child processes upon completion. Commands referencing `appa` invoke the runtime's own binary to execute built-in plugins (such as `appa file-tracker`).
 
-Commands read a single JSON consult request from standard input and write a JSON response to standard output within `timeout_ms` and `max_body_bytes`. `APPA_CONSULT_TIMEOUT_MS` informs the process of remaining execution time (accounting for queue wait). The runtime limits concurrent local program executions to eight.
+Commands read a single JSON consult request from standard input and write a JSON response to standard output within `timeout_ms` and `max_body_bytes`. When OpenAPPA reaches the end of standard output, it closes standard input, so a command that needs the whole request must read it before it closes standard output. `APPA_CONSULT_TIMEOUT_MS` informs the process of remaining execution time (accounting for queue wait). The runtime limits concurrent local program executions to eight.
 
-If a command requires credentials, specify `token_env` with an environment variable name prefixed with `APPA_PROVIDER_`. OpenAPPA passes that variable into the process environment while filtering out other internal `APPA_*` variables.
+If a command requires credentials, specify `token_env` with an environment variable name prefixed with `APPA_PROVIDER_`. OpenAPPA passes that variable into the process environment while filtering out other internal `APPA_*` variables. On Windows, where variable names ignore case, the filter also ignores case.
 
 OpenAPPA does not require credential variables to be present at policy load time; the process must handle missing credentials at runtime.
 

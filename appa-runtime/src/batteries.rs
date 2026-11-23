@@ -16,6 +16,8 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
+use tempfile::TempDir;
+use thiserror::Error;
 
 /// The store of the deployment whose root config is `config`.
 pub fn store_dir(config: &Path) -> PathBuf {
@@ -33,11 +35,11 @@ pub fn default_search_path(config: &Path) -> Vec<PathBuf> {
 /// one of them complete, or for the moment between the two renames no
 /// store at all, and nothing else stays in it. A tree without batteries
 /// leaves no store. The names stocked, sorted.
-pub fn stock(tree: &Path, store: &Path) -> io::Result<Vec<String>> {
+pub fn stock(tree: &Path, store: &Path) -> Result<Vec<String>, StockError> {
     let mut names = match names_in(tree) {
         Ok(names) => names,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
     names.sort();
     let beside = store.parent().unwrap_or(Path::new(""));
@@ -60,20 +62,45 @@ pub fn stock(tree: &Path, store: &Path) -> io::Result<Vec<String>> {
         return Ok(names);
     }
     let retired = tempfile::Builder::new().prefix(".batteries-").tempdir_in(beside)?;
-    let parked = retired.path().join("batteries");
-    fs::rename(store, &parked)?;
-    if let Err(error) = fs::rename(&staged, store) {
-        // The earlier store comes back when the new one cannot take its
-        // place; both temporary directories go with the return.
-        return Err(match fs::rename(&parked, store) {
-            Ok(()) => error,
-            Err(restore) => io::Error::new(
-                error.kind(),
-                format!("{error}; and the earlier store was not restored: {restore}"),
-            ),
-        });
-    }
+    fs::rename(store, retired.path().join(PARKED))?;
+    promote(&staged, store, retired)?;
     Ok(names)
+}
+
+/// Why a store was not replaced.
+#[derive(Debug, Error)]
+pub enum StockError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    /// The new store could not take the earlier one's place, and the earlier
+    /// one could not return to it: it stays at `parked`, the only copy left.
+    #[error("{promote}; the earlier store was not restored and stays at {}: {restore}", parked.display())]
+    NotRestored {
+        parked: PathBuf,
+        promote: io::Error,
+        restore: io::Error,
+    },
+}
+
+/// The name of the earlier store inside its retired directory.
+const PARKED: &str = "batteries";
+
+/// Rename `staged` to the vacated `store`, the earlier store parked as
+/// [`PARKED`] in `retired`. That copy goes with `retired` once the new one
+/// is in, comes back when the new one cannot take its place, and is kept
+/// when it cannot come back either.
+fn promote(staged: &Path, store: &Path, retired: TempDir) -> Result<(), StockError> {
+    let Err(promote) = fs::rename(staged, store) else {
+        return Ok(());
+    };
+    match fs::rename(retired.path().join(PARKED), store) {
+        Ok(()) => Err(StockError::Io(promote)),
+        Err(restore) => Err(StockError::NotRestored {
+            parked: retired.keep().join(PARKED),
+            promote,
+            restore,
+        }),
+    }
 }
 
 /// One battery the runtime can name: its directory name and the tool
@@ -143,19 +170,34 @@ pub fn snapshot(dirs: &[PathBuf]) -> BatteriesResponse {
     BatteriesResponse { batteries }
 }
 
-/// Resolve an authored include against the battery search path, then
-/// against the root config directory. Absolute includes stay the
-/// caller's refusal.
-pub fn resolve_include(authored: &str, source_dir: &Path, battery_dirs: &[PathBuf]) -> PathBuf {
-    if let Some(name) = name_from_include(Path::new(authored)) {
-        for dir in battery_dirs {
-            let candidate = dir.join(&name).join("appa.toml");
-            if candidate.is_file() {
-                return candidate;
-            }
-        }
-    }
-    source_dir.join(authored)
+/// Resolve an authored include. A battery include names the `appa.toml` of
+/// the first battery [`battery_in`] finds on the search path, then in the
+/// root config directory's `batteries/`, and `None` when none holds it.
+/// Any other include is the path beside the root config. Absolute includes
+/// stay the caller's refusal.
+pub fn resolve_include(authored: &str, source_dir: &Path, battery_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let Some(name) = name_from_include(Path::new(authored)) else {
+        return Some(source_dir.join(authored));
+    };
+    let beside = source_dir.join("batteries");
+    battery_dirs
+        .iter()
+        .chain([&beside])
+        .find_map(|dir| battery_in(dir, &name))
+        .map(|battery| battery.join("appa.toml"))
+}
+
+/// The directory of battery `name` in `dir`: a real directory holding a real
+/// `appa.toml` file. Neither is followed through a symbolic link, so a
+/// battery is always the tree that was stocked or put there, not one a link
+/// points to.
+pub fn battery_in(dir: &Path, name: &str) -> Option<PathBuf> {
+    let battery = dir.join(name);
+    let is_real = |path: &Path, wanted: fn(&fs::FileType) -> bool| {
+        fs::symlink_metadata(path).is_ok_and(|metadata| wanted(&metadata.file_type()))
+    };
+    (is_real(&battery, fs::FileType::is_dir) && is_real(&battery.join("appa.toml"), fs::FileType::is_file))
+        .then_some(battery)
 }
 
 /// The battery name an include path names when it is shaped
@@ -185,19 +227,11 @@ pub fn name_from_include(path: &Path) -> Option<String> {
 fn names_in(dir: &Path) -> io::Result<Vec<String>> {
     let mut names = Vec::new();
     for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
+        let name = entry?.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.starts_with('.') {
-            continue;
-        }
-        if !entry.path().join("appa.toml").is_file() {
+        if name.starts_with('.') || battery_in(dir, name).is_none() {
             continue;
         }
         names.push(name.to_string());
@@ -306,13 +340,58 @@ mod tests {
             &config_dir,
             &[overlay.clone(), image.clone()],
         );
-        assert_eq!(overlay_path, overlay.join("slack/appa.toml"));
+        assert_eq!(overlay_path, Some(overlay.join("slack/appa.toml")));
 
         let image_path = resolve_include("batteries/slack/appa.toml", &config_dir, std::slice::from_ref(&image));
-        assert_eq!(image_path, image.join("slack/appa.toml"));
+        assert_eq!(image_path, Some(image.join("slack/appa.toml")));
 
         let config_path = resolve_include("batteries/slack/appa.toml", &config_dir, &[]);
-        assert_eq!(config_path, config_dir.join("batteries/slack/appa.toml"));
+        assert_eq!(config_path, Some(config_dir.join("batteries/slack/appa.toml")));
+
+        assert_eq!(
+            resolve_include("batteries/absent/appa.toml", &config_dir, &[image]),
+            None
+        );
+        assert_eq!(
+            resolve_include("policies/team.toml", &config_dir, &[]),
+            Some(config_dir.join("policies/team.toml"))
+        );
+    }
+
+    /// A battery reached through a symbolic link, its directory or its
+    /// `appa.toml`, is not a battery: the lookup, the listing and an include
+    /// all pass over it, and the next directory's real copy wins.
+    #[cfg(unix)]
+    #[test]
+    fn a_battery_behind_a_symbolic_link_is_not_found() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let elsewhere = root.path().join("elsewhere");
+        let linked = root.path().join("linked");
+        let image = root.path().join("image");
+        let config_dir = root.path().join("config");
+        write_battery(&elsewhere, "slack", &["linked-dir"]);
+        write_battery(&elsewhere, "github", &["linked-file"]);
+        fs::create_dir_all(&linked).expect("linked directory");
+        symlink(elsewhere.join("slack"), linked.join("slack")).expect("directory link");
+        fs::create_dir_all(linked.join("github")).expect("real github directory");
+        symlink(elsewhere.join("github/appa.toml"), linked.join("github/appa.toml")).expect("file link");
+        write_battery(&image, "github", &["real"]);
+        fs::create_dir_all(config_dir.join("batteries")).expect("config store");
+        symlink(elsewhere.join("slack"), config_dir.join("batteries/slack")).expect("store link");
+
+        assert_eq!(battery_in(&linked, "slack"), None);
+        assert_eq!(battery_in(&linked, "github"), None);
+        assert_eq!(battery_in(&image, "github"), Some(image.join("github")));
+        assert_eq!(snapshot(std::slice::from_ref(&linked)).batteries, Vec::new());
+        assert_eq!(
+            resolve_include("batteries/github/appa.toml", &config_dir, &[linked.clone(), image]),
+            Some(root.path().join("image/github/appa.toml"))
+        );
+        assert_eq!(
+            resolve_include("batteries/slack/appa.toml", &config_dir, &[linked]),
+            None
+        );
     }
 
     #[test]
@@ -369,6 +448,27 @@ mod tests {
         );
         assert!(!store.exists(), "a version without batteries leaves no store");
         assert_eq!(fs::read_dir(config_dir.path()).unwrap().count(), 0);
+    }
+
+    /// A store that reappears once the earlier one is parked refuses both the
+    /// new store and the earlier one's return; the earlier copy stays parked.
+    #[test]
+    fn a_store_that_cannot_be_restored_stays_parked() {
+        let beside = tempfile::tempdir().expect("config dir");
+        let store = beside.path().join("batteries");
+        let staged = beside.path().join("staged");
+        write_battery(&staged, "slack", &["new"]);
+        let retired = tempfile::Builder::new()
+            .prefix(".batteries-")
+            .tempdir_in(beside.path())
+            .expect("retired");
+        write_battery(&retired.path().join(PARKED), "slack", &["old"]);
+        fs::write(&store, "an interloper in the store's place").expect("interloper");
+
+        let Err(StockError::NotRestored { parked, .. }) = promote(&staged, &store, retired) else {
+            panic!("neither the new store nor the earlier one can take the interloper's place");
+        };
+        assert_eq!(tools_in(&parked.join("slack/appa.toml")), vec!["old"]);
     }
 
     fn write_battery(root: &Path, name: &str, tools: &[&str]) {

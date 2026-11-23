@@ -328,6 +328,97 @@ async fn a_refused_turn_end_still_prints_nothing_and_exits_0() {
     assert_eq!(stdout, "", "a turn end prints no decision");
 }
 
+/// The client with a directory for its stdin, so the read of the hook event fails.
+#[cfg(unix)]
+fn run_with_unreadable_stdin(command: &mut Command) -> (i32, String) {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let stdin = std::fs::File::open(dir.path()).expect("a directory opens for reading");
+    let output = child_process::spawn(command.stdin(stdin))
+        .expect("the hook client spawns")
+        .wait_with_output()
+        .expect("the hook client finishes");
+    (
+        output.status.code().expect("the hook client exits with a code"),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+/// A hook event that cannot be read is no reason to hold the actor in a finished turn,
+/// while a hook that authorizes something still blocks on it.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_event_never_blocks_a_turn_end() {
+    let url = "http://127.0.0.1:1";
+    assert_eq!(
+        run_with_unreadable_stdin(client(url).arg("--turn-end")),
+        (0, String::new())
+    );
+    assert_eq!(run_with_unreadable_stdin(&mut client(url)).0, 2);
+}
+
+/// A read that fails after the whole event arrived still leaves a result the tool produced:
+/// the stdin socket delivers the post-use event and then times out instead of closing. The
+/// runtime would acknowledge the event, so only the client's own withholding answers it, and
+/// a stderr whose reader is gone does not stop it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_failing_after_a_post_use_event_withholds_its_result() {
+    #[derive(Debug, Clone, Copy)]
+    enum Stderr {
+        Read,
+        Closed,
+    }
+    let posted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&posted);
+    let url = serve(Router::new().route(
+        "/hook",
+        post(move |_body: Bytes| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { r#"{"protocol":1,"decision":"ack"}"# }
+        }),
+    ))
+    .await;
+    for stderr in [Stderr::Read, Stderr::Closed] {
+        let url = url.clone();
+        let output = tokio::task::spawn_blocking(move || {
+            let (mut ours, theirs) = std::os::unix::net::UnixStream::pair().expect("a socket pair opens");
+            theirs
+                .set_read_timeout(Some(std::time::Duration::from_millis(200)))
+                .expect("the read timeout sets");
+            ours.write_all(POST_TOOL_USE.as_bytes())
+                .expect("the event writes to the socket");
+            let mut child = child_process::spawn(client_heard(&url).stdin(std::os::fd::OwnedFd::from(theirs)))
+                .expect("the hook client spawns");
+            if let Stderr::Closed = stderr {
+                drop(child.stderr.take().expect("the child has a stderr pipe"));
+            }
+            let output = child.wait_with_output().expect("the hook client finishes");
+            drop(ours);
+            output
+        })
+        .await
+        .expect("the blocking task joins");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(0), "{stderr:?}: {stdout}");
+        let answer: serde_json::Value = serde_json::from_str(&stdout).expect("the withholding renders as JSON");
+        assert_eq!(answer["decision"], "block", "{stderr:?}: {answer}");
+        assert_eq!(answer["hookSpecificOutput"]["hookEventName"], "PostToolUse", "{answer}");
+        assert!(
+            !answer["hookSpecificOutput"]["updatedToolOutput"].is_null(),
+            "the produced output is replaced: {answer}"
+        );
+        assert!(
+            !answer.to_string().contains("readme.txt"),
+            "the withheld body never reaches the model: {answer}"
+        );
+    }
+    assert_eq!(
+        posted.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "an event that was not read whole is never posted"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unreachable_runtime_exits_2() {
     let url = refused_url().await;
@@ -335,6 +426,41 @@ async fn an_unreachable_runtime_exits_2() {
         .await
         .expect("the blocking task joins");
     assert_eq!(code, 2, "no answer from the runtime must block the action");
+}
+
+/// The block holds when its reason has nowhere to go: a stderr whose reader is gone still
+/// leaves the exit code the harness reads as a block.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_runtime_exits_2_with_its_stderr_gone() {
+    let url = refused_url().await;
+    let code = tokio::task::spawn_blocking(move || {
+        let mut child = child_process::spawn(&mut client_heard(&url)).expect("the hook client spawns");
+        drop(child.stderr.take().expect("the child has a stderr pipe"));
+        finish_output(child, PRE_TOOL_USE).status.code()
+    })
+    .await
+    .expect("the blocking task joins");
+    assert_eq!(code, Some(2), "no answer from the runtime must block the action");
+}
+
+/// A session start whose deployment cannot be resolved is blocked, and the block holds
+/// when the stderr its reason goes to has no reader from the start.
+#[cfg(unix)]
+#[test]
+fn an_unresolvable_deployment_exits_2_with_its_stderr_gone() {
+    let (stderr, reader) = std::os::unix::net::UnixStream::pair().expect("a socket pair opens");
+    drop(reader);
+    let mut command = client("http://127.0.0.1:9");
+    command
+        .arg("--ensure-runtime")
+        .env("APPA_DATA_DIR", "")
+        .stderr(std::os::fd::OwnedFd::from(stderr));
+    let child = child_process::spawn(&mut command).expect("the hook client spawns");
+    assert_eq!(
+        finish_output(child, PRE_TOOL_USE).status.code(),
+        Some(2),
+        "an unresolvable deployment must block the action"
+    );
 }
 
 /// A session that names its own runtime posts there, not to the deployment's

@@ -12,7 +12,8 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/appa-kagent-adk-go ./cmd/appa-kagent-adk-go
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+FROM dhi.io/static:20261020-alpine3.23@sha256:c262b6bf548a9adeb9fdc24fc7b845cd52010b8a47d3515abb5dddb4d172184b
+WORKDIR /home/nonroot
 COPY --from=build /out/appa-kagent-adk-go /usr/local/bin/appa-kagent-adk-go
 # The controller sends --host, --port and --filepath; /config is its mount.
 ENTRYPOINT ["/usr/local/bin/appa-kagent-adk-go"]

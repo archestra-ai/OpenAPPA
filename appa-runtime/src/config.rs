@@ -91,6 +91,31 @@ pub(crate) const RUNTIME_VARIABLE_PREFIX: &str = "APPA_";
 /// become a way to hand a subprocess a secret this runtime holds.
 pub(crate) const PROVIDER_CREDENTIAL_PREFIX: &str = "APPA_PROVIDER_";
 
+/// How the platform's environment compares variable names.
+#[derive(Clone, Copy)]
+pub(crate) enum NameCase {
+    Exact,
+    /// Windows: `appa_token` and `APPA_TOKEN` name one variable.
+    AsciiInsensitive,
+}
+
+pub(crate) const PLATFORM_NAME_CASE: NameCase = match cfg!(windows) {
+    true => NameCase::AsciiInsensitive,
+    false => NameCase::Exact,
+};
+
+impl NameCase {
+    /// Whether `name` lies in the namespace `prefix` opens, as names compare under `self`.
+    pub(crate) fn in_namespace(self, name: &std::ffi::OsStr, prefix: &str) -> bool {
+        let prefix = prefix.as_bytes();
+        let head = name.as_encoded_bytes().get(..prefix.len());
+        match self {
+            NameCase::Exact => head == Some(prefix),
+            NameCase::AsciiInsensitive => head.is_some_and(|head| head.eq_ignore_ascii_case(prefix)),
+        }
+    }
+}
+
 /// The effective policy file: deterministic TOML bytes after includes
 /// compose, and the policy value parsed from those bytes. The stored
 /// value and bytes always describe the same deployment.
@@ -615,8 +640,9 @@ pub(crate) const JEV_URL_VARIABLE: &str = "APPA_PROVIDER_JEV_API_URL";
 const JEV_SECTION: &str = "jev";
 
 /// How a bound component the runtime does not answer itself is reached: an HTTP endpoint
-/// or a local command. Every section accepts both; an Annotator and a context provider
-/// accept nothing else, since a stock Annotator is named on its policy declaration.
+/// or a local command. Every section accepts both; a context provider and a recorder accept
+/// nothing else, and neither does an Annotator, since a stock Annotator is named on its
+/// policy declaration.
 #[derive(Debug, Clone)]
 pub enum Transport {
     Url(Endpoint),
@@ -809,6 +835,8 @@ pub enum ConfigError {
         section: String,
         name: String,
     },
+    #[error("included config {path} repeats [[policy.{field}]] {name:?}, which the root config replaces")]
+    DuplicateComponent { path: String, field: String, name: String },
     #[error("invalid internal composition metadata: {reason}")]
     InvalidComposedMetadata { reason: String },
     #[error("the {section} endpoint {name:?} has an invalid url: {url}")]
@@ -927,7 +955,7 @@ pub enum ConfigError {
     },
 }
 
-/// The five sections a component binds under. Every section takes a URL or a command;
+/// The six sections a component binds under. Every section takes a URL or a command;
 /// which builtin names a section accepts is the one difference, and the audience section
 /// alone takes a `readers` roster and a `lookup` redirect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1320,7 +1348,8 @@ impl Config {
                     .filter(|(_, file)| !named.contains(file))
                     .collect(),
                 None => {
-                    let file = crate::batteries::resolve_include(authored, &source_dir, battery_dirs);
+                    let file = crate::batteries::resolve_include(authored, &source_dir, battery_dirs)
+                        .ok_or_else(|| unreadable(&source_dir.join(authored), std::io::ErrorKind::NotFound.into()))?;
                     let file = std::fs::canonicalize(&file).map_err(|source| unreadable(&file, source))?;
                     vec![(authored.clone(), file)]
                 }
@@ -1855,6 +1884,7 @@ impl<'a> IncludeGlob<'a> {
             // The entry's own type, which a symbolic link does not pass on.
             let kind = item.file_type().map_err(|source| unreadable(&item.path(), source))?;
             if kind.is_file() {
+                self.refuse_a_battery_not_found(source_dir, &name)?;
                 names.push(name);
             }
         }
@@ -1872,6 +1902,22 @@ impl<'a> IncludeGlob<'a> {
                 Ok((entry, path))
             })
             .collect()
+    }
+
+    /// A match the entry would name as a battery, `batteries/<name>/appa.toml`,
+    /// is refused unless [`crate::batteries::battery_in`] finds that battery
+    /// beside the root config, as a single-file entry is: its policy is not
+    /// dropped without a word.
+    fn refuse_a_battery_not_found(&self, source_dir: &Path, name: &str) -> Result<(), ConfigError> {
+        let entry = format!("{}/{name}", self.folder);
+        match crate::batteries::name_from_include(Path::new(&entry)) {
+            Some(battery) if crate::batteries::battery_in(&source_dir.join("batteries"), &battery).is_none() => {
+                Err(self.invalid(&format!(
+                    "it matches {entry}, and battery {battery} is not a real directory with a real appa.toml"
+                )))
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1908,15 +1954,16 @@ fn named_include_files(
         .iter()
         .filter(|authored| !authored.contains('*'))
         .filter_map(|authored| {
-            std::fs::canonicalize(crate::batteries::resolve_include(authored, source_dir, battery_dirs)).ok()
+            std::fs::canonicalize(crate::batteries::resolve_include(authored, source_dir, battery_dirs)?).ok()
         })
         .collect()
 }
 
 /// One include entry, as authored: a spelling this runtime resolves beside the root
-/// config, or hands to a host that holds the battery under it. Neither reads a spelling
-/// that starts elsewhere or leaves the root. [`edit::add_include`] refuses an entry here
-/// before it writes one, so a document the editor wrote is one a loader reads.
+/// config, or hands to a host that holds the battery under it. The hosted loader refuses
+/// an absolute spelling and any `..` component; a local root refuses an absolute spelling,
+/// and its single-file entries may hold `..`. [`edit::add_include`] refuses an entry here
+/// before it writes one.
 pub(crate) fn refuse_include_entry(entry: &str) -> Result<(), ConfigError> {
     let path = Path::new(entry);
     if path.is_absolute() {
@@ -2063,7 +2110,10 @@ fn declared_components(policy: &toml::Value) -> std::collections::BTreeSet<(Stri
 /// targets, and any other file of such a battery is refused: the deployment target
 /// picks its target policy. Any other include composes alone.
 fn target_policies(include_path: PathBuf, target: BatteryTarget) -> Result<Vec<PathBuf>, ConfigError> {
-    let dir = include_path.parent().expect("a canonical file path has a parent");
+    // The filesystem root has no parent: it is in no battery, and the caller's read refuses it.
+    let Some(dir) = include_path.parent() else {
+        return Ok(vec![include_path]);
+    };
     let manifest = dir.join(appa_package::MANIFEST_FILE);
     if !manifest.is_file() {
         return Ok(vec![include_path]);
@@ -2324,20 +2374,34 @@ impl Composition {
                 // An Annotator or a Sanitizer is one named policy component, not an ordered
                 // matcher. The root may replace one included default so a deployment can own
                 // its trusted hint, mandate, and model builtin without editing a battery. A
-                // second included declaration with that name remains in the composed policy,
-                // where normal duplicate validation refuses it instead of silently choosing
-                // between two batteries.
+                // second included declaration with that name is refused here instead of
+                // silently choosing between two batteries; kept, an unbound one would be left
+                // out by name together with the root's own declaration.
+                let mut repeated = None;
                 declarations.retain(|declaration| {
                     let Some(name) = declaration_name(declaration) else {
                         return true;
                     };
                     let key = (field.clone(), name.to_string());
-                    let replaced = self.root_components.contains(&key) && self.replaced_components.insert(key);
-                    if replaced && field == "sanitizer" {
-                        self.replaced_sanitizers.push(declaration.clone());
+                    if !self.root_components.contains(&key) {
+                        return true;
                     }
-                    !replaced
+                    match self.replaced_components.insert(key) {
+                        true if field == "sanitizer" => self.replaced_sanitizers.push(declaration.clone()),
+                        true => {}
+                        false => {
+                            repeated.get_or_insert_with(|| name.to_owned());
+                        }
+                    }
+                    false
                 });
+                if let Some(name) = repeated {
+                    return Err(ConfigError::DuplicateComponent {
+                        path: display.to_string(),
+                        field,
+                        name,
+                    });
+                }
             }
             if field == "sanitizer" {
                 self.included_sanitizers.extend(
@@ -2468,22 +2532,22 @@ fn compose_included_confinement(
 ) -> Result<Vec<(String, Vec<String>)>, ConfigError> {
     let refused = |field: &str| ConfigError::IncludedPolicyField {
         path: include_path.display().to_string(),
-        field: format!("deployment.{field}"),
+        field: field.to_owned(),
     };
-    let deployment = deployment.as_table().ok_or_else(|| refused(""))?;
+    let deployment = deployment.as_table().ok_or_else(|| refused("deployment"))?;
     if let Some(field) = deployment.keys().find(|field| field.as_str() != "confined_results") {
-        return Err(refused(field));
+        return Err(refused(&format!("deployment.{field}")));
     }
     let confined: Vec<String> = deployment
         .get("confined_results")
         .and_then(toml::Value::as_array)
-        .ok_or_else(|| refused("confined_results"))?
+        .ok_or_else(|| refused("deployment.confined_results"))?
         .iter()
         .map(|entry| {
             entry
                 .as_str()
                 .map(str::to_owned)
-                .ok_or_else(|| refused("confined_results"))
+                .ok_or_else(|| refused("deployment.confined_results"))
         })
         .collect::<Result<_, _>>()?;
     let declared: std::collections::BTreeSet<&str> = included_policy
@@ -2504,11 +2568,11 @@ fn compose_included_confinement(
         .entry("deployment".to_string())
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
         .as_table_mut()
-        .ok_or_else(|| refused(""))?
+        .ok_or_else(|| refused("deployment"))?
         .entry("confined_results".to_string())
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
-        .ok_or_else(|| refused("confined_results"))?;
+        .ok_or_else(|| refused("deployment.confined_results"))?;
     let mut tagged = Vec::new();
     for tool in confined {
         if !destination.iter().any(|entry| entry.as_str() == Some(&tool)) {
@@ -2642,11 +2706,14 @@ fn split_context(raw: BTreeMap<String, RawContextBinding>) -> Result<SplitContex
 
 type SplitContext = (BTreeMap<String, RawBinding>, BTreeMap<ContextProviderName, ContextHint>);
 
-/// An annotator or context-provider binding after its section refused every `builtin` at parse.
+/// An annotator, context-provider or recorder binding after its section refused every `builtin`
+/// at parse.
 fn transport_only(implementation: Implementation) -> Transport {
     match implementation {
         Implementation::Transport(transport) => transport,
-        Implementation::Builtin(_) => unreachable!("the annotators and context sections refuse every builtin"),
+        Implementation::Builtin(_) => {
+            unreachable!("the annotators, context and recorders sections refuse every builtin")
+        }
     }
 }
 
@@ -2951,7 +3018,7 @@ fn resolve_llm(raw: RawLlm, keys: KeySource<'_>) -> Result<LlmProfile, ConfigErr
     let url = raw.url.map(|url| validated_url(SECTION, SECTION, url)).transpose()?;
     let key = raw
         .token_env
-        .map(|var| endpoint_token_variable(SECTION, SECTION, var))
+        .map(|var| endpoint_token_variable(SECTION, SECTION, var, PLATFORM_NAME_CASE))
         .transpose()?
         .map(|var| ProfileKey::read(var, keys));
     Ok(LlmProfile {
@@ -3016,7 +3083,7 @@ fn resolve_token(
             });
         }
     };
-    let var = endpoint_token_variable(section, name, var)?;
+    let var = endpoint_token_variable(section, name, var, PLATFORM_NAME_CASE)?;
     let KeySource::Lookup(lookup) = keys else {
         return Ok(Some(EndpointToken::Deferred));
     };
@@ -3031,8 +3098,13 @@ fn resolve_token(
 }
 
 /// A variable a bearer token this runtime sends itself may come from: an `APPA_*` one
-/// outside the provider namespace a command child inherits.
-fn endpoint_token_variable(section: &'static str, name: &str, var: String) -> Result<String, ConfigError> {
+/// outside the provider namespace a command child inherits, however `case` spells it.
+fn endpoint_token_variable(
+    section: &'static str,
+    name: &str,
+    var: String,
+    case: NameCase,
+) -> Result<String, ConfigError> {
     if !var.starts_with(RUNTIME_VARIABLE_PREFIX) {
         return Err(ConfigError::ForeignSecretVariable {
             section,
@@ -3040,7 +3112,7 @@ fn endpoint_token_variable(section: &'static str, name: &str, var: String) -> Re
             var,
         });
     }
-    if var.starts_with(PROVIDER_CREDENTIAL_PREFIX) {
+    if case.in_namespace(std::ffi::OsStr::new(&var), PROVIDER_CREDENTIAL_PREFIX) {
         return Err(ConfigError::ChildCredentialVariable {
             section,
             name: name.to_string(),
@@ -3131,6 +3203,24 @@ mod tests {
         assert!(
             matches!(Config::load(&dir.path().join("appa.toml")), Err(ConfigError::IncludedTopLevel { field, .. }) if field == "bundle")
         );
+    }
+
+    /// The filesystem root is a canonical path with no parent to look for a battery
+    /// manifest in.
+    #[cfg(unix)]
+    #[test]
+    fn an_include_that_resolves_to_the_filesystem_root_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            format!("include=['root.toml']\n{BUNDLE_ROOT}"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/", dir.path().join("root.toml")).unwrap();
+        assert!(matches!(
+            Config::load_for_target(&dir.path().join("appa.toml"), &[], BatteryTarget::SingleUser),
+            Err(ConfigError::Unreadable { path, .. }) if path == "/"
+        ));
     }
 
     #[cfg(feature = "daemon")]
@@ -3333,6 +3423,36 @@ mod tests {
             parse_with(&empty, |_| Some(String::new())),
             Err(ConfigError::MissingSecret { .. }),
         ));
+    }
+
+    /// Where names ignore case, so does the provider namespace a sent token may not name:
+    /// `APPA_provider_X` is the variable `APPA_PROVIDER_X` a command child inherits.
+    #[test]
+    fn a_sent_token_stays_out_of_the_provider_namespace_however_it_is_spelled() {
+        #[derive(Debug, PartialEq)]
+        enum Verdict {
+            Sent,
+            Foreign,
+            Provider,
+        }
+        let verdict = |var: &str, case| match endpoint_token_variable("authorities", "security", var.to_string(), case)
+        {
+            Ok(_) => Verdict::Sent,
+            Err(ConfigError::ForeignSecretVariable { .. }) => Verdict::Foreign,
+            Err(ConfigError::ChildCredentialVariable { .. }) => Verdict::Provider,
+            Err(other) => panic!("{var}: {other}"),
+        };
+        for (var, exact, insensitive) in [
+            ("APPA_AUTHORITY_TOKEN", Verdict::Sent, Verdict::Sent),
+            ("APPA_PROVIDERX_TOKEN", Verdict::Sent, Verdict::Sent),
+            ("APPA_PROVIDER_AUTHORITY_TOKEN", Verdict::Provider, Verdict::Provider),
+            ("APPA_provider_AUTHORITY_TOKEN", Verdict::Sent, Verdict::Provider),
+            ("APPA_Provider_Token", Verdict::Sent, Verdict::Provider),
+            ("HOME", Verdict::Foreign, Verdict::Foreign),
+        ] {
+            assert_eq!(verdict(var, NameCase::Exact), exact, "{var}");
+            assert_eq!(verdict(var, NameCase::AsciiInsensitive), insensitive, "{var}");
+        }
     }
 
     /// A command's `token_env` is the mirror of a URL's: nothing is sent, one variable is
@@ -3867,6 +3987,67 @@ mod tests {
         assert_eq!(config.included_batteries(), ["slack"]);
     }
 
+    /// A store battery that is a link to a tree elsewhere is not loaded as
+    /// the battery it is named for.
+    #[cfg(unix)]
+    #[test]
+    fn a_battery_include_does_not_follow_a_link_in_the_store() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let elsewhere = dir.path().join("elsewhere/slack");
+        std::fs::create_dir_all(&elsewhere).expect("linked tree");
+        std::fs::write(elsewhere.join("appa.toml"), "[policy]\nversion = 2\n").expect("linked battery");
+        std::fs::create_dir_all(dir.path().join("batteries")).expect("store");
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join("batteries/slack")).expect("store link");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            "include = [\"batteries/slack/appa.toml\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n",
+        )
+        .expect("root config");
+
+        let refused = Config::load_from(&dir.path().join("appa.toml"), &[]);
+        assert!(
+            matches!(&refused, Err(ConfigError::Unreadable { source, .. }) if source.kind() == std::io::ErrorKind::NotFound),
+            "{refused:?}"
+        );
+    }
+
+    /// A glob over a store battery that is a link is refused, whether the
+    /// link stays inside the root config's folder or leads out of it; a glob
+    /// over a real battery folder that matches nothing still loads.
+    #[cfg(unix)]
+    #[test]
+    fn a_battery_glob_does_not_follow_a_link_in_the_store() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let inside = dir.path().join("vendor/slack");
+        let outside = tempfile::tempdir().expect("outside directory");
+        for tree in [inside.as_path(), outside.path()] {
+            std::fs::create_dir_all(tree).expect("linked tree");
+            std::fs::write(
+                tree.join("appa.toml"),
+                "[policy]\nversion = 2\n[[policy.tool]]\nname = \"linked\"\ndelta = {}\n",
+            )
+            .expect("linked battery");
+        }
+        std::fs::create_dir_all(dir.path().join("batteries")).expect("store");
+        std::os::unix::fs::symlink(&inside, dir.path().join("batteries/slack")).expect("inside link");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("batteries/github")).expect("outside link");
+        let root = |include: &str| {
+            std::fs::write(
+                dir.path().join("appa.toml"),
+                format!("include = [\"{include}\"]\n[policy]\nversion = 2\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 4096\n"),
+            )
+            .expect("root config");
+            Config::load_from(&dir.path().join("appa.toml"), &[])
+        };
+
+        for linked in ["batteries/slack/*.toml", "batteries/github/*.toml"] {
+            assert!(matches!(root(linked), Err(ConfigError::GlobInclude { .. })), "{linked}");
+        }
+        std::fs::create_dir_all(dir.path().join("batteries/empty")).expect("real battery folder");
+        let config = root("batteries/empty/*.toml").expect("a glob matching nothing loads");
+        assert!(config.included_batteries().is_empty());
+    }
+
     #[test]
     fn another_spelling_of_a_battery_file_is_not_a_battery_include() {
         let dir = tempfile::tempdir().expect("temp directory");
@@ -4155,6 +4336,30 @@ mod tests {
             confined.is_empty(),
             "a replacement that cannot reach `lookup` releases its confinement"
         );
+    }
+
+    /// A root replaces one included declaration of a Sanitizer. A second one is refused, so
+    /// it cannot reach the leave-out of unbound Sanitizers and take the root's with it.
+    #[test]
+    fn a_second_included_declaration_of_a_root_sanitizer_is_refused() {
+        let dir = tempfile::tempdir().expect("temp directory");
+        let fragment = "[policy]\nversion = 2\n[[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\n\
+                        [policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n";
+        std::fs::write(dir.path().join("a.toml"), fragment).expect("write a");
+        std::fs::write(dir.path().join("b.toml"), fragment).expect("write b");
+        std::fs::write(
+            dir.path().join("appa.toml"),
+            "include = [\"a.toml\", \"b.toml\"]\n[policy]\nversion = 2\n\
+             [[policy.sanitizer]]\nname = \"mask\"\non = [\"tool_output\"]\nbuiltin = \"llm\"\n\
+             [policy.sanitizer.permits]\ntrust = { from = \"suspicious\", to = \"trusted\" }\n\
+             [externals]\ntimeout_ms = 5000\nmax_body_bytes = 65536\n",
+        )
+        .expect("write root");
+        assert!(matches!(
+            Config::load(&dir.path().join("appa.toml")),
+            Err(ConfigError::DuplicateComponent { path, field, name })
+                if Path::new(&path).ends_with("b.toml") && field == "sanitizer" && name == "mask"
+        ));
     }
 
     /// An included Sanitizer that names no builtin runs only where the deployment binds it.
@@ -5705,6 +5910,41 @@ mod tests {
         }
         let root = format!("{HOSTED_ROOT}[policy.deployment]\nhint = \"The root's own hosts.\"\n");
         assert!(hosted_composed(&root, &[]).is_ok(), "the root declares it");
+    }
+
+    #[test]
+    fn a_hosted_battery_s_deployment_that_is_no_table_is_refused_under_its_own_name() {
+        assert!(matches!(
+            hosted_composed(
+                HOSTED_ROOT,
+                &[HostedBattery {
+                    name: "fetcher",
+                    base: "[policy]\nversion = 2\ndeployment = 1\n",
+                    target: None,
+                    token_env: &[],
+                }],
+            ),
+            Err(ConfigError::IncludedPolicyField { field, .. }) if field == "deployment"
+        ));
+    }
+
+    #[test]
+    fn a_confining_battery_under_a_root_deployment_that_is_no_table_is_refused_under_that_name() {
+        let root = "[policy]\nversion = 2\ndeployment = 1\n[[policy.tool]]\nname = \"root__read\"\ndelta = {}\n";
+        let confining = "[policy]\nversion = 2\n[[policy.tool]]\nname = \"fetch\"\ndelta = {}\n[policy.deployment]\n\
+                         confined_results = [\"fetch\"]\n";
+        assert!(matches!(
+            hosted_composed(
+                root,
+                &[HostedBattery {
+                    name: "fetcher",
+                    base: confining,
+                    target: None,
+                    token_env: &[],
+                }],
+            ),
+            Err(ConfigError::IncludedPolicyField { field, .. }) if field == "deployment"
+        ));
     }
 
     #[test]

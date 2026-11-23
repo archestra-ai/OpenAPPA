@@ -981,6 +981,7 @@ mod tests {
         AuthorityArtifact, AuthorityDeclaration, ContextArtifact, DeclaredPermits, DeclaredSanitizerTransition,
         MembersAnswer, SanitizerArtifact, SanitizerDeclaration, SanitizerPoint, WireAudience,
     };
+    use crate::test_support::raw_stub;
     #[cfg(unix)]
     use crate::test_support::{PROCESS_BUDGET, assert_process_gone, fake_claude, recorded_pid};
     use appa_engine::audience::DeclaredTemplate;
@@ -990,24 +991,6 @@ mod tests {
     fn process_environment() -> &'static tokio::sync::Mutex<()> {
         static ENVIRONMENT: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
         ENVIRONMENT.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
-
-    async fn raw_stub(response: &'static [u8], hold_open: bool) -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("an ephemeral loopback port binds");
-        let addr = listener.local_addr().expect("the bound address is readable");
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("the stub accepts");
-            let mut request = [0u8; 4096];
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let _ = socket.read(&mut request).await;
-            socket.write_all(response).await.expect("the stub writes");
-            if hold_open {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-            }
-        });
-        format!("http://{addr}/")
     }
 
     async fn stub(router: Router) -> String {

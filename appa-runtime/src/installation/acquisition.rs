@@ -3,9 +3,8 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use appa_package::generation::{
     ArtifactDigest, BUILD_BATTERIES_ARCHIVE, Commit, DESCRIPTOR_FILE, Generation, Platform, REPOSITORY,
@@ -14,6 +13,7 @@ use appa_package::{CATALOG_FILE, Marketplace};
 use serde::Deserialize;
 
 use super::{InstallError, Selection, invalid, io, verify_packages};
+use crate::git_checkout::git_in;
 
 const MAX_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_TAG_PAGES: usize = 5;
@@ -116,21 +116,10 @@ impl Acquired {
     /// from the caller, not trusted from a neighboring checksum file.
     pub fn import(bundle: &Path, digest: &ArtifactDigest) -> Result<Self, InstallError> {
         let stage = tempfile::tempdir().map_err(|error| io("stage bundle import", bundle, error))?;
-        // Hash and unpack a private snapshot, not two separate opens of a
-        // caller-owned path that could change after its digest was checked.
-        super::require_file_or_absent(bundle)?;
-        let input = super::open_regular(bundle)?;
-        let mut snapshot =
-            tempfile::NamedTempFile::new_in(stage.path()).map_err(|error| io("snapshot bundle", bundle, error))?;
-        let copied = std::io::copy(&mut std::io::Read::take(input, MAX_ARTIFACT_BYTES + 1), &mut snapshot)
-            .map_err(|error| io("copy bundle snapshot", bundle, error))?;
-        if copied > MAX_ARTIFACT_BYTES {
-            return Err(InstallError::Invalid("bundle exceeds its byte limit".into()));
-        }
-        verify_artifact(snapshot.path(), digest)?;
+        let snapshot = verified_snapshot(bundle, digest, stage.path())?;
         let unpacked = stage.path().join("unpacked");
         fs::create_dir(&unpacked).map_err(|error| io("stage bundle contents", &unpacked, error))?;
-        super::archive::extract_bundle_archive(snapshot.path(), &unpacked).map_err(invalid)?;
+        super::archive::extract_bundle_file(snapshot, bundle, &unpacked).map_err(invalid)?;
         let generation =
             Generation::parse(&super::required_bytes(&unpacked.join(DESCRIPTOR_FILE))?).map_err(invalid)?;
         let selection: Selection =
@@ -210,7 +199,7 @@ impl Acquired {
         match commit {
             Some(commit) if git_head(root).as_deref() == Some(commit.as_str()) => {
                 let repository = stage.join("repository");
-                export_commit(root, &repository)?;
+                export_commit(root, &commit, &repository)?;
                 let marketplace = repository.join("marketplace");
                 let catalog = parse_catalog(&write_catalog(&marketplace)?, &marketplace)?;
                 Ok((Some(commit), marketplace, catalog))
@@ -428,7 +417,7 @@ fn source_at_commit(commit: &Commit, stage: &Path) -> Result<PathBuf, InstallErr
             &commit.as_str()[..12],
             root.display()
         );
-        export_commit(root, &repository)?;
+        export_commit(root, commit, &repository)?;
         return Ok(repository);
     }
     let url = format!("{}/{commit}.tar.gz", super::archive::source_archive_base_url());
@@ -461,24 +450,23 @@ fn parse_catalog(catalog: &[u8], marketplace: &Path) -> Result<Marketplace, Inst
 }
 
 fn git_head(root: &Path) -> Option<String> {
-    let output =
-        crate::child_process::output(Command::new("git").arg("-C").arg(root).args(["rev-parse", "HEAD"])).ok()?;
+    let output = crate::child_process::output(git_in(root).args(["rev-parse", "HEAD"])).ok()?;
     output
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Committed content only, so a dirty checkout exports exactly its HEAD. The
+/// Committed content only, of the named commit: a dirty checkout, or one whose
+/// HEAD moved after it was checked, exports exactly that commit. The
 /// marketplace tree holds every source `batteries_layout` maps.
-fn export_commit(root: &Path, destination: &Path) -> Result<(), InstallError> {
-    let output = crate::child_process::output(
-        Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["-c", "core.autocrlf=false"])
-            .args(["archive", "--format=tar", "HEAD", "marketplace"]),
-    )
+fn export_commit(root: &Path, commit: &Commit, destination: &Path) -> Result<(), InstallError> {
+    let output = crate::child_process::output(git_in(root).args(["-c", "core.autocrlf=false"]).args([
+        "archive",
+        "--format=tar",
+        commit.as_str(),
+        "marketplace",
+    ]))
     .map_err(|error| io("export the build's commit", root, error))?;
     if !output.status.success() {
         return Err(InstallError::Invalid(format!(
@@ -615,6 +603,40 @@ pub(super) fn verify_artifact(path: &Path, expected: &ArtifactDigest) -> Result<
     Ok(())
 }
 
+/// A private copy of the artifact at `path`, checked against `expected`, as
+/// an anonymous file in `directory` rewound to its start. The handle that was
+/// hashed is the one returned: no name reaches it, so nothing can replace it
+/// between the check and the read, and nothing of it outlives the process.
+pub(super) fn verified_snapshot(
+    path: &Path,
+    expected: &ArtifactDigest,
+    directory: &Path,
+) -> Result<File, InstallError> {
+    super::require_file_or_absent(path)?;
+    let input = super::open_regular(path)?;
+    let mut snapshot = tempfile::tempfile_in(directory).map_err(|error| io("snapshot artifact", path, error))?;
+    let copied = std::io::copy(&mut input.take(MAX_ARTIFACT_BYTES + 1), &mut snapshot)
+        .map_err(|error| io("copy artifact snapshot", path, error))?;
+    if copied > MAX_ARTIFACT_BYTES {
+        return Err(InstallError::Invalid(format!(
+            "{} exceeds its byte limit",
+            path.display()
+        )));
+    }
+    let rewind = |snapshot: &mut File| snapshot.seek(std::io::SeekFrom::Start(0)).map(drop);
+    rewind(&mut snapshot).map_err(|error| io("rewind artifact snapshot", path, error))?;
+    let actual = ArtifactDigest::of_reader(&mut snapshot, MAX_ARTIFACT_BYTES)
+        .map_err(|error| io("hash artifact snapshot", path, error))?;
+    if &actual != expected {
+        return Err(InstallError::Invalid(format!(
+            "artifact digest mismatch at {}: expected {expected}, got {actual}",
+            path.display()
+        )));
+    }
+    rewind(&mut snapshot).map_err(|error| io("rewind artifact snapshot", path, error))?;
+    Ok(snapshot)
+}
+
 pub(super) fn validate_revision(revision: &str) -> Result<(), InstallError> {
     if let Some(version) = revision.strip_prefix('v') {
         if !version.is_empty()
@@ -702,6 +724,7 @@ mod tests {
     use appa_package::generation::Image;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::process::Command;
     use std::thread;
 
     #[test]
@@ -709,16 +732,94 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let stage = tempfile::tempdir().unwrap();
         let destination = stage.path().join("source");
-        export_commit(root, &destination).unwrap();
+        let head = Commit::parse(&git_head(root).unwrap()).unwrap();
+        export_commit(root, &head, &destination).unwrap();
         let path = "marketplace/batteries/archestra/README.md";
-        let committed = crate::child_process::output(Command::new("git").arg("-C").arg(root).args([
-            "cat-file",
-            "blob",
-            &format!("HEAD:{path}"),
-        ]))
-        .unwrap();
+        let committed =
+            crate::child_process::output(git_in(root).args(["cat-file", "blob", &format!("{}:{path}", head.as_str())]))
+                .unwrap();
         assert!(committed.status.success());
         assert_eq!(fs::read(destination.join(path)).unwrap(), committed.stdout);
+    }
+
+    /// A repository whose `marketplace/file` holds each of `versions` in turn,
+    /// one commit each, and those commits in order.
+    fn repository(versions: &[&str]) -> (tempfile::TempDir, Vec<Commit>) {
+        let root = tempfile::tempdir().unwrap();
+        // No hook or signing setting of the person running the test applies.
+        let hooks = tempfile::tempdir().unwrap();
+        let hooks_path = format!("core.hooksPath={}", hooks.path().display());
+        let git = |args: &[&str]| {
+            let output = crate::child_process::output(
+                git_in(root.path())
+                    .args(["-c", &hooks_path, "-c", "commit.gpgsign=false"])
+                    .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                    .args(args),
+            )
+            .unwrap();
+            assert!(output.status.success(), "{args:?}");
+        };
+        fs::create_dir(root.path().join("marketplace")).unwrap();
+        git(&["init", "-q", "--object-format=sha1"]);
+        let mut commits = Vec::new();
+        for version in versions {
+            fs::write(root.path().join("marketplace/file"), version).unwrap();
+            git(&["add", "."]);
+            git(&["commit", "-qm", version]);
+            commits.push(Commit::parse(&git_head(root.path()).unwrap()).unwrap());
+        }
+        (root, commits)
+    }
+
+    #[test]
+    fn export_commit_exports_the_checked_commit_after_head_moves() {
+        let (root, commits) = repository(&["checked", "moved"]);
+        let stage = tempfile::tempdir().unwrap();
+        let destination = stage.path().join("source");
+        export_commit(root.path(), &commits[0], &destination).unwrap();
+        assert_eq!(fs::read(destination.join("marketplace/file")).unwrap(), b"checked");
+    }
+
+    const FOREIGN_GIT_FIXTURE: &str = "installation::acquisition::tests::git_helpers_fixture_under_a_foreign_git_dir";
+
+    /// A caller whose environment names another repository, as a git hook's
+    /// does, still reads and exports the checkout it names. The helpers run in
+    /// a child of this test binary so the variables never touch this process.
+    #[test]
+    fn git_helpers_ignore_a_repository_the_environment_names() {
+        let (root, commits) = repository(&["checkout"]);
+        let (foreign, _) = repository(&["foreign"]);
+        let git_dir = foreign.path().join(".git");
+        let output = crate::child_process::output(
+            Command::new(std::env::current_exe().unwrap())
+                .args(["--ignored", "--exact", FOREIGN_GIT_FIXTURE, "--nocapture"])
+                .env("APPA_TEST_GIT_ROOT", root.path())
+                .env("APPA_TEST_GIT_COMMIT", commits[0].as_str())
+                .env("GIT_DIR", &git_dir)
+                .env("GIT_WORK_TREE", foreign.path())
+                .env("GIT_INDEX_FILE", git_dir.join("index"))
+                .env("GIT_OBJECT_DIRECTORY", git_dir.join("objects")),
+        )
+        .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    #[test]
+    #[ignore = "run by git_helpers_ignore_a_repository_the_environment_names"]
+    fn git_helpers_fixture_under_a_foreign_git_dir() {
+        let (Some(root), Some(commit)) = (
+            std::env::var_os("APPA_TEST_GIT_ROOT"),
+            std::env::var_os("APPA_TEST_GIT_COMMIT"),
+        ) else {
+            return;
+        };
+        let root = Path::new(&root);
+        let commit = Commit::parse(commit.to_str().unwrap()).unwrap();
+        assert_eq!(git_head(root).as_deref(), Some(commit.as_str()));
+        let stage = tempfile::tempdir().unwrap();
+        let destination = stage.path().join("source");
+        export_commit(root, &commit, &destination).unwrap();
+        assert_eq!(fs::read(destination.join("marketplace/file")).unwrap(), b"checkout");
     }
 
     #[test]

@@ -56,7 +56,10 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         }
     };
     let root = hook_root(&event).clone();
+    // The dispatcher refuses a call with an empty id; nothing that call carries lands first.
+    let refused_at_dispatch = matches!(&event, HookEvent::ToolCall { call_id: Some(id), .. } if id.is_empty());
     if let Some(inventory) = inventory
+        && !refused_at_dispatch
         && let Err(answered) = observed(runtime, adapter, &event, &root, &inventory)
     {
         return answered;
@@ -839,6 +842,10 @@ impl Dispatcher<'_> {
         prompt: Option<PromptKey>,
         ruling: Option<Ruling>,
     ) -> HookDecision {
+        // No host call id is empty; refused before the settle below closes anything.
+        if call_id.as_deref() == Some("") {
+            return fold(EventError::CallIdReused, Refusal::Deny);
+        }
         let hold_until = tokio::time::Instant::now() + SPAWN_HOLD;
         let missing_start = MissingStart::OpenLate {
             prompt: prompt.as_ref(),
@@ -1813,6 +1820,78 @@ mod tests {
 
         let late = hook(&runtime, &json(&bash_result("ping -c 30 127.0.0.1"))).await;
         assert_eq!(late.1["decision"], "block", "a result for the closed call is refused");
+    }
+
+    /// A proposal with an empty call id is refused before the settle of an interrupted turn
+    /// writes: the call the interrupt left open stays open, and the prompt's mark stays set.
+    /// The runtime's own control tool is refused alike.
+    #[tokio::test]
+    async fn an_empty_call_id_is_refused_before_it_settles_an_interrupted_turn() {
+        let mut control = bash_call("ls");
+        control["tool_name"] = serde_json::Value::String(CONTROL_TOOL_FIXTURE_NAME.to_string());
+        control["tool_input"] = serde_json::json!({});
+        control["tool_use_id"] = serde_json::Value::String(String::new());
+        for proposal in [identified_bash_call("ls", ""), control] {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime = open_runtime(&dir);
+            let root = appa_runtime_api::TrajectoryId("cc:s1".to_string());
+            let actor = Actor {
+                root: root.clone(),
+                child: None,
+            };
+            let released = hook(&runtime, &json(&bash_call("ping -c 30 127.0.0.1"))).await;
+            assert_eq!(released.1["hookSpecificOutput"]["permissionDecision"], "allow");
+            assert_eq!(hook(&runtime, &json(&prompt())).await, (200, serde_json::json!({})));
+            let before = runtime.audit(&root);
+            let basis = runtime.log_basis(&root);
+
+            let refused = hook(&runtime, &json(&proposal)).await;
+            assert_eq!(
+                refused.1["hookSpecificOutput"]["permissionDecision"], "deny",
+                "{proposal}"
+            );
+            assert_eq!(runtime.audit(&root), before, "the refusal appended nothing: {proposal}");
+            assert_eq!(runtime.log_basis(&root), basis, "the log took no append: {proposal}");
+            assert!(
+                !closed_as_unknown(&runtime),
+                "the interrupted call stays open: {proposal}"
+            );
+            assert!(
+                runtime.prompted(&actor),
+                "the prompt's mark survives for the next proposal: {proposal}"
+            );
+        }
+    }
+
+    /// A served proposal with an empty call id is refused before the inventory it carries
+    /// lands: an open trajectory's log takes no append, and a missing root is not created.
+    #[tokio::test]
+    async fn an_empty_call_id_is_refused_before_its_inventory_is_observed() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let opening = br#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"open","inventory":{"tools":[{"name":"Bash","tool":"Bash"}],"sources":[{"server":"builtin","status":"complete","dynamic":false}]}}"#;
+        let (status, reply) = answer(&runtime, &adapter, PrincipalSource::None, opening).await;
+        assert_eq!(status, 200, "the session opens: {reply}");
+        let open = TrajectoryId("cc:open".to_string());
+        let basis = runtime.log_basis(&open);
+
+        for (root_id, root) in [
+            ("open", open.clone()),
+            ("absent", TrajectoryId("cc:absent".to_string())),
+        ] {
+            let proposal = format!(
+                r#"{{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"{root_id}","call_id":"","tool":"Read","spawn":false,"arguments":{{"file_path":"a"}},"inventory":{{"tools":[{{"name":"Read","tool":"Read"}}],"sources":[{{"server":"builtin","status":"complete","dynamic":false}}]}}}}"#
+            );
+            let (_, reply) = answer(&runtime, &adapter, PrincipalSource::None, proposal.as_bytes()).await;
+            assert_eq!(reply["decision"], "deny_call", "{root_id}: {reply}");
+            assert_eq!(
+                runtime.log_basis(&open),
+                basis,
+                "{root_id}: the refusal appended nothing"
+            );
+            assert_eq!(runtime.status(&root).is_some(), root == open, "{root_id}: {reply}");
+        }
     }
 
     /// A background subagent runs past its parent's turn. Neither the turn end nor the

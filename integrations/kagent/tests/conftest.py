@@ -191,8 +191,10 @@ _READ: dict[str, list[tuple[str, Any]]] = {}
 _PLAYED: dict[str, list[int]] = {}
 
 # One offer as blocking feedback renders it: the action on its own line,
-# then the reserved call that takes it (`appa-runtime/src/engine.rs`,
-# `remedy_instruction`). Every offer a model takes has this shape.
+# then the reserved call that takes it. The runtime documents this shape as
+# a contract on `remedy_lines` in `appa-runtime/src/engine.rs` and pins it
+# with `the_remedy_lines_are_a_contract_that_scripted_models_parse`. A
+# scripted model sees only the text a real model sees, so it parses it.
 #
 # A marked spawn blocks with a different menu — the return declaration,
 # whose call carries `label` and, for attest-schema, `return_schema`.

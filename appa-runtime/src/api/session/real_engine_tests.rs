@@ -1767,6 +1767,86 @@ async fn a_denial_retires_plans_naming_the_denier_and_sticks() {
     assert_eq!(after, before, "no new offer names the denying authority");
 }
 
+/// One plan needs both `alpha` (mark `first`) and `beta` (mark `second`).
+fn two_authorities(alpha: &str, beta: &str) -> Config {
+    config_from(&format!(
+        r#"[policy]
+version = 2
+
+[[policy.tool]]
+name = "wire"
+parameters = {{ type = "object", properties = {{ amount = {{ type = "integer" }} }} }}
+requires = {{ attention = ["first", "second"] }}
+delta = {{}}
+
+[[policy.authority]]
+name = "alpha"
+[policy.authority.permits]
+attention = ["first"]
+
+[[policy.authority]]
+name = "beta"
+[policy.authority.permits]
+attention = ["second"]
+
+[externals]
+timeout_ms = 2000
+max_body_bytes = 65536
+[externals.authorities.alpha]
+url = "{alpha}"
+[externals.authorities.beta]
+url = "{beta}"
+"#
+    ))
+}
+
+/// A deny beside an abstention denies the plan whichever of the two comes first in it.
+#[tokio::test]
+async fn a_deny_wins_over_an_abstention_in_either_plan_order() {
+    let deny = serde_json::json!({"ruling": "deny", "reason": "no"});
+    let abstain = serde_json::json!({"note": "still thinking"});
+    for (alpha, beta, denier) in [(&deny, &abstain, "alpha"), (&abstain, &deny, "beta")] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let config = two_authorities(&stub(alpha.clone()).await, &stub(beta.clone()).await);
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let session = runtime.create_session(root(), None).expect("a fresh id opens");
+        session
+            .on_tool_call(wire(500), false)
+            .await
+            .expect("the block is delivered");
+        let offer = surfaced_offer(&runtime);
+        let before = runtime.minted_offers(&root(), &root()).len();
+        assert!(
+            matches!(
+                session
+                    .on_remedy(offer, RemedyArguments::default(), None, None)
+                    .await
+                    .expect("the denial is delivered"),
+                RemedyDecision::Declined { .. },
+            ),
+            "{denier}'s deny must decline the plan beside the other's abstention"
+        );
+        let deniers: Vec<String> = runtime
+            .log_facts(&root())
+            .iter()
+            .filter_map(|fact| match fact {
+                appa_engine::fact::Fact::OfferDenied { authority, .. } => Some(authority.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deniers, [denier]);
+        assert!(matches!(
+            session
+                .on_tool_call(wire(500), false)
+                .await
+                .expect("the re-block is delivered"),
+            ToolCallDecision::Deny { .. },
+        ));
+        let after = runtime.minted_offers(&root(), &root()).len();
+        assert_eq!(after, before, "no new offer names the denying authority");
+    }
+}
+
 /// The denial leads the call's block with the authority that denied the plan.
 #[tokio::test]
 async fn a_denial_names_the_authority_that_denied_the_plan() {
@@ -4217,6 +4297,35 @@ async fn a_fan_out_childs_call_before_its_start_opens_it_under_its_prompt() {
     assert!(opened(&runtime, &child("c1")));
 }
 
+/// A tool that sets [`FETCH_AND_SEND`] and its next revision apart.
+const READ_TOOL: &str = r#"
+[[policy.tool]]
+name = "read"
+parameters = { type = "object", properties = { path = { type = "string" } } }
+"#;
+
+/// A late open whose session was attached before a publish meets a log its start already
+/// stamped at the head: it follows the head and finds the child open, never refusing as a
+/// policy move.
+#[tokio::test]
+async fn a_late_open_behind_a_publish_finds_the_child_its_start_opened_at_the_head() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let mut parent = runtime.create_session(root(), None).expect("a fresh id opens");
+    let binding = release_spawn(&mut parent, fetch(serde_json::json!({"a": 1}))).await;
+    let late = runtime.session(&root(), &root()).expect("the late opener attaches");
+    runtime
+        .reload(config_with(&format!("{FETCH_AND_SEND}{READ_TOOL}"), None))
+        .expect("the next revision installs");
+    runtime
+        .session(&root(), &root())
+        .expect("the start attaches at the head")
+        .on_child_start(child("c1"), SpawnRef::Binding(binding))
+        .expect("the start opens the child at the head");
+    assert!(matches!(late.open_late(child("c1"), None), Ok(LateOpen::AlreadyOpen)));
+}
+
 /// A child that returns while one of its calls is still open is refused, and the refusal
 /// closes none of its calls.
 #[tokio::test]
@@ -4776,6 +4885,67 @@ async fn a_spawn_result_for_a_returned_child_replays_its_return_and_withholds_an
     assert!(
         runtime.live(&root(), &child("c2")).is_ok(),
         "the child is still live to return again"
+    );
+}
+
+/// A failed spawn result naming its returned child and carrying `said`: what it is answered,
+/// and how the family's dispatches closed.
+async fn failed_spawn_result_saying(said: &str) -> (SpawnResultDecision, Vec<appa_engine::fact::CloseOutcome>) {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    release_spawn(&mut session, fetch(serde_json::json!({"a": 1}))).await;
+    session
+        .on_child_start(child("c1"), SpawnRef::InFlight)
+        .expect("the child opens")
+        .on_child_end(Some("all done".to_string()))
+        .await
+        .expect("the child's own end crosses");
+
+    let decision = session
+        .on_spawn_result(
+            fetch(serde_json::json!({"a": 1})),
+            ToolOutcome::Failure {
+                message: "boom".to_string(),
+            },
+            Some(child("c1")),
+            Some(said.to_string()),
+        )
+        .await
+        .expect("the failure is decided");
+    assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
+    let closes = runtime
+        .log_facts(&root())
+        .into_iter()
+        .filter_map(|fact| match fact {
+            appa_engine::fact::Fact::DispatchClosed { outcome, .. } => Some(outcome),
+            _ => None,
+        })
+        .collect();
+    (decision, closes)
+}
+
+#[tokio::test]
+async fn a_failed_spawn_result_naming_its_returned_child_closes_the_spawn_as_failed() {
+    let (decision, closes) = failed_spawn_result_saying("all done").await;
+    assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+    assert!(
+        matches!(closes.as_slice(), [appa_engine::fact::CloseOutcome::Failure]),
+        "got {closes:?}"
+    );
+
+    let (decision, closes) = failed_spawn_result_saying("words the child never returned").await;
+    assert!(
+        matches!(
+            decision,
+            SpawnResultDecision::Return(ChildReturnDecision::Blocked { .. })
+        ),
+        "a message the child never returned is still withheld, got {decision:?}"
+    );
+    assert!(
+        matches!(closes.as_slice(), [appa_engine::fact::CloseOutcome::Failure]),
+        "got {closes:?}"
     );
 }
 
@@ -6062,6 +6232,113 @@ async fn a_stock_approve_plan_is_applied_at_the_block() {
     assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
 }
 
+/// A stock approve plan whose application cannot commit refuses the call as the storage
+/// failure it is: the call is not proposed again into an ordinary decision.
+#[tokio::test]
+async fn a_stock_approve_plan_that_cannot_commit_refuses_the_call() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    // The block commits first; the plan's approval is the commit that fails.
+    runtime.store().fail_commit_after(1);
+    let decision = session
+        .on_tool_call_identified(wire(500), Some("host-call-1".to_string()), None, None)
+        .await;
+    assert!(matches!(decision, Err(EventError::Storage(_))), "{decision:?}");
+    assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+}
+
+/// Two parallel calls of the same arguments each meet the block and get their own plan. Once
+/// one plan's approval stands, the other plan meets that approval: a refusal, never an
+/// operational fault, so the stock approve loop proposes the call again instead of failing.
+#[tokio::test]
+async fn a_second_plan_for_an_approved_call_is_refused_and_the_call_proposed_again() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    // Each call's block commits and its stock approval does not, so both plans stand unapplied.
+    for call_id in ["host-call-1", "host-call-2"] {
+        runtime.store().fail_commit_after(1);
+        let blocked = session
+            .on_tool_call_identified(wire(500), Some(call_id.to_string()), None, None)
+            .await;
+        assert!(matches!(blocked, Err(EventError::Storage(_))), "{blocked:?}");
+    }
+    let [first, second] = runtime
+        .minted_offers(&root(), &root())
+        .iter()
+        .map(|quoted| runtime.resolve_in(&root(), quoted).expect("the quoted id resolves").0)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("one plan per blocked call");
+    assert!(matches!(
+        session.on_remedy(first, RemedyArguments::default(), None, None).await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    let pending = session.on_remedy(second, RemedyArguments::default(), None, None).await;
+    assert!(
+        matches!(&pending, Err(error @ EventError::ApprovalPending) if !error.is_operational()),
+        "{pending:?}"
+    );
+    // The second call meets its plan refused while the first call's approval stands: a block,
+    // not a fault. The first call releases on that approval, and the second on its own after.
+    let decided = |call_id: &str| session.on_tool_call_identified(wire(500), Some(call_id.to_string()), None, None);
+    let held = decided("host-call-2").await;
+    assert!(matches!(held, Ok(ToolCallDecision::Deny { .. })), "{held:?}");
+    let first = decided("host-call-1").await;
+    assert!(matches!(first, Ok(ToolCallDecision::Allow { .. })), "{first:?}");
+    let second = decided("host-call-2").await;
+    assert!(matches!(second, Ok(ToolCallDecision::Allow { .. })), "{second:?}");
+    assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 2);
+}
+
+/// A host executing the second plan while the first plan's approval stands is told that
+/// refusal by name, not handed it as a runtime failure.
+#[tokio::test]
+async fn a_second_plan_for_an_approved_call_refuses_the_host_as_approval_pending() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_from(STOCK_APPROVED), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    for call_id in ["host-call-1", "host-call-2"] {
+        runtime.store().fail_commit_after(1);
+        let blocked = session
+            .on_tool_call_identified(wire(500), Some(call_id.to_string()), None, None)
+            .await;
+        assert!(matches!(blocked, Err(EventError::Storage(_))), "{blocked:?}");
+    }
+    let [first, second] = runtime
+        .minted_offers(&root(), &root())
+        .iter()
+        .map(|quoted| runtime.resolve_in(&root(), quoted).expect("the quoted id resolves").0)
+        .collect::<Vec<_>>()
+        .try_into()
+        .expect("one plan per blocked call");
+    let actor = the_root();
+    let execute = |offer| {
+        runtime.run_remedy(
+            &actor,
+            offer,
+            RemedyArguments::default(),
+            None,
+            None,
+            EmbeddedPresentationOptions::default(),
+        )
+    };
+    assert!(matches!(
+        execute(first).await,
+        crate::api::RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        execute(second).await,
+        crate::api::RemedyOutcome::Refused {
+            reason: crate::api::RemedyRefusal::ApprovalPending
+        }
+    );
+}
+
 /// A trust gate the authority covers is released on every call that meets it, since an approval
 /// never raises the label. The tool whose tag the authority excepts stays blocked, with no plan.
 #[tokio::test]
@@ -6422,4 +6699,35 @@ async fn an_empty_crossing_child_turn_stays_open_and_a_root_cannot_end_as_a_chil
             .await
             .is_ok()
     );
+}
+
+#[tokio::test]
+async fn a_root_stopping_as_a_child_is_refused_and_its_open_call_stays_open() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    assert!(matches!(
+        session.on_tool_call(fetch(serde_json::json!({"a": 1})), false).await,
+        Ok(ToolCallDecision::Allow { .. })
+    ));
+    let basis = runtime.inner.log(&root()).expect("the log reads").basis();
+
+    let refused = session.on_child_end(Some("done".to_string())).await;
+    assert!(matches!(refused, Err(EventError::NotAChild)), "got {refused:?}");
+    assert!(dispatch_open(&runtime, &root()), "the root's call is still open");
+    assert_eq!(runtime.inner.log(&root()).expect("the log reads").basis(), basis);
+}
+
+#[tokio::test]
+async fn an_unopened_child_stopping_is_answered_as_a_spawn_not_taken() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    runtime.create_session(root(), None).expect("a fresh id opens");
+    let unopened = runtime.session(&root(), &child("c1")).expect("the session attaches");
+
+    let refused = unopened.on_child_end(Some("done".to_string())).await;
+    assert!(matches!(refused, Err(EventError::SpawnNotTaken)), "got {refused:?}");
+    assert!(!opened(&runtime, &child("c1")));
 }
