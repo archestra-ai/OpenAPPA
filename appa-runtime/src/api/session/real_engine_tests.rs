@@ -3476,6 +3476,33 @@ async fn an_untrusted_log_answers_no_status() {
     assert!(runtime.try_status(&root()).is_err());
 }
 
+/// A start delivered again for a child that already ended addresses an ended branch: a
+/// lifecycle refusal, whichever way the start names its spawn, never an engine fault.
+#[tokio::test]
+async fn an_ended_child_started_again_is_refused_as_ended() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_with(MARKED, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let child = TrajectoryId("cc:child".to_string());
+    let binding = declared_spawn(&session, fetch(serde_json::json!({"a": 1}))).await;
+    session
+        .on_child_start(child.clone(), SpawnRef::Binding(binding.clone()))
+        .expect("the fork binds and the child opens")
+        .on_child_end(None)
+        .await
+        .expect("the child ends with no return");
+
+    for spawn in [SpawnRef::Binding(binding), SpawnRef::InFlight] {
+        let error = session
+            .on_child_start(child.clone(), spawn)
+            .err()
+            .expect("an ended child opens nothing");
+        assert!(matches!(error, EventError::TrajectoryEnded), "got {error:?}");
+        assert!(!error.is_operational());
+    }
+}
+
 #[tokio::test]
 async fn an_ended_child_is_refused_on_the_proposal_path() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
