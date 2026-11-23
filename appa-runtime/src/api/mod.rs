@@ -345,6 +345,9 @@ pub(crate) enum SettlementDecision {
 pub struct RemedyPresentation {
     /// Model-facing explanation in plain text.
     pub feedback: String,
+    /// Why the call or the value is held back; `None` where nothing is refused: a staged
+    /// result, a declined offer, a settlement not taken.
+    pub outcomes: Option<appa_runtime_api::Outcomes>,
     /// Machine-readable remedy offers available for this block.
     pub offers: Vec<OfferedRemedy>,
     /// Active human-in-the-loop reviews associated with this block.
@@ -829,13 +832,36 @@ impl EventError {
         }
     }
 
-    /// What asking again can do, when the failure is a fact the check reads and could not
-    /// obtain: an Annotator that gave no answer.
-    pub(crate) fn missing_fact(&self) -> Option<appa_runtime_api::RetryHint> {
+    /// The fact the check reads and could not obtain, where that is the failure: an
+    /// Annotator that gave no answer, or a family log other writers kept contended. Its
+    /// detail is built from the failure class alone, never from what an external said.
+    pub(crate) fn missing_fact(&self) -> Option<crate::engine::Unobtained> {
+        use crate::engine::{next_action, no_answer_description, retry_hint};
+        use appa_runtime_api::RetryHint;
         match self {
             EventError::AnnotationRefused {
-                no_answer: Some(class), ..
-            } => Some(crate::engine::retry_hint(*class)),
+                annotator,
+                next_action: guidance,
+                no_answer: Some(class),
+                ..
+            } => {
+                let retry = retry_hint(*class);
+                Some(crate::engine::Unobtained {
+                    detail: format!(
+                        "annotator {annotator} gave no answer: {}; {}{guidance}",
+                        no_answer_description(*class),
+                        next_action(retry)
+                    ),
+                    retry,
+                })
+            }
+            EventError::Contended { .. } => Some(crate::engine::Unobtained {
+                detail: format!(
+                    "this session's log was contended by other writers; {}",
+                    next_action(RetryHint::Later)
+                ),
+                retry: RetryHint::Later,
+            }),
             _ => None,
         }
     }
@@ -3828,6 +3854,7 @@ impl Runtime {
             Ok(SettlementDecision::Unacceptable { feedback }) => RemedyOutcome::Declined {
                 presentation: RemedyPresentation {
                     feedback,
+                    outcomes: None,
                     offers: Vec::new(),
                     review: Vec::new(),
                     display: Vec::new(),

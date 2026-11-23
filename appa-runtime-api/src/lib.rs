@@ -695,14 +695,17 @@ pub enum RefusalClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
-    /// Nothing was judged: the event, the log or the deployment is at fault.
+    /// The event, the log or the deployment is at fault, or the call breaks its contract.
     Integrity,
-    /// The call meets the reserved `blocked` mark, which no authority permits.
+    /// No remedy lifts the block: the reserved `blocked` mark, or a gap no plan clears.
     HardBlock,
     /// A fact the check reads was not obtained: an Annotator or an audience
     /// source gave no answer. No plan is offered.
     MissingFact,
-    /// A trust, audience, history or attention requirement a remedy may clear.
+    /// A remedy the agent acts on itself: declaring a spawn's return, withholding or
+    /// sanitizing a result, or calling another tool first. Never applied on its own.
+    AgentChoice,
+    /// A gap an authority's ruling may clear.
     WaivableGap,
     /// The call narrows the trajectory, and the agent may accept the narrowing.
     Consent,
@@ -719,52 +722,83 @@ pub enum RetryHint {
 }
 
 /// The outcomes one refusal holds: never empty, and `deciding` is the one of
-/// highest precedence. `retry` is set when a missing fact refused the call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// highest precedence. A missing fact is held alone, with its retry hint.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Outcomes {
-    held: std::collections::BTreeSet<Outcome>,
+    /// One bit per [`Outcome`], by its precedence.
+    held: u8,
     retry: Option<RetryHint>,
 }
 
+impl Outcome {
+    const ALL: [Outcome; 6] = [
+        Outcome::Integrity,
+        Outcome::HardBlock,
+        Outcome::MissingFact,
+        Outcome::AgentChoice,
+        Outcome::WaivableGap,
+        Outcome::Consent,
+    ];
+
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
 impl Outcomes {
-    /// The outcomes `held` names, or `None` when it names none.
+    /// The outcomes `held` names, or `None` when it names none or names a missing fact,
+    /// which only [`Outcomes::missing`] states.
     pub fn new(held: impl IntoIterator<Item = Outcome>) -> Option<Outcomes> {
-        let held: std::collections::BTreeSet<Outcome> = held.into_iter().collect();
-        (!held.is_empty()).then_some(Outcomes { held, retry: None })
+        let held = held.into_iter().fold(0, |bits, outcome| bits | outcome.bit());
+        (held != 0 && held & Outcome::MissingFact.bit() == 0).then_some(Outcomes { held, retry: None })
     }
 
-    pub fn of(outcome: Outcome) -> Outcomes {
-        Outcomes {
-            held: std::collections::BTreeSet::from([outcome]),
-            retry: None,
-        }
+    pub fn integrity() -> Outcomes {
+        Outcomes::judged(Outcome::Integrity)
+    }
+
+    pub fn hard_block() -> Outcomes {
+        Outcomes::judged(Outcome::HardBlock)
     }
 
     /// A refusal for a fact the check could not obtain.
     pub fn missing(retry: RetryHint) -> Outcomes {
         Outcomes {
             retry: Some(retry),
-            ..Outcomes::of(Outcome::MissingFact)
+            ..Outcomes::judged(Outcome::MissingFact)
+        }
+    }
+
+    fn judged(outcome: Outcome) -> Outcomes {
+        Outcomes {
+            held: outcome.bit(),
+            retry: None,
         }
     }
 
     pub fn deciding(&self) -> Outcome {
-        *self.held.first().expect("outcomes are never empty")
+        self.held().next().expect("outcomes are never empty")
     }
 
+    /// Every outcome held, in precedence order.
     pub fn held(&self) -> impl Iterator<Item = Outcome> + '_ {
-        self.held.iter().copied()
+        Outcome::ALL
+            .into_iter()
+            .filter(|outcome| self.held & outcome.bit() != 0)
     }
 
+    /// Set exactly when the refusal is a missing fact.
     pub fn retry(&self) -> Option<RetryHint> {
         self.retry
     }
+}
 
-    /// Both refusals' outcomes, as one refusal that holds them all.
-    pub fn union(mut self, other: &Outcomes) -> Outcomes {
-        self.held.extend(other.held.iter().copied());
-        self.retry = self.retry.or(other.retry);
-        self
+impl std::fmt::Debug for Outcomes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Outcomes")
+            .field("held", &self.held().collect::<Vec<_>>())
+            .field("retry", &self.retry)
+            .finish()
     }
 }
 
@@ -773,38 +807,32 @@ mod outcome_tests {
     use super::{Outcome, Outcomes, RetryHint};
 
     #[test]
-    fn the_outcome_of_highest_precedence_decides_every_mixed_set() {
+    fn the_outcome_of_highest_precedence_decides_every_set_a_refusal_holds() {
         use Outcome::*;
-        let matrix: [(&[Outcome], Outcome); 12] = [
+        let matrix: [(&[Outcome], Outcome); 6] = [
             (&[Consent], Consent),
             (&[WaivableGap], WaivableGap),
             (&[WaivableGap, Consent], WaivableGap),
-            (&[MissingFact, Consent], MissingFact),
-            (&[MissingFact, WaivableGap, Consent], MissingFact),
-            (&[HardBlock, Consent], HardBlock),
-            (&[HardBlock, WaivableGap], HardBlock),
-            (&[HardBlock, MissingFact], HardBlock),
-            (&[Integrity, HardBlock], Integrity),
-            (&[Integrity, MissingFact, Consent], Integrity),
-            (&[Consent, WaivableGap, MissingFact, HardBlock, Integrity], Integrity),
-            (&[Consent, Consent], Consent),
+            (&[AgentChoice], AgentChoice),
+            (&[Consent, AgentChoice, WaivableGap], AgentChoice),
+            (&[HardBlock], HardBlock),
         ];
         for (held, deciding) in matrix {
-            let outcomes = Outcomes::new(held.iter().copied()).expect("the set names an outcome");
+            let outcomes = Outcomes::new(held.iter().copied()).expect("the set names a judged outcome");
             assert_eq!(outcomes.deciding(), deciding, "{held:?}");
+            assert_eq!(outcomes.retry(), None);
         }
+        assert_eq!(Outcomes::integrity().deciding(), Integrity);
         assert_eq!(Outcomes::new([]), None);
     }
 
     #[test]
-    fn a_union_holds_both_refusals_and_keeps_the_retry_hint() {
-        let union = Outcomes::of(Outcome::Consent).union(&Outcomes::missing(RetryHint::Later));
-        assert_eq!(union.deciding(), Outcome::MissingFact);
-        assert_eq!(
-            union.held().collect::<Vec<_>>(),
-            vec![Outcome::MissingFact, Outcome::Consent]
-        );
-        assert_eq!(union.retry(), Some(RetryHint::Later));
+    fn a_missing_fact_is_held_only_with_its_retry_hint() {
+        assert_eq!(Outcomes::new([Outcome::MissingFact]), None);
+        assert_eq!(Outcomes::new([Outcome::MissingFact, Outcome::Consent]), None);
+        let missing = Outcomes::missing(RetryHint::Later);
+        assert_eq!(missing.held().collect::<Vec<_>>(), vec![Outcome::MissingFact]);
+        assert_eq!(missing.retry(), Some(RetryHint::Later));
     }
 }
 

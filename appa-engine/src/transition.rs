@@ -1948,7 +1948,7 @@ impl<'a> Sequence<'a> {
                 };
                 // The live act answered this whole gate before planning; the enumeration may
                 // read less, but the gathered evidence is still the operation's own ask.
-                self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &block));
+                self.audit_atoms(crate::plan::gate_atoms(self.engine.registry(), &contract, &block));
                 let blocked = || crate::plan::BlockedCall {
                     call: candidate,
                     contract: &contract,
@@ -2155,7 +2155,7 @@ impl<'a> Sequence<'a> {
         if let Ok(CheckOutcome::Block(raw)) =
             crate::check::evaluate(&contract, &views, call, &stage, role, &self.context(&expansions))
         {
-            self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw));
+            self.audit_atoms(crate::plan::gate_atoms(self.engine.registry(), &contract, &raw));
         }
         self.audit_atoms(crate::plan::plan_atoms(self.engine.registry(), offered));
         self.audit_reads(&expansions);
@@ -2751,7 +2751,7 @@ impl<'a> Sequence<'a> {
             if let Ok(CheckOutcome::Block(raw)) =
                 crate::check::evaluate(&contract, &final_views, call, &CallStage::default(), role, &context)
             {
-                self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw));
+                self.audit_atoms(crate::plan::gate_atoms(self.engine.registry(), &contract, &raw));
             }
         }
         let expected: Vec<&DispatchId> = composed.iter().flatten().map(|release| &release.dispatch).collect();
@@ -3603,7 +3603,7 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         // The live hop's act gated the standing block's whole atom set before offering.
-        self.audit_atoms(crate::plan::block_atoms(registry, &before_contract, &before));
+        self.audit_atoms(crate::plan::gate_atoms(registry, &before_contract, &before));
         self.audit_inherit(&recorded.evidence)?;
         self.audit_reads(expansions);
         Ok(())

@@ -1225,24 +1225,25 @@ name = "send_email"
         .answers("send_email", "sent");
     let annotator_url = format!("{}/annotator", host.clone().serve().await);
     let externals = format!("[externals.annotators.classify]\nurl = \"{annotator_url}\"\n");
-    let decisions = Decisions::recording();
-
     let provider = Provider::default();
     provider
         .calls("read_hr", serde_json::json!({"who": "nobody"}))
         .calls("send_email", serde_json::json!({"to": "alice"}))
         .says("I could not read the record, so I only sent the note.");
 
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let agent = agent(
         runtime(&dir, policy, &externals),
         &provider,
         &host,
         &["read_hr", "send_email"],
     )
-    .await;
+    .await
+    .with_observer(tx);
     let outcome = agent
         .run(root(), "Look up nobody and tell Alice.", Default::default())
         .await;
+    drop(agent);
 
     assert_eq!(
         outcome,
@@ -1254,17 +1255,26 @@ name = "send_email"
         vec![serde_json::json!({"tool": "send_email", "arguments": {"to": "alice"}})],
         "the unclassified call never reached the host; the next one ran",
     );
-    let reply = provider.tool_result(1, "call_0");
-    assert!(
-        reply.starts_with("[appa] annotator=classify error=non_success status=404"),
-        "the model reads the runtime's denial on the missing annotation: {reply}",
+    let mut records = Vec::new();
+    while let Some(recorded) = rx.recv().await {
+        records.push(recorded.record);
+    }
+    let denied: Vec<&str> = records
+        .iter()
+        .filter_map(|record| match record {
+            appa_example_agent::Record::Blocked { tool, .. } => Some(tool.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        denied,
+        vec!["read_hr"],
+        "the denial is a block, never a refusal: {records:?}"
     );
     assert!(
-        decisions
-            .recorded()
+        !records
             .iter()
-            .any(|line| line.starts_with("appa: [agent-test] blocked read_hr: [appa] annotator=classify")),
-        "the denial is a decision line of its own: {:?}",
-        decisions.recorded(),
+            .any(|record| matches!(record, appa_example_agent::Record::Refused { .. })),
+        "{records:?}"
     );
 }

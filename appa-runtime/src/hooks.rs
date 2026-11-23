@@ -4,9 +4,9 @@
 use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
-    Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcome, Outcomes, ParseRefusal, PeerAddress,
-    PeerFrame, PrincipalSource, PromptKey, ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind,
-    ToolOutcome, TrajectoryId, WireDecision, WireEvent,
+    Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcomes, ParseRefusal, PeerAddress, PeerFrame,
+    PrincipalSource, PromptKey, ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind, ToolOutcome,
+    TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
@@ -387,7 +387,7 @@ fn names_a_childs_transcript(
     let (status, decision) = match runtime.opened_among(&actor.root, names_children) {
         Ok(Some(child)) => {
             tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
-            (200, deny(NAMED_TRANSCRIPT.to_string()))
+            (200, denied(NAMED_TRANSCRIPT.to_string(), Outcomes::hard_block()))
         }
         Ok(None) => return None,
         Err(error) => (409, refuse(error)),
@@ -992,6 +992,7 @@ impl Dispatcher<'_> {
                 };
                 *self.presentation = Some(RemedyPresentation {
                     feedback: feedback.clone(),
+                    outcomes: Some(outcomes),
                     offers: offers.clone(),
                     review: review.clone(),
                     display,
@@ -1236,9 +1237,10 @@ fn presentation_for(decision: &HookDecision) -> Option<RemedyPresentation> {
             feedback,
             offers,
             review,
-            ..
+            outcomes,
         } => Some(RemedyPresentation {
             feedback: feedback.clone(),
+            outcomes: *outcomes,
             offers: offers.clone(),
             review: review.clone(),
             display: Vec::new(),
@@ -1458,7 +1460,7 @@ enum Refusal {
 
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
     match (error.missing_fact(), error.is_operational(), refusal) {
-        (Some(retry), _, Refusal::Deny) => denied(error.to_string(), Outcomes::missing(retry)),
+        (Some(missing), _, Refusal::Deny) => denied(missing.detail, Outcomes::missing(missing.retry)),
         (_, true, _) => refuse(error),
         (_, false, Refusal::Deny) => deny(error.to_string()),
         (_, false, Refusal::Block) => block(error.to_string()),
@@ -1469,7 +1471,7 @@ fn fold(error: EventError, refusal: Refusal) -> HookDecision {
 /// once, here, so a session can tell a runtime refusal from its harness's;
 /// a block is marked by the adapter's withheld-result rendering instead.
 fn deny(feedback: String) -> HookDecision {
-    denied(feedback, Outcomes::of(Outcome::Integrity))
+    denied(feedback, Outcomes::integrity())
 }
 
 fn denied(feedback: String, outcomes: Outcomes) -> HookDecision {

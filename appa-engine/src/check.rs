@@ -63,6 +63,14 @@ pub struct RawBlock {
     pub narrowing: Option<Narrowing>,
 }
 
+impl RawBlock {
+    /// Does a `blocked` gap make this block terminal? No remedy can lift it, so planning
+    /// gathers nothing and offers nothing.
+    pub fn is_terminal(&self) -> bool {
+        self.requirement_gaps.iter().any(Gap::is_blocked)
+    }
+}
+
 /// What the checked call is to its deployment: an ordinary tool call, or the one proposal the
 /// runtime marked as the context-controlled spawn. The mark is a property of the
 /// subject, fixed when its batch was decided, so a substituted successor keeps its predecessor's

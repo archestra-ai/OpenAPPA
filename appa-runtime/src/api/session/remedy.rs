@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn remedy_presentation(
     feedback: String,
+    outcomes: Option<appa_runtime_api::Outcomes>,
     offers: Vec<appa_runtime_api::OfferedRemedy>,
     pending: Vec<PendingReview>,
     display: Vec<crate::api::RemedyDisplay>,
@@ -9,6 +10,7 @@ pub(super) fn remedy_presentation(
 ) -> RemedyPresentation {
     RemedyPresentation {
         feedback,
+        outcomes,
         offers,
         review: reviews(&pending, externals),
         display,
@@ -251,6 +253,7 @@ impl Session {
             Next::PresentToModel(Presentation::Declined { feedback }) => Ok(RemedyDecision::Declined {
                 presentation: RemedyPresentation {
                     feedback,
+                    outcomes: None,
                     offers: Vec::new(),
                     review: Vec::new(),
                     display: Vec::new(),
@@ -259,12 +262,14 @@ impl Session {
             Next::PresentToModel(Presentation::NoAnswer { feedback }) => Ok(RemedyDecision::NoAnswer { feedback }),
             Next::PresentToModel(Presentation::Blocked {
                 feedback,
+                outcomes,
                 offers,
                 review,
                 display,
             }) => Ok(RemedyDecision::Declined {
                 presentation: remedy_presentation(
                     feedback,
+                    outcomes,
                     offers,
                     review,
                     display.into_iter().collect(),

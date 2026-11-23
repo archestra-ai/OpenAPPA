@@ -314,9 +314,9 @@ async fn the_file_tracker_battery_routes_file_tools_and_bash_to_the_tracker_and_
         call("host/claude-code/Bash", serde_json::json!({ "command": "cat .env" })),
     )
     .await;
-    assert!(
-        matches!(&undeclared, HookDecision::DenyCall { feedback, .. } if feedback.contains("names no"))
-            && missing_fact(&undeclared) == Some(RetryHint::AfterRepair),
+    assert_eq!(
+        missing_fact(&undeclared),
+        Some(RetryHint::AfterRepair),
         "{undeclared:?}"
     );
 

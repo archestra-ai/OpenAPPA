@@ -1323,32 +1323,49 @@ async fn a_suspicious_result_blocks_a_trusted_floor_sink() {
     assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
 }
 
-/// A block that only narrows asks the agent's consent; a trust floor the narrowed
-/// trajectory misses is a gap a remedy may waive. Each block holds its one outcome.
+/// A block holds what its offered plans settle: accepting a narrowing is the agent's consent,
+/// declaring a spawn's return its own choice, and an authority's ruling a waivable gap. A
+/// narrowing below the floor, which nothing offers to accept, is a hard block.
 #[tokio::test]
-async fn a_narrowing_block_asks_consent_and_a_trust_gap_is_waivable() {
-    use appa_runtime_api::{Outcome, Outcomes};
+async fn a_block_holds_what_its_offered_plans_settle() {
+    use appa_runtime_api::Outcome;
+    let policy = format!(
+        "{FETCH_AND_SEND}\n[[policy.authority]]\nname = \"approver\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n"
+    );
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
-        .expect("the deployment opens");
+    let runtime =
+        Runtime::open(config_with(&policy, None), dir.path().join("appa.db"), None).expect("the deployment opens");
     let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
-    let outcomes = |decision: ToolCallDecision| match decision {
-        ToolCallDecision::Deny { outcomes, offers, .. } => (outcomes, offers.len()),
+    let held = |decision: Result<ToolCallDecision, EventError>| match decision.expect("the call is judged") {
+        ToolCallDecision::Deny { outcomes, offers, .. } => (outcomes.held().collect::<Vec<_>>(), offers.len()),
         allowed => panic!("the call is blocked, got {allowed:?}"),
     };
 
-    let narrowing = session
-        .on_tool_call(taint(serde_json::json!({"a": 1})), false)
+    let narrowing = session.on_tool_call(taint(serde_json::json!({"a": 1})), false).await;
+    assert_eq!(held(narrowing), (vec![Outcome::Consent], 1));
+
+    let spawn = fetch(serde_json::json!({"a": 9}));
+    let (outcomes, offers) = held(session.on_tool_call(spawn.clone(), true).await);
+    assert_eq!(outcomes, vec![Outcome::AgentChoice]);
+    assert!(offers > 0);
+
+    let child = open_child(&mut session, spawn.clone(), TrajectoryId("cc:root:child".to_string())).await;
+    let below = child.on_tool_call(taint(serde_json::json!({"a": 2})), false).await;
+    assert_eq!(held(below), (vec![Outcome::HardBlock], 0));
+    child.on_child_end(None).await.expect("the child ends with no return");
+    session
+        .on_tool_result(
+            spawn,
+            ToolOutcome::Success {
+                body: OutcomeBody::Unavailable,
+            },
+        )
         .await
-        .expect("the block is delivered");
-    assert_eq!(outcomes(narrowing), (Outcomes::of(Outcome::Consent), 1));
+        .expect("the spawn dispatch closes");
 
     admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
-    let gap = session
-        .on_tool_call(trusted_send(), false)
-        .await
-        .expect("the block is delivered");
-    assert_eq!(outcomes(gap), (Outcomes::of(Outcome::WaivableGap), 0));
+    let gap = session.on_tool_call(trusted_send(), false).await;
+    assert_eq!(held(gap), (vec![Outcome::WaivableGap], 1));
 }
 
 #[tokio::test]

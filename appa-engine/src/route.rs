@@ -493,7 +493,7 @@ impl<'a> Search<'a> {
                 state,
                 &eval.requirement_gaps,
             ));
-        } else {
+        } else if !eval.is_terminal() {
             // The same gate live planning holds a surfaced block to: every atom the
             // enumeration may consult is answered, or the missing ones are the ask. Without
             // it, an unanswered mandate would silently drop this state's plans from the

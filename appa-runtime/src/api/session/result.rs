@@ -65,12 +65,14 @@ pub(super) fn outcome_decision(
         // that accepts it.
         Next::PresentToModel(Presentation::Blocked {
             feedback,
+            outcomes,
             offers,
             review,
             display,
         }) => {
             let presentation = remedy_presentation(
                 feedback.clone(),
+                outcomes,
                 offers,
                 review,
                 display.into_iter().collect(),

@@ -369,6 +369,14 @@ pub(crate) fn plan(
         stage,
         role,
     } = blocked;
+    if raw.is_terminal() {
+        return Ok(PlannedBlock {
+            raw: raw.clone(),
+            plans: Vec::new(),
+            fork_advice: None,
+            narrowing_impact: None,
+        });
+    }
     let current = views.current_label();
     let no_denials = BTreeSet::new();
     let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
@@ -1586,7 +1594,18 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], con
 /// admission derives from the value's label first and asks for members only where the
 /// enumeration itself finds derivation short, so the gate would demand atoms the decision
 /// never reads. The check's own reads — the call's contract — are the check stage's.
+/// A terminal block plans nothing, so it reads nothing.
 pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &RawBlock) -> Vec<SymbolicAtom> {
+    match raw.is_terminal() {
+        true => Vec::new(),
+        false => gate_atoms(registry, contract, raw),
+    }
+}
+
+/// The atoms any planner's gate may have asked for this block, a terminal one included.
+/// Replay counts them as asked, so a log whose act gathered a blocked call's mandates
+/// still settles.
+pub(crate) fn gate_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &RawBlock) -> Vec<SymbolicAtom> {
     let providers = registry.audience().providers();
     let mut atoms: Vec<SymbolicAtom> = Vec::new();
     let has = |wanted: fn(&Gap) -> bool| raw.requirement_gaps.iter().any(wanted);

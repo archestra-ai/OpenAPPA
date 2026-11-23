@@ -433,16 +433,11 @@ impl Session {
                         dispatch: released.dispatch.clone(),
                     })
                 }
-                ([], feedback) if !feedback.is_empty() => {
+                ([], feedback @ [entry]) => {
                     tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
                     Ok(ToolCallDecision::Deny {
                         feedback: join_feedback(feedback),
-                        outcomes: feedback
-                            .iter()
-                            .skip(1)
-                            .fold(feedback[0].outcomes.clone(), |outcomes, entry| {
-                                outcomes.union(&entry.outcomes)
-                            }),
+                        outcomes: entry.outcomes,
                         offers: feedback.iter().flat_map(|entry| entry.offers.clone()).collect(),
                         display: feedback.iter().filter_map(|entry| entry.display.clone()).collect(),
                         review: join_review(feedback, &self.deployment().externals),
@@ -505,7 +500,7 @@ fn noted(decision: &ToolCallDecision, notice: &str) -> ToolCallDecision {
             let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
             ToolCallDecision::Deny {
                 feedback: format!("{notice}{apply}\n\n{feedback}"),
-                outcomes: outcomes.clone(),
+                outcomes: *outcomes,
                 offers: offers.clone(),
                 display: display.clone(),
                 review: review.clone(),

@@ -403,11 +403,11 @@ async fn a_call_in_flight_across_a_reload_is_decided_at_the_head() {
     std::fs::write(&gate, "go").expect("the old annotator is released");
 
     let decided = in_flight.await.expect("the proposal task completes");
-    assert!(
-        matches!(&decided, HookDecision::DenyCall { feedback, .. } if feedback.contains("status=7")),
+    assert_eq!(
+        missing_fact(&decided),
+        Some(RetryHint::AfterRepair),
         "the in-flight call is decided again at the head, whose Annotator refuses it: {decided:?}"
     );
-    assert_eq!(missing_fact(&decided), Some(RetryHint::AfterRepair));
 }
 
 /// A policy whose two annotated tools route to one Annotator, `annotator`, served at `url`.
@@ -874,13 +874,6 @@ async fn every_annotation_failure_denies_on_a_missing_fact_and_appends_nothing()
         annotator.set("classifier", failure);
         let decision = propose(&runtime, fetch("https://a.example")).await;
         assert_eq!(missing_fact(&decision), Some(retry), "got {decision:?}");
-        let HookDecision::DenyCall { feedback, .. } = decision else {
-            unreachable!("a missing fact is a denial");
-        };
-        assert!(
-            feedback.contains("classifier"),
-            "the refusal names the annotator: {feedback}"
-        );
         assert_eq!(
             audit_len(&runtime),
             baseline,
@@ -914,6 +907,27 @@ async fn an_unreachable_annotator_denies_on_a_missing_fact_worth_retrying() {
     let decision = propose(&runtime, fetch("https://a.example")).await;
     assert_eq!(missing_fact(&decision), Some(RetryHint::Later), "got {decision:?}");
     assert_eq!(audit_len(&runtime), baseline);
+}
+
+/// What a failing Annotator says reaches the runtime diagnostics, never the model: the
+/// denial carries nothing of its body.
+#[tokio::test]
+async fn a_failing_annotators_words_never_reach_the_model() {
+    const TOKEN: &str = "annotator-said-q7xz";
+    let router = axum::Router::new().route(
+        "/annotate",
+        axum::routing::post(|_body: String| async { (axum::http::StatusCode::BAD_GATEWAY, TOKEN) }),
+    );
+    let url = format!("{}/annotate", serve(router).await);
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open_runtime(&dir, &http_policy(&url)).await;
+
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    assert_eq!(missing_fact(&decision), Some(RetryHint::Later), "got {decision:?}");
+    let HookDecision::DenyCall { feedback, .. } = decision else {
+        unreachable!("a missing fact is a denial");
+    };
+    assert!(!feedback.contains(TOKEN), "{feedback}");
 }
 
 #[cfg(unix)]
@@ -1686,13 +1700,6 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
         missing_fact(&refused),
         Some(RetryHint::AfterRepair),
         "an out-of-mandate audience is no answer, got {refused:?}"
-    );
-    let HookDecision::DenyCall { feedback, .. } = refused else {
-        unreachable!("a missing fact is a denial");
-    };
-    assert!(
-        feedback.contains("classifier"),
-        "the refusal names the annotator: {feedback}"
     );
     assert_eq!(audit_len(&runtime), before);
     assert_eq!(source.reads().len(), 2);

@@ -469,6 +469,7 @@ impl Runtime {
                         },
                         presentation: Some(RemedyPresentation {
                             feedback,
+                            outcomes: Some(outcomes),
                             offers,
                             review,
                             display: Vec::new(),

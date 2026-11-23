@@ -2029,3 +2029,61 @@ fn a_mandate_placeholder_admits_the_collection_each_call_spells() {
     assert!(parameters.validate(&serde_json::json!({})).is_err());
     assert!(parameters.validate(&serde_json::json!({ "channel": 1 })).is_err());
 }
+
+/// A `blocked` mark beside a recipient outside the label: the officer's mandate reads
+/// `team`, but nothing lifts the mark, so the act asks for no membership and offers nothing,
+/// live and on replay. A log whose act still pinned the mandate's answers, as an earlier
+/// planner gathered them, replays too.
+#[test]
+fn a_blocked_call_reads_no_mandate_live_or_on_replay() {
+    let officer = crate::authority::Authority {
+        except: Vec::new(),
+        name: AuthorityName::new("officer"),
+        mandate: crate::authority::Mandate {
+            reader_ceiling: Some(group_audience("team")),
+            ..crate::authority::Mandate::default()
+        },
+        scope: crate::authority::Scope::default(),
+        hint: None,
+    };
+    let mut send = plain_tool("send");
+    send.parameters = crate::params::test_string_argument_schema("to");
+    send.requires = Requires {
+        label: LabelRequirements {
+            trust_floor: None,
+            audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+        },
+        attention: vec![MarkName::new(MarkName::BLOCKED)],
+        ..Requires::default()
+    };
+    let e = open_engine_at(
+        RegistryConfig {
+            authorities: vec![officer],
+            audience: slack_groups(&["team"]),
+            ..test_config(vec![send])
+        },
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
+    );
+    let opening = vec![opened(&e)];
+    let decision = e
+        .handle(
+            &viewing(&e, &opening),
+            evidenced_batch("b1", vec![send_to("carol@other.com")], Default::default()),
+        )
+        .expect("the blocked call is decided without membership");
+    let (released, blocked) = answered(&decision);
+    assert!(released.is_empty());
+    assert!(blocked[0].block.raw.is_terminal());
+    assert!(!blocked[0].block.is_curable());
+    assert!(blocked[0].offers.is_empty());
+    let facts = appended_facts(decision);
+    assert_eq!(e.validate_replay(&[opening.clone(), facts.clone()].concat()), Ok(()));
+
+    let mut gathered = facts;
+    for fact in &mut gathered {
+        if let Fact::ProposalBatchDecided { evidence, .. } = fact {
+            *evidence = source_evidence(vec![user_group("team", wide_as_reported())]);
+        }
+    }
+    assert_eq!(e.validate_replay(&[opening, gathered].concat()), Ok(()));
+}

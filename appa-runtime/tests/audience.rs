@@ -269,7 +269,7 @@ async fn no_answer_leaves_the_call_unchecked_and_the_log_unchanged() {
 }
 
 /// A source that answers 500 leaves the check without the fact it reads: the call is denied
-/// on the missing fact alone, with no plan, and a later proposal may obtain it.
+/// on the missing fact alone, with no plan, and the proposal retried once it answers runs.
 #[tokio::test]
 async fn an_unanswered_source_denies_on_a_missing_fact() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -283,6 +283,12 @@ async fn an_unanswered_source_denies_on_a_missing_fact() {
     };
     assert!(offers.is_empty());
     assert_eq!(outcomes, Some(Outcomes::missing(RetryHint::Later)));
+
+    source.members(Some(vec!["bob@corp.example"]));
+    assert_eq!(
+        propose(&runtime, send("@team")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
 }
 
 /// `send` with the reserved `blocked` mark beside its recipient check.
@@ -317,8 +323,66 @@ async fn a_blocked_call_is_a_hard_block_before_membership_is_known() {
         panic!("the call is denied, got {decision:?}");
     };
     assert!(offers.is_empty());
-    assert_eq!(outcomes, Some(Outcomes::of(Outcome::HardBlock)));
+    assert_eq!(outcomes, Some(Outcomes::hard_block()));
     assert!(source.requests().is_empty(), "no membership is read for a blocked call");
+}
+
+/// An authority whose mandate reads `@team`, and an input sanitizer that would widen the
+/// call to its recipient: remedies for the recipient gap a `blocked` mark leaves terminal.
+const BLOCKED_REMEDIES: [&str; 2] = [
+    r#"
+[[policy.authority]]
+name = "reviewer"
+[policy.authority.permits]
+audience_missing = ["@team"]
+
+"#,
+    r#"
+[[policy.sanitizer]]
+name = "widen"
+on = ["tool_input"]
+permits = { audience = { from = ["alice@corp.example", "bob@corp.example"], to = ["carol@corp.example"] } }
+
+"#,
+];
+
+const BLOCKED_REMEDY_BINDINGS: [&str; 2] = [
+    "[externals.authorities.reviewer]\nbuiltin = \"hitl\"\n\n",
+    "[externals.sanitizers.widen]\nbuiltin = \"redact-email\"\n\n",
+];
+
+/// A recipient outside the label is a gap decided without membership. Beside a `blocked`
+/// mark nothing remedies it: no mandate is read, no source asked, nothing offered.
+#[tokio::test]
+async fn a_blocked_call_gathers_and_offers_nothing_for_its_other_gaps() {
+    for (remedy, binding) in BLOCKED_REMEDIES.into_iter().zip(BLOCKED_REMEDY_BINDINGS) {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, source) = serve_source().await;
+        source.members(None);
+        let policy = POLICY
+            .replace("[externals]", &format!("{BLOCKED_SEND}{remedy}[externals]"))
+            .replace(
+                "[externals.audience.slack]",
+                &format!("{binding}[externals.audience.slack]"),
+            );
+        let runtime = narrowed_under(&dir, &policy, &url).await;
+
+        let decision = propose(
+            &runtime,
+            ProposedCall {
+                tool: "send_blocked".to_string(),
+                arguments: raw(serde_json::json!({ "to": "carol@corp.example" })),
+                cwd: None,
+            },
+        )
+        .await;
+        let HookDecision::DenyCall { offers, outcomes, .. } = decision else {
+            panic!("the call is denied, got {decision:?}");
+        };
+        assert!(offers.is_empty(), "{remedy}");
+        assert_eq!(outcomes.map(|outcomes| outcomes.deciding()), Some(Outcome::HardBlock));
+        assert!(source.requests().is_empty(), "{remedy}");
+    }
 }
 
 #[tokio::test]

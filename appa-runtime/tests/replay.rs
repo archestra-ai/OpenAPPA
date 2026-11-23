@@ -591,10 +591,10 @@ async fn a_bound_annotator_decides_the_step() {
 }
 
 /// `expect deny` holds only for a call the policy refused. A call refused because its
-/// Annotator gave no answer was not judged: its step cannot run. The `blocked` mark is a
-/// policy refusal like any other.
+/// Annotator gave no answer was not judged: its step cannot run. The `blocked` mark and a
+/// call its contract rejects are refusals like any other.
 #[tokio::test]
-async fn a_missing_fact_never_passes_as_a_deny() {
+async fn only_a_missing_fact_leaves_a_deny_step_unjudged() {
     let router = Router::new().route(
         "/annotate",
         post(|_body: String| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
@@ -602,7 +602,8 @@ async fn a_missing_fact_never_passes_as_a_deny() {
     let url = format!("{}/annotate", serve(router).await);
     let binding = format!("\n[externals.annotators.classifier]\nurl = \"{url}\"\n");
     let policy = format!(
-        "{ANNOTATED_POLICY}\n[[policy.tool]]\nname = \"mcp/ops/wipe\"\nrequires = {{ attention = [\"blocked\"] }}\n"
+        "{ANNOTATED_POLICY}\n[[policy.tool]]\nname = \"mcp/ops/wipe\"\nrequires = {{ attention = [\"blocked\"] }}\n\
+         \n[[policy.tool]]\nname = \"mcp/mail/forward\"\nrequires = {{ audience = {{ contains = [\"$to\"] }} }}\n"
     );
     let dir = tempfile::tempdir().expect("a temp dir");
     let runtime = runtime(&dir, &policy, &binding);
@@ -615,6 +616,7 @@ async fn a_missing_fact_never_passes_as_a_deny() {
                 "mcp/web/fetch {\n  url: \"https://example.com\"\n}\nexpect deny\n",
             ),
             trace("blocked.appa", "mcp/ops/wipe {}\nexpect deny\n"),
+            trace("malformed.appa", "mcp/mail/forward {}\nexpect deny\n"),
         ],
     )
     .await;
@@ -625,6 +627,7 @@ async fn a_missing_fact_never_passes_as_a_deny() {
     );
     assert_eq!(reports[0].verdict(), Verdict::CannotRun);
     assert_eq!(outcomes(&reports[1]), vec![(1, &DENIED)]);
+    assert_eq!(outcomes(&reports[2]), vec![(1, &DENIED)]);
 }
 
 /// `appa/do_something` asks what the trajectory allows: public before the HR read, and only

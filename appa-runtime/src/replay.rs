@@ -13,7 +13,7 @@
 //! call is blocked and the offer runs it without returning its result; the runner takes it.
 //! `authority`: the call is blocked and the offer names an authority; the runner takes it.
 //! `sanitizer`: the call is blocked and the offer names a sanitizer; the runner takes it.
-//! `deny`: the policy blocks the call and nothing is offered. A call refused because a fact
+//! `deny`: the call is blocked and nothing is offered. A call refused because a fact
 //! the check reads was not obtained, such as an Annotator's answer, was not judged: its step
 //! cannot run, whatever it expects. Taking an offer goes through the
 //! runtime's own remedy path. A remedy that releases the call is followed by the released call,
@@ -680,16 +680,19 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
     };
     match hooks::handle(runtime, event).await {
         HookDecision::AllowCall { .. } => Proposed::Allowed(call),
-        // Only a policy outcome is a step's answer. A fact the check could not obtain, or an
-        // event nothing judged, leaves the step unjudged, never a deny.
+        // A fact the check could not obtain leaves the step unjudged, never a deny.
         HookDecision::DenyCall {
             feedback,
             offers,
             outcomes: Some(outcomes),
             ..
         } => match outcomes.deciding() {
-            Outcome::HardBlock | Outcome::WaivableGap | Outcome::Consent => Proposed::Denied { feedback, offers },
-            Outcome::MissingFact | Outcome::Integrity => Proposed::CannotRun(feedback),
+            Outcome::MissingFact => Proposed::CannotRun(feedback),
+            Outcome::Integrity
+            | Outcome::HardBlock
+            | Outcome::AgentChoice
+            | Outcome::WaivableGap
+            | Outcome::Consent => Proposed::Denied { feedback, offers },
         },
         HookDecision::Refuse { detail, .. } => Proposed::CannotRun(detail),
         other => Proposed::CannotRun(format!("the call answered {other:?}")),
