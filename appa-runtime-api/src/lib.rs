@@ -976,10 +976,11 @@ pub enum HookDecision {
         output: String,
     },
     /// The runtime's restatement of a spawn's launch reply, from the child the report named,
-    /// which is the spawn's bound one and runs with nothing returned: `output` is the reply's
-    /// own launch fields, as the host's [`SpawnLaunch`] keeps them, or the runtime's words
-    /// where the host declares none. Nothing else of the reply crossed. On the wire a
-    /// `replace_output` marked `launched`.
+    /// which is the spawn's bound one and runs with nothing returned: `output` is the host's
+    /// launch fields, which its [`SpawnLaunch`] makes from the released call and that child
+    /// alone, or the runtime's words where the host declares none. Nothing of the reply
+    /// crossed. A host transfers ownership of the child only where `output` names exactly its
+    /// own handle. On the wire a `replace_output` marked `launched`.
     Launched {
         output: String,
     },

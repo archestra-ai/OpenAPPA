@@ -108,6 +108,7 @@ fn a_chain_only_output_sanitizer_is_offered_and_admitted_without_membership() {
         evidence,
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     };
     let asked = e
         .handle(&viewing(&e, &log), EngineEvent::Outcome(report(Vec::new())))

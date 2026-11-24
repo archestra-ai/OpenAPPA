@@ -50,6 +50,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_dropped_is_withheld() {
         evidence: Vec::new(),
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     };
     let under_second = |batches: &[(u64, &[Fact])]| {
         let batches: Vec<StampedBatch<'_>> = batches
@@ -159,6 +160,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_no_longer_applies_is_withheld(
         evidence,
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     };
     let derivation = || {
         vec![crate::transition::Evidence::Sanitizer {
@@ -252,6 +254,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         evidence,
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     };
 
     let asked = e.handle(&view, EngineEvent::Outcome(report(Vec::new()))).unwrap();
@@ -297,6 +300,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             })
         ),
         Err(crate::transition::TransitionError::ObservationMismatch)
@@ -310,6 +314,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             })
         ),
         Err(crate::transition::TransitionError::ContradictedSuccess)
@@ -379,6 +384,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             })
         ),
         Err(crate::transition::TransitionError::ObservationMismatch)
@@ -392,6 +398,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             })
         ),
         Err(crate::transition::TransitionError::ContradictedSuccess)
@@ -512,6 +519,7 @@ fn redacted_result(e: &Engine, mut log: Vec<Fact>, dispatch: &DispatchId) -> (Ve
             evidence,
             offer_nonce: nonce(),
             audience: crate::audience::AudienceEvidence::default(),
+            spawn_report: None,
         })
     };
     log.extend(appended_facts(
@@ -703,6 +711,7 @@ fn a_narrowing_derivation_stages_its_candidate_instead_of_admitting_it() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the repeat hears the stage");
@@ -1093,6 +1102,7 @@ fn a_confined_stage_goes_stale_with_its_basis_and_is_planned_again() {
                 evidence: Vec::new(),
                 offer_nonce: crate::value::OfferNonce::new([13u8; 32]),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the candidate is planned again");
@@ -1144,6 +1154,7 @@ fn a_failure_body_under_a_bound_sanitizer_closes_withheld() {
             evidence: Vec::new(),
             offer_nonce: nonce(),
             audience: crate::audience::AudienceEvidence::default(),
+            spawn_report: None,
         })
     };
     let withheld = FollowUp::Outcome(OutcomeFollowUp::Closed {
@@ -1205,6 +1216,7 @@ fn a_repeated_report_is_not_answered_with_the_admission_an_offer_made() {
                 }],
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the repeated report answers");

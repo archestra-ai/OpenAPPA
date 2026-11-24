@@ -32,6 +32,19 @@ type Task = {
     | { status: 'failed'; message: string }
 }
 
+// Whether a launch's output is exactly the handle fields naming `handle`, and nothing else.
+function namesHandle(output: unknown, handle: string): boolean {
+  if (typeof output !== 'string') return false
+  try {
+    const fields: unknown = JSON.parse(output)
+    return typeof fields === 'object' && fields !== null && !Array.isArray(fields)
+      && Object.keys(fields).length === 2
+      && (fields as Record<string, unknown>).output === handle && (fields as Record<string, unknown>).content === handle
+  } catch {
+    return false
+  }
+}
+
 function text(decision: Decision, field: string): string {
   const value = decision[field]
   if (typeof value !== 'string') throw new Error(`[appencode] Runtime reply is missing ${field}.`)
@@ -455,13 +468,20 @@ export default Plugin.define({
             yield* ctx.session.prompt({ sessionID: child.id, id: child.promptID, text: child.prompt })
             if (input.background === true) {
               return yield* Effect.gen(function* () {
-                const task = crypto.randomUUID()
+                // The child's session id is the task handle, so the runtime restates the launch from
+                // its own facts. Ownership moves only on a launch naming exactly this handle.
+                const task = child.id
                 backgroundReport = { ...proposal, spawned_id: child.id,
                   outcome: { status: 'success', body: { output: task, content: task } } }
                 const acknowledged = yield* runtime('spawn_result', backgroundReport)
-                // The runtime restates a launch as its handle fields alone; the plugin's own handle stands.
-                if (acknowledged.decision !== 'replace_output' || acknowledged.launched !== true) {
-                  throw new Error('[appencode] Background launch was not confirmed.')
+                if (acknowledged.decision === 'replace_output' && acknowledged.no_return !== true
+                  && acknowledged.launched !== true) {
+                  throw new Error(`[appencode] ${feedback(text(acknowledged, 'output'), tools)}`)
+                }
+                if (acknowledged.decision !== 'replace_output' || acknowledged.launched !== true
+                  || acknowledged.no_return === true || !namesHandle(acknowledged.output, task)) {
+                  throw new Error(`[appencode] Background launch was not confirmed.${
+                    typeof acknowledged.output === 'string' ? ` ${feedback(acknowledged.output, tools)}` : ''}`)
                 }
                 if (disposed) throw new Error('[appencode] Plugin disposed during launch.')
                 const owned: Task = { handle: task, root: call.sessionID, child: child.id, proposal, promptID: child.promptID,

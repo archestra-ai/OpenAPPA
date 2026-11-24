@@ -330,6 +330,31 @@ pub enum ObservedResult {
     Unavailable,
 }
 
+/// How the runtime took a bound spawn's report that carried no message of its child's. Fixed by
+/// the record that first observed the report, so every repeat of it is taken the same way,
+/// whatever the child or the deployment's size limit did since.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnReport {
+    /// The child ran with nothing returned: the report was its launch.
+    Launch(LaunchAdmission),
+    /// The child had ended or returned: nothing of the report crossed.
+    NoReturn,
+}
+
+/// What a launch admitted: the host's launch fields, or nothing, and why nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchAdmission {
+    Fields,
+    /// The launch fields were past this size limit.
+    OverLimit {
+        limit_bytes: u64,
+    },
+    /// The host declares no launch fields.
+    Undeclared,
+}
+
 /// How a dispatch closed. Effects commit **only** on success — a call that dispatched but failed
 /// appends nothing. A success that admits no value (e.g. an oversized body) still commits effects.
 /// `Indeterminate` records a dispatch whose south outcome was never observed (a timeout or a
@@ -344,6 +369,10 @@ pub enum CloseOutcome {
         /// delivered no crossing, whatever the child returned before it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         crossing: Option<ChildReturnId>,
+        /// How the runtime took the report this close observed, where it was a bound spawn's
+        /// with no message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_report: Option<SpawnReport>,
     },
     Failure,
     FailureWithBody {
@@ -492,6 +521,10 @@ pub enum Fact {
         dispatch: DispatchId,
         effects: EffectSet,
         observed: ObservedResult,
+        /// How the runtime took the report this checkpoint observed, where it was a bound
+        /// spawn's with no message.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_report: Option<SpawnReport>,
     },
     DispatchClosed {
         trajectory: TrajectoryId,

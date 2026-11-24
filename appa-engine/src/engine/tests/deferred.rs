@@ -768,6 +768,7 @@ fn a_sanitized_result_of_a_deferred_spawn_s_own_dispatch_does_not_replay() {
             outcome: crate::fact::CloseOutcome::Success {
                 effects: EffectSet::default(),
                 crossing: None,
+                spawn_report: None,
             },
         },
         Fact::CandidateDerived {

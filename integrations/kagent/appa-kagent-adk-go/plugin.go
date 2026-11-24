@@ -1453,21 +1453,13 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 			return spawnReplacement(result, decision.Value), nil
 		case "replace_output":
 			// A launch crosses kagent's launch field alone: the child's
-			// session id, which the runtime matched to its bound child.
-			if decision.Launched {
-				if spawnedID == "" {
-					return nil, failClosed("appa answered a launch the plugin named no child for")
-				}
+			// session id, and only where the runtime's output names exactly the
+			// child this plugin spawned. Any other answer publishes no session
+			// id, just the runtime's words.
+			if decision.Launched && spawnedID != "" && namesSession(decision.Output, spawnedID) {
 				return map[string]any{"subagent_session_id": spawnedID}, nil
 			}
-			replaced := map[string]any{"result": p.forModel(ctx, decision.Output)}
-			// A reply carrying no message is the named child's, its bound
-			// one: its session id stays for the UI to follow the child, and
-			// nothing else does.
-			if decision.NoReturn && spawnedID != "" {
-				replaced["subagent_session_id"] = spawnedID
-			}
-			return replaced, nil
+			return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
 		case "block":
 			return withheldResult(p.forModel(ctx, decision.Reason)), nil
 		default:
@@ -1822,4 +1814,14 @@ func spawnReturn(result map[string]any) (spawnedID, value string) {
 		spawnedID = s
 	}
 	return spawnedID, value
+}
+
+// namesSession reports whether a launch's output is exactly kagent's launch
+// field naming the session id `spawned`, and nothing else.
+func namesSession(output, spawned string) bool {
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(output), &fields); err != nil {
+		return false
+	}
+	return len(fields) == 1 && fields["subagent_session_id"] == spawned
 }

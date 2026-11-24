@@ -136,6 +136,15 @@ class AppaFailClosed(RuntimeError):
     """The runtime blocked, refused, or could not answer. The action stops."""
 
 
+def _json_or_none(text: str | None) -> Any:
+    if text is None:
+        return None
+    try:
+        return json.loads(text)
+    except ValueError:
+        return None
+
+
 def _withheld(reason: str) -> dict[str, Any]:
     return {"result": f"[appa] the tool result was withheld: {reason}", _DENY_KEY: _WITHHELD}
 
@@ -788,19 +797,14 @@ class AppaPluginKagent(BasePlugin):
                     # The bytes the value crossed with, never spelled over:
                     # the parent receives what the runtime admitted.
                     return _spawn_replacement(result, decision.value)
-                # A launch crosses kagent's launch field alone: the child's session id,
-                # which the runtime matched to its bound child.
-                if decision.kind == "replace_output" and decision.launched:
-                    if spawned_id is None:
-                        raise AppaFailClosed("appa answered a launch the plugin named no child for")
-                    return {"subagent_session_id": spawned_id}
+                # A launch crosses kagent's launch field alone: the child's session id, and
+                # only where the runtime's output names exactly the child this plugin spawned.
+                # Any other answer publishes no session id, just the runtime's words.
                 if decision.kind == "replace_output":
-                    replaced: dict[str, Any] = {"result": self._for_model(decision.output, tool_context)}
-                    # A reply carrying no message is the named child's, its bound one: its
-                    # session id stays for the UI to follow the child, and nothing else does.
-                    if decision.no_return and spawned_id is not None:
-                        replaced["subagent_session_id"] = spawned_id
-                    return replaced
+                    launch = {"subagent_session_id": spawned_id}
+                    if decision.launched and spawned_id is not None and _json_or_none(decision.output) == launch:
+                        return launch
+                    return {"result": self._for_model(decision.output, tool_context)}
                 if decision.kind == "block":
                     return _withheld(self._for_model(decision.reason, tool_context))
                 raise AppaFailClosed(f"appa answered the spawn result with {decision.kind}")

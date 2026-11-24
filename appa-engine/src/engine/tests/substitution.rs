@@ -759,6 +759,7 @@ fn a_hop_goes_stale_with_its_basis_and_a_taken_one_stops_answering() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the raw result crosses");

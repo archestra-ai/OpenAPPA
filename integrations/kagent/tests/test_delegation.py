@@ -256,8 +256,8 @@ def test_nothing_a_child_says_after_returning_nothing_reaches_its_parent(stack):
 
     The parent's spawn result carries no message from a child that already
     returned, so none of the reply crosses: the delegation answers the
-    parent's model with the runtime's words in its place, beside the
-    child's session id alone.
+    parent's model with the runtime's words in its place and nothing else:
+    only a launch publishes the child's session id.
     """
     stack.script_child(
         QUIET,
@@ -281,11 +281,7 @@ def test_nothing_a_child_says_after_returning_nothing_reaches_its_parent(stack):
     assert returned.get("appa") is None, (
         f"the void crossed at the child's stop, so the parent's gate withheld nothing: {returned}"
     )
-    assert set(returned) == {"result", "subagent_session_id"}, (
-        f"the parent reads the runtime's words beside the child's session id alone: {returned}"
-    )
-    assert returned["result"] == NO_RETURN, returned
-    assert isinstance(returned["subagent_session_id"], str), returned
+    assert returned == {"result": NO_RETURN}, f"the parent reads the runtime's words alone: {returned}"
     stops = stack.child_results(RETURN_TOOL)
     assert len(stops) == 1, (
         f"one stop of this child reached the runtime, and the plugin replayed that crossing after it: {stops}"

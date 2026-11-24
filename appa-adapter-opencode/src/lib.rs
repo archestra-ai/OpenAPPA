@@ -3,7 +3,9 @@
 //! flattened dispatch names. Namespaced tools cross as `mcp__<namespace>__<name>`.
 //! Only the plugin-owned delegation tool starts checked child trajectories.
 
-use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, SpawnKind, SpawnLaunch};
+use appa_runtime_api::{
+    Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, ProposedCall, SpawnKind, SpawnLaunch,
+};
 
 const CONTROL: &str = "mcp__appa__execute_remedy_plan";
 
@@ -19,28 +21,10 @@ pub fn adapter() -> Adapter {
     }
 }
 
-/// A background `appa_subagent` launch replies with the task handle the plugin generated, a
-/// UUID, under `output` and `content`. Only a handle of that form stays.
-fn launch_fields(report: Option<serde_json::Value>, _spawned: &str) -> serde_json::Value {
-    let handles = match report {
-        Some(serde_json::Value::Object(fields)) => fields
-            .into_iter()
-            .filter(|(key, field)| {
-                matches!(key.as_str(), "output" | "content") && field.as_str().is_some_and(is_handle)
-            })
-            .collect(),
-        _ => serde_json::Map::new(),
-    };
-    serde_json::Value::Object(handles)
-}
-
-/// Whether `text` is a UUID in its hyphenated form, as `crypto.randomUUID` spells one.
-fn is_handle(text: &str) -> bool {
-    text.len() == 36
-        && text.char_indices().all(|(at, c)| match at {
-            8 | 13 | 18 | 23 => c == '-',
-            _ => c.is_ascii_hexdigit(),
-        })
+/// A background `appa_subagent` launch's handle is the child's session id, so its reply is that
+/// id under `output` and `content`, made from the bound child alone.
+fn launch_fields(_: &ProposedCall, spawned: &str) -> serde_json::Value {
+    serde_json::json!({ "output": spawned, "content": spawned })
 }
 
 fn identify_tool(raw: &str) -> Result<IdentifiedTool, ParseRefusal> {
@@ -113,26 +97,6 @@ mod tests {
         ] {
             assert_eq!(spell(&CanonicalTool::parse(canonical).unwrap()), None);
         }
-    }
-
-    #[test]
-    fn a_launch_reply_keeps_only_the_task_handle() {
-        let handle = "0f8fad5b-d9cb-469f-a165-70867728950e";
-        assert_eq!(
-            launch_fields(
-                Some(serde_json::json!({ "output": handle, "content": handle, "note": "the child's bytes" })),
-                "child"
-            ),
-            serde_json::json!({ "output": handle, "content": handle })
-        );
-        assert_eq!(
-            launch_fields(
-                Some(serde_json::json!({ "output": "the child's bytes", "content": [handle] })),
-                "child"
-            ),
-            serde_json::json!({})
-        );
-        assert_eq!(launch_fields(None, "child"), serde_json::json!({}));
     }
 
     proptest! {

@@ -101,12 +101,13 @@ pub type NamesChildrenFn = fn(&Actor, &ProposedCall) -> Vec<TrajectoryId>;
 /// `None`. A plain `fn` pointer for the same reason [`IdentifyToolFn`] is.
 pub type SpellFn = fn(&CanonicalTool) -> Option<String>;
 
-/// The reply a host's harness owns for a spawn whose bound child runs with nothing returned:
-/// `report` is the reply's body as JSON (`None` where it carries none) and `spawned` the
-/// child's host id, the wire's `spawned_id`. The answer keeps only the harness's own launch
-/// fields, so nothing beside them, the child's bytes included, reaches the parent. A plain
-/// `fn` pointer for the same reason [`IdentifyToolFn`] is.
-pub type ConformLaunchFn = fn(report: Option<serde_json::Value>, spawned: &str) -> serde_json::Value;
+/// The launch fields a host's harness shows for a spawn whose bound child runs with nothing
+/// returned, made from the runtime's facts alone: `call`, the spawn the runtime released and
+/// the report was matched to, and `spawned`, the bound child's host id (the wire's
+/// `spawned_id`). The report's bytes are never an input, so nothing a report carries — the
+/// child's bytes included — reaches the parent through them. A plain `fn` pointer for the
+/// same reason [`IdentifyToolFn`] is.
+pub type ConformLaunchFn = fn(call: &ProposedCall, spawned: &str) -> serde_json::Value;
 
 /// Whether a host declares the fields of its spawn's launch reply. A launch under a host that
 /// declares none admits nothing and is answered with the runtime's own words.

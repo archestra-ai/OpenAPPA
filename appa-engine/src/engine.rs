@@ -869,15 +869,13 @@ impl Engine {
         view.views(child).map_or(0, |views| views.returns_by(child))
     }
 
-    /// The observation the log committed for `dispatch`: its success checkpoint while value
-    /// finalization is pending, the close's observation after. A repeat of the report it
-    /// observed answers from it, whatever the dispatch's child has done since.
-    pub fn committed_observation(
-        &self,
-        view: &EngineView,
-        dispatch: &DispatchId,
-    ) -> Option<crate::fact::ObservedResult> {
-        outcome::fixed_observation(&view.projection().view(dispatch.trajectory()), dispatch)
+    /// How the runtime took `dispatch`'s report with no message, as the checkpoint or close that
+    /// first observed it fixed: a repeat of the report is taken the same way.
+    pub fn committed_spawn_report(&self, view: &EngineView, dispatch: &DispatchId) -> Option<crate::fact::SpawnReport> {
+        view.projection()
+            .view(dispatch.trajectory())
+            .spawn_report(dispatch)
+            .cloned()
     }
 
     /// The return of the child bound to the spawn `dispatch` that a report of the spawn answers

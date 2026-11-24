@@ -327,6 +327,7 @@ fn a_staged_confined_result_closes_only_with_the_admission_that_takes_it() {
         outcome: crate::fact::CloseOutcome::Success {
             effects: EffectSet::default(),
             crossing: None,
+            spawn_report: None,
         },
     };
     assert_eq!(

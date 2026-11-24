@@ -146,6 +146,7 @@ mod tests {
             outcome: CloseOutcome::Success {
                 effects: EffectSet::default(),
                 crossing: None,
+                spawn_report: None,
             },
         });
         log.push(Fact::ValueAdmitted {
@@ -330,6 +331,7 @@ mod tests {
             outcome: CloseOutcome::Success {
                 effects: EffectSet::new([egress.clone()]).unwrap(),
                 crossing: None,
+                spawn_report: None,
             },
         });
         let projection = build(&log);
@@ -459,6 +461,7 @@ mod tests {
             outcome: CloseOutcome::Success {
                 effects: EffectSet::new([egress.clone()]).unwrap(),
                 crossing: None,
+                spawn_report: None,
             },
         });
         let projection = build(&log);

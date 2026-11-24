@@ -980,7 +980,7 @@ func TestAChildReturnSubstitutesWhatTheParentReceives(t *testing.T) {
 	}
 }
 
-func TestASpawnReplyWithNoMessageKeepsOnlyItsChildsSessionID(t *testing.T) {
+func TestASpawnReplyWithNoMessageKeepsItsChildsSessionIDOnlyOnItsLaunch(t *testing.T) {
 	cases := []struct {
 		name     string
 		decision map[string]any
@@ -989,7 +989,17 @@ func TestASpawnReplyWithNoMessageKeepsOnlyItsChildsSessionID(t *testing.T) {
 		{
 			"no return",
 			map[string]any{"protocol": 1, "decision": "replace_output", "output": "no message", "no_return": true},
-			map[string]any{"result": "no message", "subagent_session_id": "child-ctx"},
+			map[string]any{"result": "no message"},
+		},
+		{
+			"a launch naming another child",
+			map[string]any{"protocol": 1, "decision": "replace_output", "output": `{"subagent_session_id":"another-ctx"}`, "launched": true},
+			map[string]any{"result": `{"subagent_session_id":"another-ctx"}`},
+		},
+		{
+			"a launch admitting no session id",
+			map[string]any{"protocol": 1, "decision": "replace_output", "output": "launched, nothing admitted", "launched": true},
+			map[string]any{"result": "launched, nothing admitted"},
 		},
 		{
 			"launched",

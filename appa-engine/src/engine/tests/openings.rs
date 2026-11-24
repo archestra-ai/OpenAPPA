@@ -227,6 +227,7 @@ fn a_root_fork_carries_its_parent_familys_effects_and_unsettled_reservations() {
                     evidence: Vec::new(),
                     offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
+                    spawn_report: None,
                 }),
             )
             .expect("the outcome closes the emit");
@@ -487,6 +488,7 @@ fn a_root_folds_from_its_openings_starting_label() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the result admits");

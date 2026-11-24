@@ -1106,6 +1106,7 @@ mod tests {
             outcome: CloseOutcome::Success {
                 effects: EffectSet::new([effect(kind)]).unwrap(),
                 crossing: None,
+                spawn_report: None,
             },
         }
     }

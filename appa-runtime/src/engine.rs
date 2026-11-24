@@ -317,6 +317,15 @@ pub enum EngineEvent {
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
     },
+    /// A bound spawn's success reported with no message of its child's, taken as `report`
+    /// says: the record that observes it fixes that, and every repeat must say the same.
+    SpawnReported {
+        dispatch: EngineDispatchId,
+        outcome: ToolOutcome,
+        report: appa_engine::fact::SpawnReport,
+        evidence: Vec<ExternalEvidence>,
+        entropy: OfferNonce,
+    },
     /// A bound spawn's success reported with the return of its child it repeats: the close
     /// delivers that crossing to the parent.
     SpawnDelivered {
@@ -1722,7 +1731,23 @@ impl RuntimeEngine {
                 outcome,
                 evidence,
                 entropy,
-            } => self.tool_outcome(view, &dispatch, &outcome, None, &evidence, &entropy, presentation),
+            } => self.tool_outcome(view, &dispatch, &outcome, None, None, &evidence, &entropy, presentation),
+            EngineEvent::SpawnReported {
+                dispatch,
+                outcome,
+                report,
+                evidence,
+                entropy,
+            } => self.tool_outcome(
+                view,
+                &dispatch,
+                &outcome,
+                None,
+                Some(&report),
+                &evidence,
+                &entropy,
+                presentation,
+            ),
             EngineEvent::SpawnDelivered {
                 dispatch,
                 crossing,
@@ -1735,6 +1760,7 @@ impl RuntimeEngine {
                     body: OutcomeBody::Unavailable,
                 },
                 Some(&crossing),
+                None,
                 &evidence,
                 &entropy,
                 presentation,
@@ -2351,6 +2377,7 @@ impl RuntimeEngine {
         dispatch: &EngineDispatchId,
         outcome: &ToolOutcome,
         crossing: Option<&ChildReturnId>,
+        spawn_report: Option<&appa_engine::fact::SpawnReport>,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
         presentation: &EmbeddedPresentationOptions,
@@ -2381,6 +2408,7 @@ impl RuntimeEngine {
                     evidence: sanitizer_evidence(evidence),
                     offer_nonce: engine_nonce(entropy),
                     audience: audience.clone(),
+                    spawn_report: spawn_report.cloned(),
                 };
                 self.engine.handle(view, CoreEvent::Outcome(report))
             },
@@ -2985,13 +3013,13 @@ impl RuntimeEngine {
         self.liveness(view, child) == Liveness::Live && self.engine.returns_by(view, child) == 0
     }
 
-    /// The observation the log committed for `dispatch`, checkpointed or closed.
-    pub(crate) fn committed_observation(
+    /// How the log fixed `dispatch`'s report with no message, checkpointed or closed.
+    pub(crate) fn committed_spawn_report(
         &self,
         view: &EngineView,
         dispatch: &appa_engine::value::DispatchId,
-    ) -> Option<appa_engine::fact::ObservedResult> {
-        self.engine.committed_observation(view, dispatch)
+    ) -> Option<appa_engine::fact::SpawnReport> {
+        self.engine.committed_spawn_report(view, dispatch)
     }
 
     pub(crate) fn spawn_return(

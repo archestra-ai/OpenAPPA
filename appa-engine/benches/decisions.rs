@@ -200,6 +200,7 @@ fn round(engine: &Engine, view: &mut EngineView, history: History, round: usize)
             evidence: vec![],
             offer_nonce: OfferNonce::new([13; 32]),
             audience: AudienceEvidence::default(),
+            spawn_report: None,
         }),
     );
 }

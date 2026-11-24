@@ -423,6 +423,7 @@ fn a_repeat_returns_the_recorded_outcome_of_a_dispatch_that_already_ran() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the outcome closes it");
@@ -652,6 +653,7 @@ fn a_later_basis_change_does_not_revoke_an_open_dispatch() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the dispatch is still the engine's to close");

@@ -121,6 +121,7 @@ fn a_report_after_an_indeterminate_close_is_refused_on_its_own_ground() {
         evidence: Vec::new(),
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     };
     let closed = e
         .handle(&released_view, EngineEvent::Outcome(report(ToolOutcome::Indeterminate)))
@@ -182,6 +183,7 @@ fn an_unavailable_success_is_no_abandonment() {
         evidence: Vec::new(),
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     };
     let log = [records, decision.append.unwrap().facts().to_vec()].concat();
     let closed = e
@@ -245,6 +247,7 @@ fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
         evidence: Vec::new(),
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     };
     let body = ValueBody::new("the ticket");
     let success = || {
@@ -310,6 +313,7 @@ fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             })
         ),
         Err(crate::transition::TransitionError::UnknownDispatch)
@@ -331,6 +335,7 @@ fn a_failure_body_on_a_call_that_touches_no_file_is_refused() {
             evidence: Vec::new(),
             offer_nonce: nonce(),
             audience: crate::audience::AudienceEvidence::default(),
+            spawn_report: None,
         }),
     );
     assert_eq!(reported.unwrap_err(), TransitionError::FailureBodyOutsideHeld);

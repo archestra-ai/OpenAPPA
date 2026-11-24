@@ -480,6 +480,7 @@ mod held_view_law {
                         evidence: Vec::new(),
                         offer_nonce: nonce(),
                         audience: crate::audience::AudienceEvidence::default(),
+                        spawn_report: None,
                     }))
                 }
                 Step::Offer { pick: at, approve } => {

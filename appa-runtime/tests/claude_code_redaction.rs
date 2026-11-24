@@ -216,11 +216,11 @@ async fn a_confined_result_the_codec_has_no_slot_for_crosses_only_as_the_masker_
 /// The same hop for a spawn's own result. `Agent` returns the subagent's message beside
 /// the run's metadata, and the codec restates it by the shape rather than by the longest
 /// leaf: the text takes `content`, and the metadata the parent reads as the run's record
-/// is kept as the harness wrote it. The engine's decision is a result decision either way
+/// keeps its shape with none of what the report said. The engine's decision is a result decision either way
 /// — a spawn's result is a result — so this is the same release as above, seen through the
 /// restatement a spawn gets.
 #[tokio::test]
-async fn a_confined_spawn_result_takes_the_maskers_text_at_content_and_keeps_its_metadata() {
+async fn a_confined_spawn_result_takes_the_maskers_text_at_content_and_keeps_only_its_shape() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let runtime = deployment(dir.path(), "Agent");
     let input = serde_json::json!({ "prompt": "Read the deploy key.", "subagent_type": "general-purpose" });
@@ -241,12 +241,12 @@ async fn a_confined_spawn_result_takes_the_maskers_text_at_content_and_keeps_its
         "no part of the answer carries the key material: {answer}"
     );
     assert_eq!(
-        output["agentId"], "a1",
-        "the run's own metadata names no part of the subagent's message and is kept: {answer}"
+        output["agentId"], "",
+        "the run's metadata keeps its shape and none of the report's content: {answer}"
     );
-    assert_eq!(output["agentType"], "general-purpose", "{answer}");
+    assert_eq!(output["agentType"], "", "{answer}");
     assert_eq!(output["status"], "completed", "{answer}");
-    assert_eq!(output["totalTokens"], 1234, "{answer}");
+    assert_eq!(output["totalTokens"], 0, "{answer}");
     assert_eq!(
         output["content"][0]["type"], "text",
         "the text takes the one field the parent model reads: {answer}"

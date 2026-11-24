@@ -159,6 +159,7 @@ pub(crate) fn observe_success(
         dispatch: dispatch.clone(),
         effects: contract.contract.emits.clone(),
         observed,
+        spawn_report: None,
     }])
 }
 
@@ -273,6 +274,7 @@ pub(crate) fn admit_result(
                 contract.contract.emits.clone()
             },
             crossing,
+            spawn_report: None,
         },
     };
     let close_success = || close_delivering(None);

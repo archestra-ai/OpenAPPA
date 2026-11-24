@@ -196,6 +196,8 @@ pub struct Projection {
     dispatch_evidence: OrdMap<DispatchId, AudienceEvidence>,
     subject_dispatches: OrdMap<crate::basis::SubjectKey, DispatchId>,
     observations: OrdMap<DispatchId, ObservedResult>,
+    /// How the runtime took each bound spawn's report with no message, as its first record fixed it.
+    spawn_reports: OrdMap<DispatchId, crate::fact::SpawnReport>,
     prepared: OrdMap<ForkId, PreparedFork>,
     bound: OrdMap<ForkId, TrajectoryId>,
     fork_of: OrdMap<TrajectoryId, ForkId>,
@@ -496,6 +498,7 @@ impl Projection {
             dispatch_evidence: Default::default(),
             subject_dispatches: Default::default(),
             observations: Default::default(),
+            spawn_reports: Default::default(),
             prepared: Default::default(),
             bound: Default::default(),
             fork_of: Default::default(),
@@ -636,6 +639,7 @@ impl Projection {
             dispatch_evidence,
             subject_dispatches,
             observations,
+            spawn_reports,
             prepared,
             bound,
             fork_of,
@@ -863,9 +867,13 @@ impl Projection {
                 dispatch,
                 effects: committed,
                 observed,
+                spawn_report,
                 ..
             } => {
                 observations.insert(dispatch.clone(), observed.clone());
+                if let Some(report) = spawn_report {
+                    spawn_reports.insert(dispatch.clone(), report.clone());
+                }
                 reservations.remove(dispatch);
                 effects.extend(committed.iter().cloned());
             }
@@ -875,8 +883,15 @@ impl Projection {
                     reservations.remove(dispatch);
                 }
                 let kind = match outcome {
-                    CloseOutcome::Success { effects: committed, .. } => {
+                    CloseOutcome::Success {
+                        effects: committed,
+                        spawn_report,
+                        ..
+                    } => {
                         effects.extend(committed.iter().cloned());
+                        if let Some(report) = spawn_report {
+                            spawn_reports.entry(dispatch.clone()).or_insert_with(|| report.clone());
+                        }
                         CloseKind::Success
                     }
                     CloseOutcome::Failure => CloseKind::Failure,
@@ -1411,6 +1426,11 @@ impl Views<'_> {
     /// one. A later report of the same dispatch is bound to it.
     pub(crate) fn observed_result(&self, dispatch: &DispatchId) -> Option<&ObservedResult> {
         self.projection.observations.get(dispatch)
+    }
+
+    /// How the runtime took `dispatch`'s report with no message, as its first record fixed it.
+    pub(crate) fn spawn_report(&self, dispatch: &DispatchId) -> Option<&crate::fact::SpawnReport> {
+        self.projection.spawn_reports.get(dispatch)
     }
 
     /// The body a dispatch's result admitted into the trajectory, if one crossed — the recorded
@@ -2277,6 +2297,7 @@ mod tests {
                 outcome: CloseOutcome::Success {
                     effects: EffectSet::new([egress.clone()]).unwrap(),
                     crossing: None,
+                    spawn_report: None,
                 },
             },
         ];

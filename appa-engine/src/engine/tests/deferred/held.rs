@@ -930,6 +930,7 @@ fn spawn_reported(dispatch: &crate::value::DispatchId, body: crate::transition::
         evidence: Vec::new(),
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     })
 }
 
@@ -949,6 +950,7 @@ fn delivering_forged(facts: &[Fact], crossing: &ChildReturnId) -> Vec<Fact> {
                 outcome: crate::fact::CloseOutcome::Success {
                     effects,
                     crossing: Some(crossing.clone()),
+                    spawn_report: None,
                 },
             },
             fact => fact,

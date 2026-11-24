@@ -1206,12 +1206,13 @@ impl ToolNaming {
         }
     }
 
-    /// The launch fields of the served host's spawn reply. A runtime naming tools as authored
-    /// serves no host whose reply it knows, so it declares none.
-    pub(crate) fn spawn_launch(self) -> appa_runtime_api::SpawnLaunch {
+    /// The launch fields of the served host's spawn reply: the configured adapter's, whatever
+    /// adapter an event came in through. Only a runtime naming tools as authored, which serves
+    /// no host of its own, takes them from the event's `ingress` adapter.
+    pub(crate) fn spawn_launch(self, ingress: appa_runtime_api::SpawnLaunch) -> appa_runtime_api::SpawnLaunch {
         match self {
             ToolNaming::Canonical { adapter } => adapter.spawn_launch,
-            ToolNaming::AsAuthored => appa_runtime_api::SpawnLaunch::Undeclared,
+            ToolNaming::AsAuthored => ingress,
         }
     }
 
@@ -2514,10 +2515,11 @@ impl Runtime {
         self.inner.shared.naming.model_spelling(recorded)
     }
 
-    /// The launch fields of the spawn reply of the host this deployment serves, for a host
-    /// that hands its events over in process.
-    pub(crate) fn spawn_launch(&self) -> appa_runtime_api::SpawnLaunch {
-        self.inner.shared.naming.spawn_launch()
+    /// The launch fields of the spawn reply of the host this deployment serves, for an event
+    /// that came in through `ingress` (`Undeclared` for a host handing its events over in
+    /// process).
+    pub(crate) fn spawn_launch(&self, ingress: appa_runtime_api::SpawnLaunch) -> appa_runtime_api::SpawnLaunch {
+        self.inner.shared.naming.spawn_launch(ingress)
     }
 
     /// The deployment `appa replay` runs: the same session and engine over a log that lives
@@ -5275,6 +5277,35 @@ mod deployment_tests {
 
     use super::*;
     use crate::config::{Endpoint, HostDefaults, Transport};
+
+    /// A runtime serving a host takes its launch fields from that host's adapter whichever
+    /// adapter an event came in through; only one naming tools as authored takes the ingress's.
+    #[test]
+    fn launch_fields_follow_the_configured_adapter_unless_tools_are_named_as_authored() {
+        let call = appa_runtime_api::ProposedCall {
+            tool: "task".to_string(),
+            arguments: serde_json::value::RawValue::from_string("{}".to_string()).expect("the arguments are JSON"),
+            cwd: None,
+        };
+        let fields = |launch| match launch {
+            appa_runtime_api::SpawnLaunch::Conformed(fields) => Some(fields(&call, "c1")),
+            appa_runtime_api::SpawnLaunch::Undeclared => None,
+        };
+        let kagent = serde_json::json!({ "subagent_session_id": "c1" });
+        let ingress = appa_adapter_opencode::adapter().spawn_launch;
+        let canonical = ToolNaming::Canonical {
+            adapter: appa_adapter_kagent::adapter(),
+        };
+        assert_eq!(fields(canonical.spawn_launch(ingress)), Some(kagent.clone()));
+        assert_eq!(
+            fields(canonical.spawn_launch(appa_runtime_api::SpawnLaunch::Undeclared)),
+            Some(kagent)
+        );
+        assert_eq!(
+            fields(ToolNaming::AsAuthored.spawn_launch(ingress)),
+            Some(serde_json::json!({ "output": "c1", "content": "c1" }))
+        );
+    }
 
     #[cfg(feature = "daemon")]
     #[test]

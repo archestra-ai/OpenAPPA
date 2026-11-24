@@ -117,7 +117,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
                 receipt: &mut receipt,
                 options: &presentation,
                 call_ids,
-                launch: adapter.spawn_launch,
+                launch: runtime.spawn_launch(adapter.spawn_launch),
             }
             .session_start(root, principal, settings, address, title, start, deciding);
             handled(
@@ -128,7 +128,16 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
                 decision,
             )
         }
-        (event, None) => handle_internal(runtime, event, presentation, call_ids, adapter.spawn_launch).await,
+        (event, None) => {
+            handle_internal(
+                runtime,
+                event,
+                presentation,
+                call_ids,
+                runtime.spawn_launch(adapter.spawn_launch),
+            )
+            .await
+        }
         (_, Some(_)) => unreachable!("only a session start carries a launch"),
     };
     runtime.record(Some(&root), handled.event);
@@ -559,7 +568,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
         event,
         EmbeddedPresentationOptions::default(),
         ToolCallIds::Unnamed,
-        runtime.spawn_launch(),
+        runtime.spawn_launch(SpawnLaunch::Undeclared),
     )
     .await
     .decision
@@ -581,7 +590,7 @@ pub async fn handle_embedded_with_options(
         event,
         presentation,
         ToolCallIds::Unnamed,
-        runtime.spawn_launch(),
+        runtime.spawn_launch(SpawnLaunch::Undeclared),
     )
     .await;
     EmbeddedHookOutcome {

@@ -195,7 +195,7 @@ fn returns(runtime: &Runtime, root: &TrajectoryId) -> Vec<Option<String>> {
 }
 
 /// Replay `events` as recorded, asserting each answers as the recording
-/// had it: every call released, every other hook without an opinion. The
+/// had it: every call released, an `Agent` launch restated from the runtime's facts, every other hook without an opinion. The
 /// parent's spawn is declared as spoken first unless a test declared it already.
 async fn replay(runtime: &Runtime, events: &[serde_json::Value]) {
     for event in events {
@@ -211,8 +211,21 @@ async fn replay(runtime: &Runtime, events: &[serde_json::Value]) {
         }
         let (status, answer) = call(runtime, event).await;
         assert_eq!(status, 200, "{name} answered {answer}");
-        match name {
-            "PreToolUse" => assert_released(event, &answer),
+        let tool = event["tool_name"].as_str();
+        match (name, tool, event["tool_response"]["status"].as_str()) {
+            ("PreToolUse", _, _) => assert_released(event, &answer),
+            ("PostToolUse", Some("Agent"), Some("async_launched")) => assert_eq!(
+                answer["hookSpecificOutput"]["updatedToolOutput"],
+                serde_json::json!({
+                    "status": "async_launched",
+                    "isAsync": true,
+                    "agentId": event["tool_response"]["agentId"],
+                    "description": event["tool_input"]["description"],
+                    "prompt": "",
+                    "outputFile": "",
+                }),
+                "a launch crosses only the runtime's facts: {answer}"
+            ),
             _ => assert_eq!(answer, serde_json::json!({}), "{name} carries no opinion: {answer}"),
         }
     }
@@ -722,8 +735,8 @@ async fn an_agent_result_naming_another_subagent_is_withheld() {
         "a result naming a child the family never bound carries none of what that child said: {answer}"
     );
     assert_eq!(
-        answer["hookSpecificOutput"]["updatedToolOutput"]["agentId"], "someone-else",
-        "the rest of the response is restated as delivered",
+        answer["hookSpecificOutput"]["updatedToolOutput"]["agentId"], "",
+        "the rest of the response keeps its shape and none of its content",
     );
     assert_eq!(
         returns(&runtime, &root),

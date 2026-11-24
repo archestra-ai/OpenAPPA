@@ -1593,6 +1593,16 @@ ${stdout}`);
 
 // integrations/opencode/appencode.ts
 var UNMEDIATED = ["shell", "patch", "grep"];
+function namesHandle(output, handle) {
+  if (typeof output !== "string")
+    return !1;
+  try {
+    let fields = JSON.parse(output);
+    return typeof fields === "object" && fields !== null && !Array.isArray(fields) && Object.keys(fields).length === 2 && fields.output === handle && fields.content === handle;
+  } catch {
+    return !1;
+  }
+}
 function text(decision, field) {
   let value = decision[field];
   if (typeof value !== "string")
@@ -1918,15 +1928,17 @@ ${task.state.value}`;
             }).pipe(Effect4.onError(() => cleanup), Effect4.uninterruptible));
             if (initialPrompts.add(child.id), yield* ctx.session.prompt({ sessionID: child.id, id: child.promptID, text: child.prompt }), input.background === !0)
               return yield* Effect4.gen(function* () {
-                let task = crypto.randomUUID();
+                let task = child.id;
                 backgroundReport = {
                   ...proposal,
                   spawned_id: child.id,
                   outcome: { status: "success", body: { output: task, content: task } }
                 };
                 let acknowledged = yield* runtime("spawn_result", backgroundReport);
-                if (acknowledged.decision !== "replace_output" || acknowledged.launched !== !0)
-                  throw Error("[appencode] Background launch was not confirmed.");
+                if (acknowledged.decision === "replace_output" && acknowledged.no_return !== !0 && acknowledged.launched !== !0)
+                  throw Error(`[appencode] ${feedback(text(acknowledged, "output"), tools)}`);
+                if (acknowledged.decision !== "replace_output" || acknowledged.launched !== !0 || acknowledged.no_return === !0 || !namesHandle(acknowledged.output, task))
+                  throw Error(`[appencode] Background launch was not confirmed.${typeof acknowledged.output === "string" ? ` ${feedback(acknowledged.output, tools)}` : ""}`);
                 if (disposed)
                   throw Error("[appencode] Plugin disposed during launch.");
                 let owned = {

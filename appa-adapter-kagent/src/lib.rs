@@ -61,7 +61,7 @@ pub fn adapter() -> Adapter {
 
 /// A kagent spawn's launch reply is the child's context id, the one field the UI follows the
 /// child by. kagent asks for no `result` beside it: its own pending reply carries none.
-fn launch_fields(_: Option<serde_json::Value>, spawned: &str) -> serde_json::Value {
+fn launch_fields(_: &ProposedCall, spawned: &str) -> serde_json::Value {
     serde_json::json!({ "subagent_session_id": spawned })
 }
 

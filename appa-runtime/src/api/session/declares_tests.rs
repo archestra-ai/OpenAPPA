@@ -2112,31 +2112,70 @@ async fn a_launch_under_a_host_declaring_no_launch_fields_admits_nothing() {
 
 /// A launch whose fields are past the size limit closes on nothing and is answered with the
 /// limit's notice, and so is its repeat once the child returned.
+/// The runtime over `dir`'s log again, its deployment's size limit `max_body_bytes`.
+fn reopened(dir: &std::path::Path, max_body_bytes: usize) -> Runtime {
+    let path = dir.join("appa.toml");
+    let text = policy(false).replace("max_body_bytes = 65536", &format!("max_body_bytes = {max_body_bytes}"));
+    std::fs::write(&path, text).expect("the fixture writes");
+    Runtime::open(
+        Config::load(&path).expect("the fixture validates"),
+        dir.join("appa.db"),
+        None,
+    )
+    .expect("the runtime reopens")
+}
+
+/// A launch's first report fixes how it is taken, its size limit's disposition included: a
+/// repeat under a deployment whose limit moved either way answers as the first report did.
 #[tokio::test]
-async fn a_launch_past_the_size_limit_answers_with_the_limit_and_so_does_its_repeat() {
+async fn a_launchs_size_disposition_is_fixed_by_its_first_report() {
+    for (first, then) in [(16, 65536), (65536, 16)] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = reopened(dir.path(), first);
+        runtime.create_session(root(), None).expect("a fresh root opens");
+        let child = bound_child(&runtime, 1).await;
+        let launched = reported_without_a_message(&runtime, &child, kagent()).await;
+        match first {
+            16 => assert!(
+                matches!(
+                    &launched,
+                    SpawnResultDecision::Outcome(ToolResultDecision::Replace { .. })
+                ),
+                "{launched:?}"
+            ),
+            _ => assert!(
+                matches!(&launched, SpawnResultDecision::Launched { .. }),
+                "{launched:?}"
+            ),
+        }
+        drop((child, runtime));
+        let runtime = reopened(dir.path(), then);
+        let child = runtime
+            .session(&root(), &TrajectoryId("cc:root:child-1".to_string()))
+            .expect("the child reattaches");
+        assert_eq!(reported_without_a_message(&runtime, &child, kagent()).await, launched);
+    }
+}
+
+/// A launch's first report fixes its class: once the child returned, or while a sanitizer
+/// withholds it, a repeat of a launch is still a launch, never a reply with no return.
+#[tokio::test]
+async fn a_launchs_repeat_is_a_launch_after_its_child_returned() {
     let Deployed { runtime, .. } = deployed(false);
     let child = bound_child(&runtime, 1).await;
-    let reply = serde_json::json!({
-        "isAsync": true,
-        "status": "async_launched",
-        "agentId": "child-1",
-        "prompt": "p".repeat(70_000),
-    });
-    let launch = appa_adapter_claude_code::adapter().spawn_launch;
-    let before = admitted(&runtime);
-    let launched = reported(&runtime, &child, &reply, launch).await;
-    assert!(
-        matches!(
-            &launched,
-            SpawnResultDecision::Outcome(ToolResultDecision::Replace { .. })
-        ),
-        "{launched:?}"
+    let launched = reported_without_a_message(&runtime, &child, SpawnLaunch::Undeclared).await;
+    assert_eq!(
+        launched,
+        SpawnResultDecision::Launched {
+            output: super::result::LAUNCHED.to_string(),
+            receipt: None,
+        }
     );
     crossing(&child, "the answer", "op-1").await;
-    let crossed = admitted(&runtime);
-    assert_eq!(reported(&runtime, &child, &reply, launch).await, launched);
-    assert_eq!(admitted(&runtime), crossed);
-    assert_eq!(crossed, before + 1, "only the child's return was admitted");
+    assert_eq!(
+        reported_without_a_message(&runtime, &child, SpawnLaunch::Undeclared).await,
+        launched
+    );
 }
 
 /// [`MIDDLE`]'s `fetch` behind a `signoff` the authority at `url` rules on.

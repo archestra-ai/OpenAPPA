@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use appa_runtime_api::{HookDecision, HookEvent, ToolOutcome};
 
-use crate::redact::{Replacement, carries_no_message, replacement, response, restated, restates};
+use crate::redact::{Replacement, replacement, response, restated, restates};
 
 pub(crate) fn withheld(reason: &str) -> String {
     format!("[appa] the tool result was withheld: {reason}")
@@ -111,10 +111,7 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
             Some(replacement) => replaced(replacement, None),
             None => block(output),
         },
-        // A spawn reply holding nothing beside the run's own metadata holds nothing of the
-        // child's for the runtime's words to stand in for.
         HookDecision::NoReturn { output } => match replacement(event, output) {
-            Some(_) if carries_no_message(event) => serde_json::json!({}),
             Some(replacement) => replaced(replacement, None),
             None => block(output),
         },

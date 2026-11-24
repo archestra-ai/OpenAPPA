@@ -145,6 +145,7 @@ fn a_result_replays_only_for_a_successful_close() {
                     closed(crate::fact::CloseOutcome::Success {
                         effects: EffectSet::default(),
                         crossing: None,
+                        spawn_report: None,
                     }),
                     admitted.clone()
                 ]

@@ -473,6 +473,9 @@ pub struct ToolReport {
     pub offer_nonce: crate::value::OfferNonce,
     /// Audience primitives this act reads that the dispatch's record did not pin.
     pub audience: AudienceEvidence,
+    /// How the runtime took a bound spawn's report with no message, recorded with the
+    /// observation and required of every repeat.
+    pub spawn_report: Option<crate::fact::SpawnReport>,
 }
 
 /// How a tool run ended. `Failure` commits no effects; `Indeterminate` commits none and
@@ -1520,6 +1523,7 @@ impl<'a> Sequence<'a> {
                 dispatch,
                 effects,
                 observed: _,
+                spawn_report: _,
             } => self.dispatch_succeeded(trajectory, dispatch, effects)?,
             Fact::DispatchClosed {
                 trajectory,
@@ -4244,6 +4248,7 @@ mod tests {
                     evidence: Vec::new(),
                     offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
+                    spawn_report: None,
                 }),
             )
             .expect("the outcome closes the dispatch")
@@ -4541,6 +4546,7 @@ mod tests {
                     evidence: Vec::new(),
                     offer_nonce: nonce(),
                     audience: crate::audience::AudienceEvidence::default(),
+                    spawn_report: None,
                 }),
             )
             .expect("the outcome decides");

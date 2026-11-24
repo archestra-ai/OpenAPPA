@@ -4731,6 +4731,7 @@ mod tests {
             outcome: crate::fact::CloseOutcome::Success {
                 effects: EffectSet::new([kind]).unwrap(),
                 crossing: None,
+                spawn_report: None,
             },
         }
     }

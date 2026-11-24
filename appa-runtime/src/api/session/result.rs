@@ -1,4 +1,5 @@
 use super::*;
+use appa_engine::fact::{LaunchAdmission, SpawnReport};
 use appa_runtime_api::AutoApply;
 
 /// Why a reported outcome named no reportable dispatch. The threat model puts
@@ -47,37 +48,23 @@ pub(super) enum SpawnPlan {
         crossing: appa_engine::value::ChildReturnId,
     },
     Withheld,
-    /// A success that carries no message from a child that ended or already returned. It
-    /// closes as a success with no body, and none of its bytes cross.
-    Unspoken,
-    /// A success that carries no message from a child that runs with nothing returned: it
-    /// closes on its [`Launch`] alone.
-    Launch,
+    /// A success that carries no message of the child's, taken as the report says: the
+    /// child's launch or a reply with no return. None of the report's bytes cross.
+    Reported(SpawnReport),
     Close(EventError),
 }
 
-/// A bound spawn's launch reply as the host's launch fields keep it. Nothing else of the reply
-/// is ever admitted: the child's bytes beside those fields included.
-pub(super) enum Launch {
-    /// The launch fields, admitted as the call's body: `Available`, or `TooLarge` past the
-    /// externals' limit.
-    Fields(OutcomeBody),
-    /// The host declares no launch fields, so the launch admits nothing.
-    Undeclared,
-}
-
-impl Launch {
-    fn outcome(&self) -> ToolOutcome {
-        ToolOutcome::Success {
-            body: match self {
-                Launch::Fields(body) => body.clone(),
-                Launch::Undeclared => OutcomeBody::Unavailable,
+/// What a report taken as `report` closes on: the launch fields alone, or nothing. Only the
+/// runtime's facts make the fields, never the report's bytes.
+fn reported_outcome(report: &SpawnReport, fields: Option<&str>) -> ToolOutcome {
+    ToolOutcome::Success {
+        body: match (report, fields) {
+            (SpawnReport::Launch(LaunchAdmission::Fields), Some(fields)) => OutcomeBody::Available(fields.to_string()),
+            (SpawnReport::Launch(LaunchAdmission::OverLimit { limit_bytes }), _) => OutcomeBody::TooLarge {
+                limit_bytes: usize::try_from(*limit_bytes).ok(),
             },
-        }
-    }
-
-    fn too_large(&self) -> bool {
-        matches!(self, Launch::Fields(OutcomeBody::TooLarge { .. }))
+            _ => OutcomeBody::Unavailable,
+        },
     }
 }
 
@@ -340,9 +327,9 @@ impl Session {
         value: Option<String>,
         launch: appa_runtime_api::SpawnLaunch,
     ) -> Result<SpawnResultDecision, EventError> {
-        // A launch is conformed from the reply as reported, and then capped.
-        let launch = match (&outcome, &child, &value) {
-            (ToolOutcome::Success { body }, Some(child), None) => Some(self.launch(launch, body, child)),
+        // A launch's fields are the runtime's facts: the call and the child the report names.
+        let fields = match (&child, &value) {
+            (Some(child), None) => self.launch_fields(launch, &call, child),
             _ => None,
         };
         let outcome = self.cap_outcome(outcome);
@@ -375,8 +362,22 @@ impl Session {
                                 .spawn_deferral(&dispatch)
                                 .map(|deferred| context.engine().deferral_notice(&deferred, &self.presentation)),
                         };
+                        // A success with no message from the bound child is taken once: the record
+                        // that first observed it fixes how, and every repeat is taken the same way,
+                        // whatever the child, a deferral or the size limit did since.
+                        let recorded = match (&status, &child, &value, &outcome) {
+                            (ForkStatus::Bound(bound), Some(named), None, ToolOutcome::Success { .. })
+                                if named == bound =>
+                            {
+                                context.engine().committed_spawn_report(context.view, &dispatch)
+                            }
+                            _ => None,
+                        };
                         let next = match (status, &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
+                            _ if recorded.is_some() => {
+                                SpawnPlan::Reported(recorded.expect("a recorded report was just matched"))
+                            }
                             (ForkStatus::Unprepared | ForkStatus::FanOut, _) => SpawnPlan::Outcome,
                             // A deferred return answers every report of its spawn with the notice,
                             // so the report closes the dispatch as what the host says it was.
@@ -401,31 +402,22 @@ impl Session {
                             (ForkStatus::Prepared, None) | (ForkStatus::Failed | ForkStatus::ParentEnded, _) => {
                                 SpawnPlan::Close(EventError::SpawnNotTaken)
                             }
-                            (ForkStatus::Bound(bound), Some(child)) if *child == bound => match (&value, &launch) {
-                                // A success with no message. Its class follows the observation the
-                                // log committed for the report, where there is one, so a repeat and
-                                // a pending finalization answer as the report first did; a reply
-                                // past the size limit is answered as one either way. Without a
-                                // committed observation, a child that runs with nothing returned
-                                // is launched, and its return crosses at its own stop.
-                                (None, Some(launch)) => {
-                                    let unreturned = || context.engine().runs_unreturned(context.view, &bound);
-                                    let launched = launch.too_large()
-                                        || match context.engine().committed_observation(context.view, &dispatch) {
-                                            Some(appa_engine::fact::ObservedResult::Available(_)) => true,
-                                            Some(appa_engine::fact::ObservedResult::Unavailable) => {
-                                                matches!(launch, Launch::Undeclared) && unreturned()
-                                            }
-                                            None => unreturned(),
-                                        };
-                                    match launched {
-                                        true => SpawnPlan::Launch,
-                                        false => SpawnPlan::Unspoken,
-                                    }
-                                }
-                                (None, None) => SpawnPlan::Outcome,
+                            (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
+                                // A success with no message, first reported: a child that runs with
+                                // nothing returned is launched, and its return crosses at its own
+                                // stop. The size limit applies to the launch fields once that is
+                                // fixed.
+                                None => match &outcome {
+                                    ToolOutcome::Success { .. } => SpawnPlan::Reported(
+                                        match context.engine().runs_unreturned(context.view, &bound) {
+                                            true => SpawnReport::Launch(self.launch_admission(fields.as_deref())),
+                                            false => SpawnReport::NoReturn,
+                                        },
+                                    ),
+                                    _ => SpawnPlan::Outcome,
+                                },
                                 // A failure repeating the crossed return closes as the host reported it.
-                                (Some(_), _) => match (&crossed, &outcome) {
+                                Some(_) => match (&crossed, &outcome) {
                                     (Some(_), ToolOutcome::Failure { .. }) => SpawnPlan::Outcome,
                                     (Some(crossed), _) => SpawnPlan::Replay {
                                         receipt: crossed.receipt.clone(),
@@ -456,20 +448,10 @@ impl Session {
                             },
                             // A withheld message still closes as the failure the host reported, in
                             // the runtime's words: none of the host's bytes cross with the close.
-                            SpawnPlan::Unspoken => EngineEvent::ToolOutcome {
+                            SpawnPlan::Reported(report) => EngineEvent::SpawnReported {
                                 dispatch,
-                                outcome: ToolOutcome::Success {
-                                    body: OutcomeBody::Unavailable,
-                                },
-                                evidence,
-                                entropy: fresh_entropy(),
-                            },
-                            SpawnPlan::Launch => EngineEvent::ToolOutcome {
-                                dispatch,
-                                outcome: launch
-                                    .as_ref()
-                                    .expect("a launch is planned from its conformed reply")
-                                    .outcome(),
+                                outcome: reported_outcome(report, fields.as_deref()),
+                                report: report.clone(),
                                 evidence,
                                 entropy: fresh_entropy(),
                             },
@@ -537,28 +519,34 @@ impl Session {
                         _ => SpawnResultDecision::Return(ChildReturnDecision::Returned { value, receipt }),
                     });
                 }
-                SpawnPlan::Unspoken => {
-                    outcome_decision(decision, &self.deployment().externals)?;
-                    return Ok(SpawnResultDecision::NoReturn {
-                        output: NO_RETURN.to_string(),
-                    });
-                }
-                SpawnPlan::Launch => {
-                    let decided = self
-                        .accept_staged(outcome_decision(decision, &self.deployment().externals)?, auto_apply)
-                        .await?;
-                    // The admitted fields restate the reply in its place; any other answer — the
-                    // size limit's, a withholding, a sanitizer's derivation — is the call's own.
-                    return Ok(match (launch, decided) {
-                        (
-                            Some(Launch::Fields(OutcomeBody::Available(output))),
-                            ToolResultDecision::Keep { receipt },
-                        ) => SpawnResultDecision::Launched { output, receipt },
-                        (Some(Launch::Undeclared), _) => SpawnResultDecision::Launched {
-                            output: LAUNCHED.to_string(),
-                            receipt: None,
-                        },
-                        (_, decided) => SpawnResultDecision::Outcome(decided),
+                // The admitted fields restate the reply in its place; any other answer to a launch —
+                // the size limit's, a withholding, a sanitizer's derivation — is the call's own.
+                SpawnPlan::Reported(report) => {
+                    return Ok(match report {
+                        SpawnReport::Launch(LaunchAdmission::Fields | LaunchAdmission::OverLimit { .. }) => {
+                            let decided = self
+                                .accept_staged(outcome_decision(decision, &self.deployment().externals)?, auto_apply)
+                                .await?;
+                            match (fields, decided) {
+                                (Some(output), ToolResultDecision::Keep { receipt }) => {
+                                    SpawnResultDecision::Launched { output, receipt }
+                                }
+                                (_, decided) => SpawnResultDecision::Outcome(decided),
+                            }
+                        }
+                        SpawnReport::Launch(LaunchAdmission::Undeclared) => {
+                            outcome_decision(decision, &self.deployment().externals)?;
+                            SpawnResultDecision::Launched {
+                                output: LAUNCHED.to_string(),
+                                receipt: None,
+                            }
+                        }
+                        SpawnReport::NoReturn => {
+                            outcome_decision(decision, &self.deployment().externals)?;
+                            SpawnResultDecision::NoReturn {
+                                output: NO_RETURN.to_string(),
+                            }
+                        }
                     });
                 }
                 SpawnPlan::Withheld => {
@@ -573,28 +561,30 @@ impl Session {
         Err(EventError::UnexpectedDecision)
     }
 
-    /// The reply `body` of the bound child `child` as the host's launch fields keep it.
-    fn launch(&self, launch: appa_runtime_api::SpawnLaunch, body: &OutcomeBody, child: &TrajectoryId) -> Launch {
-        let appa_runtime_api::SpawnLaunch::Conformed(conform) = launch else {
-            return Launch::Undeclared;
+    /// The launch fields of the bound child `child` that `call` spawned, as `launch` makes them
+    /// from those two facts alone; `None` where the host declares none.
+    fn launch_fields(
+        &self,
+        launch: appa_runtime_api::SpawnLaunch,
+        call: &ProposedCall,
+        child: &TrajectoryId,
+    ) -> Option<String> {
+        let appa_runtime_api::SpawnLaunch::Conformed(fields) = launch else {
+            return None;
         };
-        let Ok(spawned) = appa_runtime_api::child_host_id(&self.root, child) else {
-            return Launch::Undeclared;
-        };
-        let report = match body {
-            OutcomeBody::Available(raw) => serde_json::from_str(raw).ok(),
-            OutcomeBody::TooLarge { limit_bytes } => {
-                return Launch::Fields(OutcomeBody::TooLarge {
-                    limit_bytes: *limit_bytes,
-                });
-            }
-            OutcomeBody::Unavailable => None,
-        };
-        match self.cap_outcome(ToolOutcome::Success {
-            body: OutcomeBody::Available(conform(report, &spawned).to_string()),
-        }) {
-            ToolOutcome::Success { body } => Launch::Fields(body),
-            _ => unreachable!("capping keeps a success a success"),
+        let spawned = appa_runtime_api::child_host_id(&self.root, child).ok()?;
+        Some(fields(call, &spawned).to_string())
+    }
+
+    /// What a launch first reported admits: its fields under this deployment's size limit.
+    fn launch_admission(&self, fields: Option<&str>) -> LaunchAdmission {
+        let limit = self.deployment().config.externals.max_body_bytes;
+        match fields {
+            None => LaunchAdmission::Undeclared,
+            Some(fields) if fields.len() > limit => LaunchAdmission::OverLimit {
+                limit_bytes: u64::try_from(limit).unwrap_or(u64::MAX),
+            },
+            Some(_) => LaunchAdmission::Fields,
         }
     }
 

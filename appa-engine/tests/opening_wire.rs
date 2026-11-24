@@ -235,6 +235,7 @@ fn stored_closes_keep_their_bytes_beside_an_abandoned_success() {
             CloseOutcome::Success {
                 effects: EffectSet::new([EffectKind::new("read")]).expect("one effect is a set"),
                 crossing: None,
+                spawn_report: None,
             },
         ),
         (
@@ -242,6 +243,7 @@ fn stored_closes_keep_their_bytes_beside_an_abandoned_success() {
             CloseOutcome::Success {
                 effects: EffectSet::default(),
                 crossing: None,
+                spawn_report: None,
             },
         ),
         (r#""Failure""#.to_string(), CloseOutcome::Failure),

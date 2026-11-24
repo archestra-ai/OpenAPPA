@@ -259,6 +259,7 @@ pub(super) fn reads(
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the raw result admits");
@@ -1322,6 +1323,7 @@ pub(super) fn staged_candidate(e: &Engine) -> (Vec<Fact>, DispatchId, ValueBody,
         evidence,
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     };
     let view = |log: &[Fact]| {
         e.view(&traj(), log.to_vec(), log.len() as u64)

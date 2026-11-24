@@ -40,7 +40,7 @@
 //! withheld too, from the tool and response its bytes still carry: the
 //! result has run either way, and a hook that only exits non-zero leaves
 //! that output in front of the model.
-use appa_runtime_api::{HookEvent, OutcomeBody, SpawnKind, ToolOutcome};
+use appa_runtime_api::{HookEvent, OutcomeBody, ProposedCall, SpawnKind, ToolOutcome};
 
 use crate::identity::{is_mcp_tool, spawn_kind};
 
@@ -77,9 +77,31 @@ impl Restatement {
 
 pub(crate) fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> {
     match event {
-        HookEvent::SpawnResult { call, outcome, .. } | HookEvent::ToolResult { call, outcome, .. } => {
-            Some(restated(&call.tool, delivered(outcome)?, text))
+        HookEvent::SpawnResult {
+            actor,
+            call,
+            outcome,
+            child,
+            ..
+        } => {
+            let response = delivered(outcome)?;
+            Some(match (Restatement::of(&call.tool), is_launch(&response)) {
+                // A launch is restated from the runtime's facts alone: nothing of the response
+                // it stands in for is copied, and the runtime's words go beside it.
+                (Restatement::Spawn, true) => Replacement {
+                    output: launch_fields(
+                        call,
+                        &child
+                            .as_ref()
+                            .and_then(|child| appa_runtime_api::child_host_id(&actor.root, child).ok())
+                            .unwrap_or_default(),
+                    ),
+                    context: Some(text.to_string()),
+                },
+                _ => restated(&call.tool, response, text),
+            })
         }
+        HookEvent::ToolResult { call, outcome, .. } => Some(restated(&call.tool, delivered(outcome)?, text)),
         _ => None,
     }
 }
@@ -103,25 +125,6 @@ pub(crate) fn restates(event: &HookEvent, text: &str, replacement: &Replacement)
     }
 }
 
-/// Whether the response `event` delivered is a spawn's that carries nothing beside the run's
-/// metadata of its known shape, no message among it: a launch acknowledgement, which holds
-/// none of the child's bytes for a replacement to stand in for.
-pub(crate) fn carries_no_message(event: &HookEvent) -> bool {
-    match event {
-        HookEvent::SpawnResult { call, outcome, .. } | HookEvent::ToolResult { call, outcome, .. } => {
-            matches!(Restatement::of(&call.tool), Restatement::Spawn)
-                && delivered(outcome).is_some_and(|response| match response {
-                    serde_json::Value::Object(fields) => fields.iter().all(|(key, field)| match key.as_str() {
-                        "content" => *field == serde_json::json!([]),
-                        key => is_run_metadata(key, field),
-                    }),
-                    _ => false,
-                })
-        }
-        _ => false,
-    }
-}
-
 /// The response `event` delivered, as JSON.
 pub(crate) fn response(event: &HookEvent) -> Option<serde_json::Value> {
     match event {
@@ -130,22 +133,35 @@ pub(crate) fn response(event: &HookEvent) -> Option<serde_json::Value> {
     }
 }
 
-/// The `Agent` response's launch fields: the run's metadata keys alone, each conformed to its
-/// known shape, and `content` emptied, since a launch carries no message there. Every other
-/// key is dropped, so a launch reply crosses none of what sits beside its metadata.
-pub(crate) fn launch_fields(report: Option<serde_json::Value>, _spawned: &str) -> serde_json::Value {
-    match report {
-        Some(serde_json::Value::Object(fields)) => serde_json::Value::Object(
-            fields
-                .into_iter()
-                .filter_map(|(key, field)| match key.as_str() {
-                    "content" => Some((key, serde_json::json!([]))),
-                    _ => spawn_metadata(&key).map(|shape| (key, shape.conform(field))),
-                })
-                .collect(),
-        ),
-        _ => serde_json::Value::Object(serde_json::Map::new()),
-    }
+/// The `Agent` tool's background launch as Claude Code's output shape for it requires it, made
+/// from the runtime's facts alone: the child's host id and the description the released call
+/// gave. The launch's prompt and output file are not facts the runtime holds, so they stand
+/// empty, and nothing of a reported response is ever copied.
+pub(crate) fn launch_fields(call: &ProposedCall, spawned: &str) -> serde_json::Value {
+    let description = serde_json::from_str::<serde_json::Value>(call.arguments.get())
+        .ok()
+        .and_then(|arguments| arguments.get("description")?.as_str().map(str::to_string))
+        .unwrap_or_default();
+    launch_shape(spawned, &description)
+}
+
+fn launch_shape(spawned: &str, description: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "async_launched",
+        "isAsync": true,
+        "agentId": spawned,
+        "description": description,
+        "prompt": "",
+        "outputFile": "",
+    })
+}
+
+/// Whether a spawn's response is a launch's, by the status Claude Code's launch shapes carry.
+fn is_launch(response: &serde_json::Value) -> bool {
+    matches!(
+        response.get("status").and_then(serde_json::Value::as_str),
+        Some("async_launched" | "remote_launched")
+    )
 }
 
 /// One delivered response restated in place of itself.
@@ -203,26 +219,25 @@ impl Shape {
         }
     }
 
-    /// `value` rebuilt in this shape: the listed keys alone, each conformed, and every leaf
-    /// this shape admits kept as it is, any other a placeholder of its shape.
-    fn conform(self, value: serde_json::Value) -> serde_json::Value {
+    /// `value`'s structure in this shape with none of its content: the listed keys alone, a
+    /// discriminator kept where it is one of its values, and every other leaf a placeholder of
+    /// its shape. So a replacement keeps the output shape the client validates and copies
+    /// nothing a report said.
+    fn blank(self, value: serde_json::Value) -> serde_json::Value {
         match (self, value) {
             (Self::Fields(known), serde_json::Value::Object(mut fields)) => serde_json::Value::Object(
                 known
                     .iter()
-                    .filter_map(|(name, shape)| Some((name.to_string(), shape.conform(fields.remove(*name)?))))
+                    .filter_map(|(name, shape)| Some((name.to_string(), shape.blank(fields.remove(*name)?))))
                     .collect(),
             ),
-            (Self::List(item), serde_json::Value::Array(items)) => {
-                serde_json::Value::Array(items.into_iter().map(|element| item.conform(element)).collect())
-            }
-            (shape, value) if shape.admits(&value) => value,
-            (Self::Text, _) => serde_json::Value::String(REDACTED.to_string()),
-            (Self::Count, _) => serde_json::Value::from(0),
-            (Self::Flag, _) => serde_json::Value::Bool(false),
+            (Self::Fixed(_), value) if self.admits(&value) => value,
             (Self::Fixed(values), _) => {
                 serde_json::Value::String(values.first().copied().unwrap_or(REDACTED).to_string())
             }
+            (Self::Text, _) => serde_json::Value::String(String::new()),
+            (Self::Count, _) => serde_json::Value::from(0),
+            (Self::Flag, _) => serde_json::Value::Bool(false),
             (Self::Fields(_), _) => serde_json::Value::Object(serde_json::Map::new()),
             (Self::List(_), _) => serde_json::Value::Array(Vec::new()),
         }
@@ -336,17 +351,24 @@ fn spawn_restates(response: &serde_json::Value, text: &str) -> bool {
 
 /// The spawn's result restated: the swap is the `content` text, the one field of the
 /// `Agent` response Claude Code shows the parent model, beside the run's metadata keys alone,
-/// each conformed to its known shape. Nothing else of the response is copied, so a response
-/// under the spawn's name that is not the spawn's own shape — the bytes a refused hook still
-/// carries included — crosses nothing.
+/// each blanked to its known shape; a launch's response takes the runtime's words beside its
+/// shape instead. No content of the response is copied, so a response under the spawn's name
+/// that is not the spawn's own shape — the bytes a refused hook still carries included —
+/// crosses nothing.
 fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
+    if is_launch(&response) {
+        return Replacement {
+            output: launch_shape("", ""),
+            context: Some(text.to_string()),
+        };
+    }
     let output = match response {
         serde_json::Value::Object(fields) => {
             let mut object: serde_json::Map<String, serde_json::Value> = fields
                 .into_iter()
                 .filter_map(|(key, field)| {
                     let shape = spawn_metadata(&key)?;
-                    Some((key, shape.conform(field)))
+                    Some((key, shape.blank(field)))
                 })
                 .collect();
             object.insert("content".to_string(), text_block(text));
@@ -629,10 +651,22 @@ mod tests {
         );
     }
 
+    /// `agent_response` in its shape with none of its content, as a replacement carries it.
+    fn blank_response() -> serde_json::Value {
+        serde_json::json!({
+            "status": "completed",
+            "prompt": "",
+            "agentId": "",
+            "agentType": "",
+            "totalDurationMs": 0,
+            "toolStats": {"readCount": 0},
+        })
+    }
+
     #[test]
     fn a_withheld_spawn_result_replaces_the_subagents_message() {
         let event = spawn_result(agent_response());
-        let mut withheld = agent_response();
+        let mut withheld = blank_response();
         withheld["content"] =
             serde_json::json!([{"type": "text", "text": "[appa] the tool result was withheld: nothing crossed"}]);
         assert_eq!(
@@ -713,10 +747,18 @@ mod tests {
                 outcomes: None,
             },
         );
-        let output = &answer["hookSpecificOutput"]["updatedToolOutput"];
-        for (key, value) in launched.as_object().expect("the fixture is an object") {
-            assert_eq!(&output[key], value, "the run's own metadata stays: {answer}");
-        }
+        assert_eq!(
+            answer["hookSpecificOutput"]["updatedToolOutput"],
+            serde_json::json!({
+                "status": "async_launched",
+                "isAsync": true,
+                "agentId": "a1",
+                "description": "",
+                "prompt": "",
+                "outputFile": "",
+            }),
+            "a launch is restated from the runtime's facts alone: {answer}"
+        );
     }
 
     /// The two content slots no test reached, and the three outcomes that deliver no body at
@@ -874,27 +916,28 @@ mod tests {
                 "an unknown nested key",
                 "toolStats",
                 serde_json::json!({"readCount": 1, "unchecked": "words"}),
-                Some(serde_json::json!({"readCount": 1})),
+                Some(serde_json::json!({"readCount": 0})),
             ),
             (
                 "a nested element of another shape",
                 "usage",
                 serde_json::json!({"input_tokens": 2, "iterations": [{"type": "message", "note": "unchecked"}]}),
-                Some(serde_json::json!({"input_tokens": 2, "iterations": [{"type": "message"}]})),
+                Some(serde_json::json!({"input_tokens": 0, "iterations": []})),
             ),
             (
                 "text in a nested discriminator",
                 "usage",
                 serde_json::json!({"iterations": [{"type": "unchecked words"}]}),
-                Some(serde_json::json!({"iterations": [{"type": "message"}]})),
+                Some(serde_json::json!({"iterations": []})),
             ),
         ];
-        for (name, key, payload, conformed) in cases {
+        for (name, key, payload, blanked) in cases {
             let mut response = agent_response();
             response[key] = payload;
-            let mut replaced = agent_response();
-            match conformed {
-                Some(conformed) => replaced[key] = conformed,
+            let mut replaced = blank_response();
+            replaced["content"] = serde_json::json!([{"type": "text", "text": "one file: readme.txt"}]);
+            match blanked {
+                Some(blanked) => replaced[key] = blanked,
                 None => {
                     replaced.as_object_mut().expect("the response is an object").remove(key);
                 }
@@ -912,96 +955,67 @@ mod tests {
         }
     }
 
-    /// A spawn reply holding the run's metadata alone holds none of the child's bytes, so the
-    /// runtime's words for a reply with no message rewrite nothing; the same reply beside a
-    /// payload is restated without it, and any other notice in the reply's place, a size
-    /// limit's among them, still reaches the model.
+    /// A launch crosses the runtime's facts alone: its fields name the matched child and the
+    /// released call's description, and every answer to a launch reply, a notice's included,
+    /// restates it from those facts with nothing of the reply copied.
     #[test]
-    fn a_metadata_only_spawn_reply_is_kept_only_for_the_no_return_answer() {
-        let launched = serde_json::json!({
+    fn a_launch_crosses_only_the_runtimes_facts() {
+        let reported = serde_json::json!({
             "isAsync": true,
             "status": "async_launched",
-            "agentId": "a2",
-            "description": "Compute 6*7",
+            "agentId": "forged",
+            "description": "the child's bytes",
             "resolvedModel": "claude-opus-5",
-            "prompt": "Compute 6*7",
-            "outputFile": "/tmp/a2.md",
-            "canReadOutputFile": false,
+            "prompt": "the child's bytes",
+            "outputFile": "/tmp/the-childs-bytes.md",
+            "canReadOutputFile": true,
+            "note": "the child's bytes",
         });
-        let no_return = HookDecision::NoReturn {
-            output: "no message".to_string(),
+        let event = spawn_result(reported);
+        let HookEvent::SpawnResult { call, .. } = &event else {
+            unreachable!("the fixture is a spawn result")
         };
-        let mut empty = launched.clone();
-        empty["content"] = serde_json::json!([]);
-        for kept in [launched.clone(), empty] {
-            assert_eq!(render(&spawn_result(kept), &no_return), serde_json::json!({}));
+        let fields = launch_fields(call, "a1");
+        assert_eq!(
+            fields,
+            serde_json::json!({
+                "status": "async_launched",
+                "isAsync": true,
+                "agentId": "a1",
+                "description": "",
+                "prompt": "",
+                "outputFile": "",
+            })
+        );
+        let described = ProposedCall {
+            arguments: raw(serde_json::json!({"description": "List", "prompt": "List the files."})),
+            ..call.clone()
+        };
+        assert_eq!(launch_fields(&described, "a1")["description"], "List");
+
+        let updated = |answer: &HookDecision| render(&event, answer)["hookSpecificOutput"]["updatedToolOutput"].clone();
+        assert_eq!(
+            updated(&HookDecision::Launched {
+                output: fields.to_string()
+            }),
+            fields
+        );
+        // Every fallback restates the launch from the runtime's facts, its words beside it.
+        for answer in [
+            HookDecision::ReplaceOutput {
+                output: "[appa] past the size limit".to_string(),
+                outcomes: None,
+            },
+            HookDecision::Launched {
+                output: "[appa] launched".to_string(),
+            },
+            HookDecision::NoReturn {
+                output: "[appa] no return".to_string(),
+            },
+        ] {
+            let rendered = render(&event, &answer);
+            assert_eq!(rendered["hookSpecificOutput"]["updatedToolOutput"], fields);
+            assert!(rendered["hookSpecificOutput"]["additionalContext"].is_string());
         }
-        let rendered = |output: &str| {
-            let mut replaced = launched.clone();
-            replaced["content"] = serde_json::json!([{"type": "text", "text": output}]);
-            serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "updatedToolOutput": replaced,
-                }
-            })
-        };
-        let mut carrying = launched.clone();
-        carrying["extra"] = serde_json::json!("the child's bytes");
-        assert_eq!(render(&spawn_result(carrying), &no_return), rendered("no message"));
-        assert_eq!(
-            render(
-                &spawn_result(launched.clone()),
-                &HookDecision::ReplaceOutput {
-                    output: "the output was not shown".to_string(),
-                    outcomes: None,
-                }
-            ),
-            rendered("the output was not shown")
-        );
-    }
-
-    /// A launch crosses the run's metadata alone: the recorded launch is its own launch fields
-    /// and rewrites nothing, and a launch carrying anything beside them is restated without it.
-    #[test]
-    fn a_launch_crosses_only_its_run_metadata() {
-        let launched = serde_json::json!({
-            "isAsync": true,
-            "status": "async_launched",
-            "agentId": "a2",
-            "description": "Compute 6*7",
-            "resolvedModel": "claude-opus-5",
-            "prompt": "Compute 6*7",
-            "outputFile": "/tmp/a2.md",
-            "canReadOutputFile": false,
-        });
-        assert_eq!(launch_fields(Some(launched.clone()), "a2"), launched);
-        let mut carrying = launched.clone();
-        carrying["note"] = serde_json::json!("the child's bytes");
-        carrying["content"] = serde_json::json!([{"type": "image", "source": "the child's bytes"}]);
-        let mut fields = launched.clone();
-        fields["content"] = serde_json::json!([]);
-        assert_eq!(launch_fields(Some(carrying.clone()), "a2"), fields);
-        assert_eq!(
-            launch_fields(Some(serde_json::json!("the child's bytes")), "a2"),
-            serde_json::json!({})
-        );
-
-        let answer = |fields: &serde_json::Value| HookDecision::Launched {
-            output: fields.to_string(),
-        };
-        assert_eq!(
-            render(&spawn_result(launched.clone()), &answer(&launched)),
-            serde_json::json!({})
-        );
-        assert_eq!(
-            render(&spawn_result(carrying), &answer(&fields)),
-            serde_json::json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PostToolUse",
-                    "updatedToolOutput": fields,
-                }
-            })
-        );
     }
 }

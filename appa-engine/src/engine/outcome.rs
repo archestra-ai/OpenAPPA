@@ -97,6 +97,9 @@ impl Engine {
             {
                 return Err(TransitionError::ObservationMismatch);
             }
+            if spawn_report_differs(&views, dispatch, report) {
+                return Err(TransitionError::ObservationMismatch);
+            }
             // A report delivering a crossing repeats a close that delivered the same one.
             if let Some(crossing) = crossing
                 && views.spawn_crossing(dispatch).map(|(delivered, _)| delivered).as_ref() != Some(crossing)
@@ -116,7 +119,15 @@ impl Engine {
                         .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
                         .is_none() =>
             {
-                return self.admitting_outcome(view, &views, dispatch, &call, ResultAdmission::SuccessAbandoned, act);
+                return self.admitting_outcome(
+                    view,
+                    &views,
+                    dispatch,
+                    &call,
+                    ResultAdmission::SuccessAbandoned,
+                    report,
+                    act,
+                );
             }
             // A recorded success cannot be withdrawn: its effects are committed.
             (Some(_), None) => return Err(TransitionError::ContradictedSuccess),
@@ -124,6 +135,9 @@ impl Engine {
                 return Err(TransitionError::ObservationMismatch);
             }
             _ => {}
+        }
+        if spawn_report_differs(&views, dispatch, report) {
+            return Err(TransitionError::ObservationMismatch);
         }
         if views
             .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
@@ -176,7 +190,7 @@ impl Engine {
                     Some(sanitizer) => {
                         let sanitizer = sanitizer.clone();
                         let Some(derived) = sanitizer_evidence(&report.evidence, &sanitizer, raw_digest) else {
-                            let append = self.checkpoint_batch(view, &views, dispatch, &call, raw_digest)?;
+                            let append = self.checkpoint_batch(view, &views, dispatch, &call, raw_digest, report)?;
                             return Ok(EngineDecision {
                                 append,
                                 follow_up: FollowUp::Outcome(OutcomeFollowUp::Resolve(EvidenceRequest::Sanitizer {
@@ -210,6 +224,7 @@ impl Engine {
                                     sanitizer,
                                     raw_digest,
                                 },
+                                report,
                                 act,
                             );
                         };
@@ -227,15 +242,17 @@ impl Engine {
                                 lineage,
                                 evidence: act.pinned().clone(),
                             },
+                            report,
                             act,
                         );
                     }
                 }
             }
         };
-        self.admitting_outcome(view, &views, dispatch, &call, admission, act)
+        self.admitting_outcome(view, &views, dispatch, &call, admission, report, act)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn admitting_outcome(
         &self,
         view: &EngineView,
@@ -243,6 +260,7 @@ impl Engine {
         dispatch: &DispatchId,
         call: &ResolvedCall,
         admission: ResultAdmission,
+        report: &ToolReport,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
         let withheld = self
@@ -258,6 +276,7 @@ impl Engine {
             &act.pinned(),
         )
         .map_err(admission_refusal)?;
+        let batch = stamped(batch, dispatch, report);
         let batch = self.decided(view, crate::basis::DecidedAct::Outcome(dispatch.clone()), batch)?;
         Ok(EngineDecision {
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
@@ -335,17 +354,18 @@ impl Engine {
         dispatch: &DispatchId,
         call: &ResolvedCall,
         source: RawResultDigest,
+        report: &ToolReport,
     ) -> Result<Vec<Fact>, TransitionError> {
         if views.observed_result(dispatch).is_some() {
             return Ok(Vec::new());
         }
-        admit::observe_success(&self.registry, views, dispatch, call, ObservedResult::Available(source)).map_err(
-            |error| match error {
+        admit::observe_success(&self.registry, views, dispatch, call, ObservedResult::Available(source))
+            .map(|facts| stamped(facts, dispatch, report))
+            .map_err(|error| match error {
                 // The revision deciding now no longer declares the tool the dispatch released.
                 AdmitError::UnknownTool(name) => TransitionError::Call(EngineError::UnknownTool(name)),
                 other => unreachable!("an open, unreported dispatch checkpoints its observed success: {other}"),
-            },
-        )
+            })
     }
 
     /// [`Self::observed_checkpoint`] sealed as its own batch, for the paths that append it and
@@ -357,8 +377,9 @@ impl Engine {
         dispatch: &DispatchId,
         call: &ResolvedCall,
         source: RawResultDigest,
+        report: &ToolReport,
     ) -> Result<Option<ValidatedFactBatch>, TransitionError> {
-        let checkpoint = self.observed_checkpoint(views, dispatch, call, source)?;
+        let checkpoint = self.observed_checkpoint(views, dispatch, call, source, report)?;
         if checkpoint.is_empty() {
             return Ok(None);
         }
@@ -378,6 +399,7 @@ impl Engine {
         call: &ResolvedCall,
         nonce: crate::value::OfferNonce,
         derived: Fact,
+        report: &ToolReport,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
         let source = match &derived {
@@ -387,7 +409,7 @@ impl Engine {
             } => *source,
             _ => unreachable!("a staged record is a derived candidate"),
         };
-        let mut facts = self.observed_checkpoint(views, dispatch, call, source)?;
+        let mut facts = self.observed_checkpoint(views, dispatch, call, source, report)?;
         facts.push(derived);
         let (batch, confined) = self.staged(
             view,
@@ -535,6 +557,33 @@ fn admission_refusal(error: AdmitError) -> TransitionError {
         AdmitError::UnknownTool(name) => TransitionError::Call(EngineError::UnknownTool(name)),
         other => unreachable!("the outcome path admits what the log already proved: {other}"),
     }
+}
+
+/// Whether `report` takes a report of `dispatch` otherwise than its first record fixed.
+fn spawn_report_differs(views: &Views, dispatch: &DispatchId, report: &ToolReport) -> bool {
+    views
+        .spawn_report(dispatch)
+        .is_some_and(|recorded| report.spawn_report.as_ref() != Some(recorded))
+}
+
+/// `facts` with `report`'s spawn report on the record that observes `dispatch`'s success.
+fn stamped(mut facts: Vec<Fact>, dispatch: &DispatchId, report: &ToolReport) -> Vec<Fact> {
+    for fact in &mut facts {
+        match fact {
+            Fact::DispatchSucceeded {
+                dispatch: observed,
+                spawn_report,
+                ..
+            }
+            | Fact::DispatchClosed {
+                dispatch: observed,
+                outcome: crate::fact::CloseOutcome::Success { spawn_report, .. },
+                ..
+            } if observed == dispatch => spawn_report.clone_from(&report.spawn_report),
+            _ => {}
+        }
+    }
+    facts
 }
 
 pub(super) fn fixed_observation(views: &Views, dispatch: &DispatchId) -> Option<ObservedResult> {

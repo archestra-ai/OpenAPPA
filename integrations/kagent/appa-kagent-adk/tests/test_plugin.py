@@ -1020,7 +1020,20 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
     [
         (
             {"protocol": 1, "decision": "replace_output", "output": "no message", "no_return": True},
-            {"result": "no message", "subagent_session_id": "child-ctx"},
+            {"result": "no message"},
+        ),
+        (
+            {
+                "protocol": 1,
+                "decision": "replace_output",
+                "output": '{"subagent_session_id":"another-ctx"}',
+                "launched": True,
+            },
+            {"result": '{"subagent_session_id":"another-ctx"}'},
+        ),
+        (
+            {"protocol": 1, "decision": "replace_output", "output": "launched, nothing admitted", "launched": True},
+            {"result": "launched, nothing admitted"},
         ),
         (
             {
@@ -1034,7 +1047,7 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
         ({"protocol": 1, "decision": "replace_output", "output": "confined"}, {"result": "confined"}),
     ],
 )
-async def test_a_spawn_reply_with_no_message_keeps_only_its_childs_session_id(decision, returned):
+async def test_a_spawn_reply_with_no_message_keeps_its_childs_session_id_only_on_its_launch(decision, returned):
     plugin = plugin_over(Hook(decision))
     replaced = await plugin.after_tool_callback(
         tool=FakeTool("kagent__NS__billing_agent"),

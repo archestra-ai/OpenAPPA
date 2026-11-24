@@ -363,6 +363,7 @@ fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
             outcome: crate::fact::CloseOutcome::Success {
                 effects: crate::fact::EffectSet::default(),
                 crossing: None,
+                spawn_report: None,
             },
         }],
     ]
@@ -555,6 +556,7 @@ fn delivering(dispatch: &DispatchId, crossing: &ChildReturnId) -> EngineEvent {
         evidence: Vec::new(),
         offer_nonce: nonce(),
         audience: crate::audience::AudienceEvidence::default(),
+        spawn_report: None,
     })
 }
 
@@ -615,6 +617,7 @@ fn a_spawn_close_delivers_only_its_bound_childs_latest_crossing() {
                     crate::fact::CloseOutcome::Success {
                         effects,
                         crossing: Some(_),
+                        spawn_report: _,
                     },
             } => Fact::DispatchClosed {
                 trajectory,
@@ -622,6 +625,7 @@ fn a_spawn_close_delivers_only_its_bound_childs_latest_crossing() {
                 outcome: crate::fact::CloseOutcome::Success {
                     effects,
                     crossing: Some(other.clone()),
+                    spawn_report: None,
                 },
             },
             fact => fact,
@@ -670,6 +674,7 @@ fn a_spawn_close_that_admitted_its_own_result_delivered_no_crossing() {
                 evidence: Vec::new(),
                 offer_nonce: nonce(),
                 audience: crate::audience::AudienceEvidence::default(),
+                spawn_report: None,
             }),
         )
         .expect("the report closes with its own result"),
@@ -692,6 +697,7 @@ fn a_spawn_close_that_admitted_its_own_result_delivered_no_crossing() {
                 outcome: crate::fact::CloseOutcome::Success {
                     effects,
                     crossing: Some(crossing.clone()),
+                    spawn_report: None,
                 },
             },
             fact => fact,
@@ -710,6 +716,7 @@ fn checkpoint(dispatch: &DispatchId, observed: crate::fact::ObservedResult) -> F
         dispatch: dispatch.clone(),
         effects: crate::fact::EffectSet::default(),
         observed,
+        spawn_report: None,
     }
 }
 
