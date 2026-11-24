@@ -1668,6 +1668,15 @@ impl<'a> Sequence<'a> {
             {
                 Err(TransitionRefusal::ForgedEvidence)
             }
+            (CloseOutcome::SuccessAbandoned, false) => Err(TransitionRefusal::ForgedEvidence),
+            (CloseOutcome::SuccessAbandoned, true)
+                if views.bound_sanitizer(dispatch).is_none()
+                    || views
+                        .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+                        .is_some() =>
+            {
+                Err(TransitionRefusal::ForgedEvidence)
+            }
             (CloseOutcome::Success { effects }, true) if effects != &EffectSet::default() => {
                 Err(TransitionRefusal::EffectsMismatch)
             }
@@ -2459,7 +2468,7 @@ impl<'a> Sequence<'a> {
                 CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => {
                     effect_advance(self.projection.view(trajectory).reserves(dispatch))
                 }
-                CloseOutcome::Indeterminate => crate::basis::BasisAdvance::default(),
+                CloseOutcome::Indeterminate | CloseOutcome::SuccessAbandoned => crate::basis::BasisAdvance::default(),
             },
             Fact::ValueAdmitted {
                 provenance: Provenance::ProviderRun { effects, .. },

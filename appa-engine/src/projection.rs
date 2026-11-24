@@ -40,6 +40,7 @@ static MISSING_SOURCE: std::sync::LazyLock<Label> = std::sync::LazyLock::new(Lab
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CloseKind {
     Success,
+    SuccessAbandoned,
     Failure,
     FailureWithBody(RawResultDigest),
     Indeterminate,
@@ -704,6 +705,7 @@ impl Projection {
                     CloseOutcome::Failure => CloseKind::Failure,
                     CloseOutcome::FailureWithBody { observed } => CloseKind::FailureWithBody(*observed),
                     CloseOutcome::Indeterminate => CloseKind::Indeterminate,
+                    CloseOutcome::SuccessAbandoned => CloseKind::SuccessAbandoned,
                 };
                 closed.insert(dispatch.clone(), kind);
             }
@@ -1511,6 +1513,10 @@ impl Views<'_> {
 
     pub(crate) fn closed_successfully(&self, dispatch: &DispatchId) -> bool {
         matches!(self.projection.closed.get(dispatch), Some(CloseKind::Success))
+    }
+
+    pub(crate) fn closed_abandoned(&self, dispatch: &DispatchId) -> bool {
+        matches!(self.projection.closed.get(dispatch), Some(CloseKind::SuccessAbandoned))
     }
 
     pub(crate) fn dispatch_failed(&self, dispatch: &DispatchId) -> bool {

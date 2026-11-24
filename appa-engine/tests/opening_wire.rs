@@ -160,3 +160,49 @@ fn a_principal_opening_forks_with_its_principal_and_replay_holds_it_to_shape() {
         "a fork acting for another principal"
     );
 }
+
+/// A close's stored forms read and write back byte for byte; an abandoned success is a tag of
+/// its own, never one an earlier release wrote.
+#[test]
+fn stored_closes_keep_their_bytes_beside_an_abandoned_success() {
+    use appa_engine::fact::{CloseOutcome, EffectKind, EffectSet};
+    use appa_engine::value::RawResultDigest;
+
+    let observed = RawResultDigest::of(b"raw");
+    let stored = [
+        (
+            r#"{"Success":{"effects":["read"]}}"#.to_string(),
+            CloseOutcome::Success {
+                effects: EffectSet::new([EffectKind::new("read")]).expect("one effect is a set"),
+            },
+        ),
+        (
+            r#"{"Success":{"effects":[]}}"#.to_string(),
+            CloseOutcome::Success {
+                effects: EffectSet::default(),
+            },
+        ),
+        (r#""Failure""#.to_string(), CloseOutcome::Failure),
+        (
+            format!(
+                r#"{{"FailureWithBody":{{"observed":{}}}}}"#,
+                serde_json::to_string(&observed).expect("a digest serializes")
+            ),
+            CloseOutcome::FailureWithBody { observed },
+        ),
+        (r#""Indeterminate""#.to_string(), CloseOutcome::Indeterminate),
+    ];
+    for (bytes, outcome) in &stored {
+        assert_eq!(
+            &serde_json::from_str::<CloseOutcome>(bytes).expect("a stored close reads"),
+            outcome
+        );
+        assert_eq!(&serde_json::to_string(outcome).expect("a close serializes"), bytes);
+    }
+    let abandoned = serde_json::to_string(&CloseOutcome::SuccessAbandoned).expect("a close serializes");
+    assert_eq!(abandoned, r#""SuccessAbandoned""#);
+    assert_eq!(
+        serde_json::from_str::<CloseOutcome>(&abandoned).expect("an abandoned close reads"),
+        CloseOutcome::SuccessAbandoned
+    );
+}

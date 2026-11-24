@@ -62,7 +62,14 @@ impl Engine {
             return Ok(closed());
         }
         if !views.is_open(dispatch) {
-            match (views.closed_successfully(dispatch), &observed) {
+            // A repeated abandonment re-answers the close it recorded.
+            if views.closed_abandoned(dispatch) && matches!(report.outcome, ToolOutcome::Indeterminate) {
+                return Ok(closed());
+            }
+            match (
+                views.closed_successfully(dispatch) || views.closed_abandoned(dispatch),
+                &observed,
+            ) {
                 (true, None) => return Err(TransitionError::ContradictedSuccess),
                 (false, Some(_)) if views.closed_unobserved(dispatch) => {
                     return Err(TransitionError::ClosedUnobserved);
@@ -88,7 +95,7 @@ impl Engine {
                         .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
                         .is_none() =>
             {
-                return self.admitting_outcome(view, &views, dispatch, &call, ResultAdmission::SuccessNoValue, act);
+                return self.admitting_outcome(view, &views, dispatch, &call, ResultAdmission::SuccessAbandoned, act);
             }
             // A recorded success cannot be withdrawn: its effects are committed.
             (Some(_), None) => return Err(TransitionError::ContradictedSuccess),

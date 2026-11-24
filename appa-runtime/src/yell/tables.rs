@@ -574,6 +574,7 @@ static CLOSE_OUTCOME: Table = Table {
         ("Success", Rule::Table(&CLOSE_SUCCESS)),
         ("Failure", Rule::Keep),
         ("Indeterminate", Rule::Keep),
+        ("SuccessAbandoned", Rule::Keep),
     ],
 };
 

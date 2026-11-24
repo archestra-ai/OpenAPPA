@@ -3674,14 +3674,19 @@ async fn a_result_whose_bound_sanitizer_a_revision_dropped_is_a_hard_block() {
 }
 
 /// A result its bound sanitizer never derived stays open, and the host may give up on it:
-/// abandoned, it closes withheld, and the trajectory goes on.
+/// abandoned, it closes withheld. A crash that lost the acknowledgement replays the same
+/// abandonment, which re-answers the recorded close; a report that contradicts it does not.
 #[tokio::test]
-async fn a_result_left_on_a_missing_derivation_is_abandoned_withheld() {
+async fn a_result_left_on_a_missing_derivation_is_abandoned_once_and_replays_its_close() {
     let url = stub(serde_json::json!(42)).await;
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let runtime =
-        Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
-    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let db = dir.path().join("appa.db");
+    let runtime = Runtime::open(narrowing_config(&url), db.clone(), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let id = || Some("toolu-1".to_string());
+    let raw = || ToolOutcome::Success {
+        body: OutcomeBody::Available("raw with pii".to_string()),
+    };
     assert!(matches!(
         session
             .on_tool_call(leak(), false)
@@ -3689,7 +3694,36 @@ async fn a_result_left_on_a_missing_derivation_is_abandoned_withheld() {
             .expect("the block is delivered"),
         ToolCallDecision::Deny { .. },
     ));
-    let ToolResultDecision::Replace { presentation, .. } = run_sanitize_offer(&runtime, &mut session).await else {
+    let quoted = runtime
+        .minted_offers(&root(), &root())
+        .into_iter()
+        .find(|offer| {
+            matches!(
+                runtime.offer_kind(&root(), offer),
+                Some(crate::api::OfferKind::Sanitizer { .. })
+            )
+        })
+        .expect("the block surfaced a sanitize offer");
+    let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+    assert!(matches!(
+        session
+            .on_remedy(offer, RemedyArguments::default(), None, None)
+            .await
+            .expect("the offer executes"),
+        RemedyDecision::Authorized { .. }
+    ));
+    assert!(matches!(
+        session
+            .on_tool_call_identified(leak(), id(), None, None)
+            .await
+            .expect("the re-proposal resumes"),
+        ToolCallDecision::Allow { spawn: None, .. }
+    ));
+    let ToolResultDecision::Replace { presentation, .. } = session
+        .on_tool_result_identified(leak(), id(), raw())
+        .await
+        .expect("the outcome is delivered")
+    else {
         panic!("the raw must be withheld");
     };
     assert!(matches!(
@@ -3697,18 +3731,57 @@ async fn a_result_left_on_a_missing_derivation_is_abandoned_withheld() {
         Some(appa_runtime_api::Outcomes::MissingFact(_))
     ));
     assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+    let abandoned = session
+        .on_tool_result_identified(leak(), id(), ToolOutcome::Indeterminate)
+        .await
+        .expect("the abandon closes the dispatch");
+    assert_eq!(abandoned, ToolResultDecision::Keep);
+    assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    drop(session);
+    drop(runtime);
+
+    let runtime = Runtime::open(narrowing_config(&url), db, None).expect("the deployment reopens");
+    let session = runtime.session(&root(), &root()).expect("the session reattaches");
+    let closes = || {
+        runtime
+            .log_facts(&root())
+            .into_iter()
+            .filter(|fact| matches!(fact, appa_engine::fact::Fact::DispatchClosed { .. }))
+            .count()
+    };
     assert_eq!(
         session
-            .on_tool_result(leak(), ToolOutcome::Indeterminate)
+            .on_tool_result_identified(leak(), id(), ToolOutcome::Indeterminate)
             .await
-            .expect("the abandon closes the dispatch"),
-        ToolResultDecision::Keep
+            .expect("the replayed abandonment re-answers its close"),
+        abandoned
     );
-    assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    assert_eq!(closes(), 1);
     assert!(matches!(
-        session.on_tool_call(leak(), false).await.expect("the session goes on"),
-        ToolCallDecision::Deny { .. },
+        session
+            .on_tool_result_identified(
+                leak(),
+                id(),
+                ToolOutcome::Failure {
+                    message: "no".to_string()
+                }
+            )
+            .await,
+        Err(EventError::OutcomeMismatch)
     ));
+    assert!(matches!(
+        session
+            .on_tool_result_identified(
+                leak(),
+                id(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("other bytes".to_string()),
+                },
+            )
+            .await,
+        Err(EventError::OutcomeMismatch)
+    ));
+    assert_eq!(closes(), 1);
 }
 
 #[tokio::test]

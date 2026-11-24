@@ -311,10 +311,17 @@ pub enum ObservedResult {
 /// no" from "no one knows whether the tool ran".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CloseOutcome {
-    Success { effects: EffectSet },
+    Success {
+        effects: EffectSet,
+    },
     Failure,
-    FailureWithBody { observed: RawResultDigest },
+    FailureWithBody {
+        observed: RawResultDigest,
+    },
     Indeterminate,
+    /// A checkpointed success the host gave up on while its bound sanitizer's derivation was
+    /// never obtained: its effects committed with the checkpoint, and nothing of it crossed.
+    SuccessAbandoned,
 }
 
 impl CloseOutcome {
@@ -322,7 +329,10 @@ impl CloseOutcome {
     /// keeps it: the call may have executed.
     pub(crate) fn settles_reservation(&self) -> bool {
         match self {
-            CloseOutcome::Success { .. } | CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => true,
+            CloseOutcome::Success { .. }
+            | CloseOutcome::SuccessAbandoned
+            | CloseOutcome::Failure
+            | CloseOutcome::FailureWithBody { .. } => true,
             CloseOutcome::Indeterminate => false,
         }
     }

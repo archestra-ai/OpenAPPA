@@ -149,6 +149,67 @@ fn a_report_after_an_indeterminate_close_is_refused_on_its_own_ground() {
     );
 }
 
+/// A success reported without its body closes as a success: a later abandonment contradicts
+/// it, where an abandoned checkpoint would re-answer its own close.
+#[test]
+fn an_unavailable_success_is_no_abandonment() {
+    let internal = Audience::restricted([ReaderId::new("insider")]);
+    let e = engine_at(vec![crm_tool()], Label::new(TRUSTED, internal));
+    let call = call("get_ticket", json!({}));
+    let records = vec![opened(&e)];
+    let view = e.view(&traj(), records.clone(), 1).unwrap();
+    let decision = e
+        .handle(
+            &view,
+            EngineEvent::Proposals(ProposalBatch {
+                id: crate::transition::ProposalBatchId::new("b1"),
+                trajectory: traj(),
+                provider_results: Vec::new(),
+                proposals: vec![raw(&call)],
+                spawn: None,
+                offer_nonce: nonce(),
+                evidence: Vec::new(),
+                audience: crate::audience::AudienceEvidence::default(),
+            }),
+        )
+        .unwrap();
+    let FollowUp::Proposals { released, .. } = decision.follow_up else {
+        panic!("a proposal batch answers with proposals")
+    };
+    let report = |outcome: ToolOutcome| ToolReport {
+        dispatch: released[0].dispatch.clone(),
+        outcome,
+        evidence: Vec::new(),
+        offer_nonce: nonce(),
+        audience: crate::audience::AudienceEvidence::default(),
+    };
+    let log = [records, decision.append.unwrap().facts().to_vec()].concat();
+    let closed = e
+        .handle(
+            &e.view(&traj(), log.clone(), 2).unwrap(),
+            EngineEvent::Outcome(report(ToolOutcome::Success {
+                body: OutcomeBody::Unavailable,
+            })),
+        )
+        .expect("the outcome closes the dispatch");
+    let facts = closed.append.expect("the close appends").facts().to_vec();
+    assert!(
+        matches!(
+            declared_records(&facts),
+            [Fact::DispatchClosed {
+                outcome: crate::fact::CloseOutcome::Success { .. },
+                ..
+            }]
+        ),
+        "{facts:?}"
+    );
+    let after = e.view(&traj(), [log, facts].concat(), 3).unwrap();
+    assert_eq!(
+        e.handle(&after, EngineEvent::Outcome(report(ToolOutcome::Indeterminate))),
+        Err(crate::transition::TransitionError::ContradictedSuccess)
+    );
+}
+
 #[test]
 fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
     let internal = Audience::restricted([ReaderId::new("insider")]);

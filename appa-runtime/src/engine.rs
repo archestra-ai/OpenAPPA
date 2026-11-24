@@ -1340,6 +1340,7 @@ impl RuntimeEngine {
                     let Some(call) = call_of(dispatch) else { continue };
                     let outcome = match outcome {
                         CloseOutcome::Success { .. } => "success",
+                        CloseOutcome::SuccessAbandoned => "abandoned",
                         CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => "failure",
                         CloseOutcome::Indeterminate => "indeterminate",
                     };
@@ -1526,6 +1527,7 @@ impl RuntimeEngine {
                     },
                     CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => DispatchOutcome::Failed,
                     CloseOutcome::Indeterminate => DispatchOutcome::Unknown,
+                    CloseOutcome::SuccessAbandoned => DispatchOutcome::Ran { effects: Vec::new() },
                 },
             },
             Fact::ValueAdmitted { value, .. } => AuditEvent::Admitted {
