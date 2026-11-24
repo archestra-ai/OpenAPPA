@@ -146,6 +146,12 @@ fn ack() -> serde_json::Value {
     decision("ack")
 }
 
+/// The crossed `value` delivered in place of a spawn result whose body carries other bytes
+/// than it: the fixture's body never crossed.
+fn delivered(value: &str) -> serde_json::Value {
+    serde_json::json!({"protocol": appa_runtime_api::PROTOCOL, "decision": "deliver_value", "value": value})
+}
+
 fn session_start() -> serde_json::Value {
     wire("session_start", serde_json::json!({}))
 }
@@ -459,7 +465,7 @@ async fn a_return_declared_as_spoken_crosses_at_the_child_end_and_the_spawn_resu
 
     assert_eq!(
         answered(&runtime, spawn_result(Some(RETURN))).await,
-        ack(),
+        delivered(RETURN),
         "the parent's after-tool point replays the crossed bytes"
     );
     assert_eq!(crossings(&runtime), vec![None], "a replay crosses nothing new");
@@ -544,7 +550,7 @@ async fn an_attested_return_blocks_the_child_until_its_message_matches_the_schem
     );
     assert_eq!(
         answered(&runtime, spawn_result(Some(&canonical))).await,
-        ack(),
+        delivered(&canonical),
         "the parent replays the attested bytes"
     );
 }
@@ -580,7 +586,7 @@ async fn a_sanitized_return_is_staged_first_and_crosses_on_the_echo() {
     assert_eq!(crossings(&runtime), vec![Some("scrub".to_string())]);
     assert_eq!(
         answered(&runtime, spawn_result(Some(&rewritten))).await,
-        ack(),
+        delivered(&rewritten),
         "the parent replays the derivation, not the raw message"
     );
 }

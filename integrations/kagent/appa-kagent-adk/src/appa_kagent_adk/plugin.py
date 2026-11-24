@@ -780,6 +780,10 @@ class AppaPluginKagent(BasePlugin):
                 )
                 if decision.kind == "ack":
                     return None
+                # The crossed value restating the reply it came in, beside the child's
+                # session id alone, is that reply: kagent keeps it as it is.
+                if decision.kind == "deliver_value" and _restates_spawn_reply(result, decision.value):
+                    return None
                 if decision.kind in ("child_return", "deliver_value"):
                     # The bytes the value crossed with, never spelled over:
                     # the parent receives what the runtime admitted.
@@ -1190,6 +1194,20 @@ def _plain_json(value: Any) -> Any:
         return value
     except (TypeError, ValueError):
         return json.loads(json.dumps(value, default=str))
+
+
+def _restates_spawn_reply(result: Any, value: str | None) -> bool:
+    """Whether ``value`` is the whole of what a spawn reply carries from its child.
+
+    A bare string reply is its value. A Task reply is ``{"result": ...}``, with
+    the child's context id under ``subagent_session_id``; any other key is not
+    known to be the harness's own and may carry the child's bytes.
+    """
+    if isinstance(result, str):
+        return result == value
+    if isinstance(result, dict):
+        return set(result) <= {"result", "subagent_session_id"} and result.get("result") == value
+    return False
 
 
 def _spawn_return(result: Any) -> tuple[str | None, str | None]:

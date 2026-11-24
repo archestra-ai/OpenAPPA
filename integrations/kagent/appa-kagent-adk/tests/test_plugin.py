@@ -1016,6 +1016,27 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
 
 
 @pytest.mark.parametrize(
+    "result,returned",
+    [
+        ({"result": "the total is 42", "subagent_session_id": "child-ctx"}, None),
+        ("the total is 42", None),
+        ({"result": "the total is 42", "note": "bytes no stop checked"}, {"result": "the total is 42"}),
+        ({"result": "other words", "subagent_session_id": "child-ctx"}, {"result": "the total is 42"}),
+    ],
+)
+async def test_a_delivered_spawn_value_replaces_the_reply_unless_it_is_the_whole_reply(result, returned):
+    hook = Hook({"protocol": 1, "decision": "deliver_value", "value": "the total is 42"})
+    plugin = plugin_over(hook)
+    delivered = await plugin.after_tool_callback(
+        tool=FakeTool("kagent__NS__billing_agent"),
+        tool_args={},
+        tool_context=FakeContext(FakeSession("s1")),
+        result=result,
+    )
+    assert delivered == returned
+
+
+@pytest.mark.parametrize(
     "tool_name,event", [("k8s_scale", "tool_result"), ("kagent__NS__billing_agent", "spawn_result")]
 )
 async def test_a_tool_failure_crosses_as_a_failure_outcome(tool_name, event):
