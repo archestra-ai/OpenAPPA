@@ -636,7 +636,11 @@ mod tests {
         // The other start decides for ten seconds, past what a fixed number of posts waited.
         let held = Duration::from_secs(10);
         let compacted = launched_start("7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", "compact", &launch);
-        let mut deciding = Some(runtime.decide_launch(launch.clone()).expect("the other start decides"));
+        let mut deciding = Some(
+            runtime
+                .decide_launch(launch.clone(), &Default::default())
+                .expect("the other start decides"),
+        );
         let mut classes = Vec::new();
         let answered = posted(
             &compacted,
@@ -668,7 +672,9 @@ mod tests {
 
         // A deadline that leaves no room for the next wait ends the posts at the refusal.
         let spent = launched_start("9d0e1f2a-3b4c-4d5e-9f6a-7b8c9d0e1f2a", "compact", &launch);
-        let deciding = runtime.decide_launch(launch.clone()).expect("the other start decides");
+        let deciding = runtime
+            .decide_launch(launch.clone(), &Default::default())
+            .expect("the other start decides");
         waits.borrow_mut().clear();
         let mut classes = Vec::new();
         posted(

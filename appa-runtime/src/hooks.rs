@@ -56,8 +56,10 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
     // A launched start decides from this alias lookup through the identity it records.
     let deciding = match &event {
         HookEvent::SessionStart {
-            launch: Some(launch), ..
-        } => match runtime.decide_launch(launch.clone()) {
+            launch: Some(launch),
+            settings,
+            ..
+        } => match runtime.decide_launch(launch.clone(), settings) {
             Ok(deciding) => Some(deciding),
             Err(error) => return unfiled(&event, error),
         },
@@ -694,7 +696,7 @@ async fn dispatch_event(
         } => {
             // As in `answer`, a host id another family continues under starts that family.
             let decided = launch
-                .map(|launch| runtime.decide_launch(launch))
+                .map(|launch| runtime.decide_launch(launch, &settings))
                 .transpose()
                 .and_then(|deciding| Ok((runtime.alias_of(&root)?, deciding)));
             match decided {
@@ -1801,9 +1803,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let first = launch("first-launch");
-        let deciding = runtime.decide_launch(first.clone()).expect("the first start decides");
+        let deciding = runtime
+            .decide_launch(first.clone(), &Default::default())
+            .expect("the first start decides");
         assert!(matches!(
-            runtime.decide_launch(first.clone()),
+            runtime.decide_launch(first.clone(), &Default::default()),
             Err(EventError::LaunchDeciding)
         ));
 
@@ -1854,7 +1858,7 @@ mod tests {
         );
         assert_eq!(answered_start(&runtime, &compacted).await, HookDecision::Ack);
         let second = runtime
-            .decide_launch(launch("second-launch"))
+            .decide_launch(launch("second-launch"), &Default::default())
             .expect("the second launch decides");
         runtime
             .launched_start(
@@ -1871,7 +1875,7 @@ mod tests {
         ));
 
         let _deciding = runtime
-            .decide_launch(launch("first-launch"))
+            .decide_launch(launch("first-launch"), &Default::default())
             .expect("the first launch decides");
         assert!(contended(&answered_start(&runtime, &compacted).await));
     }

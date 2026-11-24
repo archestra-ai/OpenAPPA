@@ -752,6 +752,9 @@ pub(crate) enum EventError {
     PrincipalMismatch,
     #[error("the session was opened under another line variant")]
     LineVariantMismatch,
+    /// A start that carries a launch named a line variant; no host sends both.
+    #[error("a start that carries a launch names no line variant; this one names one")]
+    LaunchedLineVariant,
     #[error("no open dispatch with this id exists")]
     UnknownDispatch,
     #[error("this outcome does not match the open dispatch; it is not reported")]
@@ -903,7 +906,8 @@ impl EventError {
             EventError::UnknownTrajectory
             | EventError::TrajectoryExists
             | EventError::RootArchived
-            | EventError::LineVariantMismatch => RefusalClass::Trajectory,
+            | EventError::LineVariantMismatch
+            | EventError::LaunchedLineVariant => RefusalClass::Trajectory,
             EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
             EventError::UnknownOffer
             | EventError::ApprovalPending
@@ -944,6 +948,7 @@ impl EventError {
             | EventError::MalformedPrincipal(_)
             | EventError::PrincipalMismatch
             | EventError::LineVariantMismatch
+            | EventError::LaunchedLineVariant
             | EventError::DeclaresOffSpawn
             | EventError::DeferralUnkeyed
             | EventError::UnexpectedDecision => true,
@@ -2305,14 +2310,6 @@ fn pinned_settings(log: &Log) -> &SessionSettings {
     match log.facts().first() {
         Some(appa_engine::fact::Fact::TrajectoryOpened(opening)) => &opening.settings,
         _ => UNPINNED,
-    }
-}
-
-/// Refuses an event naming a line variant other than the one the family's opening pinned.
-fn line_continued(log: &Log, settings: &SessionSettings) -> Result<(), EventError> {
-    match pinned_settings(log).continued_by(settings.line_variant.as_ref()) {
-        true => Ok(()),
-        false => Err(EventError::LineVariantMismatch),
     }
 }
 

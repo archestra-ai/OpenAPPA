@@ -88,8 +88,16 @@ enum Cleared {
 
 impl Runtime {
     /// Begin deciding a start of `launch`, or refuse it as contended while another start of
-    /// that launch decides.
-    pub(crate) fn decide_launch(&self, launch: LaunchStart) -> Result<Deciding<'_>, EventError> {
+    /// that launch decides. A start that also names a line variant is refused before it reads
+    /// anything: a handoff writes two logs apart, so no line pin is checked along one.
+    pub(crate) fn decide_launch(
+        &self,
+        launch: LaunchStart,
+        settings: &SessionSettings,
+    ) -> Result<Deciding<'_>, EventError> {
+        if settings.line_variant.is_some() {
+            return Err(EventError::LaunchedLineVariant);
+        }
         self.inner
             .shared
             .launches
@@ -121,8 +129,7 @@ impl Runtime {
     /// Open the family a launched start belongs to. `root` is the start's own host id,
     /// resolved through [`Runtime::alias_of`] under the same `deciding`. A start whose
     /// handoff finds the launch already moved is refused as contended: it claims nothing. A
-    /// family it opens pins `settings`; one it continues is checked against them before
-    /// anything is recorded, so a start it refuses moves, aliases and claims nothing.
+    /// family it opens pins `settings`.
     pub(crate) fn launched_start(
         &self,
         root: &TrajectoryId,
@@ -134,9 +141,6 @@ impl Runtime {
         let token = &launch.launch;
         let family = self.launch_family(token)?;
         let known = self.has_root(root)?;
-        if known {
-            self.continues_line(root, settings)?;
-        }
         let opened = match (known, family) {
             // Already the launch's family: nothing moves, and nothing is claimed again over a
             // move a concurrent start made since.
@@ -148,7 +152,7 @@ impl Runtime {
             },
             (true, None) => LaunchedStart::Opened(root.clone()),
             (false, Some(family)) => match start {
-                Some(StartKind::Clear) => match self.clear_launch(&family, token, root, settings)? {
+                Some(StartKind::Clear) => match self.clear_launch(&family, token, root)? {
                     Cleared::Moved => {
                         self.open_fresh(root, settings)?;
                         LaunchedStart::Opened(root.clone())
@@ -165,7 +169,6 @@ impl Runtime {
                     Handoff::Gone => return Err(raced()),
                 },
                 Some(StartKind::Startup | StartKind::Compact | StartKind::Fork) | None => {
-                    self.continues_line(&family, settings)?;
                     self.record_once(&family, HostObservation::Aliased { host: root.clone() })?;
                     LaunchedStart::Continued(family)
                 }
@@ -189,14 +192,6 @@ impl Runtime {
         Ok(opened)
     }
 
-    /// Refuses a start naming a line variant other than the one `family` pinned.
-    fn continues_line(&self, family: &TrajectoryId, settings: &SessionSettings) -> Result<(), EventError> {
-        match settings.line_variant {
-            None => Ok(()),
-            Some(_) => super::line_continued(&self.inner.log(family)?, settings),
-        }
-    }
-
     /// The family `launch` currently runs, if any start recorded one.
     fn launch_family(&self, launch: &LaunchToken) -> Result<Option<TrajectoryId>, EventError> {
         let mut current = Vec::new();
@@ -215,16 +210,14 @@ impl Runtime {
     }
 
     /// Move `launch` from `family` to `to`, the clear's new root, only when the family has
-    /// nothing in flight or owed; otherwise record `to` as the family's alias, unless the
-    /// family, which the clear then continues, pinned a line variant other than `settings`
-    /// names. One compare-and-swap decides all three, so nothing the family starts can slip
-    /// between the check and the move.
+    /// nothing in flight or owed; otherwise record `to` as the family's alias. One
+    /// compare-and-swap decides all three, so nothing the family starts can slip between the
+    /// check and the move.
     fn clear_launch(
         &self,
         family: &TrajectoryId,
         launch: &LaunchToken,
         to: &TrajectoryId,
-        settings: &SessionSettings,
     ) -> Result<Cleared, EventError> {
         let deployment = self.inner.deployment();
         self.inner.append_host_with(family, |log| {
@@ -241,10 +234,7 @@ impl Runtime {
                     }),
                     Cleared::Moved,
                 ),
-                false => {
-                    super::line_continued(log, settings)?;
-                    (Some(HostObservation::Aliased { host: to.clone() }), Cleared::Kept)
-                }
+                false => (Some(HostObservation::Aliased { host: to.clone() }), Cleared::Kept),
             })
         })
     }
