@@ -38,8 +38,10 @@
 //! lowest result trust — that narrows every answer, so no answer loosens what the policy
 //! author wrote. The
 //! wildcard declaration (`"*"`) routes every call without a matching explicit contract through an
-//! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
-//! to arrive is an operational refusal, never a policy denial.
+//! Annotator; a call nothing covers is refused before it runs. An annotation that fails to arrive
+//! is an operational refusal by default. An `Annotated` declaration may instead supply a static
+//! `on_no_answer` annotation with an attention requirement: when the Annotator produces no answer,
+//! that fallback is pinned to the call and follows the ordinary policy approval path.
 //!
 //! ## Two fork lifecycles
 //!

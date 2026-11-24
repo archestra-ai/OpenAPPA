@@ -565,7 +565,9 @@ async fn a_replay_keeps_each_calls_annotation_from_the_revision_that_recorded_it
                         Some((
                             batch.revision.expect("a decided batch is stamped").value(),
                             tool.as_str(),
-                            pin.annotator().as_str(),
+                            pin.annotator()
+                                .expect("the dispatch pin came from an annotator")
+                                .as_str(),
                             pin.produced().delta.trust,
                         ))
                     }
@@ -784,7 +786,7 @@ async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_erro
         .collect();
     assert_eq!(pins.len(), 1);
     assert_eq!(
-        pins[0]["context"], context,
+        pins[0]["Annotator"]["context"], context,
         "the decision records the context it was made with"
     );
 }
@@ -892,6 +894,181 @@ async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
         HookDecision::AllowCall { spawn: None }
     );
     assert!(audit_len(&runtime) > baseline);
+}
+
+fn reviewed_fallback_policy(url: &str, tool_section: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "classifier"
+
+[[policy.authority]]
+name = "operator"
+permits = {{ attention = ["annotator-unavailable"] }}
+
+{tool_section}
+
+[externals]
+timeout_ms = 2000
+review_timeout_ms = 1000
+max_body_bytes = 65536
+
+[externals.annotators.classifier]
+url = "{url}"
+
+[externals.authorities.operator]
+builtin = "hitl"
+"#
+    )
+}
+
+async fn approve_hitl(runtime: &Arc<Runtime>, offer_id: &str) -> RemedyOutcome {
+    let args = serde_json::json!({ "offer_id": offer_id });
+    let gate = hooks::handle(
+        runtime,
+        HookEvent::ToolCall {
+            actor: actor(),
+            call: ProposedCall {
+                tool: appa_runtime_api::CONTROL_TOOL.into(),
+                arguments: raw(args.clone()),
+                cwd: None,
+            },
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: Some(appa_runtime_api::Ruling::Approve),
+            declares: None,
+        },
+    )
+    .await;
+    assert!(matches!(gate, HookDecision::PassControl), "{gate:?}");
+    runtime
+        .execute_embedded_remedy(&actor(), serde_json::from_value(args).unwrap())
+        .await
+}
+
+#[tokio::test]
+async fn a_route_can_turn_an_annotation_failure_into_human_approval() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Down);
+    let policy = reviewed_fallback_policy(
+        &url,
+        r#"
+[[policy.tool]]
+name = "fetch"
+description = "Fetches one URL and returns its body."
+parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+annotator = "classifier"
+on_no_answer = { delta = { trust = "suspicious" }, forwards = {}, requires = { attention = ["annotator-unavailable"] } }
+
+[[policy.tool]]
+name = "publish"
+requires = { trust = "trusted" }
+delta = {}
+"#,
+    );
+    let runtime = open_runtime(&dir, &policy).await;
+
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    let HookDecision::DenyCall { offers, review, .. } = &decision else {
+        panic!("the fallback must request approval instead of refusing the hook: {decision:?}");
+    };
+    assert!(!offers.is_empty(), "the human authority supplies an approval path");
+    assert!(!review.is_empty(), "the harness receives a human review request");
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the Annotator is attempted before fallback"
+    );
+
+    let repeated = propose(&runtime, fetch("https://a.example")).await;
+    assert!(
+        matches!(repeated, HookDecision::DenyCall { .. }),
+        "the fallback pin still requires approval"
+    );
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the prepared fallback is pinned to the exact call instead of reconsulting"
+    );
+
+    // Approving through the HITL authority releases the exact call and applies the fallback's
+    // conservative delta (`suspicious`), which then blocks a later trusted-only call.
+    let outcome = approve_hitl(&runtime, &offers[0].id).await;
+    assert!(
+        matches!(outcome, RemedyOutcome::Authorized { .. }),
+        "approving the fallback attention mark authorizes the call: {outcome:?}"
+    );
+    assert_eq!(
+        propose(&runtime, fetch("https://a.example")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(
+        annotator.requests().len(),
+        1,
+        "the approved fallback pin is reused without reconsulting"
+    );
+    ran(&runtime, fetch("https://a.example")).await;
+    assert!(
+        matches!(
+            propose(
+                &runtime,
+                ProposedCall {
+                    tool: "publish".to_string(),
+                    arguments: raw(serde_json::json!({})),
+                    cwd: None,
+                },
+            )
+            .await,
+            HookDecision::DenyCall { .. }
+        ),
+        "the fallback's suspicious delta narrowed the trajectory"
+    );
+}
+
+#[tokio::test]
+async fn a_wildcard_route_can_turn_an_annotation_failure_into_human_approval() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Down);
+    let policy = reviewed_fallback_policy(
+        &url,
+        r#"
+[[policy.tool]]
+name = "*"
+annotator = "classifier"
+on_no_answer = { delta = { trust = "suspicious" }, forwards = {}, requires = { attention = ["annotator-unavailable"] } }
+"#,
+    );
+    let runtime = open_runtime(&dir, &policy).await;
+    let undeclared = ProposedCall {
+        tool: "mystery_tool".to_string(),
+        arguments: raw(serde_json::json!({ "id": 1 })),
+        cwd: None,
+    };
+
+    let decision = propose(&runtime, undeclared.clone()).await;
+    let HookDecision::DenyCall { offers, review, .. } = &decision else {
+        panic!("the wildcard fallback must request approval instead of refusing: {decision:?}");
+    };
+    assert!(!offers.is_empty(), "the human authority supplies an approval path");
+    assert!(!review.is_empty(), "the harness receives a human review request");
+    assert_eq!(annotator.requests().len(), 1);
+
+    let outcome = approve_hitl(&runtime, &offers[0].id).await;
+    assert!(
+        matches!(outcome, RemedyOutcome::Authorized { .. }),
+        "approving the wildcard fallback authorizes the call: {outcome:?}"
+    );
+    assert_eq!(
+        propose(&runtime, undeclared).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    assert_eq!(annotator.requests().len(), 1);
 }
 
 #[cfg(unix)]

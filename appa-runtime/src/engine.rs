@@ -235,6 +235,15 @@ pub enum ExternalEvidence {
         /// What the context providers answered before the Annotator judged the call.
         context: AnnotationContext,
     },
+    /// The Annotator produced no usable answer for this exact call. The engine chooses
+    /// between the route's declared `on_no_answer` fallback and an operational refusal.
+    AnnotationNoAnswer {
+        annotator: String,
+        call: appa_engine::value::CanonicalDigest,
+        reason: String,
+        class: crate::events::NoAnswerClass,
+        context: AnnotationContext,
+    },
     AudienceSource {
         provider: String,
         selector: String,
@@ -615,10 +624,15 @@ pub enum EngineRefusal {
     /// policy cannot read. Nothing is appended; the offer stands.
     #[error("{detail}")]
     Arguments { detail: String },
-    /// The runtime could not read the annotation a call carries from its own arguments, as it
-    /// does for `appa/do_something`. Nothing is judged and nothing is appended.
+    /// An Annotator gave no usable answer on a route without `on_no_answer`, or the runtime
+    /// could not read the annotation a call carries from its own arguments (as for
+    /// `appa/do_something`). Nothing is judged and nothing is appended.
     #[error("annotator={annotator} error={reason}")]
-    Annotation { annotator: String, reason: String },
+    Annotation {
+        annotator: String,
+        reason: String,
+        no_answer: Option<crate::events::NoAnswerClass>,
+    },
 }
 
 impl EngineRefusal {
@@ -1678,7 +1692,10 @@ impl RuntimeEngine {
             Some(pin) => CallAnswers { annotation: Some(pin?) },
             None => match self.answers_for(&views, &resolved, call.cwd.as_deref(), evidence) {
                 Ok(answers) => answers,
-                Err(Resolution(requests)) => return Ok(EngineDecision::deliver(Next::ResolveExternal(requests))),
+                Err(AnnotationNeed::Consult(Resolution(requests))) => {
+                    return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
+                }
+                Err(AnnotationNeed::Refused(refusal)) => return Err(refusal),
             },
         };
         let proposed = CoreProposedCall {
@@ -2218,9 +2235,10 @@ impl RuntimeEngine {
                         (Some(declaration @ ToolDeclaration::Annotated { .. }), None) => {
                             match self.annotation_for(&views, declaration, &rewritten, cwd, evidence) {
                                 Ok(annotation) => Some(annotation),
-                                Err(Resolution(requests)) => {
+                                Err(AnnotationNeed::Consult(Resolution(requests))) => {
                                     return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                                 }
+                                Err(AnnotationNeed::Refused(refusal)) => return Err(refusal),
                             }
                         }
                         _ => None,
@@ -2913,6 +2931,7 @@ impl RuntimeEngine {
             crate::do_something::pin(registry, resolved).map_err(|reason| EngineRefusal::Annotation {
                 annotator: annotator.as_str().to_string(),
                 reason,
+                no_answer: None,
             })
         })
     }
@@ -2927,7 +2946,7 @@ impl RuntimeEngine {
         resolved: &ResolvedCall,
         cwd: Option<&str>,
         evidence: &[ExternalEvidence],
-    ) -> Result<CallAnswers, Resolution> {
+    ) -> Result<CallAnswers, AnnotationNeed> {
         let declaration = self
             .engine
             .registry()
@@ -2943,8 +2962,10 @@ impl RuntimeEngine {
     }
 
     /// The pinned annotation an Annotated declaration owes: a pin standing on an open offer
-    /// or unspent approval for this exact digest, the evidence the Annotator gave for it, or
-    /// the one consult still owed. The digest is the key: any rewrite is annotated afresh.
+    /// or unspent approval for this exact digest, the evidence the Annotator gave for it, the
+    /// route's `on_no_answer` fallback (or an operational refusal if none is declared) when
+    /// the Annotator produced no answer, or the one consult still owed. The digest is the key:
+    /// any rewrite is annotated afresh.
     fn annotation_for(
         &self,
         views: &Views,
@@ -2952,7 +2973,7 @@ impl RuntimeEngine {
         resolved: &ResolvedCall,
         cwd: Option<&str>,
         evidence: &[ExternalEvidence],
-    ) -> Result<PinnedAnnotation, Resolution> {
+    ) -> Result<PinnedAnnotation, AnnotationNeed> {
         let annotator = declaration
             .annotator()
             .expect("only an Annotated declaration owes an annotation");
@@ -2973,18 +2994,40 @@ impl RuntimeEngine {
             } if answered_by == annotator.as_str() && *call == digest => Some((answer, context)),
             _ => None,
         });
-        let Some((answer, context)) = answer else {
-            return Err(Resolution(vec![self.annotation_request(
-                annotator,
-                declaration,
-                resolved,
-                cwd,
-            )]));
-        };
-        Ok(
-            PinnedAnnotation::new(annotator.clone(), digest, self.produced_annotation(answer))
-                .with_context(context.clone()),
-        )
+        if let Some((answer, context)) = answer {
+            return Ok(
+                PinnedAnnotation::new(annotator.clone(), digest, self.produced_annotation(answer))
+                    .with_context(context.clone()),
+            );
+        }
+        let no_answer = evidence.iter().find_map(|entry| match entry {
+            ExternalEvidence::AnnotationNoAnswer {
+                annotator: answered_by,
+                call,
+                reason,
+                class,
+                context,
+            } if answered_by == annotator.as_str() && *call == digest => Some((reason, *class, context)),
+            _ => None,
+        });
+        if let Some((reason, class, context)) = no_answer {
+            return match declaration.on_no_answer() {
+                Some(fallback) => {
+                    Ok(PinnedAnnotation::no_answer_fallback(digest, fallback.clone()).with_context(context.clone()))
+                }
+                None => Err(AnnotationNeed::Refused(EngineRefusal::Annotation {
+                    annotator: annotator.as_str().to_string(),
+                    reason: reason.clone(),
+                    no_answer: Some(class),
+                })),
+            };
+        }
+        Err(AnnotationNeed::Consult(Resolution(vec![self.annotation_request(
+            annotator,
+            declaration,
+            resolved,
+            cwd,
+        )])))
     }
 
     /// `cwd` is the directory the harness proposed the call from, when it reports one; only
@@ -3557,6 +3600,14 @@ fn qualified_by(provider: &str, id: &str) -> bool {
 /// Everything a proposal carries beyond its tool and arguments, gathered before it is judged.
 struct CallAnswers {
     annotation: Option<PinnedAnnotation>,
+}
+
+/// Why an Annotated call still lacks a pinned annotation: either the runtime must consult
+/// the Annotator, or the Annotator already gave no answer on a route with no fallback.
+#[derive(Debug)]
+enum AnnotationNeed {
+    Consult(Resolution),
+    Refused(EngineRefusal),
 }
 
 /// The consult artifact an annotation request carries: the complete call — its proposed
@@ -5298,10 +5349,10 @@ mod tests {
     }
 
     use super::{
-        BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId, OfferNonce,
-        Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject, TrajectoryId,
-        audience_failure, audience_wire, block_feedback, outcome_presentation, remedy_instruction, remedy_lines,
-        terminal_safe, unresolved_audience,
+        AnnotationNeed, BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId,
+        OfferNonce, Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject,
+        TrajectoryId, audience_failure, audience_wire, block_feedback, outcome_presentation, remedy_instruction,
+        remedy_lines, terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
     use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint, ToolNameAuthor};
@@ -5901,7 +5952,7 @@ mod tests {
         let view = opened_view(&engine, &trajectory);
         let views = view.views(&trajectory).expect("the root is opened");
         let asked = match engine.annotation_for(&views, declaration, &call, None, &[]) {
-            Err(Resolution(requests)) => match requests.as_slice() {
+            Err(AnnotationNeed::Consult(Resolution(requests))) => match requests.as_slice() {
                 [
                     ExternalRequest::Annotation {
                         annotator,
@@ -5966,7 +6017,7 @@ mod tests {
                 }],
             )
             .expect("a complete answer pins");
-        assert_eq!(pin.annotator(), &AnnotatorName::new("classifier"));
+        assert_eq!(pin.annotator(), Some(&AnnotatorName::new("classifier")));
         assert_eq!(pin.call(), &call.digest(), "the pin binds the exact call it answered");
         let produced = pin.produced();
         assert_eq!(produced.delta.trust, Some(Trust::new(0)));
@@ -6015,7 +6066,7 @@ mod tests {
                     context: AnnotationContext::default(),
                 }],
             ),
-            Err(Resolution(_))
+            Err(AnnotationNeed::Consult(Resolution(_)))
         ));
     }
 

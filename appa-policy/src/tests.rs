@@ -1719,6 +1719,98 @@ delta = {}
     ));
 }
 
+#[test]
+fn an_annotated_route_can_declare_a_human_reviewed_no_answer_fallback() {
+    let policy = r#"
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[[annotator]]
+name = "classifier"
+
+[[authority]]
+name = "operator"
+permits = { attention = ["annotator-unavailable"] }
+
+[[tool]]
+name = "fetch"
+annotator = "classifier"
+on_no_answer = { delta = { trust = "suspicious" }, forwards = {}, requires = { attention = ["annotator-unavailable"] } }
+"#;
+    let config = load(policy).expect("a reviewed no-answer fallback loads");
+    let declaration = config
+        .engine()
+        .registry()
+        .declaration(
+            &config
+                .engine()
+                .resolve_call(ToolName::new("fetch"), b"{}")
+                .expect("the call resolves"),
+        )
+        .expect("fetch is declared");
+    let fallback = declaration.on_no_answer().expect("the route carries its fallback");
+    assert_eq!(fallback.delta.trust, Some(Trust::new(0)));
+    assert_eq!(
+        fallback
+            .requires
+            .attention_marks()
+            .iter()
+            .map(|mark| mark.as_str())
+            .collect::<Vec<_>>(),
+        ["annotator-unavailable"]
+    );
+}
+
+#[test]
+fn a_no_answer_fallback_requires_an_annotator_forwards_and_human_attention() {
+    assert!(matches!(
+        load("version = 2\n[[tool]]\nname = \"fetch\"\non_no_answer = { forwards = {}, requires = { attention = [\"review\"] } }\n"),
+        Err(ConfigError::FallbackWithoutAnnotator { tool }) if tool == "fetch"
+    ));
+    assert!(matches!(
+        load(
+            "version = 2\n[[annotator]]\nname = \"classifier\"\n[[tool]]\nname = \"fetch\"\nannotator = \"classifier\"\non_no_answer = { forwards = {}, requires = { attention = [] } }\n"
+        ),
+        Err(ConfigError::FallbackWithoutAttention { tool }) if tool == "fetch"
+    ));
+    assert!(load(
+        "version = 2\n[[annotator]]\nname = \"classifier\"\n[[tool]]\nname = \"fetch\"\nannotator = \"classifier\"\non_no_answer = { requires = { attention = [\"review\"] } }\n"
+    )
+    .is_err());
+}
+
+#[test]
+fn the_wildcard_route_can_declare_a_no_answer_fallback() {
+    let policy = r#"
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[[annotator]]
+name = "classifier"
+
+[[authority]]
+name = "operator"
+permits = { attention = ["annotator-unavailable"] }
+
+[[tool]]
+name = "*"
+annotator = "classifier"
+on_no_answer = { forwards = {}, requires = { attention = ["annotator-unavailable"] } }
+"#;
+    let config = load(policy).expect("a wildcard fallback loads");
+    let declaration = config
+        .engine()
+        .registry()
+        .declaration(
+            &config
+                .engine()
+                .resolve_call(ToolName::new("anything_at_all"), b"{}")
+                .expect("the call resolves"),
+        )
+        .expect("the wildcard covers an undeclared tool");
+    assert!(declaration.on_no_answer().is_some());
+}
+
 /// A recorder binds to the declaration that names it: the first matching selector wins, a call
 /// the explicit declarations do not cover falls to the wildcard's recorder, and a declaration
 /// that names none has none.

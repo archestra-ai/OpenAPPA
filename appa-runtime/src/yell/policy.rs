@@ -75,6 +75,16 @@ static REQUIRES: Table = Table {
 
 // ---------------------------------------------------------------- declarations
 
+static ON_NO_ANSWER: Table = Table {
+    name: "policy.tool.on_no_answer",
+    entries: &[
+        ("delta", Rule::Table(&LABEL_WRITE)),
+        ("forwards", Rule::Table(&LABEL_WRITE)),
+        ("requires", Rule::Table(&REQUIRES)),
+        ("effects", Rule::Elements(Class::Effect)),
+    ],
+};
+
 static TOOL: Table = Table {
     name: "policy.tool",
     entries: &[
@@ -90,6 +100,7 @@ static TOOL: Table = Table {
         // reads both: they are the same dialect.
         ("parameters", Rule::ReturnSchema),
         ("annotator", Rule::Token(Class::Annotator)),
+        ("on_no_answer", Rule::Table(&ON_NO_ANSWER)),
     ],
 };
 
@@ -356,6 +367,15 @@ mod tests {
         [tool.requires.audience]
         contains = ["public"]
 
+        [[annotator]]
+        name = "classify"
+        ranks = ["suspicious", "trusted"]
+
+        [[tool]]
+        name = "Fetch"
+        annotator = "classify"
+        on_no_answer = { delta = { trust = "suspicious" }, forwards = {}, requires = { attention = ["annotator-unavailable"] } }
+
         [[authority]]
         name = "hitl"
         hint = "ask alice@corp.example first"
@@ -476,6 +496,9 @@ mod tests {
         let rendered = serde_json::to_string(&stripped.value).expect("serializes");
         for spelled in [
             "Bash",
+            "Fetch",
+            "classify",
+            "annotator-unavailable",
             "hitl",
             "redact",
             "finance",
@@ -484,8 +507,8 @@ mod tests {
         ] {
             assert!(!rendered.contains(spelled), "{spelled} survived pseudonymization");
         }
-        // The shape survives: two tools, one authority, one sanitizer.
-        assert_eq!(stripped.value["tool"].as_array().expect("an array").len(), 2);
+        // The shape survives: three tools, one authority, one sanitizer.
+        assert_eq!(stripped.value["tool"].as_array().expect("an array").len(), 3);
         assert_eq!(stripped.value["version"], 2);
     }
 
