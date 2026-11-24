@@ -574,6 +574,7 @@ async fn the_prepared_fork_carries_the_declared_floor_and_the_attested_shape() {
         sanitizer: Some(appa_engine::fact::ReturnSanitizer::Attest(
             appa_engine::shape::ReturnShape::compile(&schema).expect("the schema compiles"),
         )),
+        below_floor: appa_engine::fact::BelowFloor::Refuse,
     });
     assert_eq!(fork_returns(&runtime), vec![expected]);
 }
@@ -771,7 +772,7 @@ async fn a_deferred_child_that_narrowed_is_answered_deferred_at_its_stop_and_not
     );
     assert!(
         matches!(
-            child.on_child_return("the answer".to_string()).await,
+            child.on_child_return("the answer".to_string(), None).await,
             Ok(ChildReturnDecision::Deferred)
         ),
         "and so is a return made without ending"
@@ -1049,4 +1050,187 @@ async fn a_deferred_spawns_reported_failure_closes_its_dispatch_as_failed() {
         .await
         .expect("the same failure reported again does not contradict the close");
     assert_eq!(admitted(&runtime), before);
+}
+
+fn operation(name: &str) -> Option<appa_runtime_api::ReturnOperation> {
+    Some(appa_runtime_api::ReturnOperation(name.to_string()))
+}
+
+fn held_records(runtime: &Runtime) -> usize {
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    log.host_records()
+        .iter()
+        .filter(|record| matches!(record.observation, appa_eventlog::HostObservation::ReturnHeld { .. }))
+        .count()
+}
+
+fn occurrences(
+    runtime: &Runtime,
+) -> Vec<(
+    u32,
+    crate::api::OccurrenceState,
+    Option<appa_runtime_api::ReturnOperation>,
+)> {
+    runtime
+        .child_occurrences(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+        .expect("the family reads")
+        .into_iter()
+        .map(|occurrence| (occurrence.occurrence, occurrence.state, occurrence.operation))
+        .collect()
+}
+
+fn notices(runtime: &Runtime) -> Vec<crate::api::DeferredReturnNotice> {
+    runtime
+        .child_occurrences(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+        .expect("the family reads")
+        .into_iter()
+        .map(|occurrence| occurrence.notice)
+        .collect()
+}
+
+/// A background child under a deferred return that narrowed and returned twice without ending,
+/// steered between its turns.
+async fn two_held_turns(runtime: &Runtime) -> Session {
+    let fork = binding(deferring(runtime, call("fetch", 1), "toolu-1").await);
+    let child_id = TrajectoryId("cc:root:child".to_string());
+    let child = session(runtime)
+        .on_child_start(child_id.clone(), SpawnRef::Binding(fork.clone()))
+        .expect("the fork binds and the child opens");
+    tainted(runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("turn one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert_eq!(child.liveness_of(&child_id).expect("the log reads"), Liveness::Live);
+    session(runtime)
+        .on_child_start(child_id, SpawnRef::Binding(fork))
+        .expect("the parent steers its child");
+    assert!(matches!(
+        child.on_child_return("turn two".to_string(), operation("op-2")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    child
+}
+
+#[tokio::test]
+async fn each_return_a_background_child_makes_without_ending_is_held_at_its_own_occurrence() {
+    use crate::api::OccurrenceState::Pending;
+    let Deployed { runtime, .. } = deployed(false);
+    let child = two_held_turns(&runtime).await;
+    assert_eq!(
+        facts(&runtime, |fact| matches!(fact, Fact::ReturnDeferred { held: true, .. })),
+        2
+    );
+    assert_eq!(held_records(&runtime), 2);
+    assert_eq!(crossings(&runtime), 0);
+    assert_eq!(
+        occurrences(&runtime),
+        vec![(0, Pending, operation("op-1")), (1, Pending, operation("op-2"))]
+    );
+    assert_eq!(
+        runtime
+            .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+            .expect("the family reads"),
+        None,
+        "a held return is not the deferral that ends the spawn's child"
+    );
+    assert!(matches!(child.liveness_of(&child.trajectory), Ok(Liveness::Live)));
+}
+
+#[tokio::test]
+async fn a_retried_return_answers_its_own_occurrence_and_refuses_other_words() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = two_held_turns(&runtime).await;
+    let before = (deferred_returns(&runtime), held_records(&runtime));
+
+    // The host lost the first answer after its append and retries: the operation names the
+    // occurrence it froze, though the child has returned again since.
+    assert!(matches!(
+        child.on_child_return("turn one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert!(matches!(
+        child.on_child_return("turn two".to_string(), operation("op-2")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert!(matches!(
+        child
+            .on_child_return("turn one, revised".to_string(), operation("op-1"))
+            .await,
+        Err(EventError::ReturnRetryChanged)
+    ));
+    assert_eq!((deferred_returns(&runtime), held_records(&runtime)), before);
+}
+
+#[tokio::test]
+async fn held_returns_settle_out_of_order_and_repeated_settlements_replay() {
+    use crate::api::OccurrenceState::{Accepted, Discarded};
+    let Deployed { runtime, .. } = deployed(false);
+    two_held_turns(&runtime).await;
+    let [first, second] = notices(&runtime).try_into().expect("two occurrences");
+
+    let accepted = settling(&runtime, &parent(), &second.accept).await;
+    assert_eq!(
+        accepted,
+        RemedyOutcome::Returned {
+            value: "turn two".to_string()
+        }
+    );
+    let discarded = settling(&runtime, &parent(), &first.discard).await;
+    assert!(matches!(discarded, RemedyOutcome::Returned { .. }), "{discarded:?}");
+    assert_eq!(
+        occurrences(&runtime),
+        vec![(0, Discarded, operation("op-1")), (1, Accepted, operation("op-2"))]
+    );
+    assert_eq!(crossings(&runtime), 1);
+    assert_eq!(facts(&runtime, |fact| matches!(fact, Fact::ReturnAccepted { .. })), 1);
+
+    assert_eq!(settling(&runtime, &parent(), &second.discard).await, accepted);
+    assert_eq!(settling(&runtime, &parent(), &first.accept).await, discarded);
+    assert_eq!(crossings(&runtime), 1);
+    assert_eq!(
+        notices(&runtime),
+        vec![first, second],
+        "the notices read the same after the decisions"
+    );
+}
+
+#[tokio::test]
+async fn a_stop_retried_with_other_words_after_its_deferral_is_refused() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (child, _) = deferred_answer(&runtime).await;
+    assert!(matches!(
+        child.on_child_end(Some("the answer".to_string())).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert!(matches!(
+        child.on_child_end(Some("another answer".to_string())).await,
+        Err(EventError::ReturnRetryChanged)
+    ));
+    assert_eq!(deferred_returns(&runtime), 1);
+}
+
+#[tokio::test]
+async fn a_spawn_whose_parent_can_decide_records_a_floor_that_holds_what_falls_below_it() {
+    let Deployed { runtime, .. } = deployed(false);
+    let decides = || DeclaredReturn::Decides(as_spoken());
+    assert!(matches!(
+        session(&runtime)
+            .on_spawn_declaring(call("fetch", 1), None, None, decides())
+            .await,
+        Err(EventError::DeferralUnkeyed)
+    ));
+    binding(
+        session(&runtime)
+            .on_spawn_declaring(call("fetch", 1), Some("toolu-1".to_string()), None, decides())
+            .await,
+    );
+    assert!(matches!(
+        fork_returns(&runtime).as_slice(),
+        [ReturnPolicy::Crossing(appa_engine::fact::CrossingReturn {
+            sanitizer: None,
+            below_floor: appa_engine::fact::BelowFloor::Hold,
+            ..
+        })]
+    ));
 }

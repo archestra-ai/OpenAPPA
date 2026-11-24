@@ -31,14 +31,34 @@ pub enum ReturnPolicy {
 }
 
 /// A return that crosses. `floor` is the lowest label the parent accepts from the child — inside
-/// the child, no remedy accepts a narrowing below it, and a return that stands below it is
-/// refused at the child's stop. `sanitizer` names the derivation every return crosses through;
+/// the child, no remedy accepts a narrowing below it, and a return that stands below it comes to
+/// what `below_floor` says. `sanitizer` names the derivation every return crosses through;
 /// the dimension it raises is the one the floor does not bind, so the child may descend freely
 /// there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossingReturn {
     pub floor: Label,
     pub sanitizer: Option<ReturnSanitizer>,
+    /// Absent on a return declared before a return below the floor could be held.
+    #[serde(default, skip_serializing_if = "BelowFloor::is_refuse")]
+    pub below_floor: BelowFloor,
+}
+
+/// What a return below its fork's floor comes to. `Refuse` keeps it in the child. `Hold`
+/// freezes it for the parent's decision, as a deferred return freezes a narrowing one: the host
+/// declares it for a parent that can decide, and only a raw return under a parent that stands
+/// under no floor of its own takes it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BelowFloor {
+    #[default]
+    Refuse,
+    Hold,
+}
+
+impl BelowFloor {
+    fn is_refuse(&self) -> bool {
+        *self == BelowFloor::Refuse
+    }
 }
 
 /// The return a marked spawn's plan declares, compared step against record: the bare floor, a
@@ -641,13 +661,17 @@ pub enum Fact {
         trajectory: TrajectoryId,
         fork: crate::value::ForkId,
     },
-    /// A child under a deferred return stopped with a value that would narrow its parent. The
-    /// value is frozen here and crosses nowhere; the stop ends the child's errand. `trajectory`
-    /// is the child.
+    /// A child under a deferred return returned a value that would narrow its parent, or one
+    /// below a floor that holds it. The value is frozen here at its own occurrence and crosses
+    /// nowhere. A deferral at the child's stop ends the child's errand; a `held` one, made by a
+    /// return without ending, leaves the child running. `trajectory` is the child.
     ReturnDeferred {
         trajectory: TrajectoryId,
         id: ChildReturnId,
         value: LabeledValue,
+        /// Absent on a deferral recorded before a return could be held.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        held: bool,
     },
     /// The parent accepted a deferred return: the narrowing it consented to, in the batch that
     /// crosses the frozen value. `trajectory` is the parent.

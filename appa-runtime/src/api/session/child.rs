@@ -190,7 +190,7 @@ impl Session {
     /// replays, a message is held until the child gives it up.
     pub async fn on_child_end(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
         match self.child_calls()? {
-            ChildCalls::Ended(end) => Ok(ended_child(end, value)),
+            ChildCalls::Ended(end) => ended_child(end, value),
             ChildCalls::Open(open) => self.close_and_cross(open, value).await,
         }
     }
@@ -203,7 +203,7 @@ impl Session {
         answered: &BTreeSet<String>,
     ) -> Result<Stop<ChildReturnDecision>, EventError> {
         let open = match self.child_calls()? {
-            ChildCalls::Ended(end) => return Ok(Stop::Taken(ended_child(end, value))),
+            ChildCalls::Ended(end) => return ended_child(end, value).map(Stop::Taken),
             ChildCalls::Open(open) => open,
         };
         match self.unanswered(&open, answered)?.as_slice() {
@@ -237,20 +237,78 @@ impl Session {
         // a turn end closes it.
         self.close_unreported(open, "call closed as unreported at the child's end")
             .await?;
-        self.cross_return(value).await
+        self.cross_return(value, ReturnKind::Stop, None).await
     }
 
     /// A return the child makes without ending, judged exactly as a stop's return: the calls
-    /// it has open stay open, and a return made beside one is refused until they report.
-    pub async fn on_child_return(&self, value: String) -> Result<ChildReturnDecision, EventError> {
+    /// it has open stay open, and a return made beside one is refused until they report. A
+    /// deferral here holds the value for the parent, and the child runs on. `operation` names
+    /// this return across the host's retries: a retry with the same words answers as the
+    /// return it repeats, and one with other words is refused.
+    pub async fn on_child_return(
+        &self,
+        value: String,
+        operation: Option<ReturnOperation>,
+    ) -> Result<ChildReturnDecision, EventError> {
+        if let Some(operation) = &operation
+            && let Some(repeated) = self.repeated_return(operation, &value)?
+        {
+            return Ok(repeated);
+        }
         match self.child_calls()? {
-            ChildCalls::Ended(ChildEnd::Deferred) => Ok(ChildReturnDecision::Deferred),
-            ChildCalls::Ended(ChildEnd::Void) | ChildCalls::Open(_) => self.cross_return(Some(value)).await,
+            ChildCalls::Ended(end @ ChildEnd::Deferred { .. }) => ended_child(end, Some(value)),
+            ChildCalls::Ended(ChildEnd::Void) | ChildCalls::Open(_) => {
+                match (
+                    self.cross_return(Some(value.clone()), ReturnKind::Turn, operation.as_ref())
+                        .await,
+                    &operation,
+                ) {
+                    // Another attempt of the operation committed first: answer from its record.
+                    (Err(EventError::ReturnRetryChanged), Some(operation)) => self
+                        .repeated_return(operation, &value)?
+                        .ok_or(EventError::ReturnRetryChanged),
+                    (decided, _) => decided,
+                }
+            }
         }
     }
 
-    pub(super) async fn cross_return(&self, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
+    /// What a retry of the host's `operation` answers, where the operation already froze a
+    /// return: that return again for the same words, a refusal for other words.
+    fn repeated_return(
+        &self,
+        operation: &ReturnOperation,
+        value: &str,
+    ) -> Result<Option<ChildReturnDecision>, EventError> {
+        self.with_view(|context| {
+            let Some(id) = context.log.held_return(&self.trajectory, operation) else {
+                return Ok(None);
+            };
+            let parent = context.parent_of(&self.trajectory).ok_or(EventError::NotAChild)?;
+            let frozen = context
+                .engine()
+                .deferred_returns(context.view, &parent)
+                .into_iter()
+                .find(|deferred| deferred.id == *id)
+                .ok_or_else(|| EventError::EngineInvariant("a held operation names no deferral".to_string()))?;
+            match frozen.body.as_str() == value {
+                true => Ok(Some(ChildReturnDecision::Deferred)),
+                false => Err(EventError::ReturnRetryChanged),
+            }
+        })
+    }
+
+    pub(super) async fn cross_return(
+        &self,
+        value: Option<String>,
+        kind: ReturnKind,
+        operation: Option<&ReturnOperation>,
+    ) -> Result<ChildReturnDecision, EventError> {
         let child = self.trajectory.clone();
+        let occasion = match operation {
+            Some(operation) => Occasion::Return { operation },
+            None => Occasion::Other,
+        };
         let decision = self
             .drive_with_evidence(
                 |context, evidence| {
@@ -260,12 +318,13 @@ impl Session {
                     Ok(EngineEvent::ChildReturn {
                         child: child.clone(),
                         value: value.clone(),
+                        kind,
                         evidence,
                     })
                 },
                 None,
                 None,
-                Occasion::Other,
+                occasion,
             )
             .await?;
 
@@ -282,20 +341,21 @@ enum ChildCalls {
     Ended(ChildEnd),
 }
 
-/// How an ended child ended: every later stop repeats what that end answered.
-#[derive(Clone, Copy)]
+/// How an ended child ended: every later stop repeats what that end answered. A deferral at
+/// the stop keeps the words it froze, which only a retry of that stop repeats.
 pub(super) enum ChildEnd {
     Void,
-    Deferred,
+    Deferred { said: String },
 }
 
-fn ended_child(end: ChildEnd, value: Option<String>) -> ChildReturnDecision {
+fn ended_child(end: ChildEnd, value: Option<String>) -> Result<ChildReturnDecision, EventError> {
     match (value, end) {
-        (None, _) => ChildReturnDecision::NoValue,
-        (Some(_), ChildEnd::Deferred) => ChildReturnDecision::Deferred,
-        (Some(_), ChildEnd::Void) => ChildReturnDecision::Blocked {
+        (None, _) => Ok(ChildReturnDecision::NoValue),
+        (Some(value), ChildEnd::Deferred { said }) if value == said => Ok(ChildReturnDecision::Deferred),
+        (Some(_), ChildEnd::Deferred { .. }) => Err(EventError::ReturnRetryChanged),
+        (Some(_), ChildEnd::Void) => Ok(ChildReturnDecision::Blocked {
             feedback: ENDED_CHILD.to_string(),
             outcomes: appa_runtime_api::Outcomes::HardBlock,
-        },
+        }),
     }
 }

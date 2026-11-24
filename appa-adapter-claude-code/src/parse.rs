@@ -293,6 +293,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                         root: event.root(),
                         child: event.child_id(agent),
                         value: input.to_string(),
+                        operation: None,
                     })),
                     Err(error) => Err(malformed(&format!(
                         "a StructuredOutput input that is not JSON: {error}"

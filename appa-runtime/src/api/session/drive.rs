@@ -98,6 +98,8 @@ pub(super) struct Opening<'a> {
     invocation: Option<appa_eventlog::InvocationNonce>,
     applies: Option<&'a AheadClaim<'a>>,
     took: Option<&'a Took>,
+    /// The host's identity for a child's return without ending, which a deferral binds.
+    operation: Option<&'a ReturnOperation>,
 }
 
 /// Where a spawn's proposal leaves the declaration its call or invocation durably took, as the
@@ -325,6 +327,23 @@ impl Decided<'_> {
         ahead: Option<&AheadState>,
     ) -> Result<Option<appa_eventlog::HostObservation>, EventError> {
         let trajectory = &self.session.trajectory;
+        if let Some(operation) = opening.operation
+            && let Some((child, id)) = facts.iter().find_map(|fact| match fact {
+                appa_engine::fact::Fact::ReturnDeferred { trajectory, id, .. } => Some((trajectory, id)),
+                _ => None,
+            })
+        {
+            // One operation names one occurrence: a retry that read the log before the first
+            // attempt committed meets the binding here and is answered from it.
+            if self.log.held_return(child, operation).is_some() {
+                return Err(EventError::ReturnRetryChanged);
+            }
+            return Ok(Some(appa_eventlog::HostObservation::ReturnHeld {
+                trajectory: child.clone(),
+                operation: operation.clone(),
+                id: id.clone(),
+            }));
+        }
         let takes = |call_id: &str| {
             let ahead = ahead?;
             match ahead.assignment(trajectory, call_id) {
@@ -401,7 +420,7 @@ impl Decided<'_> {
         // application round.
         if self
             .engine()
-            .declare_ahead(self.view, trajectory, &declared.arguments)
+            .declare_ahead(self.view, trajectory, &declared.arguments, BelowFloor::Refuse)
             .is_err()
         {
             return Ok(Judgment::Settled(AheadOutcome::Unfit));
@@ -664,16 +683,20 @@ impl Decided<'_> {
             .map(|binding| binding.dispatch.clone())
     }
 
+    /// How the ended `child` ended: by the deferral at its stop, the one occurrence of it that
+    /// is not held, or by its void return.
     pub(super) fn child_end(&self, child: &TrajectoryId) -> super::child::ChildEnd {
-        let deferred = self.parent_of(child).is_some_and(|parent| {
+        let terminal = self.parent_of(child).and_then(|parent| {
             self.engine()
                 .deferred_returns(self.view, &parent)
-                .iter()
-                .any(|deferred| deferred.id.child() == child)
+                .into_iter()
+                .find(|deferred| deferred.id.child() == child && !deferred.held)
         });
-        match deferred {
-            true => super::child::ChildEnd::Deferred,
-            false => super::child::ChildEnd::Void,
+        match terminal {
+            Some(deferred) => super::child::ChildEnd::Deferred {
+                said: deferred.body.as_str().to_string(),
+            },
+            None => super::child::ChildEnd::Void,
         }
     }
 
@@ -778,9 +801,14 @@ impl Session {
                 invocation,
                 applies: None,
                 took: Some(took),
+                operation: None,
             },
             Occasion::AheadApply { claim, .. } => Opening {
                 applies: Some(claim),
+                ..Opening::default()
+            },
+            Occasion::Return { operation } => Opening {
+                operation: Some(operation),
                 ..Opening::default()
             },
             Occasion::Report { .. } | Occasion::Remedy { .. } | Occasion::Other => Opening::default(),

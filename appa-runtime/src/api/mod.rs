@@ -142,6 +142,26 @@ pub struct DeferredReturnNotice {
     pub discard: ReturnReference,
 }
 
+/// One return a spawn's child froze for its parent, held or at its stop: its occurrence among
+/// the child's returns, where the parent's decision on it stands, the host operation that made
+/// it where the host named one, and what the parent is told about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildOccurrence {
+    pub occurrence: u32,
+    pub state: OccurrenceState,
+    pub operation: Option<appa_runtime_api::ReturnOperation>,
+    pub notice: DeferredReturnNotice,
+}
+
+/// A frozen return awaits the parent's decision until it accepts or discards it. A pending
+/// return never crosses, and a discarded one never will.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OccurrenceState {
+    Pending,
+    Accepted,
+    Discarded,
+}
+
 /// Why an externally supplied rendered offer id cannot identify an offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum OfferIdRefusal {
@@ -726,12 +746,15 @@ pub(crate) enum EventError {
     /// The host carried a return declaration on a call that starts no single subagent.
     #[error("only a call that starts a single subagent declares its return; this call starts none")]
     DeclaresOffSpawn,
-    /// The host declared a deferred return on a spawn it gave no call id: the parent finds
-    /// the answer it decides on by that id.
-    #[error("a spawn that declares a deferred return carries the host's call id; this one carries none")]
+    /// The host declared a deferred or held return on a spawn it gave no call id: the parent
+    /// finds the answer it decides on by that id.
+    #[error("a spawn that declares a deferred or held return carries the host's call id; this one carries none")]
     DeferralUnkeyed,
     #[error("the host reused a call id")]
     CallIdReused,
+    /// A retry of a child's return carried other words than the return it repeats.
+    #[error("this return repeats an earlier one with other words; a retried return carries the words it first carried")]
+    ReturnRetryChanged,
     #[error("the trajectory has ended")]
     TrajectoryEnded,
     #[error("the child has a call still open; report its outcome before the child ends")]
@@ -896,7 +919,7 @@ impl EventError {
             | EventError::SpawnOutstanding
             | EventError::FanOutOutstanding
             | EventError::ChildDispatchOpen => RefusalClass::OutstandingCall,
-            EventError::CallIdReused => RefusalClass::CallIdReused,
+            EventError::CallIdReused | EventError::ReturnRetryChanged => RefusalClass::CallIdReused,
             EventError::TrajectoryEnded => RefusalClass::TrajectoryEnded,
             // A start under another line variant names a family its id does not hold, as a
             // reused id does.
@@ -952,6 +975,7 @@ impl EventError {
             | EventError::FanOutOutstanding
             | EventError::FanOutUnkeyed
             | EventError::CallIdReused
+            | EventError::ReturnRetryChanged
             | EventError::TrajectoryEnded
             | EventError::ChildDispatchOpen
             | EventError::RemedyArguments { .. }
@@ -3806,7 +3830,12 @@ impl Runtime {
             };
             let label = context
                 .engine()
-                .declare_ahead(context.view, acting_trajectory(&actor), arguments)
+                .declare_ahead(
+                    context.view,
+                    acting_trajectory(&actor),
+                    arguments,
+                    appa_engine::fact::BelowFloor::Refuse,
+                )
                 .map_err(|detail| RemedyOutcome::from(EventError::RemedyArguments { detail }))?;
             let declaration = HostObservation::AheadDeclared {
                 actor: host_actor(&actor),
@@ -3987,6 +4016,19 @@ impl Runtime {
     ) -> Result<Option<DeferredReturnNotice>, EmbeddedPeerError> {
         self.session_with_presentation(&acting.root, acting_trajectory(acting), presentation.clone())
             .and_then(|session| session.deferred_return(call_id))
+            .map_err(embedded::peer_error)
+    }
+
+    /// Every return the subagent of `acting`'s spawn `call_id` froze for `acting`, in occurrence
+    /// order; none for a spawn whose subagent froze nothing.
+    pub fn child_occurrences(
+        &self,
+        acting: &Actor,
+        call_id: &str,
+        presentation: &EmbeddedPresentationOptions,
+    ) -> Result<Vec<ChildOccurrence>, EmbeddedPeerError> {
+        self.session_with_presentation(&acting.root, acting_trajectory(acting), presentation.clone())
+            .and_then(|session| session.child_occurrences(call_id))
             .map_err(embedded::peer_error)
     }
 

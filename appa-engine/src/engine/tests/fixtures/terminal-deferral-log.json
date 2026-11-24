@@ -1,0 +1,1491 @@
+[
+  {
+    "TrajectoryOpened": {
+      "trajectory": "t",
+      "profile": {
+        "starting_label": {
+          "trust": 1,
+          "audience": []
+        },
+        "context_control": true,
+        "dispatch": "enforced",
+        "executor_exceptions": {},
+        "confined_results": [
+          "fetch",
+          "read_internal",
+          "read_suspicious",
+          "read_suspicious_internal",
+          "spawn"
+        ],
+        "provider_surfaces": {},
+        "binding": "harness"
+      },
+      "policy_file_key": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "deployment": "default",
+      "revision": 1
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "spawn-discarded"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "spawn-discarded",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single",
+        "deferral": true
+      },
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "ad41dd26326d792e69ae59a29553031d5c5ce01a2e622d2e8efec5dc9931262f",
+      "block": "2bfd7f24861118df3b7689c219759a6f425a8a3e66129c56243f7963fec04df0",
+      "act": {
+        "Proposals": "spawn-discarded"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-discarded",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Return": "Raw"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "df1111330d300dce7275da86a8e67807828afcf8414074737da987b7865561fb",
+      "block": "2bfd7f24861118df3b7689c219759a6f425a8a3e66129c56243f7963fec04df0",
+      "act": {
+        "Proposals": "spawn-discarded"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-discarded",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 1,
+        "steps": [
+          {
+            "Return": "Void"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Offer": "ad41dd26326d792e69ae59a29553031d5c5ce01a2e622d2e8efec5dc9931262f"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "t",
+              "batch": "spawn-discarded",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "t",
+      "offer": "ad41dd26326d792e69ae59a29553031d5c5ce01a2e622d2e8efec5dc9931262f",
+      "initiator": "agent"
+    }
+  },
+  {
+    "OfferInvalidated": {
+      "trajectory": "t",
+      "offer": "df1111330d300dce7275da86a8e67807828afcf8414074737da987b7865561fb"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "t",
+      "offer": "ad41dd26326d792e69ae59a29553031d5c5ce01a2e622d2e8efec5dc9931262f",
+      "call": {
+        "tool": "spawn",
+        "arguments": "{}",
+        "annotation": null
+      },
+      "plan": 0,
+      "acceptance": null,
+      "rulings": [],
+      "output": null,
+      "return_policy": "Deferred",
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "spawn-approved-discarded"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "ad41dd26326d792e69ae59a29553031d5c5ce01a2e622d2e8efec5dc9931262f"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "spawn-approved-discarded",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single",
+        "deferral": true
+      },
+      "released": [
+        {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "t",
+      "offer": "ad41dd26326d792e69ae59a29553031d5c5ce01a2e622d2e8efec5dc9931262f",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "t",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 0
+      },
+      "tool": "spawn",
+      "arguments": "{}",
+      "proposed_label": {
+        "trust": 1,
+        "audience": []
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-approved-discarded",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": null,
+          "audience": null
+        }
+      }
+    }
+  },
+  {
+    "ForkPrepared": {
+      "trajectory": "t",
+      "fork": {
+        "Spawn": {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      },
+      "snapshot": {
+        "base": {
+          "trust": 1,
+          "audience": []
+        },
+        "inherited": [],
+        "seed": {
+          "trust": 1,
+          "audience": []
+        }
+      },
+      "return_policy": "Deferred",
+      "kind": "Single"
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Binding": {
+          "Spawn": {
+            "trajectory": "t",
+            "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+            "occurrence": 0
+          }
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ForkOpened": {
+      "trajectory": "discarded",
+      "fork": {
+        "Spawn": {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "discarded",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-16"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "discarded",
+      "batch": "read-read_suspicious_internal-16",
+      "proposals": [
+        {
+          "tool": "read_suspicious_internal",
+          "arguments": "{\"who\":\"someone\"}",
+          "annotation": null
+        }
+      ],
+      "spawn": null,
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "discarded",
+      "offer": "83dc573691be8319a143d79272d3c7ac3c689fce40d72615348868b2c61917e7",
+      "block": "0e33f8ea2438ce1beb012452b514b16061fab2ef362603d1f3a68593750b81b6",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-16"
+      },
+      "call": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+      "subject": {
+        "Call": {
+          "trajectory": "discarded",
+          "batch": "read-read_suspicious_internal-16",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Accept": {
+              "from": {
+                "trust": 1,
+                "audience": []
+              },
+              "to": {
+                "trust": 0,
+                "audience": [
+                  {
+                    "readers": [
+                      "insider"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "discarded",
+      "act": {
+        "Offer": "83dc573691be8319a143d79272d3c7ac3c689fce40d72615348868b2c61917e7"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "discarded",
+              "batch": "read-read_suspicious_internal-16",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "discarded",
+      "offer": "83dc573691be8319a143d79272d3c7ac3c689fce40d72615348868b2c61917e7",
+      "initiator": "agent"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "discarded",
+      "offer": "83dc573691be8319a143d79272d3c7ac3c689fce40d72615348868b2c61917e7",
+      "call": {
+        "tool": "read_suspicious_internal",
+        "arguments": "{\"who\":\"someone\"}",
+        "annotation": null
+      },
+      "plan": 0,
+      "acceptance": {
+        "from": {
+          "trust": 1,
+          "audience": []
+        },
+        "to": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "rulings": [],
+      "output": null,
+      "return_policy": null,
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "discarded",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-16-approved"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "83dc573691be8319a143d79272d3c7ac3c689fce40d72615348868b2c61917e7"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "discarded",
+      "batch": "read-read_suspicious_internal-16-approved",
+      "proposals": [
+        {
+          "tool": "read_suspicious_internal",
+          "arguments": "{\"who\":\"someone\"}",
+          "annotation": null
+        }
+      ],
+      "spawn": null,
+      "released": [
+        {
+          "trajectory": "discarded",
+          "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+          "occurrence": 0
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "discarded",
+      "offer": "83dc573691be8319a143d79272d3c7ac3c689fce40d72615348868b2c61917e7",
+      "dispatch": {
+        "trajectory": "discarded",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "Acceptance": {
+      "trajectory": "discarded",
+      "dispatch": {
+        "trajectory": "discarded",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "plan": 0,
+      "narrowing": {
+        "from": {
+          "trust": 1,
+          "audience": []
+        },
+        "to": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "discarded",
+      "dispatch": {
+        "trajectory": "discarded",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "tool": "read_suspicious_internal",
+      "arguments": "{\"who\":\"someone\"}",
+      "proposed_label": {
+        "trust": 0,
+        "audience": [
+          {
+            "readers": [
+              "insider"
+            ]
+          }
+        ]
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "subject": {
+        "Call": {
+          "trajectory": "discarded",
+          "batch": "read-read_suspicious_internal-16-approved",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": 0,
+          "audience": {
+            "Union": {
+              "readers": [
+                "insider"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "discarded",
+      "act": {
+        "Outcome": {
+          "trajectory": "discarded",
+          "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [
+          "discarded"
+        ],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "DispatchClosed": {
+      "trajectory": "discarded",
+      "dispatch": {
+        "trajectory": "discarded",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "outcome": {
+        "Success": {
+          "effects": []
+        }
+      }
+    }
+  },
+  {
+    "ValueAdmitted": {
+      "trajectory": "discarded",
+      "value": {
+        "body": "read",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "ToolResult": {
+          "dispatch": {
+            "trajectory": "discarded",
+            "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "ChildReturn": {
+          "child": "discarded",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ReturnDeferred": {
+      "trajectory": "discarded",
+      "id": {
+        "child": "discarded",
+        "occurrence": 0
+      },
+      "value": {
+        "body": "other",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Settlement": {
+          "child": "discarded",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ReturnDiscarded": {
+      "trajectory": "t",
+      "id": {
+        "child": "discarded",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "spawn-accepted"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "spawn-accepted",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single",
+        "deferral": true
+      },
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "e21133383758d3b09d4e44ec1a4cee0fcd41a420c49d8420a5ebb3a06e9e1f18",
+      "block": "59352e3f638b4e1d4261e9b091521a79ad2df3070f60d5e2c0f45fffabab6335",
+      "act": {
+        "Proposals": "spawn-accepted"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-accepted",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Return": "Raw"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "69a26195f8ead1980dc096dba021a62561a5c16dc891eb9eed84c1e0829c57fe",
+      "block": "59352e3f638b4e1d4261e9b091521a79ad2df3070f60d5e2c0f45fffabab6335",
+      "act": {
+        "Proposals": "spawn-accepted"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-accepted",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 1,
+        "steps": [
+          {
+            "Return": "Void"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Offer": "e21133383758d3b09d4e44ec1a4cee0fcd41a420c49d8420a5ebb3a06e9e1f18"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "t",
+              "batch": "spawn-accepted",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "t",
+      "offer": "e21133383758d3b09d4e44ec1a4cee0fcd41a420c49d8420a5ebb3a06e9e1f18",
+      "initiator": "agent"
+    }
+  },
+  {
+    "OfferInvalidated": {
+      "trajectory": "t",
+      "offer": "69a26195f8ead1980dc096dba021a62561a5c16dc891eb9eed84c1e0829c57fe"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "t",
+      "offer": "e21133383758d3b09d4e44ec1a4cee0fcd41a420c49d8420a5ebb3a06e9e1f18",
+      "call": {
+        "tool": "spawn",
+        "arguments": "{}",
+        "annotation": null
+      },
+      "plan": 0,
+      "acceptance": null,
+      "rulings": [],
+      "output": null,
+      "return_policy": "Deferred",
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "spawn-approved-accepted"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "e21133383758d3b09d4e44ec1a4cee0fcd41a420c49d8420a5ebb3a06e9e1f18"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "spawn-approved-accepted",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single",
+        "deferral": true
+      },
+      "released": [
+        {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 1
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "t",
+      "offer": "e21133383758d3b09d4e44ec1a4cee0fcd41a420c49d8420a5ebb3a06e9e1f18",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 1
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "t",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 1
+      },
+      "tool": "spawn",
+      "arguments": "{}",
+      "proposed_label": {
+        "trust": 1,
+        "audience": []
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-approved-accepted",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": null,
+          "audience": null
+        }
+      }
+    }
+  },
+  {
+    "ForkPrepared": {
+      "trajectory": "t",
+      "fork": {
+        "Spawn": {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 1
+        }
+      },
+      "snapshot": {
+        "base": {
+          "trust": 1,
+          "audience": []
+        },
+        "inherited": [],
+        "seed": {
+          "trust": 1,
+          "audience": []
+        }
+      },
+      "return_policy": "Deferred",
+      "kind": "Single"
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Binding": {
+          "Spawn": {
+            "trajectory": "t",
+            "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+            "occurrence": 1
+          }
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ForkOpened": {
+      "trajectory": "accepted",
+      "fork": {
+        "Spawn": {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 1
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "accepted",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-49"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "accepted",
+      "batch": "read-read_suspicious_internal-49",
+      "proposals": [
+        {
+          "tool": "read_suspicious_internal",
+          "arguments": "{\"who\":\"someone\"}",
+          "annotation": null
+        }
+      ],
+      "spawn": null,
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "accepted",
+      "offer": "e917df8c87ccb301235972a6c188dcf682b7842fbd3192b3e93028102de01579",
+      "block": "1c52ac42609ccb769913c4809e7abfd5fc4c32f5ff6684d1c2e901055c878676",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-49"
+      },
+      "call": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+      "subject": {
+        "Call": {
+          "trajectory": "accepted",
+          "batch": "read-read_suspicious_internal-49",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Accept": {
+              "from": {
+                "trust": 1,
+                "audience": []
+              },
+              "to": {
+                "trust": 0,
+                "audience": [
+                  {
+                    "readers": [
+                      "insider"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "accepted",
+      "act": {
+        "Offer": "e917df8c87ccb301235972a6c188dcf682b7842fbd3192b3e93028102de01579"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "accepted",
+              "batch": "read-read_suspicious_internal-49",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "accepted",
+      "offer": "e917df8c87ccb301235972a6c188dcf682b7842fbd3192b3e93028102de01579",
+      "initiator": "agent"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "accepted",
+      "offer": "e917df8c87ccb301235972a6c188dcf682b7842fbd3192b3e93028102de01579",
+      "call": {
+        "tool": "read_suspicious_internal",
+        "arguments": "{\"who\":\"someone\"}",
+        "annotation": null
+      },
+      "plan": 0,
+      "acceptance": {
+        "from": {
+          "trust": 1,
+          "audience": []
+        },
+        "to": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "rulings": [],
+      "output": null,
+      "return_policy": null,
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "accepted",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-49-approved"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "e917df8c87ccb301235972a6c188dcf682b7842fbd3192b3e93028102de01579"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "accepted",
+      "batch": "read-read_suspicious_internal-49-approved",
+      "proposals": [
+        {
+          "tool": "read_suspicious_internal",
+          "arguments": "{\"who\":\"someone\"}",
+          "annotation": null
+        }
+      ],
+      "spawn": null,
+      "released": [
+        {
+          "trajectory": "accepted",
+          "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+          "occurrence": 0
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "accepted",
+      "offer": "e917df8c87ccb301235972a6c188dcf682b7842fbd3192b3e93028102de01579",
+      "dispatch": {
+        "trajectory": "accepted",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "Acceptance": {
+      "trajectory": "accepted",
+      "dispatch": {
+        "trajectory": "accepted",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "plan": 0,
+      "narrowing": {
+        "from": {
+          "trust": 1,
+          "audience": []
+        },
+        "to": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "accepted",
+      "dispatch": {
+        "trajectory": "accepted",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "tool": "read_suspicious_internal",
+      "arguments": "{\"who\":\"someone\"}",
+      "proposed_label": {
+        "trust": 0,
+        "audience": [
+          {
+            "readers": [
+              "insider"
+            ]
+          }
+        ]
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "subject": {
+        "Call": {
+          "trajectory": "accepted",
+          "batch": "read-read_suspicious_internal-49-approved",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": 0,
+          "audience": {
+            "Union": {
+              "readers": [
+                "insider"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "accepted",
+      "act": {
+        "Outcome": {
+          "trajectory": "accepted",
+          "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [
+          "accepted"
+        ],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "DispatchClosed": {
+      "trajectory": "accepted",
+      "dispatch": {
+        "trajectory": "accepted",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "outcome": {
+        "Success": {
+          "effects": []
+        }
+      }
+    }
+  },
+  {
+    "ValueAdmitted": {
+      "trajectory": "accepted",
+      "value": {
+        "body": "read",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "ToolResult": {
+          "dispatch": {
+            "trajectory": "accepted",
+            "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "ChildReturn": {
+          "child": "accepted",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ReturnDeferred": {
+      "trajectory": "accepted",
+      "id": {
+        "child": "accepted",
+        "occurrence": 0
+      },
+      "value": {
+        "body": "the answer",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Settlement": {
+          "child": "accepted",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [
+          "t"
+        ],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ReturnAccepted": {
+      "trajectory": "t",
+      "id": {
+        "child": "accepted",
+        "occurrence": 0
+      },
+      "narrowing": {
+        "from": {
+          "trust": 1,
+          "audience": []
+        },
+        "to": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "ChildReturn": {
+      "trajectory": "accepted",
+      "id": {
+        "child": "accepted",
+        "occurrence": 0
+      },
+      "value": {
+        "body": "the answer",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "derivation": "Raw"
+    }
+  },
+  {
+    "ValueAdmitted": {
+      "trajectory": "t",
+      "value": {
+        "body": "the answer",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "ChildReturn": {
+          "child": "accepted",
+          "id": {
+            "child": "accepted",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "Boundary": {
+      "trajectory": "t",
+      "kind": {
+        "Merge": {
+          "child_return": {
+            "child": "accepted",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  }
+]

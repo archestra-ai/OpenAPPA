@@ -355,6 +355,7 @@ pub struct ChildReport {
     pub child: TrajectoryId,
     pub fork: crate::value::ForkId,
     pub submission: ChildSubmission,
+    pub kind: ReturnKind,
     /// Typed evidence the runtime resolved for this exact report: the fork's named
     /// sanitizer's derivation. An external that gave no answer contributes nothing here and
     /// resumes nothing.
@@ -362,6 +363,15 @@ pub struct ChildReport {
     /// The pinned audience primitives the runtime gathered for this act: the fork's
     /// sanitizer's mandate reads them.
     pub audience: AudienceEvidence,
+}
+
+/// Whether a child returns at its stop or without ending. A value either way crosses, or is
+/// deferred, alike; a deferral at the stop ends the child's errand, and one made without ending
+/// holds the value for the parent while the child runs on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReturnKind {
+    Stop,
+    Turn,
 }
 
 /// What the child submitted: one value, or none. The crossing path is derived from the
@@ -376,12 +386,13 @@ pub enum ChildSubmission {
 /// act, or crossed before and repeated. `Staged` is the fork's sanitizer's derivation, recorded
 /// once and crossing when the child returns exactly it: a host that delivers the child's own
 /// words to the parent holds the child until it says them. `Deferred` is a value frozen for
-/// the parent's decision: the child's errand ended and nothing crossed.
+/// the parent's decision, now or by an earlier return of the same value: nothing crossed, and
+/// the child's errand ended unless the return was made without ending.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildFollowUp {
     Merged { admitted: ValueBody },
     Staged { derived: ValueBody },
-    Deferred,
+    Deferred { id: ChildReturnId },
     Ended,
     Resolve(EvidenceRequest),
 }
@@ -1498,7 +1509,9 @@ impl<'a> Sequence<'a> {
                 kind,
             } => self.fork_prepared(trajectory, fork, snapshot, return_policy, kind, released)?,
             Fact::ForkOpened { trajectory, fork } => self.fork_opened(trajectory, fork)?,
-            Fact::ReturnDeferred { trajectory, id, value } => self.return_deferred(trajectory, id, value)?,
+            Fact::ReturnDeferred {
+                trajectory, id, value, ..
+            } => self.return_deferred(trajectory, id, value)?,
             Fact::ReturnAccepted {
                 trajectory,
                 id,
@@ -3197,8 +3210,10 @@ impl<'a> Sequence<'a> {
         }
     }
 
-    /// A deferral, re-derived from the fork's recorded policy: the child is live under a
-    /// deferred return, the label is its fold, and the value would narrow its parent.
+    /// A deferral, re-derived from the fork's recorded policy: the child is live, the label is
+    /// its fold, and the value would narrow its parent — under a deferred return, within the
+    /// floor the child inherits; under a raw crossing that holds what falls below its floor,
+    /// below that floor.
     fn return_deferred(
         &self,
         child: &TrajectoryId,
@@ -3212,11 +3227,16 @@ impl<'a> Sequence<'a> {
             .ok_or(TransitionRefusal::NotForked)?
             .clone();
         let views = self.projection.view(&parent);
-        match standing_return(&views, child, id)? {
-            ReturnPolicy::Deferred => {}
+        let held_below_floor = match standing_return(&views, child, id)? {
+            ReturnPolicy::Deferred => false,
             ReturnPolicy::Void => return Err(TransitionRefusal::ReturnVoid),
+            ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                sanitizer: None,
+                below_floor: crate::fact::BelowFloor::Hold,
+                ..
+            }) => true,
             ReturnPolicy::Crossing(_) => return Err(TransitionRefusal::ReturnNotDeferred),
-        }
+        };
         if value.label != views.branch_label(child) {
             return Err(TransitionRefusal::ForgedLabel);
         }
@@ -3224,7 +3244,11 @@ impl<'a> Sequence<'a> {
         if standing.combine(&value.label) == standing {
             return Err(TransitionRefusal::DeferralUnneeded);
         }
-        self.holds_child_floor(child, &value.label)
+        match (held_below_floor, self.holds_child_floor(child, &value.label)) {
+            (false, held) => held,
+            (true, Err(TransitionRefusal::ReturnBelowFloor)) => Ok(()),
+            (true, _) => Err(TransitionRefusal::ReturnNotDeferred),
+        }
     }
 
     /// The value a pending deferred return froze, for the parent that owns it.
@@ -3236,6 +3260,9 @@ impl<'a> Sequence<'a> {
         let views = self.projection.view(parent);
         if views.parent_of(id.child()) != Some(parent) {
             return Err(TransitionRefusal::ForeignTrajectory);
+        }
+        if views.has_ended(parent) {
+            return Err(TransitionRefusal::BranchEnded);
         }
         views
             .deferral(id)

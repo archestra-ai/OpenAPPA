@@ -868,6 +868,7 @@ mod tests {
             root: root(),
             child: TrajectoryId("cc:s1:a1".to_string()),
             value: r#"{"rows":3}"#.to_string(),
+            operation: None,
         };
         assert_eq!(
             render(&event, &HookDecision::Ack),

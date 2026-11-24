@@ -56,6 +56,7 @@ fn a_child_return_crosses_and_a_repeat_answers_from_the_record() {
         e.handle(
             &after,
             EngineEvent::ChildReturn(ChildReport {
+                kind: crate::transition::ReturnKind::Stop,
                 child: TrajectoryId::new("stranger"),
                 fork: fork_in(&log, &child),
                 submission: ChildSubmission::Void,

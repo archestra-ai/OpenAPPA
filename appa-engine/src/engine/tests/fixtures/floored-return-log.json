@@ -1,0 +1,409 @@
+[
+  {
+    "TrajectoryOpened": {
+      "trajectory": "t",
+      "profile": {
+        "starting_label": {
+          "trust": 1,
+          "audience": []
+        },
+        "context_control": true,
+        "dispatch": "enforced",
+        "executor_exceptions": {},
+        "confined_results": [
+          "fetch",
+          "read_internal",
+          "read_suspicious",
+          "read_suspicious_internal",
+          "spawn"
+        ],
+        "provider_surfaces": {},
+        "binding": "harness"
+      },
+      "policy_file_key": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "deployment": "default",
+      "revision": 1
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "spawn-child"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "spawn-child",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single"
+      },
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "198a9b3a931c44fac61d5a4984de317ee4c8dcd35de22e13825fd482fe5460a7",
+      "block": "d82028deb5ea49267b535167293dc1694367ea2ba9955baf1e3807ad8cf897c0",
+      "act": {
+        "Proposals": "spawn-child"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-child",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Return": "Raw"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "235f31e28c08aecaeb015035a860ed50266bdfe867fb173e7ad0449f565b92e9",
+      "block": "d82028deb5ea49267b535167293dc1694367ea2ba9955baf1e3807ad8cf897c0",
+      "act": {
+        "Proposals": "spawn-child"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-child",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 1,
+        "steps": [
+          {
+            "Return": "Void"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Offer": "198a9b3a931c44fac61d5a4984de317ee4c8dcd35de22e13825fd482fe5460a7"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "t",
+              "batch": "spawn-child",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "t",
+      "offer": "198a9b3a931c44fac61d5a4984de317ee4c8dcd35de22e13825fd482fe5460a7",
+      "initiator": "agent"
+    }
+  },
+  {
+    "OfferInvalidated": {
+      "trajectory": "t",
+      "offer": "235f31e28c08aecaeb015035a860ed50266bdfe867fb173e7ad0449f565b92e9"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "t",
+      "offer": "198a9b3a931c44fac61d5a4984de317ee4c8dcd35de22e13825fd482fe5460a7",
+      "call": {
+        "tool": "spawn",
+        "arguments": "{}",
+        "annotation": null
+      },
+      "plan": 0,
+      "acceptance": null,
+      "rulings": [],
+      "output": null,
+      "return_policy": {
+        "Crossing": {
+          "floor": {
+            "trust": 1,
+            "audience": []
+          },
+          "sanitizer": null
+        }
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "spawn-approved-child"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "198a9b3a931c44fac61d5a4984de317ee4c8dcd35de22e13825fd482fe5460a7"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "spawn-approved-child",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single"
+      },
+      "released": [
+        {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "t",
+      "offer": "198a9b3a931c44fac61d5a4984de317ee4c8dcd35de22e13825fd482fe5460a7",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "t",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 0
+      },
+      "tool": "spawn",
+      "arguments": "{}",
+      "proposed_label": {
+        "trust": 1,
+        "audience": []
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-approved-child",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": null,
+          "audience": null
+        }
+      }
+    }
+  },
+  {
+    "ForkPrepared": {
+      "trajectory": "t",
+      "fork": {
+        "Spawn": {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      },
+      "snapshot": {
+        "base": {
+          "trust": 1,
+          "audience": []
+        },
+        "inherited": [],
+        "seed": {
+          "trust": 1,
+          "audience": []
+        }
+      },
+      "return_policy": {
+        "Crossing": {
+          "floor": {
+            "trust": 1,
+            "audience": []
+          },
+          "sanitizer": null
+        }
+      },
+      "kind": "Single"
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Binding": {
+          "Spawn": {
+            "trajectory": "t",
+            "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+            "occurrence": 0
+          }
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ForkOpened": {
+      "trajectory": "child",
+      "fork": {
+        "Spawn": {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "ChildReturn": {
+          "child": "child",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ChildReturn": {
+      "trajectory": "child",
+      "id": {
+        "child": "child",
+        "occurrence": 0
+      },
+      "value": {
+        "body": "first",
+        "label": {
+          "trust": 1,
+          "audience": []
+        }
+      },
+      "derivation": "Raw"
+    }
+  },
+  {
+    "ValueAdmitted": {
+      "trajectory": "t",
+      "value": {
+        "body": "first",
+        "label": {
+          "trust": 1,
+          "audience": []
+        }
+      },
+      "provenance": {
+        "ChildReturn": {
+          "child": "child",
+          "id": {
+            "child": "child",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "Boundary": {
+      "trajectory": "t",
+      "kind": {
+        "Merge": {
+          "child_return": {
+            "child": "child",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  }
+]

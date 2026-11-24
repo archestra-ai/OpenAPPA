@@ -74,7 +74,8 @@ impl HostState {
                 | HostObservation::Aliased { .. }
                 | HostObservation::AheadDeclared { spends: None, .. }
                 | HostObservation::AheadReserved { .. }
-                | HostObservation::AheadSettled { .. } => {}
+                | HostObservation::AheadSettled { .. }
+                | HostObservation::ReturnHeld { .. } => {}
                 // A daemon declaration consumes the vouch that authorized it, as a release does.
                 HostObservation::AheadDeclared {
                     actor,

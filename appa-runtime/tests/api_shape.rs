@@ -149,8 +149,10 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             root: _,
             child: _,
             value,
+            operation,
         } => {
             let _: String = value;
+            let _: Option<appa_runtime_api::ReturnOperation> = operation;
         }
         HookEvent::SpawnResult {
             actor: _,

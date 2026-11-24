@@ -71,7 +71,7 @@ impl Session {
         prompt: Option<PromptKey>,
         declares: DeclaredReturn,
     ) -> Result<ToolCallDecision, EventError> {
-        if declares == DeclaredReturn::Deferred && call_id.is_none() {
+        if matches!(declares, DeclaredReturn::Deferred | DeclaredReturn::Decides(_)) && call_id.is_none() {
             return Err(EventError::DeferralUnkeyed);
         }
         self.on_proposal(Proposal {
@@ -237,17 +237,19 @@ impl Session {
                 return Ok(decision);
             }
             let fit = self.with_view(|context| {
+                // Arguments the policy does not accept here are refused by every application.
+                let fitting = |arguments: &RemedyArguments, below_floor| match context.engine().declare_ahead(
+                    context.view,
+                    &self.trajectory,
+                    arguments,
+                    below_floor,
+                ) {
+                    Err(_) => Fit::Unfit,
+                    Ok(_) => context.fitting_offer(offers, arguments),
+                };
                 Ok(match declares {
-                    // Arguments the policy does not accept here are refused by every application.
-                    DeclaredReturn::Arguments(arguments) => {
-                        match context
-                            .engine()
-                            .declare_ahead(context.view, &self.trajectory, arguments)
-                        {
-                            Err(_) => Fit::Unfit,
-                            Ok(_) => context.fitting_offer(offers, arguments),
-                        }
-                    }
+                    DeclaredReturn::Arguments(arguments) => fitting(arguments, BelowFloor::Refuse),
+                    DeclaredReturn::Decides(arguments) => fitting(arguments, BelowFloor::Hold),
                     // A deferred return rides the plan that takes the return as spoken.
                     DeclaredReturn::Deferred => context.fitting_offer(offers, &RemedyArguments::default()),
                 })

@@ -1474,6 +1474,10 @@ pub enum ReturnPolicyRefusal {
     SanitizerUnavailable,
     #[error("a deferred return is declared only by the host, on a single spawn's own proposal")]
     DeferralUndeclared,
+    #[error(
+        "a return below its floor is held only for a trajectory that stands under no floor of its own, and only when it crosses as spoken"
+    )]
+    HoldUnavailable,
 }
 
 /// Is `policy` the declaration `step` asks for, at this trajectory's label? A void return
@@ -1512,8 +1516,14 @@ fn declared_crossing(registry: &Registry, views: &Views, policy: &CrossingReturn
     if current.combine(&policy.floor) != policy.floor {
         return Err(ReturnPolicyRefusal::FloorAboveLabel);
     }
-    if floor_of(registry, views).is_some_and(|own| !own.holds(&policy.floor)) {
+    let own = floor_of(registry, views);
+    if own.as_ref().is_some_and(|own| !own.holds(&policy.floor)) {
         return Err(ReturnPolicyRefusal::FloorBelowOwn);
+    }
+    // A held return waits for its parent's acceptance, which a floor of the parent's own could
+    // refuse, and a sanitized return crosses as its derivation, never as held words.
+    if policy.below_floor == crate::fact::BelowFloor::Hold && (own.is_some() || policy.sanitizer.is_some()) {
+        return Err(ReturnPolicyRefusal::HoldUnavailable);
     }
     match &policy.sanitizer {
         None => Ok(()),

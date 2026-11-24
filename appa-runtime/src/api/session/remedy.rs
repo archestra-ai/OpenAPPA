@@ -82,12 +82,47 @@ impl Session {
                     .engine()
                     .deferred_return_of(context.view, &self.trajectory, &dispatch)
             });
-            Ok(deferred.map(|deferred| crate::api::DeferredReturnNotice {
-                feedback: context.engine().deferral_notice(&deferred, &self.presentation),
-                accept: ReturnReference::of(&deferred.id, ReturnDecision::Accept),
-                discard: ReturnReference::of(&deferred.id, ReturnDecision::Discard),
-            }))
+            Ok(deferred.map(|deferred| self.notice(context, &deferred)))
         })
+    }
+
+    pub(in crate::api) fn child_occurrences(
+        &self,
+        call_id: &str,
+    ) -> Result<Vec<crate::api::ChildOccurrence>, EventError> {
+        self.with_view(|context| {
+            let Some(dispatch) = context.spawn_dispatch(call_id) else {
+                return Ok(Vec::new());
+            };
+            let frozen = context
+                .engine()
+                .child_occurrences(context.view, &self.trajectory, &dispatch);
+            Ok(frozen
+                .iter()
+                .map(|deferred| crate::api::ChildOccurrence {
+                    occurrence: deferred.id.occurrence(),
+                    state: match deferred.settled {
+                        None => crate::api::OccurrenceState::Pending,
+                        Some(ReturnDecision::Accept) => crate::api::OccurrenceState::Accepted,
+                        Some(ReturnDecision::Discard) => crate::api::OccurrenceState::Discarded,
+                    },
+                    operation: context.log.held_operation(&deferred.id).cloned(),
+                    notice: self.notice(context, deferred),
+                })
+                .collect())
+        })
+    }
+
+    fn notice(
+        &self,
+        context: &Decided<'_>,
+        deferred: &crate::engine::DeferredReturn,
+    ) -> crate::api::DeferredReturnNotice {
+        crate::api::DeferredReturnNotice {
+            feedback: context.engine().deferral_notice(deferred, &self.presentation),
+            accept: ReturnReference::of(&deferred.id, ReturnDecision::Accept),
+            discard: ReturnReference::of(&deferred.id, ReturnDecision::Discard),
+        }
     }
 
     pub(in crate::api) fn defers_return(&self, call_id: &str) -> Result<bool, EventError> {

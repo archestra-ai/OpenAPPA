@@ -14,10 +14,11 @@ use crate::engine::{
 };
 use crate::external::ConsultOutcome;
 use appa_engine::contract::{AnnotationContext, ContextEntry};
+use appa_engine::fact::BelowFloor;
 use appa_engine::label::ReaderId;
 use appa_engine::names::ContextProviderName;
-use appa_engine::transition::{ProposalBatchId, ReturnDecision, SpawnMark};
-use appa_runtime_api::DeclaredReturn;
+use appa_engine::transition::{ProposalBatchId, ReturnDecision, ReturnKind, SpawnMark};
+use appa_runtime_api::{DeclaredReturn, ReturnOperation};
 use std::collections::BTreeSet;
 
 use super::host::AheadState;
@@ -89,6 +90,10 @@ enum Occasion<'a> {
         offer: &'a OfferId,
         claim: &'a AheadClaim<'a>,
     },
+    /// A child's return without ending, under the host's identity for it.
+    Return {
+        operation: &'a ReturnOperation,
+    },
     Other,
 }
 
@@ -105,7 +110,7 @@ impl<'a> Occasion<'a> {
     fn call_id(self) -> Option<&'a str> {
         match self {
             Occasion::Proposal { call_id, .. } | Occasion::Report { call_id } => call_id,
-            Occasion::Remedy { .. } | Occasion::AheadApply { .. } | Occasion::Other => None,
+            Occasion::Remedy { .. } | Occasion::AheadApply { .. } | Occasion::Return { .. } | Occasion::Other => None,
         }
     }
 }

@@ -291,10 +291,16 @@ fn continued(
             value,
             open_calls,
         },
-        HookEvent::ChildReturn { root, child, value } => HookEvent::ChildReturn {
+        HookEvent::ChildReturn {
+            root,
+            child,
+            value,
+            operation,
+        } => HookEvent::ChildReturn {
             root: id(root),
             child: id(child),
             value,
+            operation,
         },
     };
     (event, names_children.into_iter().map(id).collect())
@@ -771,7 +777,12 @@ async fn dispatch_event(
             child,
             open_calls,
         } => dispatcher.child_turn_end(root, child, open_calls).await,
-        HookEvent::ChildReturn { root, child, value } => dispatcher.child_return(root, child, value).await,
+        HookEvent::ChildReturn {
+            root,
+            child,
+            value,
+            operation,
+        } => dispatcher.child_return(root, child, value, operation).await,
     }
 }
 
@@ -1249,7 +1260,13 @@ impl Dispatcher<'_> {
 
     /// A return the subagent makes without ending: it crosses exactly as a stop's return would,
     /// and the subagent runs on whatever the answer.
-    async fn child_return(&mut self, root: TrajectoryId, child: TrajectoryId, value: String) -> HookDecision {
+    async fn child_return(
+        &mut self,
+        root: TrajectoryId,
+        child: TrajectoryId,
+        value: String,
+        operation: Option<appa_runtime_api::ReturnOperation>,
+    ) -> HookDecision {
         let said = Some(value.clone());
         match on_child(
             self.runtime,
@@ -1258,8 +1275,8 @@ impl Dispatcher<'_> {
             MissingStart::Refuse,
             self.options,
             |session| {
-                let value = value.clone();
-                async move { session.on_child_return(value).await }
+                let (value, operation) = (value.clone(), operation.clone());
+                async move { session.on_child_return(value, operation).await }
             },
         )
         .await

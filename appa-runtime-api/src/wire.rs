@@ -51,9 +51,9 @@ use serde_json::value::RawValue;
 use crate::{
     Actor, AdapterName, AutoApply, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
     LineVariant, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes,
-    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, Remediable, Remedy, RetryHint, Review,
-    ReviewChannel, ReviewScopeItem, Ruling, SessionSettings, SessionTitle, SpawnBinding, SpawnKind, SpawnRef,
-    StartKind, ToolOutcome, TrajectoryId,
+    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, Remediable, Remedy, RetryHint,
+    ReturnOperation, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionSettings, SessionTitle, SpawnBinding,
+    SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -169,10 +169,11 @@ enum Field {
     Declares,
     AutoApply,
     LineVariant,
+    OperationId,
 }
 
 impl Field {
-    const ALL: [Field; 25] = [
+    const ALL: [Field; 26] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -198,6 +199,7 @@ impl Field {
         Field::Declares,
         Field::AutoApply,
         Field::LineVariant,
+        Field::OperationId,
     ];
 
     fn spelling(self) -> &'static str {
@@ -227,6 +229,7 @@ impl Field {
             Field::Declares => "declares",
             Field::AutoApply => "auto_apply",
             Field::LineVariant => "line_variant",
+            Field::OperationId => "operation_id",
         }
     }
 }
@@ -295,7 +298,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
         EventName::ChildStart => &[Field::RootId, Field::ChildId, Field::SpawnBinding, Field::PromptId],
         EventName::ChildTurnEnd => &[Field::RootId, Field::ChildId, Field::AnsweredCallIds],
         EventName::ChildEnd => &[Field::RootId, Field::ChildId, Field::Value, Field::AnsweredCallIds],
-        EventName::ChildReturn => &[Field::RootId, Field::ChildId, Field::Value],
+        EventName::ChildReturn => &[Field::RootId, Field::ChildId, Field::Value, Field::OperationId],
     }
 }
 
@@ -601,6 +604,9 @@ pub struct WireEvent {
     /// On a session start: the host's name for the authority line it composed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_variant: Option<LineVariant>,
+    /// On a child's return without ending: the host's identity for that return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<ReturnOperation>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -688,6 +694,7 @@ impl WireEvent {
             declares: None,
             auto_apply: None,
             line_variant: None,
+            operation_id: None,
         }
     }
 
@@ -720,6 +727,7 @@ impl WireEvent {
             Field::Declares => self.declares.is_some(),
             Field::AutoApply => self.auto_apply.is_some(),
             Field::LineVariant => self.line_variant.is_some(),
+            Field::OperationId => self.operation_id.is_some(),
         }
     }
 
@@ -935,7 +943,12 @@ impl WireEvent {
                     ..Self::bare(adapter, EventName::ChildEnd)
                 }
             }
-            HookEvent::ChildReturn { root, child, value } => {
+            HookEvent::ChildReturn {
+                root,
+                child,
+                value,
+                operation,
+            } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
                     child: None,
@@ -944,6 +957,7 @@ impl WireEvent {
                     root_id: Some(root_id),
                     child_id: Some(child_host_id(root, child)?),
                     value: Some(value.clone()),
+                    operation_id: operation.clone(),
                     ..Self::bare(adapter, EventName::ChildReturn)
                 }
             }
@@ -1029,6 +1043,7 @@ impl WireEvent {
             declares,
             auto_apply,
             line_variant,
+            operation_id,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -1159,9 +1174,12 @@ impl WireEvent {
                 }
                 // Settling a deferred return takes the embedded caller's stamped trajectory,
                 // which no served control call carries.
-                if matches!(declares, Some(crate::DeclaredReturn::Deferred)) {
+                if matches!(
+                    declares,
+                    Some(crate::DeclaredReturn::Deferred | crate::DeclaredReturn::Decides(_))
+                ) {
                     return Err(malformed(format!(
-                        "a deferred return declared on {}, which only an embedded host declares",
+                        "a deferred or held return declared on {}, which only an embedded host declares",
                         identified.canonical
                     )));
                 }
@@ -1281,9 +1299,17 @@ impl WireEvent {
             }
             EventName::ChildReturn => {
                 let (root, child) = named_child()?;
-                match value {
-                    Some(value) => accepted(HookEvent::ChildReturn { root, child, value }),
-                    None => Err(malformed("child_return without its value")),
+                match (value, operation_id) {
+                    (_, Some(ReturnOperation(operation))) if operation.is_empty() => {
+                        Err(malformed("child_return carrying an empty operation_id"))
+                    }
+                    (Some(value), operation) => accepted(HookEvent::ChildReturn {
+                        root,
+                        child,
+                        value,
+                        operation,
+                    }),
+                    (None, _) => Err(malformed("child_return without its value")),
                 }
             }
         }
@@ -2199,6 +2225,36 @@ mod tests {
         assert!(read(floor).is_ok());
         let deferred = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"spawn","arguments":{"a":1},"declares":{"deferred":true}}"#;
         assert!(matches!(read(deferred), Err(ParseRefusal::Malformed { .. })));
+        let decides = br#"{"protocol":1,"adapter":"kagent","event":"tool_call","root_id":"r1","tool":"spawn","arguments":{"a":1},"declares":{"label":{},"decides":true}}"#;
+        assert!(matches!(read(decides), Err(ParseRefusal::Malformed { .. })));
+    }
+
+    #[test]
+    fn a_held_floor_is_declared_by_label_alone_and_reads_back_as_written() {
+        let declared = |json: serde_json::Value| serde_json::from_value::<DeclaredReturn>(json);
+        let decides = declared(serde_json::json!({ "label": { "trust": "trusted" }, "decides": true }))
+            .expect("a floor held for a deciding parent reads");
+        assert_eq!(
+            decides,
+            DeclaredReturn::Decides(crate::DeclaredArguments {
+                label: Some(crate::LabelSpelling {
+                    trust: Some("trusted".to_string()),
+                    audience: None,
+                }),
+                return_schema: None,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&decides).expect("a declaration writes"),
+            serde_json::json!({ "label": { "trust": "trusted", "audience": null }, "return_schema": null, "decides": true })
+        );
+        assert!(declared(serde_json::json!({ "label": {}, "return_schema": {}, "decides": true })).is_err());
+        assert!(declared(serde_json::json!({ "deferred": true, "decides": true })).is_err());
+        assert_eq!(
+            serde_json::to_value(DeclaredReturn::Deferred).expect("a declaration writes"),
+            serde_json::json!({ "label": null, "return_schema": null, "deferred": true }),
+            "a deferral writes as it did before a floor could be held"
+        );
     }
 
     #[test]
@@ -2468,11 +2524,18 @@ mod tests {
             root: root.clone(),
             child: child.clone(),
             value: r#"{"rows":3}"#.to_string(),
+            operation: Some(crate::ReturnOperation("turn-1".to_string())),
         };
         match through(&returned) {
-            HookEvent::ChildReturn { child: back, value, .. } => {
+            HookEvent::ChildReturn {
+                child: back,
+                value,
+                operation,
+                ..
+            } => {
                 assert_eq!(back, child);
                 assert_eq!(value, r#"{"rows":3}"#);
+                assert_eq!(operation, Some(crate::ReturnOperation("turn-1".to_string())));
             }
             other => panic!("{other:?}"),
         }

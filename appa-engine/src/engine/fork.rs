@@ -1,6 +1,7 @@
 use super::*;
+use crate::fact::BelowFloor;
 use crate::projection::DeferralStanding;
-use crate::transition::{ReturnDecision, ReturnSettlement, SettlementFollowUp};
+use crate::transition::{ReturnDecision, ReturnKind, ReturnSettlement, SettlementFollowUp};
 
 impl Engine {
     pub(super) fn decide_binding(
@@ -112,12 +113,13 @@ impl Engine {
         })
     }
 
-    /// One child's stop, judged against the policy its fork recorded. A void submission ends
+    /// One child's return, judged against the policy its fork recorded. A void submission ends
     /// the branch. A value crosses at the child's fold, or through the fork's sanitizer: an
     /// attested body crosses in canonical form; a named sanitizer derives the submission once,
-    /// stages the derivation, and crosses it when the child returns exactly it. A stop repeating
-    /// the latest crossing is a replay and appends nothing. A return below the floor the parent
-    /// set is refused, and the child keeps it.
+    /// stages the derivation, and crosses it when the child returns exactly it. A return
+    /// repeating the latest crossing or deferral is a replay and appends nothing. A raw return
+    /// below the floor the parent set is held where the fork holds it, and otherwise refused:
+    /// the child keeps it.
     pub(super) fn decide_child_return(
         &self,
         view: &EngineView,
@@ -149,11 +151,20 @@ impl Engine {
             }
             ChildSubmission::Value { body } => body.clone(),
         };
+        if let Some((id, _)) = views
+            .latest_deferral(child)
+            .filter(|(_, deferral)| deferral.value.body == body)
+        {
+            return Ok(EngineDecision {
+                append: None,
+                follow_up: FollowUp::Child(ChildFollowUp::Deferred { id }),
+            });
+        }
         let fold = views.branch_label(child);
         let policy = match views.return_policy_of(child).ok_or(TransitionError::NotForked)?.clone() {
             ReturnPolicy::Void => return Err(TransitionError::ReturnVoid),
             ReturnPolicy::Deferred => {
-                return self.decide_deferred_return(view, &views, child, LabeledValue::new(body, fold), act);
+                return self.decide_deferred_return(view, &views, report, LabeledValue::new(body, fold), act);
             }
             ReturnPolicy::Crossing(policy) => policy,
         };
@@ -187,7 +198,7 @@ impl Engine {
             let admitted = value.body.clone();
             facts.extend(branch::crossing_facts(
                 &views,
-                child,
+                next_return(&views, child),
                 value,
                 derivation,
                 act.pinned().clone(),
@@ -202,8 +213,13 @@ impl Engine {
                 if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == body) {
                     return Ok(replay(latest));
                 }
-                above_floor(&fold)?;
-                cross(Vec::new(), LabeledValue::new(body, fold), ReturnDerivation::Raw)
+                match (above_floor(&fold), policy.below_floor) {
+                    (Ok(()), _) => cross(Vec::new(), LabeledValue::new(body, fold), ReturnDerivation::Raw),
+                    (Err(TransitionError::ReturnBelowFloor { .. }), BelowFloor::Hold) => {
+                        self.deferral(view, &views, report, LabeledValue::new(body, fold))
+                    }
+                    (Err(refused), _) => Err(refused),
+                }
             }
             Some(ReturnSanitizer::Attest(shape)) => {
                 let canonical = ValueBody::new(
@@ -240,8 +256,7 @@ impl Engine {
                     .registry
                     .sanitizer(name)
                     .ok_or(TransitionError::SanitizerUnapplicable)?;
-                let id = ChildReturnId::new(child.clone(), views.returns_by(child));
-                let subject = crate::basis::SubjectKey::Return(id);
+                let subject = crate::basis::SubjectKey::Return(next_return(&views, child));
                 if let Some(DerivedCandidate::Return { source, value }) = views.candidate(&subject) {
                     // A derivation stands: it crosses when the child says exactly it, and the
                     // sanitizer never runs again for this errand.
@@ -310,19 +325,18 @@ impl Engine {
     }
 }
 
-/// The act one child's stop lands under: its next crossing's identity.
 impl Engine {
-    /// A stop under a deferred return. A value that leaves the parent's label where it is
-    /// crosses now, as a value under a floor does. One that would narrow it is frozen at this
-    /// occurrence and ends the child's errand: nothing crosses until the parent accepts it.
+    /// A return under a deferred return. A value that leaves the parent's label where it is
+    /// crosses now, as a value under a floor does. One that would narrow it is deferred.
     fn decide_deferred_return(
         &self,
         view: &EngineView,
         views: &Views,
-        child: &TrajectoryId,
+        report: &ChildReport,
         value: LabeledValue,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
+        let child = &report.child;
         if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == value.body) {
             return Ok(EngineDecision {
                 append: None,
@@ -339,26 +353,43 @@ impl Engine {
             });
         }
         let standing = views.branch_label(views.trajectory());
-        let (facts, follow_up) = match standing.combine(&value.label) == standing {
-            true => {
-                let admitted = value.body.clone();
-                (
-                    branch::crossing_facts(views, child, value, ReturnDerivation::Raw, act.pinned().clone()),
-                    ChildFollowUp::Merged { admitted },
-                )
-            }
-            false => (
-                vec![Fact::ReturnDeferred {
-                    trajectory: child.clone(),
-                    id: ChildReturnId::new(child.clone(), views.returns_by(child)),
-                    value,
-                }],
-                ChildFollowUp::Deferred,
-            ),
-        };
+        if standing.combine(&value.label) != standing {
+            return self.deferral(view, views, report, value);
+        }
+        let admitted = value.body.clone();
+        let facts = branch::crossing_facts(
+            views,
+            next_return(views, child),
+            value,
+            ReturnDerivation::Raw,
+            act.pinned().clone(),
+        );
         Ok(EngineDecision {
             append: Some(self.decided(view, return_act(views, child), facts)?),
-            follow_up: FollowUp::Child(follow_up),
+            follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted }),
+        })
+    }
+
+    /// The value frozen at the child's next occurrence: nothing crosses until the parent
+    /// accepts it. At the stop it ends the child's errand; a return made without ending holds it
+    /// while the child runs on.
+    fn deferral(
+        &self,
+        view: &EngineView,
+        views: &Views,
+        report: &ChildReport,
+        value: LabeledValue,
+    ) -> Result<EngineDecision, TransitionError> {
+        let id = next_return(views, &report.child);
+        let facts = vec![Fact::ReturnDeferred {
+            trajectory: report.child.clone(),
+            id: id.clone(),
+            value,
+            held: report.kind == ReturnKind::Turn,
+        }];
+        Ok(EngineDecision {
+            append: Some(self.decided(view, return_act(views, &report.child), facts)?),
+            follow_up: FollowUp::Child(ChildFollowUp::Deferred { id }),
         })
     }
 
@@ -382,8 +413,10 @@ impl Engine {
             follow_up: FollowUp::Settlement(follow_up),
         };
         let deferral = views.deferral(id).ok_or(TransitionError::NoDeferredReturn)?;
-        let frozen = match &deferral.standing {
-            DeferralStanding::Pending(body) => LabeledValue::new(body.clone(), deferral.label.clone()),
+        let frozen = match deferral.standing {
+            // A pending return never crosses into a parent that has ended.
+            DeferralStanding::Pending if views.has_ended(parent) => return Err(TransitionError::BranchEnded),
+            DeferralStanding::Pending => deferral.value.clone(),
             DeferralStanding::Discarded => return Ok(settled(SettlementFollowUp::Discarded)),
             DeferralStanding::Accepted => {
                 let admitted = views
@@ -420,7 +453,7 @@ impl Engine {
                 }];
                 facts.extend(branch::crossing_facts(
                     &views,
-                    id.child(),
+                    id.clone(),
                     frozen,
                     ReturnDerivation::Raw,
                     AudienceEvidence::default(),
@@ -435,8 +468,14 @@ impl Engine {
     }
 }
 
+/// The identity `child`'s next return takes, crossed or deferred.
+fn next_return(views: &Views, child: &TrajectoryId) -> ChildReturnId {
+    ChildReturnId::new(child.clone(), views.returns_by(child))
+}
+
+/// The act one child's return lands under: its next occurrence's identity.
 fn return_act(views: &Views, child: &TrajectoryId) -> crate::basis::DecidedAct {
-    crate::basis::DecidedAct::ChildReturn(ChildReturnId::new(child.clone(), views.returns_by(child)))
+    crate::basis::DecidedAct::ChildReturn(next_return(views, child))
 }
 
 fn branch_refusal(error: BranchError) -> TransitionError {

@@ -17,6 +17,7 @@ fn named(sanitizer: &str) -> Option<ReturnSanitizer> {
 
 fn report_with(log: &[Fact], child: &TrajectoryId, body: &str, evidence: Vec<Evidence>) -> EngineEvent {
     EngineEvent::ChildReturn(ChildReport {
+        kind: crate::transition::ReturnKind::Stop,
         child: child.clone(),
         fork: fork_in(log, child),
         submission: ChildSubmission::Value {
@@ -136,6 +137,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
         execute(
             bare,
             Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                below_floor: crate::fact::BelowFloor::Refuse,
                 floor: floor.clone(),
                 sanitizer: named("redactor"),
             }))
@@ -148,6 +150,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
         execute(
             redacting,
             Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                below_floor: crate::fact::BelowFloor::Refuse,
                 floor: floor.clone(),
                 sanitizer: None,
             }))
@@ -161,6 +164,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
             execute(
                 bare,
                 Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                    below_floor: crate::fact::BelowFloor::Refuse,
                     floor: Label::new(TRUSTED, internal.clone()),
                     sanitizer: None,
                 }))
@@ -176,6 +180,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
             execute(
                 bare,
                 Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                    below_floor: crate::fact::BelowFloor::Refuse,
                     floor: Label::new(SUSPICIOUS, Audience::public()),
                     sanitizer: None,
                 }))
@@ -189,6 +194,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
     let approved = execute(
         bare,
         Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+            below_floor: crate::fact::BelowFloor::Refuse,
             floor: Label::new(SUSPICIOUS, internal),
             sanitizer: None,
         })),
@@ -1265,6 +1271,7 @@ fn a_child_stop_carries_its_parents_declared_floor_to_a_grandchild() {
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
                 return_policy: Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                    below_floor: crate::fact::BelowFloor::Refuse,
                     floor,
                     sanitizer: None,
                 })),
@@ -1550,7 +1557,11 @@ fn a_declaration_ahead_of_the_spawn_is_held_to_the_label_and_the_own_floor() {
         e.check_return_declaration(
             &viewing(&e, log),
             trajectory,
-            &ReturnPolicy::Crossing(crate::fact::CrossingReturn { floor, sanitizer: None }),
+            &ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                floor,
+                sanitizer: None,
+                below_floor: crate::fact::BelowFloor::Refuse,
+            }),
         )
     };
     assert_eq!(

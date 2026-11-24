@@ -110,7 +110,10 @@ impl Session {
                     call_id: occasion.call_id().map(str::to_string),
                     offer_id: match occasion {
                         Occasion::Remedy { offer } | Occasion::AheadApply { offer, .. } => Some(offer.0.clone()),
-                        Occasion::Proposal { .. } | Occasion::Report { .. } | Occasion::Other => None,
+                        Occasion::Proposal { .. }
+                        | Occasion::Report { .. }
+                        | Occasion::Return { .. }
+                        | Occasion::Other => None,
                     },
                     call_digest: call.map(|call| crate::engine::hex(call.bytes())),
                 };

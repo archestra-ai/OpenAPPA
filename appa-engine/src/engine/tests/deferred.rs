@@ -1,3 +1,5 @@
+mod held;
+
 use super::returns::{execute_offer_declaring, gapped_spawn_engine};
 use super::*;
 use crate::transition::{ReturnDecision, ReturnSettlement, SettlementFollowUp, SpawnMark};
@@ -48,7 +50,12 @@ fn frozen_family(e: &Engine, child: &TrajectoryId, body: &str) -> Vec<Fact> {
     let deferred = e
         .handle(&viewing(e, &log), stop(&log, child, body))
         .expect("a narrowing return under a deferred fork is frozen");
-    assert_eq!(deferred.follow_up, FollowUp::Child(ChildFollowUp::Deferred));
+    assert_eq!(
+        deferred.follow_up,
+        FollowUp::Child(ChildFollowUp::Deferred {
+            id: ChildReturnId::new(child.clone(), 0)
+        })
+    );
     [log, appended_facts(deferred)].concat()
 }
 
@@ -72,7 +79,7 @@ fn a_deferred_child_narrows_freely_and_its_narrowing_return_is_frozen_at_the_sto
     let root = traj();
     let parent = views.views(&root).expect("the parent is opened");
     assert!(parent.has_ended(&child), "the deferral ends the child's errand");
-    assert_eq!(parent.returns_by(&child), 0);
+    assert_eq!(parent.returns_by(&child), 1, "the deferral is its own occurrence");
     assert_eq!(
         e.handle(&viewing(&e, &log), stop(&log, &child, "the answer")),
         Err(TransitionError::BranchEnded)
@@ -197,7 +204,7 @@ fn a_frozen_return_crosses_into_a_later_revision_s_trust_chain() {
     assert_eq!(
         parent
             .deferral(&ChildReturnId::new(child.clone(), 0))
-            .map(|deferral| &deferral.label),
+            .map(|deferral| &deferral.value.label),
         Some(&crossed)
     );
     let from = parent.current_label();

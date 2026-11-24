@@ -53,12 +53,14 @@ pub enum EngineError {
     InvalidHeldEvidence(String),
 }
 
-/// One deferred return as the parent that owns it reads it. The label is the one its value froze
-/// under; `settled` is the parent's decision, once made.
+/// One deferred return as the parent that owns it reads it: the value it froze, whether it left
+/// its child running, and `settled`, the parent's decision, once made.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeferredReturn {
     pub id: ChildReturnId,
     pub label: Label,
+    pub body: ValueBody,
+    pub held: bool,
     pub settled: Option<crate::transition::ReturnDecision>,
 }
 
@@ -777,9 +779,11 @@ impl Engine {
             .filter(|(id, _)| views.parent_of(id.child()) == Some(parent))
             .map(|(id, deferral)| DeferredReturn {
                 id: id.clone(),
-                label: deferral.label.clone(),
+                label: deferral.value.label.clone(),
+                body: deferral.value.body.clone(),
+                held: deferral.held,
                 settled: match deferral.standing {
-                    crate::projection::DeferralStanding::Pending(_) => None,
+                    crate::projection::DeferralStanding::Pending => None,
                     crate::projection::DeferralStanding::Accepted => Some(crate::transition::ReturnDecision::Accept),
                     crate::projection::DeferralStanding::Discarded => Some(crate::transition::ReturnDecision::Discard),
                 },

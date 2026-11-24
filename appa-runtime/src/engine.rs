@@ -56,8 +56,8 @@ pub(crate) use appa_engine::engine::ForkStatus;
 use appa_engine::engine::{Engine, EngineError};
 use appa_engine::execute::{AuthorityEvidence, AuthorityReview};
 use appa_engine::fact::{
-    BoundaryKind, CloseOutcome, CrossingReturn, EffectKind, EffectSet, Fact, ReturnDerivation, ReturnPolicy,
-    ReturnRoute, ReturnSanitizer, RootForkOrigin,
+    BelowFloor, BoundaryKind, CloseOutcome, CrossingReturn, EffectKind, EffectSet, Fact, ReturnDerivation,
+    ReturnPolicy, ReturnRoute, ReturnSanitizer, RootForkOrigin,
 };
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::{AuthorityName, MarkName};
@@ -78,8 +78,8 @@ use appa_engine::transition::{
     ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent, Evidence, EvidenceRequest, FollowUp,
     ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody,
     OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, ReturnDecision,
-    ReturnSettlement, SettlementFollowUp, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport, TransitionError,
-    TransitionRefusal, ValidatedFactBatch,
+    ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport,
+    TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
     ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
@@ -335,6 +335,7 @@ pub enum EngineEvent {
     ChildReturn {
         child: TrajectoryId,
         value: Option<String>,
+        kind: ReturnKind,
         evidence: Vec<ExternalEvidence>,
     },
     /// The parent's decision on one deferred return it owns.
@@ -1662,9 +1663,12 @@ impl RuntimeEngine {
                 presentation,
             ),
             EngineEvent::BindFork { fork, child } => self.bind_fork(view, &fork, &child),
-            EngineEvent::ChildReturn { child, value, evidence } => {
-                self.child_return(view, &child, value, &evidence, presentation)
-            }
+            EngineEvent::ChildReturn {
+                child,
+                value,
+                kind,
+                evidence,
+            } => self.child_return(view, &child, value, kind, &evidence, presentation),
             EngineEvent::SettleReturn {
                 trajectory: parent,
                 id,
@@ -2512,9 +2516,12 @@ impl RuntimeEngine {
             return Ok(None);
         };
         match (declared, route) {
-            (appa_runtime_api::DeclaredReturn::Arguments(arguments), route) => {
-                self.return_policy_of_route(views, route, arguments).map(Some)
-            }
+            (appa_runtime_api::DeclaredReturn::Arguments(arguments), route) => self
+                .return_policy_of_route(views, route, arguments, BelowFloor::Refuse)
+                .map(Some),
+            (appa_runtime_api::DeclaredReturn::Decides(arguments), route) => self
+                .return_policy_of_route(views, route, arguments, BelowFloor::Hold)
+                .map(Some),
             (appa_runtime_api::DeclaredReturn::Deferred, ReturnRoute::Raw) => Ok(Some(ReturnPolicy::Deferred)),
             (appa_runtime_api::DeclaredReturn::Deferred, ReturnRoute::Void | ReturnRoute::Sanitized(_)) => {
                 Err("a deferred return is declared on the plan that takes the subagent's return as spoken".to_string())
@@ -2524,12 +2531,14 @@ impl RuntimeEngine {
 
     /// A return declaration made ahead of the spawn: the bare floor, or the attestation when
     /// `return_schema` is passed, checked as the spawn's own declaration would be at this
-    /// trajectory's label. Answers the label it was checked at, which the declaration stands at.
+    /// trajectory's label, with what a return below the floor comes to. Answers the label it was
+    /// checked at, which the declaration stands at.
     pub(crate) fn declare_ahead(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
         arguments: &RemedyArguments,
+        below_floor: BelowFloor,
     ) -> Result<Label, String> {
         if !self.engine.registry().profile().context_control() {
             return Err("this deployment does not control subagent context, so no return is declared".to_string());
@@ -2543,7 +2552,7 @@ impl RuntimeEngine {
             )),
             None => ReturnRoute::Raw,
         };
-        let policy = self.return_policy_of_route(&views, route, arguments)?;
+        let policy = self.return_policy_of_route(&views, route, arguments, below_floor)?;
         self.engine
             .check_return_declaration(view, trajectory, &policy)
             .map_err(|refusal| format!("this return declaration does not stand: {refusal}"))?;
@@ -2584,6 +2593,7 @@ impl RuntimeEngine {
         views: &Views,
         route: ReturnRoute,
         arguments: &RemedyArguments,
+        below_floor: BelowFloor,
     ) -> Result<ReturnPolicy, String> {
         let step = match route {
             ReturnRoute::Void => {
@@ -2651,7 +2661,11 @@ impl RuntimeEngine {
             None => None,
             Some(name) => Some(ReturnSanitizer::Named(name)),
         };
-        Ok(ReturnPolicy::Crossing(CrossingReturn { floor, sanitizer }))
+        Ok(ReturnPolicy::Crossing(CrossingReturn {
+            floor,
+            sanitizer,
+            below_floor,
+        }))
     }
 
     /// Return contract context provided to a starting subagent.
@@ -2777,19 +2791,34 @@ impl RuntimeEngine {
         self.engine.deferred_returns(view, parent)
     }
 
-    /// The deferred return of the child `parent`'s spawn `dispatch` bound, if its answer froze.
+    /// The deferral that ended the child `parent`'s spawn `dispatch` bound, if its answer at
+    /// its stop froze.
     pub(crate) fn deferred_return_of(
         &self,
         view: &EngineView,
         parent: &TrajectoryId,
         dispatch: &EngineDispatchId,
     ) -> Option<DeferredReturn> {
+        self.child_occurrences(view, parent, dispatch)
+            .into_iter()
+            .find(|deferred| !deferred.held)
+    }
+
+    /// Every return the child `parent`'s spawn `dispatch` bound froze, held or at its stop, in
+    /// occurrence order.
+    pub(crate) fn child_occurrences(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        dispatch: &EngineDispatchId,
+    ) -> Vec<DeferredReturn> {
         let ForkStatus::Bound(child) = self.engine.fork_status(view, &ForkId::of(dispatch)) else {
-            return None;
+            return Vec::new();
         };
         self.deferred_returns(view, parent)
             .into_iter()
-            .find(|deferred| *deferred.id.child() == child)
+            .filter(|deferred| *deferred.id.child() == child)
+            .collect()
     }
 
     /// Was `parent`'s spawn `dispatch` released under a deferred return?
@@ -2872,12 +2901,13 @@ impl RuntimeEngine {
         Ok(EngineDecision { append, then })
     }
 
-    /// Handles one child's stop and decides what crosses or blocks.
+    /// Handles one child's return and decides what crosses or blocks.
     fn child_return(
         &self,
         view: &EngineView,
         child: &TrajectoryId,
         value: Option<String>,
+        kind: ReturnKind,
         evidence: &[ExternalEvidence],
         _presentation: &EmbeddedPresentationOptions,
     ) -> Result<EngineDecision, EngineRefusal> {
@@ -2904,6 +2934,7 @@ impl RuntimeEngine {
                 child: child.clone(),
                 fork: fork.clone(),
                 submission: submission.clone(),
+                kind,
                 evidence: sanitizer_evidence(evidence),
                 audience: audience.clone(),
             };
@@ -2954,7 +2985,7 @@ impl RuntimeEngine {
                 value: derived.as_str().to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
-            FollowUp::Child(ChildFollowUp::Deferred) => Next::PresentToModel(Presentation::Deferred),
+            FollowUp::Child(ChildFollowUp::Deferred { .. }) => Next::PresentToModel(Presentation::Deferred),
             FollowUp::Child(ChildFollowUp::Resolve(request)) => {
                 self.resolve_or_withhold(view, child, None, request, evidence, withheld)?
             }

@@ -80,10 +80,10 @@ use std::time::{Duration, SystemTime};
 use appa_engine::engine::StampedBatch;
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::{PolicyFileKey, PolicyRevision};
-use appa_engine::value::DispatchId;
 pub use appa_engine::value::TrajectoryId;
+use appa_engine::value::{ChildReturnId, DispatchId};
 use appa_runtime_api::{
-    AdapterName, LaunchToken, PeerAddress, PeerDigest, Ruling, SessionTitle, inventory::ToolInventory,
+    AdapterName, LaunchToken, PeerAddress, PeerDigest, ReturnOperation, Ruling, SessionTitle, inventory::ToolInventory,
 };
 
 mod ahead;
@@ -327,6 +327,14 @@ pub enum HostObservation {
         attempt: AheadAttempt,
         outcome: AheadOutcome,
     },
+    /// The return the child `trajectory` made under the host's `operation` froze at `id`.
+    /// Written in the same batch as the deferral, so a retry of the operation names that
+    /// occurrence and no other.
+    ReturnHeld {
+        trajectory: TrajectoryId,
+        operation: ReturnOperation,
+        id: ChildReturnId,
+    },
 }
 
 impl HostObservation {
@@ -352,7 +360,8 @@ impl HostObservation {
             | Self::PeerAdmitted { .. }
             | Self::LaunchMoved { .. }
             | Self::AheadReserved { .. }
-            | Self::AheadSettled { .. } => None,
+            | Self::AheadSettled { .. }
+            | Self::ReturnHeld { .. } => None,
         }
     }
 }
@@ -522,6 +531,28 @@ impl Log {
     }
 
     /// The bound calls the host reported finished, as (trajectory, call id).
+    /// The occurrence the child `trajectory`'s return under `operation` froze at, if one did.
+    pub fn held_return(&self, trajectory: &TrajectoryId, operation: &ReturnOperation) -> Option<&ChildReturnId> {
+        self.data.host.iter().find_map(|record| match &record.observation {
+            HostObservation::ReturnHeld {
+                trajectory: child,
+                operation: recorded,
+                id,
+            } if child == trajectory && recorded == operation => Some(id),
+            _ => None,
+        })
+    }
+
+    /// The host operation the return frozen at `id` was made under, if the host named one.
+    pub fn held_operation(&self, id: &ChildReturnId) -> Option<&ReturnOperation> {
+        self.data.host.iter().find_map(|record| match &record.observation {
+            HostObservation::ReturnHeld {
+                operation, id: held, ..
+            } if held == id => Some(operation),
+            _ => None,
+        })
+    }
+
     pub fn settled_calls(&self) -> std::collections::BTreeSet<(&TrajectoryId, &str)> {
         self.data
             .host

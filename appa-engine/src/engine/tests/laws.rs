@@ -496,6 +496,7 @@ mod held_view_law {
                     };
                     let return_policy = plan.return_step().map(|_| {
                         ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                            below_floor: crate::fact::BelowFloor::Refuse,
                             floor: views.current_label(),
                             sanitizer: None,
                         })
@@ -524,6 +525,7 @@ mod held_view_law {
                         false => ChildSubmission::Void,
                     };
                     Some(EngineEvent::ChildReturn(ChildReport {
+                        kind: crate::transition::ReturnKind::Stop,
                         child,
                         fork,
                         submission,

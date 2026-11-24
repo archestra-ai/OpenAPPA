@@ -385,6 +385,7 @@ pub(super) fn floor_policy(e: &Engine, log: &[Fact]) -> ReturnPolicy {
 
 pub(super) fn floor_crossing(e: &Engine, log: &[Fact]) -> crate::fact::CrossingReturn {
     crate::fact::CrossingReturn {
+        below_floor: crate::fact::BelowFloor::Refuse,
         floor: viewing(e, log)
             .views(&traj())
             .expect("the parent is opened")
@@ -418,6 +419,7 @@ pub(super) fn crossed_report(e: &Engine, log: &[Fact], child: &TrajectoryId, bod
 
 pub(super) fn child_report(log: &[Fact], child: &TrajectoryId, submission: ChildSubmission) -> EngineEvent {
     EngineEvent::ChildReturn(ChildReport {
+        kind: crate::transition::ReturnKind::Stop,
         child: child.clone(),
         fork: log
             .iter()
@@ -1206,6 +1208,7 @@ pub(super) fn fan_out_family(e: &Engine, floor: Label) -> (Vec<Fact>, crate::val
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
                 return_policy: Some(ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                    below_floor: crate::fact::BelowFloor::Refuse,
                     floor,
                     sanitizer: None,
                 })),

@@ -1471,6 +1471,7 @@ async fn a_subject_a_concurrent_event_moved_reads_as_lifecycle_not_a_fault() {
             crate::engine::EngineEvent::ChildReturn {
                 child: child.clone(),
                 value: value.clone(),
+                kind: appa_engine::transition::ReturnKind::Stop,
                 evidence: Vec::new(),
             },
         );
@@ -4723,7 +4724,7 @@ async fn a_fan_out_binds_each_child_its_prompt_names_until_its_call_settles() {
         .on_child_start(child("c1"), SpawnRef::FanOut(prompt("p1")))
         .expect("a child bound before the notice starts again on its own fork");
     assert_eq!(
-        c1.on_child_return("{\"rows\":3}".to_string())
+        c1.on_child_return("{\"rows\":3}".to_string(), None)
             .await
             .expect("the return is judged"),
         ChildReturnDecision::Returned {
@@ -4878,7 +4879,7 @@ async fn a_return_beside_an_open_child_call_is_refused_and_leaves_it_open() {
     .await
     .expect("the child's call releases");
     assert!(matches!(
-        c1.on_child_return("{}".to_string()).await,
+        c1.on_child_return("{}".to_string(), None).await,
         Err(EventError::ChildDispatchOpen)
     ));
     assert!(

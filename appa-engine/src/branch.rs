@@ -44,12 +44,12 @@ pub(crate) fn submit_void_return(parent: &Views, child: &TrajectoryId) -> Result
 /// unrelated restrictions.
 pub(crate) fn crossing_facts(
     parent: &Views,
-    child: &TrajectoryId,
+    id: ChildReturnId,
     value: LabeledValue,
     derivation: ReturnDerivation,
     evidence: AudienceEvidence,
 ) -> Vec<Fact> {
-    let id = ChildReturnId::new(child.clone(), parent.returns_by(child));
+    let child = id.child();
     vec![
         Fact::ChildReturn {
             trajectory: child.clone(),
@@ -172,6 +172,7 @@ mod tests {
                 fork: fork.clone(),
                 snapshot: projection.view(parent).freeze_basis(),
                 return_policy: ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                    below_floor: crate::fact::BelowFloor::Refuse,
                     floor: Label::bottom(),
                     sanitizer: None,
                 }),
@@ -216,7 +217,7 @@ mod tests {
         let fold = views.branch_label(&child());
         let ret = crossing_facts(
             &views,
-            &child(),
+            ChildReturnId::new(child(), views.returns_by(&child())),
             LabeledValue::new(raw("secret"), fold.clone()),
             ReturnDerivation::Raw,
             AudienceEvidence::default(),

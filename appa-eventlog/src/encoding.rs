@@ -222,8 +222,8 @@ fn push(log: &mut LogData, record: Record) {
 mod tests {
     use std::time::SystemTime;
 
-    use appa_engine::value::DispatchId;
-    use appa_runtime_api::Ruling;
+    use appa_engine::value::{ChildReturnId, DispatchId};
+    use appa_runtime_api::{ReturnOperation, Ruling};
 
     use appa_engine::label::{Audience, Label, Trust};
     use appa_engine::registry::TrustChain;
@@ -314,6 +314,11 @@ mod tests {
                 attempt: AheadAttempt::Host("remedy:op".to_string()),
                 outcome: AheadOutcome::Applied,
             },
+            HostObservation::ReturnHeld {
+                trajectory: TrajectoryId::new("cc:child"),
+                operation: ReturnOperation("turn:1".to_string()),
+                id: ChildReturnId::new(TrajectoryId::new("cc:child"), 2),
+            },
         ]
     }
 
@@ -343,6 +348,7 @@ mod tests {
             r#"{"kind":"ahead_declared","actor":{"root":"cc:root","child":"cc:child"},"attempt":{"mcp_call":"toolu_3"},"arguments":{"label":{"trust":"trusted","audience":null},"return_schema":{"type":"string"}},"label":LABEL,"spends":{"key":"call:one"}}"#,
             r#"{"kind":"ahead_reserved","trajectory":"cc:root","attempt":{"vouch":4},"invocation":"00000000000000000000000000000abc"}"#,
             r#"{"kind":"ahead_settled","trajectory":"cc:root","attempt":{"host":"remedy:op"},"outcome":"applied"}"#,
+            r#"{"kind":"return_held","trajectory":"cc:child","operation":"turn:1","id":{"child":"cc:child","occurrence":2}}"#,
         ];
         let observations = golden_observations();
         assert_eq!(observations.len(), hosts.len());

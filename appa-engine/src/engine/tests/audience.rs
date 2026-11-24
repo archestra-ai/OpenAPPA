@@ -1557,6 +1557,7 @@ mod symbolic_audiences {
         audience: crate::audience::AudienceEvidence,
     ) -> EngineEvent {
         EngineEvent::ChildReturn(ChildReport {
+            kind: crate::transition::ReturnKind::Stop,
             child: child.clone(),
             fork: fork_in(log, child),
             submission: ChildSubmission::Value { body: body.clone() },
@@ -1708,6 +1709,7 @@ mod symbolic_audiences {
         let opened_log = vec![opened(&e)];
         // The declaration binds only the trust dimension, the one the sanitizer leaves alone.
         let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+            below_floor: crate::fact::BelowFloor::Refuse,
             floor: Label::new(SUSPICIOUS, Audience::public()),
             sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("declassify"))),
         });

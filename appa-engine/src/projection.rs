@@ -139,19 +139,19 @@ struct ReturnedChild {
     value: LabeledValue,
 }
 
-/// A deferred return: the label its value froze under, which stands for the life of the log,
-/// and where the parent's decision on it stands.
+/// A deferred return: the value it froze, which stands for the life of the log, whether it
+/// left its child running, and where the parent's decision on it stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Deferral {
-    pub(crate) label: Label,
+    pub(crate) value: LabeledValue,
+    pub(crate) held: bool,
     pub(crate) standing: DeferralStanding,
 }
 
-/// A pending return holds the frozen value; a settled one keeps only the parent's decision,
-/// which a retry reads back.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The parent's decision on a deferred return, which a retry reads back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeferralStanding {
-    Pending(crate::value::ValueBody),
+    Pending,
     Accepted,
     Discarded,
 }
@@ -159,8 +159,8 @@ pub(crate) enum DeferralStanding {
 impl Deferral {
     /// The frozen value, while the parent has not decided.
     pub(crate) fn pending(&self) -> Option<LabeledValue> {
-        match &self.standing {
-            DeferralStanding::Pending(body) => Some(LabeledValue::new(body.clone(), self.label.clone())),
+        match self.standing {
+            DeferralStanding::Pending => Some(self.value.clone()),
             DeferralStanding::Accepted | DeferralStanding::Discarded => None,
         }
     }
@@ -307,6 +307,12 @@ fn each_mut<K: Ord + Clone, V: Clone>(map: &mut OrdMap<K, V>, mut change: impl F
     }
 }
 
+/// Count `id` as one of its child's returns: the next occurrence is the one after it.
+fn occurred(returns_by: &mut OrdMap<TrajectoryId, u32>, id: &ChildReturnId) {
+    let next = returns_by.entry(id.child().clone()).or_insert(0);
+    *next = (*next).max(id.occurrence() + 1);
+}
+
 fn end_offer(offers: &mut OrdMap<crate::value::OfferId, RecordedOffer>, offer: &crate::value::OfferId, end: OfferEnd) {
     if let Some(open) = offers.get_mut(offer) {
         open.end = Some(end);
@@ -402,7 +408,9 @@ impl Projection {
         for returned in self.child_returns.iter_mut() {
             returned.value.label.cross_value(crossing);
         }
-        each_mut(&mut self.deferrals, |deferral| deferral.label.cross_value(crossing));
+        each_mut(&mut self.deferrals, |deferral| {
+            deferral.value.label.cross_value(crossing)
+        });
         each_mut(&mut self.resumed, |label| label.cross_value(crossing));
         if let Some((_, label)) = self.opening.as_mut() {
             label.cross_value(crossing);
@@ -793,26 +801,38 @@ impl Projection {
                     }
                 }
             }
+            // An accepted deferral crosses at the occurrence it froze at, which already counts.
             Fact::ChildReturn { id, value, .. } => {
                 child_returns.push_back(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),
                 });
-                *returns_by.entry(id.child().clone()).or_insert(0) += 1;
+                occurred(returns_by, id);
                 resumed_since_return.remove(id.child());
                 candidates.remove(&SubjectKey::Return(id.clone()));
             }
-            // The stop ends the child's errand. The occurrence counter moves when the parent
-            // settles: an accepted return's crossing advances it, a discarded one's record does.
-            Fact::ReturnDeferred { trajectory, id, value } => {
+            // Every deferral is its own occurrence, counted as it is recorded, so the next return
+            // never reuses its identity. A deferral at the stop ends the child's errand; a held
+            // one answers the errand and leaves the child running.
+            Fact::ReturnDeferred {
+                trajectory,
+                id,
+                value,
+                held,
+            } => {
                 deferrals.insert(
                     id.clone(),
                     Deferral {
-                        label: value.label.clone(),
-                        standing: DeferralStanding::Pending(value.body.clone()),
+                        value: value.clone(),
+                        held: *held,
+                        standing: DeferralStanding::Pending,
                     },
                 );
-                ended.insert(trajectory.clone());
+                occurred(returns_by, id);
+                resumed_since_return.remove(trajectory);
+                if !held {
+                    ended.insert(trajectory.clone());
+                }
             }
             Fact::ReturnAccepted { id, .. } => {
                 if let Some(deferral) = deferrals.get_mut(id) {
@@ -823,7 +843,6 @@ impl Projection {
                 if let Some(deferral) = deferrals.get_mut(id) {
                     deferral.standing = DeferralStanding::Discarded;
                 }
-                *returns_by.entry(id.child().clone()).or_insert(0) += 1;
             }
             Fact::Boundary { trajectory, kind } => match kind {
                 BoundaryKind::Merge { .. } => {}
@@ -1413,19 +1432,37 @@ impl Views<'_> {
             .map(|returned| &returned.value)
     }
 
-    /// The value `child` crossed most recently, if any: a stop repeating it is a replay of that
-    /// crossing, never a second one. A child addressed again since has no replayable return:
-    /// what it says next crosses anew, at the label it stands at then.
+    /// The value `child` crossed at its latest return, if that return crossed: a stop repeating
+    /// it is a replay of that crossing, never a second one. A child addressed again since has no
+    /// replayable return: what it says next crosses anew, at the label it stands at then.
     pub(crate) fn latest_return(&self, child: &TrajectoryId) -> Option<&LabeledValue> {
-        if self.projection.resumed_since_return.contains(child) {
-            return None;
-        }
+        let latest = self.latest_occurrence(child)?;
         self.projection
             .child_returns
             .iter()
             .rev()
-            .find(|returned| returned.id.child() == child)
+            .find(|returned| returned.id == latest)
             .map(|returned| &returned.value)
+    }
+
+    /// The deferral `child`'s latest return froze, if it froze one: a return repeating its value
+    /// is that deferral again, never a second occurrence.
+    pub(crate) fn latest_deferral(&self, child: &TrajectoryId) -> Option<(ChildReturnId, &Deferral)> {
+        let latest = self.latest_occurrence(child)?;
+        self.projection
+            .deferrals
+            .get(&latest)
+            .map(|deferral| (latest, deferral))
+    }
+
+    /// `child`'s latest return, unless the parent addressed it again since.
+    fn latest_occurrence(&self, child: &TrajectoryId) -> Option<ChildReturnId> {
+        if self.projection.resumed_since_return.contains(child) {
+            return None;
+        }
+        let next = self.returns_by(child);
+        next.checked_sub(1)
+            .map(|occurrence| ChildReturnId::new(child.clone(), occurrence))
     }
 
     /// Where the deferred return at this occurrence stands, if one froze there.
@@ -1569,13 +1606,17 @@ impl Views<'_> {
     }
 
     /// Does this dispatch's result stay out of its trajectory? A plan withheld it at release, or
-    /// it is a spawn whose return is deferred: what that child says reaches its parent only by
-    /// a crossing at its stop or by the parent's acceptance, never as the spawn's own output.
+    /// it is a spawn whose return may be deferred or held: what that child says reaches its
+    /// parent only by a crossing or by the parent's acceptance, never as the spawn's own output.
     pub(crate) fn withholds_output(&self, dispatch: &DispatchId) -> bool {
         self.projection.withheld_outputs.contains(dispatch)
             || self
                 .prepared_fork(&ForkId::of(dispatch))
-                .is_some_and(|prepared| prepared.return_policy == ReturnPolicy::Deferred)
+                .is_some_and(|prepared| match &prepared.return_policy {
+                    ReturnPolicy::Deferred => true,
+                    ReturnPolicy::Crossing(crossing) => crossing.below_floor == crate::fact::BelowFloor::Hold,
+                    ReturnPolicy::Void => false,
+                })
     }
 
     /// The live derived candidate of this subject, if a hop has produced one. The next
@@ -1860,6 +1901,7 @@ mod tests {
                 fork: fork.clone(),
                 snapshot,
                 return_policy: ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+                    below_floor: crate::fact::BelowFloor::Refuse,
                     floor: Label::top(),
                     sanitizer: None,
                 }),
