@@ -1720,9 +1720,13 @@ impl Views<'_> {
     }
 
     /// The return a close of the open spawn `dispatch` may deliver: its bound child's latest,
-    /// where that crossed and no return of the child awaits its parent's decision, whose notice
-    /// answers the spawn instead. A live close and a replayed one are held to this alike.
+    /// where that crossed, no return of the child awaits its parent's decision, whose notice
+    /// answers the spawn instead, and no success checkpoint observed a body of the report's
+    /// own. A live close and a replayed one are held to this alike.
     pub(crate) fn spawn_delivery(&self, dispatch: &DispatchId) -> Option<ChildReturnId> {
+        if let Some(ObservedResult::Available(_)) = self.observed_result(dispatch) {
+            return None;
+        }
         let child = self.projection.bound.get(&ForkId::of(dispatch))?;
         if self
             .deferrals_by(child)

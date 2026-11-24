@@ -349,6 +349,10 @@ pub struct AudienceConfig {
     pub lookup_targets: BTreeMap<String, String>,
 }
 
+/// Per-selector reader sets: `None` marks a selector whose redirected provider still owes a
+/// lookup for one of its qualified members.
+type SelectorMembers = BTreeMap<SelectorSpec, Option<BTreeSet<ReaderId>>>;
+
 /// The validated audience registry the engine reads: everything [`AudienceConfig`] declares,
 /// indexed. Built once at load behind the registry's structural lints.
 #[derive(Clone, Debug, Default)]
@@ -590,6 +594,61 @@ impl AudienceRegistry {
         evidence: &AudienceEvidence,
         principal: Option<&ReaderId>,
     ) -> Result<Expansions, EvidenceRefusal> {
+        let (principals, selector_members) = self.validated(evidence)?;
+        let mut answers: Vec<(SymbolicAtom, BTreeSet<ReaderId>)> = Vec::new();
+
+        // Source-qualified selector atoms answer directly.
+        for (spec, members) in &selector_members {
+            if let Some(members) = members {
+                answers.push((
+                    SymbolicAtom::Group(GroupRef::Source {
+                        provider: spec.provider.clone(),
+                        selector: spec.selector.clone(),
+                    }),
+                    members.clone(),
+                ));
+            }
+        }
+
+        // Named audiences: the union of their selectors, when every one is answered.
+        let union_of = |specs: &BTreeSet<SelectorSpec>| -> Option<BTreeSet<ReaderId>> {
+            let mut union = BTreeSet::new();
+            for spec in specs {
+                union.extend(selector_members.get(spec)?.as_ref()?.iter().cloned());
+            }
+            Some(union)
+        };
+        for group in self.groups.values() {
+            let specs: BTreeSet<SelectorSpec> = group.from.iter().cloned().collect();
+            if let Some(members) = union_of(&specs) {
+                answers.push((SymbolicAtom::Group(GroupRef::Named(group.name.clone())), members));
+            }
+        }
+
+        // Chain levels: the symmetric closure over the same selector answers.
+        for level in [ChainAudience::Self_, ChainAudience::Internal] {
+            if let Some(specs) = self.chain_selectors(level, principal)
+                && let Some(mut members) = union_of(&specs)
+            {
+                members.extend(principal.cloned());
+                answers.push((SymbolicAtom::Chain(level), members));
+            }
+        }
+
+        Ok(Expansions::new(answers, principals))
+    }
+
+    /// Whether `evidence` passes the test [`AudienceRegistry::expansions`] holds it to,
+    /// without expanding any audience from it.
+    pub fn admissible(&self, evidence: &AudienceEvidence) -> Result<(), EvidenceRefusal> {
+        self.validated(evidence).map(|_| ())
+    }
+
+    /// The evidence's reader canonicalizations and per-selector reader sets, validated.
+    fn validated(
+        &self,
+        evidence: &AudienceEvidence,
+    ) -> Result<(BTreeMap<ReaderId, ReaderId>, SelectorMembers), EvidenceRefusal> {
         for claims in &evidence.sources {
             self.route_selector(&claims.provider, &claims.selector).map_err(|_| {
                 EvidenceRefusal::UnroutableSelector {
@@ -639,7 +698,7 @@ impl AudienceRegistry {
 
         // Per-selector reader sets, validated. `None` marks a selector whose redirected
         // provider still owes a lookup for one of its qualified members.
-        let mut selector_members: BTreeMap<SelectorSpec, Option<BTreeSet<ReaderId>>> = BTreeMap::new();
+        let mut selector_members: SelectorMembers = BTreeMap::new();
         for claims in &evidence.sources {
             let spec = SelectorSpec {
                 provider: claims.provider.clone(),
@@ -681,48 +740,7 @@ impl AudienceRegistry {
                 });
             }
         }
-
-        let mut answers: Vec<(SymbolicAtom, BTreeSet<ReaderId>)> = Vec::new();
-
-        // Source-qualified selector atoms answer directly.
-        for (spec, members) in &selector_members {
-            if let Some(members) = members {
-                answers.push((
-                    SymbolicAtom::Group(GroupRef::Source {
-                        provider: spec.provider.clone(),
-                        selector: spec.selector.clone(),
-                    }),
-                    members.clone(),
-                ));
-            }
-        }
-
-        // Named audiences: the union of their selectors, when every one is answered.
-        let union_of = |specs: &BTreeSet<SelectorSpec>| -> Option<BTreeSet<ReaderId>> {
-            let mut union = BTreeSet::new();
-            for spec in specs {
-                union.extend(selector_members.get(spec)?.as_ref()?.iter().cloned());
-            }
-            Some(union)
-        };
-        for group in self.groups.values() {
-            let specs: BTreeSet<SelectorSpec> = group.from.iter().cloned().collect();
-            if let Some(members) = union_of(&specs) {
-                answers.push((SymbolicAtom::Group(GroupRef::Named(group.name.clone())), members));
-            }
-        }
-
-        // Chain levels: the symmetric closure over the same selector answers.
-        for level in [ChainAudience::Self_, ChainAudience::Internal] {
-            if let Some(specs) = self.chain_selectors(level, principal)
-                && let Some(mut members) = union_of(&specs)
-            {
-                members.extend(principal.cloned());
-                answers.push((SymbolicAtom::Chain(level), members));
-            }
-        }
-
-        Ok(Expansions::new(answers, principals))
+        Ok((principals, selector_members))
     }
 
     /// The lookups a redirected provider's pinned answers owe: every qualified member it

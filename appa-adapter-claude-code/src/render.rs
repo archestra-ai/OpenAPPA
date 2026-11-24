@@ -113,7 +113,7 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
         },
         // A value the delivered response already says, and nothing beside it, rewrites nothing.
         HookDecision::DeliverValue { value } => match replacement(event, value) {
-            Some(_) if restates(event, value) => serde_json::json!({}),
+            Some(replacement) if restates(event, value, &replacement) => serde_json::json!({}),
             Some(replacement) => replaced(replacement, None),
             None => block(value),
         },

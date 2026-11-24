@@ -1782,3 +1782,28 @@ async fn a_release_whose_second_roster_answers_malformed_is_judged_on_the_first(
         assert_eq!(selectors_read(&directory), ["user-group/g1", "user-group/g2"]);
     }
 }
+
+/// A roster whose members' lookups fail both transiently and in a way only a repair fixes is
+/// lost for the repair, whichever member it reports first.
+#[tokio::test]
+async fn a_roster_lost_to_its_members_lookups_asks_for_a_repair_in_either_member_order() {
+    let (busy, misspelled) = ("slack:U1".to_string(), "slack:U2".to_string());
+    for members in [
+        vec![busy.clone(), misspelled.clone()],
+        vec![misspelled.clone(), busy.clone()],
+    ] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, directory) = serve_directory().await;
+        directory.group("user-group/g1", &misspelled, Some("github:bob"));
+        directory
+            .members
+            .lock()
+            .unwrap()
+            .insert("user-group/g1".to_string(), members.clone());
+        assert_eq!(
+            answer_sent_to_eve(&dir, &covered_by_redirected_groups_policy(1), &url).await,
+            Err(appa_runtime_api::ReleaseRefusal::MissingFact(RetryHint::AfterRepair)),
+            "{members:?}"
+        );
+    }
+}

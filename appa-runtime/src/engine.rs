@@ -3813,7 +3813,7 @@ impl RuntimeEngine {
                     sources: vec![claims],
                     lookups: Vec::new(),
                 };
-                match audience.expansions(&alone, principal) {
+                match audience.admissible(&alone) {
                     Ok(_) => payload.sources.extend(alone.sources),
                     Err(refusal) => {
                         tracing::info!(%refusal, "an audience source answered inadmissibly");
@@ -3834,7 +3834,7 @@ impl RuntimeEngine {
                     sources: Vec::new(),
                     lookups: vec![lookup],
                 };
-                match audience.expansions(&alone, principal) {
+                match audience.admissible(&alone) {
                     Ok(_) => payload.lookups.extend(alone.lookups),
                     Err(refusal) => {
                         tracing::info!(%refusal, "a member lookup answered inadmissibly");
@@ -3870,10 +3870,12 @@ impl RuntimeEngine {
                 })
                 .collect();
             payload.sources.retain(|claims| {
+                // A member only a repair answers outranks one asking again would.
                 let reason = claims
                     .members
                     .iter()
-                    .find_map(|member| lost_members.get(&(claims.provider.as_str(), member.as_str())));
+                    .filter_map(|member| lost_members.get(&(claims.provider.as_str(), member.as_str())))
+                    .max_by_key(|reason| retry_hint(**reason) == RetryHint::AfterRepair);
                 match reason {
                     Some(reason) => {
                         unanswered.selectors.insert(

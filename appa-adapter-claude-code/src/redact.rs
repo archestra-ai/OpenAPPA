@@ -7,10 +7,10 @@
 //! follows the tool that produced it, as the runtime's own identification
 //! does, and never the event it arrived as. For the spawn's result the
 //! swap is the `content` text — the one field of the `Agent` response
-//! Claude Code shows the parent model; the rest stays for the transcript
-//! where it is one of the metadata keys that response carries, in that
-//! key's known shape, and is redacted like any other leaf where it is
-//! not, so a response under the
+//! Claude Code shows the parent model; beside it the replacement carries
+//! only the metadata keys that response is known to carry, each kept
+//! where its value has that key's known shape and stood in for by a
+//! placeholder of that shape where it has not, so a response under the
 //! spawn's name that is not the spawn's own shape carries nothing to the
 //! model. For every other builtin tool every leaf is
 //! redacted: the text takes the tool's content field — `Bash` `stdout`,
@@ -84,19 +84,17 @@ pub(crate) fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> 
     }
 }
 
-/// Whether the response `event` delivered already says `text` and nothing else, so restating
-/// it rewrites nothing. A spawn's response says nothing else only when its every field is
-/// `content` carrying exactly `text` or run metadata of its known shape: a redaction fixed
-/// point is no proof there, since a null, a zero or a key name survives redaction as it is.
-/// Every other restatement is the response with its leaves redacted, which is all that
-/// crosses either way, so its fixed point is the response it restates.
-pub(crate) fn restates(event: &HookEvent, text: &str) -> bool {
+/// Whether the response `event` delivered already says `text` and nothing else, so its
+/// `replacement` rewrites nothing. A spawn's response says nothing else only when its every
+/// field is `content` carrying exactly `text` or run metadata of its known shape. Every other
+/// restatement is the response with its leaves redacted, which is all that crosses either
+/// way, so it restates when it is the response it replaces.
+pub(crate) fn restates(event: &HookEvent, text: &str, replacement: &Replacement) -> bool {
     match event {
         HookEvent::SpawnResult { call, outcome, .. } | HookEvent::ToolResult { call, outcome, .. } => {
             delivered(outcome).is_some_and(|response| match Restatement::of(&call.tool) {
                 Restatement::Spawn => spawn_restates(&response, text),
                 Restatement::TextBlock | Restatement::Leaves => {
-                    let replacement = restated(&call.tool, response.clone(), text);
                     replacement.context.is_none() && replacement.output == response
                 }
             })
@@ -134,6 +132,8 @@ enum Shape {
     Text,
     Count,
     Flag,
+    /// A discriminator: one of these values, the first standing in for any other.
+    Fixed(&'static [&'static str]),
     /// An object carrying only these keys, each of its own shape, any of them absent.
     Fields(&'static [(&'static str, Shape)]),
     /// An array whose every element has this shape.
@@ -146,6 +146,7 @@ impl Shape {
             (Self::Text, serde_json::Value::String(_))
             | (Self::Count, serde_json::Value::Number(_))
             | (Self::Flag, serde_json::Value::Bool(_)) => true,
+            (Self::Fixed(values), serde_json::Value::String(value)) => values.contains(&value.as_str()),
             (Self::Fields(known), serde_json::Value::Object(fields)) => fields.iter().all(|(key, field)| {
                 known
                     .iter()
@@ -156,7 +157,45 @@ impl Shape {
             _ => false,
         }
     }
+
+    /// `value` rebuilt in this shape: the listed keys alone, each conformed, and every leaf
+    /// this shape admits kept as it is, any other a placeholder of its shape.
+    fn conform(self, value: &serde_json::Value) -> serde_json::Value {
+        match (self, value) {
+            (Self::Fields(known), serde_json::Value::Object(fields)) => serde_json::Value::Object(
+                known
+                    .iter()
+                    .filter_map(|(name, shape)| Some((name.to_string(), shape.conform(fields.get(*name)?))))
+                    .collect(),
+            ),
+            (Self::List(item), serde_json::Value::Array(items)) => {
+                serde_json::Value::Array(items.iter().map(|element| item.conform(element)).collect())
+            }
+            (shape, value) if shape.admits(value) => value.clone(),
+            (Self::Text, _) => serde_json::Value::String(REDACTED.to_string()),
+            (Self::Count, _) => serde_json::Value::from(0),
+            (Self::Flag, _) => serde_json::Value::Bool(false),
+            (Self::Fixed(values), _) => {
+                serde_json::Value::String(values.first().copied().unwrap_or(REDACTED).to_string())
+            }
+            (Self::Fields(_), _) => serde_json::Value::Object(serde_json::Map::new()),
+            (Self::List(_), _) => serde_json::Value::Array(Vec::new()),
+        }
+    }
 }
+
+/// The values Claude Code's output shapes validate a `status` against.
+const STATUSES: &[&str] = &[
+    "completed",
+    "async_launched",
+    "remote_launched",
+    "pending",
+    "in_progress",
+    "running",
+    "failed",
+    "killed",
+    "paused",
+];
 
 const CACHE_CREATION: Shape = Shape::Fields(&[
     ("ephemeral_1h_input_tokens", Shape::Count),
@@ -169,7 +208,7 @@ const ITERATION: Shape = Shape::Fields(&[
     ("cache_read_input_tokens", Shape::Count),
     ("cache_creation_input_tokens", Shape::Count),
     ("cache_creation", CACHE_CREATION),
-    ("type", Shape::Text),
+    ("type", Shape::Fixed(&["message"])),
 ]);
 
 const USAGE: Shape = Shape::Fields(&[
@@ -212,8 +251,10 @@ const TOOL_STATS: Shape = Shape::Fields(&[
 /// is redacted until it is listed here, so the list going stale withholds more, never less.
 fn spawn_metadata(key: &str) -> Option<Shape> {
     match key {
-        "agentId" | "agentType" | "description" | "harnessSectionHash" | "outputFile" | "prompt" | "resolvedModel"
-        | "status" => Some(Shape::Text),
+        "agentId" | "agentType" | "description" | "harnessSectionHash" | "outputFile" | "prompt" | "resolvedModel" => {
+            Some(Shape::Text)
+        }
+        "status" => Some(Shape::Fixed(STATUSES)),
         "harnessNoteCount" | "harnessTailCount" | "totalDurationMs" | "totalTokens" | "totalToolUseCount" => {
             Some(Shape::Count)
         }
@@ -249,27 +290,16 @@ fn spawn_restates(response: &serde_json::Value, text: &str) -> bool {
 }
 
 /// The spawn's result restated: the swap is the `content` text, the one field of the
-/// `Agent` response Claude Code shows the parent model, and the run's own metadata stays
-/// for the transcript. A field that is not one of the response's known metadata keys in
-/// its known shape is a payload this codec does not recognize, so its leaves are redacted
-/// as an ordinary tool's are — redacted rather than dropped, since Claude Code keeps the
-/// original response when its replacement lacks the tool's own shape: a response under the
-/// spawn's name that is not the spawn's own shape — the bytes a refused hook still carries
-/// included — crosses nothing.
+/// `Agent` response Claude Code shows the parent model, beside the run's metadata keys alone,
+/// each conformed to its known shape. Nothing else of the response is copied, so a response
+/// under the spawn's name that is not the spawn's own shape — the bytes a refused hook still
+/// carries included — crosses nothing.
 fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
     let output = match response {
         serde_json::Value::Object(fields) => {
-            // The text takes the `content` field below, never a leaf.
-            let mut placement = Placement::Taken;
             let mut object: serde_json::Map<String, serde_json::Value> = fields
-                .into_iter()
-                .map(|(key, field)| match is_run_metadata(&key, &field) {
-                    true => (key, field),
-                    false => {
-                        let redacted = redact(field, Some(&key), text, &mut placement);
-                        (key, redacted)
-                    }
-                })
+                .iter()
+                .filter_map(|(key, field)| Some((key.clone(), spawn_metadata(key)?.conform(field))))
                 .collect();
             object.insert("content".to_string(), text_block(text));
             serde_json::Value::Object(object)
@@ -327,8 +357,8 @@ fn longest_content(value: &serde_json::Value, key: Option<&str>) -> Option<usize
 /// Where the text goes in the response being restated, as the redaction walks it. One
 /// question with three answers, and the walk answers it at most once.
 enum Placement {
-    /// The text has a home already — a named content slot, or the spawn's `content` — so
-    /// every string this walk meets is redacted.
+    /// The text has a home already, a named content slot, so every string this walk meets
+    /// is redacted.
     Taken,
     /// No named slot, so the first string of this length takes the text and the walk
     /// becomes `Taken`. [`longest_content`] measured that string, so one exists.
@@ -400,17 +430,7 @@ fn is_fixed_value(key: &str, value: &str) -> bool {
             "audio",
         ],
         "mode" => &["content", "files_with_matches", "count"],
-        "status" => &[
-            "completed",
-            "async_launched",
-            "remote_launched",
-            "pending",
-            "in_progress",
-            "running",
-            "failed",
-            "killed",
-            "paused",
-        ],
+        "status" => STATUSES,
         _ => &[],
     };
     fixed.contains(&value)
@@ -587,10 +607,10 @@ mod tests {
         assert_eq!(render(&event, &HookDecision::Ack), serde_json::json!({}));
     }
 
-    /// A response the codec does not recognize as the spawn's own shape crosses no leaf,
+    /// A response the codec does not recognize as the spawn's own shape crosses nothing,
     /// whichever side reads it: the parsed spawn result and the bytes a refused hook still
-    /// carries are both restated leaf by leaf, as an ordinary tool's response is. The
-    /// metadata the `Agent` response does carry is what stays.
+    /// carries are both restated as the message alone, since only the metadata the `Agent`
+    /// response does carry stays beside it.
     #[test]
     fn an_unrecognized_response_under_the_spawns_tool_carries_nothing_across() {
         let response = serde_json::json!({
@@ -619,19 +639,11 @@ mod tests {
         );
         for answer in [salvaged, rendered] {
             let output = &answer["hookSpecificOutput"]["updatedToolOutput"];
-            assert!(
-                !output.to_string().contains("the secret"),
+            assert_eq!(
+                *output,
+                serde_json::json!({"content": [{"type": "text", "text": withheld("unreadable")}]}),
                 "an unrecognized payload never reaches the model: {answer}",
             );
-            assert_eq!(
-                output["content"],
-                serde_json::json!([{"type": "text", "text": withheld("unreadable")}]),
-                "the swap is still the message the parent model reads: {answer}",
-            );
-            assert_eq!(output["result"], REDACTED);
-            assert_eq!(output["nested"]["note"], REDACTED);
-            assert_eq!(output["nested"]["count"], 0);
-            assert_eq!(output["flag"], false);
         }
 
         let launched = serde_json::json!({
@@ -779,10 +791,10 @@ mod tests {
         );
     }
 
-    /// A field that survives redaction as it is proves nothing about what it carries: an
-    /// unknown key, or a metadata key whose value is not its known shape, is a payload
-    /// beside the message, so the response does not restate the value, and the replacement
-    /// redacts that field as it redacts any payload it does not recognize.
+    /// A field that is not run metadata of its known shape is a payload beside the message, so
+    /// the response does not restate the value, and the replacement is built from the message
+    /// and the metadata alone: an unknown key is gone, and a slot of another shape, a
+    /// discriminator among them, holds a placeholder of its shape.
     #[test]
     fn a_spawn_response_with_a_payload_beside_its_message_does_not_restate_it() {
         let cases = [
@@ -790,38 +802,55 @@ mod tests {
                 "an unknown key",
                 "extra",
                 serde_json::json!({"unchecked-key": null}),
-                serde_json::json!({"unchecked-key": null}),
+                None,
             ),
             (
-                "nested content in a text slot",
+                "nested content in a discriminator",
                 "status",
                 serde_json::json!({"note": "unchecked", "count": 3}),
-                serde_json::json!({"note": REDACTED, "count": 0}),
+                Some(serde_json::json!("completed")),
+            ),
+            (
+                "text in a discriminator",
+                "status",
+                serde_json::json!("unchecked words"),
+                Some(serde_json::json!("completed")),
             ),
             (
                 "a string in a count slot",
                 "totalDurationMs",
                 serde_json::json!("unchecked"),
-                serde_json::json!(REDACTED),
+                Some(serde_json::json!(0)),
             ),
             (
                 "an unknown nested key",
                 "toolStats",
                 serde_json::json!({"readCount": 1, "unchecked": "words"}),
-                serde_json::json!({"readCount": 0, "unchecked": REDACTED}),
+                Some(serde_json::json!({"readCount": 1})),
             ),
             (
                 "a nested element of another shape",
                 "usage",
                 serde_json::json!({"input_tokens": 2, "iterations": [{"type": "message", "note": "unchecked"}]}),
-                serde_json::json!({"input_tokens": 0, "iterations": [{"type": REDACTED, "note": REDACTED}]}),
+                Some(serde_json::json!({"input_tokens": 2, "iterations": [{"type": "message"}]})),
+            ),
+            (
+                "text in a nested discriminator",
+                "usage",
+                serde_json::json!({"iterations": [{"type": "unchecked words"}]}),
+                Some(serde_json::json!({"iterations": [{"type": "message"}]})),
             ),
         ];
-        for (name, key, payload, redacted) in cases {
+        for (name, key, payload, conformed) in cases {
             let mut response = agent_response();
             response[key] = payload;
             let mut replaced = agent_response();
-            replaced[key] = redacted;
+            match conformed {
+                Some(conformed) => replaced[key] = conformed,
+                None => {
+                    replaced.as_object_mut().expect("the response is an object").remove(key);
+                }
+            }
             assert_eq!(
                 render(&spawn_result(response), &delivered("one file: readme.txt")),
                 serde_json::json!({
@@ -830,7 +859,7 @@ mod tests {
                         "updatedToolOutput": replaced,
                     }
                 }),
-                "{name} is not run metadata, so the reply is restated with it redacted",
+                "{name} is not run metadata, so the reply is restated without it",
             );
         }
     }
