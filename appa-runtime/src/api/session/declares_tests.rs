@@ -1943,7 +1943,7 @@ async fn a_deciding_spawn_whose_return_crossed_delivers_its_result_as_a_plain_sp
             SpawnResultDecision::Return(ChildReturnDecision::Returned {
                 value,
                 receipt: replayed,
-            }) => Some(value).filter(|_| replayed == receipt),
+            }) => (replayed == receipt).then_some(value),
             _ => None,
         });
         (value, replayed.map_err(|error| error.to_string()), admitted(&runtime))
