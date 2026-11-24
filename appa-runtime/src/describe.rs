@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 
 use appa_runtime_api::AdapterName;
 
+use appa_engine::label::Trust;
+use appa_engine::registry::{RequirementKind, TrustChain, UnsatisfiableRequirement};
+
 use crate::config::{Config, ConfigError, Externals, Implementation, Section, Transport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -441,7 +444,18 @@ pub(crate) fn served(adapter: AdapterName) -> appa_runtime_api::Adapter {
 
 pub struct Description {
     pub text: String,
-    pub valid: bool,
+    /// Whether the complete configuration loads for the served adapter.
+    pub loads: bool,
+    /// The authoring check over the served policy: empty where it passes, and where the
+    /// configuration does not load.
+    pub unsatisfiable: Vec<UnsatisfiableRequirement>,
+}
+
+impl Description {
+    /// What `--check` requires: the configuration loads, and the authoring check passes.
+    pub fn passes_check(&self) -> bool {
+        self.loads && self.unsatisfiable.is_empty()
+    }
 }
 
 /// `session_tools` are the tool names the configuring agent's own session sees, in the host's
@@ -462,12 +476,13 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
         Some(loaded) => crate::api::Runtime::validate_served(loaded, served).map_err(|error| error.to_string()),
         None => Err("configuration cannot be loaded; check the configuration diagnostics above".to_string()),
     };
+    let loads = validation.is_ok();
     let unsatisfiable = served_policy
         .as_ref()
-        .map(|policy| policy.engine().registry().unsatisfiable_requirements())
+        .filter(|_| loads)
+        .map(appa_policy::Config::unsatisfiable_requirements)
         .unwrap_or_default();
-    let valid = validation.is_ok() && unsatisfiable.is_empty();
-    if !valid && config.state == ConfigState::Loadable {
+    if !loads && config.state == ConfigState::Loadable {
         config.state = ConfigState::Invalid;
     }
     let mut output = String::new();
@@ -619,13 +634,54 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
             let _ = writeln!(output, "Validation failed: {error}");
         }
     }
-    if !unsatisfiable.is_empty() {
-        let _ = writeln!(output, "Unsatisfiable requirements (every call they gate is refused):");
-        for requirement in &unsatisfiable {
-            let _ = writeln!(output, "  {requirement}");
+    match served_policy.as_ref().filter(|_| loads) {
+        None => {
+            let _ = writeln!(output, "Authoring check: unavailable (the configuration does not load)");
+        }
+        Some(_) if unsatisfiable.is_empty() => {
+            let _ = writeln!(output, "Authoring check: passed");
+        }
+        Some(policy) => {
+            let _ = writeln!(
+                output,
+                "Authoring check: failed; while a call selects one of these rules, a fresh trajectory never dispatches it"
+            );
+            let chain = policy.engine().registry().trust_chain();
+            for requirement in &unsatisfiable {
+                let _ = writeln!(output, "  {}", unsatisfiable_line(chain, requirement));
+            }
         }
     }
-    Description { text: output, valid }
+    Description {
+        text: output,
+        loads,
+        unsatisfiable,
+    }
+}
+
+fn unsatisfiable_line(chain: &TrustChain, unsatisfiable: &UnsatisfiableRequirement) -> String {
+    let tool = unsatisfiable.tool.as_str();
+    match &unsatisfiable.requirement {
+        RequirementKind::Prior(kind) => format!(
+            "{tool}: prior effect {:?}, which no other rule that can release its call emits and no authority waives",
+            kind.as_str()
+        ),
+        RequirementKind::TrustFloor { required, effective } => {
+            let name = |trust: &Trust| {
+                chain
+                    .name_of(*trust)
+                    .map_or_else(|| format!("rank {}", trust.rank()), str::to_owned)
+            };
+            format!(
+                "{tool}: trust floor {}, above {}, the most the call carries after its own `forwards`, which no authority's trust ceiling reaches",
+                name(required),
+                name(effective)
+            )
+        }
+        RequirementKind::Attention(mark) => {
+            format!("{tool}: attention mark {:?}, which no authority attends", mark.as_str())
+        }
+    }
 }
 
 /// The MCP servers this machine configures or the session reports, and the batteries of the
@@ -758,7 +814,7 @@ mod tests {
             crate::tool_validation::ToolStatus::Unknown { .. }
         ));
         let description = render(&path, &[], AdapterName::Kagent, &[]);
-        assert!(description.valid);
+        assert!(description.loads);
         assert!(
             description.text.contains("1 declared tools have no host observation"),
             "{}",
@@ -771,7 +827,35 @@ mod tests {
             format!("{policy}\n[[appa_inventory.tools]]\nname = \"write_secret\"\ntool = \"mcp:demo/write_secret\"\n"),
         )
         .unwrap();
-        assert!(!render(&path, &[], AdapterName::Kagent, &[]).valid);
+        assert!(!render(&path, &[], AdapterName::Kagent, &[]).loads);
+    }
+
+    /// A requirement nothing can meet fails the authoring check, never loadability.
+    #[test]
+    fn the_authoring_check_is_a_result_apart_from_loading() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appa.toml");
+        let deploy = "[[policy.tool]]\nname = \"mcp/ops/deploy\"\nrequires = { effects = { contains = [\"backup.completed\"] } }\ndelta = {}\n";
+        let backup = "[[policy.tool]]\nname = \"mcp/ops/backup\"\neffects = [\"backup.completed\"]\ndelta = {}\n";
+        let externals = "[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n";
+        let described = |tools: &str| {
+            std::fs::write(&path, format!("[policy]\nversion = 2\n{tools}{externals}")).unwrap();
+            render(&path, &[], AdapterName::ClaudeCode, &[])
+        };
+
+        let unmet = described(deploy);
+        assert!(unmet.loads);
+        assert_eq!(
+            unmet.unsatisfiable,
+            [UnsatisfiableRequirement {
+                tool: appa_engine::value::ToolName::new("mcp/ops/deploy"),
+                requirement: RequirementKind::Prior(appa_engine::fact::EffectKind::new("backup.completed")),
+            }]
+        );
+        assert!(!unmet.passes_check());
+
+        let met = described(&format!("{backup}{deploy}"));
+        assert!(met.loads && met.unsatisfiable.is_empty() && met.passes_check());
     }
 
     #[test]
@@ -780,7 +864,7 @@ mod tests {
         let path = directory.path().join("appa.toml");
         std::fs::write(&path, "[policy]\nversion = 2\n[[policy.tool]]\nname = \"read\"\nannotator = \"missing\"\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n").unwrap();
         assert!(Config::load_from(&path, &[]).is_ok());
-        assert!(!render(&path, &[], AdapterName::Kagent, &[]).valid);
+        assert!(!render(&path, &[], AdapterName::Kagent, &[]).loads);
     }
 
     /// Each tool the session reports lands in exactly one bucket of the served policy: a rule,
@@ -985,7 +1069,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("temporary directory");
         let description = render(&directory.path().join("appa.toml"), &[], AdapterName::ClaudeCode, &[]);
 
-        assert!(!description.valid);
+        assert!(!description.loads);
         let text = &description.text;
         // The MCP server section reports this machine's configuration, so it is not counted.
         let machine = text

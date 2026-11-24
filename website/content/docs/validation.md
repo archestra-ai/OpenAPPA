@@ -7,7 +7,7 @@ description: Test policy decisions before merging changes, without running your 
 
 The [APPA CLI](https://openappa.com/install.sh) provides two commands for validation:
 
-- `appa describe --check` checks that your configuration loads.
+- `appa describe --check` checks that your configuration loads, and that each requirement a tool rule writes can be met.
 - `appa replay` checks scripted tool calls against the decisions you expect, without running your agent's tools.
 
 Run them locally or in continuous integration (CI) to catch configuration errors and unexpected policy decisions before deployment.

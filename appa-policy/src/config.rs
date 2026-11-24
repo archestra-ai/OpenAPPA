@@ -7,7 +7,9 @@ use appa_engine::engine::Engine;
 use appa_engine::label::Label;
 use appa_engine::names::{AnnotatorName, RecorderName, SanitizerName};
 use appa_engine::profile::{DeploymentPolicy, ProfileDeclaration};
-use appa_engine::registry::{AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain};
+use appa_engine::registry::{
+    AnnotatorDeclaration, AudienceVocabulary, PlannerCap, RegistryConfig, TrustChain, UnsatisfiableRequirement,
+};
 
 use crate::annotator::{AnnotatorBinding, AnnotatorBuiltin, compile_annotators, validate_annotator_inputs};
 use crate::audience::convert_audience;
@@ -209,6 +211,18 @@ impl Config {
     /// `[externals.annotators]`.
     pub fn annotators(&self) -> impl Iterator<Item = (&AnnotatorName, &AnnotatorBinding)> {
         self.annotators.iter()
+    }
+
+    /// [`appa_engine::registry::Registry::unsatisfiable_requirements`], where the `jev`
+    /// builtin's consults emit nothing.
+    pub fn unsatisfiable_requirements(&self) -> Vec<UnsatisfiableRequirement> {
+        let effect_free = self
+            .annotators
+            .iter()
+            .filter(|(_, binding)| binding.builtin == Some(AnnotatorBuiltin::Jev))
+            .map(|(name, _)| name.clone())
+            .collect();
+        self.engine.registry().unsatisfiable_requirements(&effect_free)
     }
 
     /// Every `[[sanitizer]]` that names a model builtin on its declaration, with that builtin.

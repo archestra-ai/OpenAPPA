@@ -76,7 +76,8 @@ enum Command {
         #[arg(long, default_value_t = AdapterName::ClaudeCode)]
         adapter: AdapterName,
 
-        /// Exit unsuccessfully unless the complete configuration loads.
+        /// Exit unsuccessfully unless the complete configuration loads and the authoring check
+        /// finds no requirement that nothing in the policy can meet.
         #[arg(long)]
         check: bool,
 
@@ -448,7 +449,7 @@ fn main() -> ExitCode {
                 Ok(readiness) => print!("{readiness}"),
                 Err(_) => eprintln!("Battery readiness: checks unavailable"),
             }
-            if check && !description.valid {
+            if check && !description.passes_check() {
                 ExitCode::FAILURE
             } else {
                 ExitCode::SUCCESS

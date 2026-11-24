@@ -64,3 +64,34 @@ fn a_declared_tool_with_history_or_attention_requirements_loads() {
         assert_eq!(contract.delta, Delta::NONE, "{case}: an omitted delta is neutral");
     }
 }
+
+/// The `jev` builtin labels a call and never emits, so a wildcard it serves records no effect
+/// a prior can wait for; another Annotator's omitted effect bound admits every policy effect.
+#[test]
+fn a_jev_annotator_emits_nothing_a_prior_can_wait_for() {
+    use appa_engine::fact::EffectKind;
+    use appa_engine::registry::{RequirementKind, UnsatisfiableRequirement};
+    use appa_engine::value::ToolName;
+
+    let policy = |builtin: &str| {
+        format!(
+            "version = 2\n\n[[annotator]]\nname = \"classifier\"\n{builtin}\n\n\
+             [[tool]]\nname = \"*\"\nannotator = \"classifier\"\n\n\
+             [[tool]]\nname = \"deploy\"\nrequires = {{ effects = {{ contains = [\"backup.completed\"] }} }}\n"
+        )
+    };
+    let unsatisfiable = |builtin| {
+        Config::from_toml_str(&policy(builtin))
+            .expect("the policy loads")
+            .unsatisfiable_requirements()
+    };
+
+    assert_eq!(
+        unsatisfiable("builtin = \"jev\""),
+        [UnsatisfiableRequirement {
+            tool: ToolName::new("deploy"),
+            requirement: RequirementKind::Prior(EffectKind::new("backup.completed")),
+        }]
+    );
+    assert_eq!(unsatisfiable(""), []);
+}

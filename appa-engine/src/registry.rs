@@ -843,9 +843,11 @@ pub enum LoadError {
     },
 }
 
-/// A requirement a tool declaration states that no reachable trajectory and no remedy can ever
-/// meet: every call it gates is refused. An authoring check, never a load error — a deployment
-/// may keep a mark unattended on purpose, and a stored policy keeps loading.
+/// A requirement a tool rule states that nothing in the checked revision can meet for a fresh
+/// trajectory that inherits nothing: while a call selects this rule, it is never dispatched. A
+/// sanitizer rewrite that moves the call onto another rule is not ruled out. An authoring check,
+/// never a load error — a deployment may keep a mark unattended on purpose, and a stored policy
+/// keeps loading.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnsatisfiableRequirement {
     pub tool: ToolName,
@@ -854,35 +856,14 @@ pub struct UnsatisfiableRequirement {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RequirementKind {
-    /// No tool emits the effect and no in-scope authority waives it.
+    /// No other reachable rule that can release its own call emits the effect, and no in-scope
+    /// authority waives it.
     Prior(EffectKind),
-    /// The floor is above every trust the call can carry, and no in-scope authority's trust
-    /// ceiling reaches it.
-    TrustFloor,
+    /// The floor is above `effective`, the most trust the call can carry once its own
+    /// `forwards` narrows the starting label, and no in-scope authority's trust ceiling reaches it.
+    TrustFloor { required: Trust, effective: Trust },
     /// No authority attends the mark.
     Attention(MarkName),
-}
-
-impl std::fmt::Display for UnsatisfiableRequirement {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let tool = self.tool.as_str();
-        match &self.requirement {
-            RequirementKind::Prior(kind) => write!(
-                f,
-                "tool {tool} requires prior effect {:?}, which no tool emits and no authority waives",
-                kind.as_str()
-            ),
-            RequirementKind::TrustFloor => write!(
-                f,
-                "tool {tool} requires a trust floor above both the starting label and its own `forwards`, which no authority's trust ceiling reaches"
-            ),
-            RequirementKind::Attention(mark) => write!(
-                f,
-                "tool {tool} requires attention mark {:?}, which no authority attends",
-                mark.as_str()
-            ),
-        }
-    }
 }
 
 /// The planner cap: the most alternatives one current-stage plan menu may hold — per
@@ -2104,14 +2085,18 @@ impl Registry {
         self.sanitizers.values()
     }
 
-    /// Every requirement a declaration states that nothing can ever meet. A trajectory's trust
+    /// Every [`UnsatisfiableRequirement`] of the rules a call can select. A trajectory's trust
     /// only narrows from its starting label, and the call's own `forwards` narrows what it sends,
     /// so a floor above both is met only by an authority; a sanitizer settles a narrowing, never
-    /// a requirement gap. Covers read the predicate planning reads. Requirements an Annotator
-    /// produces exist per call and are its own: only the floor written beside it is judged, and
-    /// an Annotator whose mandate admits an effect counts as its emitter. The reserved `blocked`
-    /// mark is unsatisfiable by design and never listed.
-    pub fn unsatisfiable_requirements(&self) -> Vec<UnsatisfiableRequirement> {
+    /// a requirement gap. Covers read the predicate planning reads. A rule an earlier
+    /// unconditional rule of a covering name shadows is never selected, so it neither states a
+    /// requirement nor emits. An emitter counts only where it can release its call: never the
+    /// gated rule itself, never a rule requiring `blocked`. Requirements an Annotator produces
+    /// exist per call and are its own: only the floor written beside it is judged, and an
+    /// Annotator whose mandate admits an effect counts as its emitter unless it is in
+    /// `effect_free`, whose consults never emit. The reserved `blocked` mark is unsatisfiable by
+    /// design and never listed.
+    pub fn unsatisfiable_requirements(&self, effect_free: &BTreeSet<AnnotatorName>) -> Vec<UnsatisfiableRequirement> {
         use crate::check::Gap;
         use crate::plan::covers_gap;
 
@@ -2122,24 +2107,56 @@ impl Registry {
             &no_expansions,
         );
         let starting = self.profile.starting_label().trust;
-        let declarations = || {
-            self.tools
-                .values()
-                .flatten()
-                .map(|(_, declaration)| declaration)
-                .chain(self.wildcard.as_ref())
+        let mut selectable: Vec<&ToolDeclaration> = Vec::new();
+        let mut unconditional: BTreeSet<ToolName> = BTreeSet::new();
+        for (name, ordinal) in &self.tool_order {
+            let (matcher, declaration) = &self.tools[name][*ordinal];
+            let covering_selector = name
+                .as_str()
+                .strip_prefix("mcp/")
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(_, leaf)| ToolName::new(format!("mcp/*/{leaf}")))
+                .filter(|selector| selector.matches_name(name));
+            let shadowed = unconditional.contains(name)
+                || covering_selector.is_some_and(|selector| unconditional.contains(&selector));
+            if !shadowed {
+                selectable.push(declaration);
+            }
+            if matches!(matcher, ToolMatcher::Bare) {
+                unconditional.insert(name.clone());
+            }
+        }
+        selectable.extend(self.wildcard.as_ref());
+        let releasing = |declaration: &ToolDeclaration| {
+            declaration
+                .declared()
+                .is_none_or(|tool| !tool.requires.attention_marks().iter().any(MarkName::is_blocked))
         };
-        let emitted = |kind: &EffectKind| {
-            declarations().any(|declaration| match declaration {
-                ToolDeclaration::Declared(tool) => tool.emits.contains(kind),
+        let mut emitters: BTreeMap<&EffectKind, BTreeSet<usize>> = BTreeMap::new();
+        for (index, declaration) in selectable.iter().enumerate().filter(|(_, d)| releasing(d)) {
+            let emits: Vec<&EffectKind> = match declaration {
+                ToolDeclaration::Declared(tool) => tool.emits.iter().collect(),
+                ToolDeclaration::Annotated { annotator, .. } if effect_free.contains(annotator) => Vec::new(),
                 ToolDeclaration::Annotated { annotator, .. } => self
                     .annotators
                     .get(annotator)
-                    .is_some_and(|mandate| mandate.permits_effect(kind)),
-            }) || self.provider_run.values().any(|tool| tool.emits.contains(kind))
+                    .map(|mandate| mandate.effects.iter().collect())
+                    .unwrap_or_default(),
+            };
+            for kind in emits {
+                emitters.entry(kind).or_default().insert(index);
+            }
+        }
+        let provider_run: BTreeSet<&EffectKind> =
+            self.provider_run.values().flat_map(|tool| tool.emits.iter()).collect();
+        let emitted_for = |kind: &EffectKind, gated: usize| {
+            provider_run.contains(kind)
+                || emitters
+                    .get(kind)
+                    .is_some_and(|emitters| emitters.iter().any(|&emitter| emitter != gated))
         };
         let mut unsatisfiable = Vec::new();
-        for declaration in declarations() {
+        for (index, declaration) in selectable.iter().enumerate() {
             let tags = declaration.tags();
             let covered = |gap: Gap| {
                 self.authorities
@@ -2152,7 +2169,7 @@ impl Registry {
                     requirement,
                 })
             };
-            let (floor, carried) = match declaration {
+            let (floor, effective) = match declaration {
                 ToolDeclaration::Declared(tool) => (
                     tool.requires.trust_floor(),
                     tool.forwards
@@ -2162,20 +2179,20 @@ impl Registry {
                 ToolDeclaration::Annotated { requires, .. } => (requires.trust_floor, starting),
             };
             if let Some(required) = floor
-                && required > carried
+                && required > effective
                 && !covered(Gap::TrustFloor {
                     required,
-                    actual: carried,
+                    actual: effective,
                 })
             {
-                unmet(RequirementKind::TrustFloor);
+                unmet(RequirementKind::TrustFloor { required, effective });
             }
             let Some(tool) = declaration.declared() else {
                 continue;
             };
             for requirement in &tool.requires.history {
                 if let HistoryRequirement::Prior(kind) = requirement
-                    && !emitted(kind)
+                    && !emitted_for(kind, index)
                     && !covered(Gap::Prior(kind.clone()))
                 {
                     unmet(RequirementKind::Prior(kind.clone()));
@@ -3621,6 +3638,14 @@ mod tests {
     /// What the registry lists as unsatisfiable under a starting label at `starting`. The
     /// registry always loads: the list is an authoring check.
     fn unsatisfiable_under(cfg: RegistryConfig, starting: Trust) -> Vec<UnsatisfiableRequirement> {
+        unsatisfiable_beside(cfg, starting, &BTreeSet::new())
+    }
+
+    fn unsatisfiable_beside(
+        cfg: RegistryConfig,
+        starting: Trust,
+        effect_free: &BTreeSet<AnnotatorName>,
+    ) -> Vec<UnsatisfiableRequirement> {
         let profile = crate::profile::DeploymentProfile::declare(crate::profile::ProfileDeclaration {
             starting_label: crate::label::Label::new(starting, Audience::public()),
             ..crate::profile::covering_declaration(&cfg)
@@ -3628,7 +3653,7 @@ mod tests {
         .expect("the covering profile validates");
         Registry::build(cfg, PlannerCap::default(), profile)
             .expect("an unsatisfiable requirement never refuses the load")
-            .unsatisfiable_requirements()
+            .unsatisfiable_requirements(effect_free)
     }
 
     fn unsatisfiable(cfg: RegistryConfig) -> Vec<UnsatisfiableRequirement> {
@@ -3699,15 +3724,95 @@ mod tests {
         assert_eq!(unsatisfiable(with(vec![gated.clone()], vec![waiver])), vec![]);
         let mut annotated_emitter = with(vec![gated, annotated("classify", "classifier")], vec![]);
         annotated_emitter.annotators = vec![AnnotatorDeclaration {
-            effects: Some(BTreeSet::from([reviewed])),
+            effects: Some(BTreeSet::from([reviewed.clone()])),
             ..annotator("classifier")
         }];
-        assert_eq!(unsatisfiable(annotated_emitter), vec![]);
+        assert_eq!(unsatisfiable(annotated_emitter.clone()), vec![]);
+        assert_eq!(
+            unsatisfiable_beside(
+                annotated_emitter,
+                Trust::new(1),
+                &BTreeSet::from([AnnotatorName::new("classifier")])
+            ),
+            listed(RequirementKind::Prior(reviewed))
+        );
+    }
+
+    #[test]
+    fn an_emitter_counts_only_where_it_can_release_its_call() {
+        let reviewed = EffectKind::new("reviewed");
+        let mut gated = tool("gated");
+        gated.requires.history = vec![HistoryRequirement::Prior(reviewed.clone())];
+        let mut review = tool("review");
+        review.emits = EffectSet::new([reviewed.clone()]).unwrap();
+        assert_eq!(
+            unsatisfiable(with(
+                vec![
+                    ToolDeclaration::Declared(gated.clone()),
+                    ToolDeclaration::Declared(review.clone())
+                ],
+                vec![]
+            )),
+            vec![]
+        );
+
+        review.requires.attention = vec![MarkName::new(MarkName::BLOCKED)];
+        assert_eq!(
+            unsatisfiable(with(
+                vec![
+                    ToolDeclaration::Declared(gated.clone()),
+                    ToolDeclaration::Declared(review)
+                ],
+                vec![]
+            )),
+            listed(RequirementKind::Prior(reviewed.clone()))
+        );
+
+        gated.emits = EffectSet::new([reviewed.clone()]).unwrap();
+        assert_eq!(
+            unsatisfiable(with(vec![ToolDeclaration::Declared(gated)], vec![])),
+            listed(RequirementKind::Prior(reviewed))
+        );
+    }
+
+    /// Selection is first match wins: an unconditional rule shadows every later rule of a name
+    /// it covers, and an exact rule never covers the whole namespace a selector names.
+    #[test]
+    fn a_rule_an_earlier_unconditional_selector_shadows_neither_requires_nor_emits() {
+        let (reviewed, signoff) = (EffectKind::new("reviewed"), MarkName::new("signoff"));
+        let mut gated = tool("gated");
+        gated.requires.history = vec![HistoryRequirement::Prior(reviewed.clone())];
+        let mut exact = tool("mcp/demo/read");
+        exact.emits = EffectSet::new([reviewed.clone()]).unwrap();
+        exact.requires.attention = vec![signoff.clone()];
+        let mut selector = tool("mcp/*/read");
+        let declared =
+            |tools: Vec<ToolAnnotation>| with(tools.into_iter().map(ToolDeclaration::Declared).collect(), vec![]);
+
+        assert_eq!(
+            unsatisfiable(declared(vec![selector.clone(), exact.clone(), gated.clone()])),
+            listed(RequirementKind::Prior(reviewed.clone()))
+        );
+
+        selector.requires.attention = vec![signoff.clone()];
+        assert_eq!(
+            unsatisfiable(declared(vec![exact, selector, gated])),
+            ["mcp/demo/read", "mcp/*/read"]
+                .map(|tool| UnsatisfiableRequirement {
+                    tool: ToolName::new(tool),
+                    requirement: RequirementKind::Attention(signoff.clone()),
+                })
+                .to_vec()
+        );
     }
 
     #[test]
     fn a_trust_floor_is_listed_unless_the_call_or_an_in_scope_authority_reaches_it() {
         let (suspicious, trusted) = (Trust::new(0), Trust::new(1));
+        let floor_above_suspicious = RequirementKind::TrustFloor {
+            required: trusted,
+            effective: suspicious,
+        };
         let gated = |forwards: Option<Trust>| {
             let mut gated = tool("gated");
             gated.requires.label.trust_floor = Some(trusted);
@@ -3725,11 +3830,11 @@ mod tests {
         assert_eq!(unsatisfiable(with(vec![gated(None)], vec![])), vec![]);
         assert_eq!(
             unsatisfiable(with(vec![gated(Some(suspicious))], vec![])),
-            listed(RequirementKind::TrustFloor)
+            listed(floor_above_suspicious.clone())
         );
         assert_eq!(
             unsatisfiable_under(with(vec![gated(None)], vec![]), suspicious),
-            listed(RequirementKind::TrustFloor)
+            listed(floor_above_suspicious.clone())
         );
         assert_eq!(
             unsatisfiable(with(vec![gated(Some(suspicious))], vec![lifting.clone()])),
@@ -3755,7 +3860,7 @@ mod tests {
             scope: Scope::default(),
             hint: None,
         }];
-        assert_eq!(unsatisfiable(sanitized), listed(RequirementKind::TrustFloor));
+        assert_eq!(unsatisfiable(sanitized), listed(floor_above_suspicious.clone()));
 
         // The floor written beside an Annotator is the policy's own, whatever the answer.
         let mut floored = with(
@@ -3777,7 +3882,7 @@ mod tests {
         assert_eq!(unsatisfiable(floored.clone()), vec![]);
         assert_eq!(
             unsatisfiable_under(floored, suspicious),
-            listed(RequirementKind::TrustFloor)
+            listed(floor_above_suspicious.clone())
         );
     }
 
