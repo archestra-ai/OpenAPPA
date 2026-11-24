@@ -859,7 +859,7 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
             .offers
             .iter()
             .find(|(id, _)| id == offer)
-            .map(|(_, plan)| *plan)
+            .map(|(_, plan)| plan.id)
             .expect("the stage's own offer")
     };
     let scrubbed = ValueBody::new("page bytes, redacted, scrubbed");

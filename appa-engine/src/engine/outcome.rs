@@ -399,7 +399,7 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value,
                 residual,
-                offers,
+                offers: Confined::binding(offers, |_, id| stage.iter().find(|plan| plan.id == id).cloned()),
             },
         ))
     }
@@ -428,7 +428,9 @@ impl Engine {
                     dispatch: dispatch.clone(),
                     candidate: value,
                     residual,
-                    offers,
+                    offers: Confined::binding(offers, |offer, _| {
+                        views.offer(offer).map(|recorded| recorded.plan.clone())
+                    }),
                 }))),
             });
         }
@@ -459,7 +461,7 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value,
                 residual,
-                offers,
+                offers: Confined::binding(offers, |_, id| stage.iter().find(|plan| plan.id == id).cloned()),
             }))),
         })
     }

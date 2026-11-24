@@ -516,12 +516,23 @@ max_body_bytes = 4096
     let before = audit_len(&runtime);
 
     for _ in 0..2 {
-        let HookDecision::DenyCall { feedback, offers, .. } = propose(&runtime, send_internal()).await else {
+        let HookDecision::DenyCall {
+            feedback,
+            offers,
+            outcomes,
+            ..
+        } = propose(&runtime, send_internal()).await
+        else {
             panic!("the call is denied");
         };
         // The feedback points at the key the operator must fill, not at a retry.
         assert!(feedback.contains("[policy.audience] internal"), "{feedback}");
         assert!(offers.is_empty());
+        assert_eq!(
+            outcomes,
+            Some(Outcomes::Integrity),
+            "a misconfigured policy, not a missing fact"
+        );
         assert_eq!(audit_len(&runtime), before);
     }
 }

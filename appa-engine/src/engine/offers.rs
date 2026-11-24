@@ -529,7 +529,9 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value.clone(),
                 residual: residual.clone(),
-                offers,
+                offers: Confined::binding(offers, |offer, _| {
+                    views.offer(offer).map(|recorded| recorded.plan.clone())
+                }),
             })),
             _ => OfferFollowUp::Invalidated,
         }

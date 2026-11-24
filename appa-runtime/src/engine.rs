@@ -2678,7 +2678,7 @@ impl RuntimeEngine {
         &self,
         headline: &str,
         residual: &appa_engine::check::Narrowing,
-        staged: &[(EngineOfferId, PlanId)],
+        staged: &[(EngineOfferId, appa_engine::plan::ExecutableRemedyPlan)],
         presentation: &EmbeddedPresentationOptions,
     ) -> Presentation {
         let offers: Vec<OfferId> = staged.iter().map(|(offer, _)| offer_id(offer)).collect();
@@ -2692,7 +2692,11 @@ impl RuntimeEngine {
         );
         Presentation::Blocked {
             feedback,
-            outcomes: Outcomes::Remediable(Remediable::new(Remedy::Consent, [])),
+            outcomes: route_outcomes(
+                staged
+                    .iter()
+                    .map(|(_, plan)| plan.steps.iter().map(step_remedy).collect()),
+            ),
             offers: offers
                 .into_iter()
                 .map(|offer| OfferedRemedy {
@@ -3805,19 +3809,19 @@ impl UnresolvedAudience<'_> {
         }
     }
 
-    /// The same act, short of an answer no retry obtains: the wording names the policy
-    /// gap and invites no retry.
+    /// The same act, short of an answer no retry obtains: the policy is misconfigured, so
+    /// the refusal is an integrity fault, and the wording names the gap and invites no retry.
     fn present_unconfigured(self, level: ChainAudience, naming: ToolNaming) -> EngineDecision {
         let detail = unconfigured_audience(level);
         match self {
             UnresolvedAudience::Denied { tool } => deny(
                 format!("[appa] {}: {detail}; the call is denied", naming.model_spelling(tool)),
-                Outcomes::MissingFact(RetryHint::AfterRepair),
+                Outcomes::Integrity,
             ),
             UnresolvedAudience::Withheld { subject } => {
                 EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
                     format!("[appa] {detail}; the {subject} is withheld"),
-                    Outcomes::MissingFact(RetryHint::AfterRepair),
+                    Outcomes::Integrity,
                 )))
             }
             UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
@@ -3903,17 +3907,23 @@ fn block_outcomes(block: &CoreBlocked) -> Outcomes {
             .iter()
             .find_map(|plan| plan.executable().filter(|plan| plan.id == *id))
     });
-    let mut routes: Vec<Vec<Remedy>> = offered
-        .map(|plan| plan.steps.iter().map(step_remedy).collect())
-        .collect();
-    routes.extend(
-        block
-            .block
-            .plans
-            .iter()
-            .filter(|plan| matches!(plan, RemedyPlan::Redispatch(_)))
-            .map(|_| vec![Remedy::AgentChoice]),
-    );
+    let redispatches = block
+        .block
+        .plans
+        .iter()
+        .filter(|plan| matches!(plan, RemedyPlan::Redispatch(_)))
+        .map(|_| vec![Remedy::AgentChoice]);
+    route_outcomes(
+        offered
+            .map(|plan| plan.steps.iter().map(step_remedy).collect())
+            .chain(redispatches),
+    )
+}
+
+/// Each route scores its most demanding step; the cheapest route decides, and every step's
+/// remedy is held. No route is a hard block.
+fn route_outcomes(routes: impl Iterator<Item = Vec<Remedy>>) -> Outcomes {
+    let routes: Vec<Vec<Remedy>> = routes.collect();
     match routes.iter().filter_map(|steps| steps.iter().min()).max() {
         Some(&deciding) => Outcomes::Remediable(Remediable::new(deciding, routes.into_iter().flatten())),
         None => Outcomes::HardBlock,

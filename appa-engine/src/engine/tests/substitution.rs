@@ -975,6 +975,16 @@ fn a_hop_an_earlier_planner_offered_a_blocked_call_replays_and_is_offered_no_mor
         "the fixture offers the hop for the blocked call"
     );
     assert_eq!(e.validate_replay(&recorded), Ok(()));
+    let again = proposed(
+        &e,
+        &recorded,
+        "b1",
+        nonce(),
+        call("post_blocked", json!({ "body": "ssn 123" })),
+    )
+    .expect("the recorded batch answers again");
+    let (_, blocked) = answered(&again);
+    assert!(blocked[0].offers.is_empty(), "the recorded hop is no longer shown");
 
     let log = internal_log(&e);
     let facts = appended_facts(

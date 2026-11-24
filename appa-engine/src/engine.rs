@@ -984,9 +984,14 @@ impl Engine {
             return Ok(Recheck::Clear(Box::new(call)));
         };
         require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw))?;
-        let (block_id, offers) = views
+        let (block_id, mut offers) = views
             .pending_block(subject)
             .unwrap_or_else(|| (proposal_block(nonce, subject, &call), Vec::new()));
+        // An offer an earlier planner left pending on a hard block shows no more than planning
+        // offers now; executing it is already refused.
+        if raw.is_hard() {
+            offers.clear();
+        }
         let mut block = plan::plan(
             &self.registry,
             views,

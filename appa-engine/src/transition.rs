@@ -318,9 +318,24 @@ pub struct Confined {
     pub candidate: crate::value::LabeledValue,
     pub residual: Narrowing,
     /// The offer opened for each next-stage plan, paired with the plan it binds: acceptance of
-    /// exactly `residual`, and every sanitizer hop that strictly improves the candidate. Runtime
-    /// renders these and routes `execute_remedy_plan` by them; it mints none of its own.
-    pub offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
+    /// exactly `residual` where the floor admits it, and every sanitizer hop that strictly
+    /// improves the candidate. Runtime renders these and routes `execute_remedy_plan` by them;
+    /// it mints none of its own.
+    pub offers: Vec<(crate::value::OfferId, crate::plan::ExecutableRemedyPlan)>,
+}
+
+impl Confined {
+    /// The staged offers with the plans they bind: freshly opened over `stage`, or read back
+    /// from the log where they already stand.
+    pub(crate) fn binding(
+        offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
+        plan: impl Fn(&crate::value::OfferId, crate::plan::PlanId) -> Option<crate::plan::ExecutableRemedyPlan>,
+    ) -> Vec<(crate::value::OfferId, crate::plan::ExecutableRemedyPlan)> {
+        offers
+            .into_iter()
+            .filter_map(|(offer, id)| plan(&offer, id).map(|plan| (offer, plan)))
+            .collect()
+    }
 }
 
 /// The host's child identity for one prepared fork. Idempotent: repeating the same pair

@@ -3262,6 +3262,105 @@ async fn a_partly_cleared_derivation_is_staged_with_its_own_remedies() {
     );
 }
 
+/// The sanitize offer a block on `trajectory` surfaced, taken and the call run to its result.
+async fn sanitized_result(runtime: &Runtime, session: &Session, trajectory: &TrajectoryId) -> ToolResultDecision {
+    let quoted = runtime
+        .minted_offers(&root(), trajectory)
+        .into_iter()
+        .find(|offer| {
+            matches!(
+                runtime.offer_kind(&root(), offer),
+                Some(crate::api::OfferKind::Sanitizer { .. })
+            )
+        })
+        .expect("the block surfaced a sanitize offer");
+    let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+    assert!(matches!(
+        session.on_remedy(offer, RemedyArguments::default(), None, None).await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    assert!(matches!(
+        session.on_tool_call(leak(), false).await,
+        Ok(ToolCallDecision::Allow { spawn: None, .. })
+    ));
+    session
+        .on_tool_result(
+            leak(),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("raw with pii".to_string()),
+            },
+        )
+        .await
+        .expect("the outcome is delivered")
+}
+
+/// A child floored at `trusted` cannot accept the trust `scrub` leaves lowered, and no other
+/// hop lifts it: the staged result offers nothing and is a hard block.
+#[tokio::test]
+async fn a_staged_result_its_floor_refuses_is_a_hard_block() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let text = format!(
+        "[policy]\n{}\ncontext_control = true\n\n[[policy.tool]]\nname = \"fetch\"\n\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n",
+        PARTLY_CLEARED.trim_end()
+    );
+    let runtime = Runtime::open(config_from(&text), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let child_id = TrajectoryId("cc:child".to_string());
+    let child = open_child_floored(
+        &mut session,
+        fetch(serde_json::json!({})),
+        child_id.clone(),
+        floor_trust("trusted"),
+    )
+    .await;
+    assert!(matches!(
+        child.on_tool_call(leak(), false).await,
+        Ok(ToolCallDecision::Deny { .. })
+    ));
+    let ToolResultDecision::Replace { presentation, .. } = sanitized_result(&runtime, &child, &child_id).await else {
+        panic!("the staged derivation is replaced, not kept");
+    };
+    let presentation = presentation.expect("a result-time block preserves its remedy state");
+    assert!(presentation.offers.is_empty(), "the floor drops the acceptance");
+    assert_eq!(presentation.outcomes, Some(appa_runtime_api::Outcomes::HardBlock));
+}
+
+/// A second sanitizer lifts what the first left: the stage offers its hop beside the
+/// acceptance, decides on consent, and holds the agent's choice too.
+#[tokio::test]
+async fn a_staged_result_with_a_hop_and_its_acceptance_holds_both() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let text = format!(
+        "[policy]\n{PARTLY_CLEARED}\n[[policy.sanitizer]]\nname = \"vet\"\non = [\"tool_output\"]\n[policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n[externals.sanitizers.vet]\nurl = \"{url}\"\n"
+    );
+    let runtime = Runtime::open(config_from(&text), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    assert!(matches!(
+        session.on_tool_call(leak(), false).await,
+        Ok(ToolCallDecision::Deny { .. })
+    ));
+    let ToolResultDecision::Replace { presentation, .. } = sanitized_result(&runtime, &session, &root()).await else {
+        panic!("the staged derivation is replaced, not kept");
+    };
+    let presentation = presentation.expect("a result-time block preserves its remedy state");
+    assert_eq!(
+        presentation.offers.len(),
+        2,
+        "the other sanitizer's hop and the acceptance"
+    );
+    assert_eq!(
+        presentation.outcomes,
+        Some(appa_runtime_api::Outcomes::Remediable(
+            appa_runtime_api::Remediable::new(
+                appa_runtime_api::Remedy::Consent,
+                [appa_runtime_api::Remedy::AgentChoice],
+            )
+        ))
+    );
+}
+
 const PARTLY_CLEARED_CHILD: &str = r#"
 version = 2
 
