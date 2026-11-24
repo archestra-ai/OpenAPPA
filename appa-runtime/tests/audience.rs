@@ -371,6 +371,70 @@ async fn a_failed_selector_reads_alike_whatever_it_named() {
     assert_eq!(told[0], told[1]);
 }
 
+/// A narrowed session sends to `@team`. Whether the directory resolves it to bob alone, whose
+/// lookup answers 503, or to bob and carol, whose lookup answers 404, the model reads the
+/// same bytes through the adapter; only the host's typed hint tells the two apart.
+#[tokio::test]
+async fn which_members_failed_and_how_never_reaches_the_model() {
+    let mut rendered = Vec::new();
+    for team in [vec!["slack:U-bob"], vec!["slack:U-bob", "slack:U-carol"]] {
+        let router = Router::new().route(
+            "/audience",
+            post(move |body: String| {
+                let team = team.clone();
+                async move {
+                    let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                    match request["artifact"]["member"].as_str() {
+                        Some("slack:U-bob") => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "busy".to_string()),
+                        Some(_) => (axum::http::StatusCode::NOT_FOUND, "missing".to_string()),
+                        None => (
+                            axum::http::StatusCode::OK,
+                            serde_json::json!({ "version": 1, "answer": { "members": team } }).to_string(),
+                        ),
+                    }
+                }
+            }),
+        );
+        let url = format!("{}/audience", serve(router).await);
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = narrowed_under(&dir, &POLICY.replace(SLACK_BINDING, LOOKUP_URL_BINDINGS), &url).await;
+        let call = ProposedCall {
+            tool: "send".to_string(),
+            arguments: raw(serde_json::json!({ "to": "@team" })),
+            cwd: None,
+        };
+        let event = HookEvent::ToolCall {
+            actor: actor(),
+            call,
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: None,
+            declares: None,
+        };
+        let decision = hooks::handle(&runtime, event.clone()).await;
+        let HookDecision::DenyCall { outcomes, .. } = &decision else {
+            panic!("the call is denied, got {decision:?}");
+        };
+        let rendered_for_model = (appa_adapter_claude_code::codec().render)(b"{}", &event, &decision);
+        rendered.push((rendered_for_model, *outcomes));
+    }
+    let [(bob, bob_hint), (both, both_hint)] = &rendered[..] else {
+        panic!("both directories were asked");
+    };
+    assert_eq!(
+        (bob_hint, both_hint),
+        (
+            &Some(Outcomes::MissingFact(RetryHint::Later)),
+            &Some(Outcomes::MissingFact(RetryHint::AfterRepair))
+        )
+    );
+    assert_eq!(
+        serde_json::to_vec(bob).expect("serializes"),
+        serde_json::to_vec(both).expect("serializes")
+    );
+}
+
 /// `send` with the reserved `blocked` mark beside its recipient check.
 const BLOCKED_SEND: &str = r#"
 [[policy.tool]]

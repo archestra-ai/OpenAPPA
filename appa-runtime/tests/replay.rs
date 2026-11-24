@@ -584,7 +584,7 @@ async fn a_bound_annotator_decides_the_step() {
     *answer.lock().unwrap() = false;
     let reports = run(&runtime, &[trace("down.appa", text)]).await;
     assert!(
-        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(detail) if detail.contains("classifier")),
+        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(_)),
         "{:?}",
         reports[0]
     );

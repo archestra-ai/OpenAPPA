@@ -15,6 +15,7 @@ use crate::api::{
     LaunchedStart, Quoted, RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision,
     ToolResultDecision, is_control_tool,
 };
+use crate::engine::{MissingIn, Unobtained, ValueKind};
 use appa_eventlog::EndKind;
 
 fn wire(decision: &HookDecision) -> serde_json::Value {
@@ -371,9 +372,7 @@ fn observed(
 fn refused_hook(runtime: &Runtime, root: &TrajectoryId, event: &HookEvent, error: EventError) -> Answered {
     let (kind, tool) = hook_shape(event);
     let (status, decision) = match (event, error.missing_fact()) {
-        (HookEvent::ToolCall { .. }, Some(missing)) => {
-            (200, denied(missing.detail, Outcomes::MissingFact(missing.retry)))
-        }
+        (HookEvent::ToolCall { .. }, Some(missing)) => (200, missing_call(&missing)),
         _ => (409, refuse(error)),
     };
     runtime.record(Some(root), bare_hook(kind, hook_result(&decision).0, tool));
@@ -1052,7 +1051,7 @@ impl Dispatcher<'_> {
                 }
                 HookDecision::Ack
             }
-            Err(error) => fold(error, Refusal::Block),
+            Err(error) => fold(error, Refusal::Settle),
         }
     }
 
@@ -1488,15 +1487,15 @@ enum Refusal {
     /// The return is already in hand: it is blocked out of the model's way, and the child
     /// may return again.
     Block,
-    /// The result is already in hand, and the host settles its dispatch on a block. A fact a
-    /// retry could still obtain is refused instead, so the dispatch stays reportable.
+    /// The host settles what it holds on a block: a result's dispatch, or a resumed spawn. A
+    /// fact a retry could still obtain is refused instead, so the hook can be sent again.
     Settle,
 }
 
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
     match (error.missing_fact(), error.is_operational(), refusal) {
-        (Some(missing), _, Refusal::Deny) => denied(missing.detail, Outcomes::MissingFact(missing.retry)),
-        (Some(missing), _, Refusal::Block) => block(missing.detail, Outcomes::MissingFact(missing.retry)),
+        (Some(missing), _, Refusal::Deny) => missing_call(&missing),
+        (Some(missing), _, Refusal::Block) => missing_return(&missing),
         (_, true, _) => refuse(error),
         (_, false, Refusal::Deny) => deny(error.to_string()),
         (_, false, Refusal::Block | Refusal::Settle) => block(error.to_string(), Outcomes::Integrity),
@@ -1517,6 +1516,24 @@ fn denied(feedback: String, outcomes: Outcomes) -> HookDecision {
         review: Vec::new(),
         outcomes: Some(outcomes),
     }
+}
+
+/// A call denied on a fact not obtained, in the one text a call reads.
+fn missing_call(missing: &Unobtained) -> HookDecision {
+    HookDecision::DenyCall {
+        feedback: MissingIn::Call.model_text().to_string(),
+        offers: Vec::new(),
+        review: Vec::new(),
+        outcomes: Some(Outcomes::MissingFact(missing.retry)),
+    }
+}
+
+/// A return blocked on a fact not obtained, in the one text a return reads.
+fn missing_return(missing: &Unobtained) -> HookDecision {
+    block(
+        MissingIn::Value(ValueKind::Return).model_text().to_string(),
+        Outcomes::MissingFact(missing.retry),
+    )
 }
 
 fn block(reason: String, outcomes: Outcomes) -> HookDecision {
@@ -1542,12 +1559,23 @@ fn with_peer_notices(runtime: &Runtime, actor: &Actor, decision: HookDecision) -
     }
 }
 
+/// A hook refused. A refusal on a fact not obtained says only that: what failed, and how,
+/// stays in the diagnostics, since a harness may show the detail to its model.
 fn refuse(error: EventError) -> HookDecision {
+    let detail = match error.missing_fact() {
+        Some(_) => {
+            tracing::info!(%error, "a hook was refused on a fact not obtained");
+            UNOBTAINED_REFUSAL.to_string()
+        }
+        None => error.to_string(),
+    };
     HookDecision::Refuse {
         class: error.class(),
-        detail: error.to_string(),
+        detail,
     }
 }
+
+const UNOBTAINED_REFUSAL: &str = "[appa] this hook was not decided: a fact it needs could not be obtained.";
 
 #[cfg(test)]
 mod tests {

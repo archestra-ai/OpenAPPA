@@ -311,7 +311,7 @@ impl ToolCallDecision {
     /// proposal exit classifies it; `None` for any other error.
     pub(crate) fn missing_fact(error: &EventError) -> Option<ToolCallDecision> {
         error.missing_fact().map(|missing| ToolCallDecision::Deny {
-            feedback: format!("[appa] {}", missing.detail),
+            feedback: crate::engine::MissingIn::Call.model_text().to_string(),
             outcomes: appa_runtime_api::Outcomes::MissingFact(missing.retry),
             offers: Vec::new(),
             display: Vec::new(),
@@ -476,19 +476,8 @@ impl RemedyRefusal {
                 "[appa] Another plan already approved this exact call, so this plan was not applied. Call the \
                  blocked tool again with the same arguments; it will be checked again."
             }
-            Self::Unanswered { annotator, class } => {
-                let retry = crate::engine::retry_hint(*class);
-                let again = match retry {
-                    appa_runtime_api::RetryHint::Later => ": call execute_remedy_plan again with the same offer id",
-                    appa_runtime_api::RetryHint::AfterRepair => "",
-                };
-                return std::borrow::Cow::Owned(format!(
-                    "annotator {annotator} gave no answer: {}, so the plan was not applied. Nothing changed and the \
-                     offer still stands; {}{again}.",
-                    crate::engine::no_answer_description(*class),
-                    crate::engine::next_action(retry)
-                ));
-            }
+            // Which annotator failed, and how, is the host's to read from the fields.
+            Self::Unanswered { .. } => crate::engine::MissingIn::Remedy.model_text(),
             Self::Runtime { detail } => detail,
         })
     }
@@ -523,13 +512,8 @@ pub enum RemedyOutcome {
 /// A family log other writers kept contended: nothing was decided, and asking again later
 /// may decide it.
 fn contended() -> crate::engine::Unobtained {
-    let retry = appa_runtime_api::RetryHint::Later;
     crate::engine::Unobtained {
-        detail: format!(
-            "this session's log was contended by other writers; {}",
-            crate::engine::next_action(retry)
-        ),
-        retry,
+        retry: appa_runtime_api::RetryHint::Later,
     }
 }
 
@@ -539,7 +523,7 @@ impl From<EventError> for RemedyOutcome {
             // Contention leaves the offer standing, as a consult with no answer does.
             EventError::Contended { .. } => {
                 return RemedyOutcome::NoAnswer {
-                    feedback: contended().detail,
+                    feedback: crate::engine::MissingIn::Remedy.model_text().to_string(),
                 };
             }
             EventError::AnnotationRefused {
@@ -874,27 +858,14 @@ impl EventError {
     }
 
     /// The fact the check reads and could not obtain, where that is the failure: an
-    /// Annotator that gave no answer, or a family log other writers kept contended. Its
-    /// detail is built from the failure class alone, never from what an external said.
+    /// Annotator that gave no answer, or a family log other writers kept contended.
     pub(crate) fn missing_fact(&self) -> Option<crate::engine::Unobtained> {
-        use crate::engine::{next_action, no_answer_description, retry_hint};
         match self {
             EventError::AnnotationRefused {
-                annotator,
-                next_action: guidance,
-                no_answer: Some(class),
-                ..
-            } => {
-                let retry = retry_hint(*class);
-                Some(crate::engine::Unobtained {
-                    detail: format!(
-                        "annotator {annotator} gave no answer: {}; {}{guidance}",
-                        no_answer_description(*class),
-                        next_action(retry)
-                    ),
-                    retry,
-                })
-            }
+                no_answer: Some(class), ..
+            } => Some(crate::engine::Unobtained {
+                retry: crate::engine::retry_hint(*class),
+            }),
             EventError::Contended { .. } => Some(contended()),
             _ => None,
         }

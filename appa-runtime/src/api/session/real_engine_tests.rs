@@ -2335,6 +2335,46 @@ async fn an_input_substitution_approves_the_replaced_call_and_the_proposal_of_it
     );
 }
 
+/// An input sanitizer that answers 403 and one that answers 503 leave the offer standing in
+/// the same words: only the host's typed hint may differ.
+#[tokio::test]
+async fn an_input_sanitizers_failure_class_never_reaches_the_model() {
+    let mut replies = Vec::new();
+    for status in [
+        axum::http::StatusCode::FORBIDDEN,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let app = axum::Router::new().route("/", axum::routing::post(move || async move { (status, "no") }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback stub binds");
+        let addr = listener.local_addr().expect("the stub has an address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("the stub serves");
+        });
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let config = config_from(&format!(
+            "[policy]\n{SUBSTITUTED_SEND}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\
+             [externals.sanitizers.redactor]\nurl = \"http://{addr}/\"\n"
+        ));
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+        replies.push(
+            session
+                .on_remedy(hop, RemedyArguments::default(), None, None)
+                .await
+                .expect("the hop is answered"),
+        );
+    }
+    assert!(
+        matches!(replies[0], RemedyDecision::NoAnswer { .. }),
+        "{:?}",
+        replies[0]
+    );
+    assert_eq!(replies[0], replies[1]);
+}
+
 #[tokio::test]
 async fn an_unusable_derivation_leaves_the_offer_standing() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -3569,6 +3609,44 @@ async fn a_result_whose_bound_sanitizer_a_revision_dropped_is_a_hard_block() {
         presentation.and_then(|presentation| presentation.outcomes),
         Some(appa_runtime_api::Outcomes::HardBlock),
     );
+}
+
+/// A result its bound sanitizer never derived stays open, and the host may give up on it:
+/// abandoned, it closes withheld, and the trajectory goes on.
+#[tokio::test]
+async fn a_result_left_on_a_missing_derivation_is_abandoned_withheld() {
+    let url = stub(serde_json::json!(42)).await;
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    assert!(matches!(
+        session
+            .on_tool_call(leak(), false)
+            .await
+            .expect("the block is delivered"),
+        ToolCallDecision::Deny { .. },
+    ));
+    let ToolResultDecision::Replace { presentation, .. } = run_sanitize_offer(&runtime, &mut session).await else {
+        panic!("the raw must be withheld");
+    };
+    assert!(matches!(
+        presentation.and_then(|presentation| presentation.outcomes),
+        Some(appa_runtime_api::Outcomes::MissingFact(_))
+    ));
+    assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+    assert_eq!(
+        session
+            .on_tool_result(leak(), ToolOutcome::Indeterminate)
+            .await
+            .expect("the abandon closes the dispatch"),
+        ToolResultDecision::Keep
+    );
+    assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    assert!(matches!(
+        session.on_tool_call(leak(), false).await.expect("the session goes on"),
+        ToolCallDecision::Deny { .. },
+    ));
 }
 
 #[tokio::test]

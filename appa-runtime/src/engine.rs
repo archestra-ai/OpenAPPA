@@ -2110,7 +2110,7 @@ impl RuntimeEngine {
         let judged = self.judge_under_audience(
             view.principal(),
             evidence,
-            UnresolvedAudience::Withheld { subject: "result" },
+            UnresolvedAudience::Withheld(ValueKind::Result),
             |audience| {
                 let report = ToolReport {
                     dispatch: dispatch.clone(),
@@ -2150,7 +2150,7 @@ impl RuntimeEngine {
                 Some(dispatch),
                 request,
                 evidence,
-                UnresolvedAudience::Withheld { subject: "result" },
+                UnresolvedAudience::Withheld(ValueKind::Result),
             )?,
             FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
@@ -2857,7 +2857,7 @@ impl RuntimeEngine {
                 body: ValueBody::new(body),
             },
         };
-        let withheld = UnresolvedAudience::Withheld { subject: "return" };
+        let withheld = UnresolvedAudience::Withheld(ValueKind::Return);
         let blocked = |feedback: String, outcomes: Outcomes| {
             Ok(EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
                 feedback, outcomes,
@@ -3279,8 +3279,7 @@ impl RuntimeEngine {
                 self.sanitizer_request(sanitizer, source, body, subject),
             ])))),
             SanitizerAnswer::NoAnswer(class) => Err(Box::new(
-                UnresolvedAudience::OfferStands
-                    .present(&sanitizer_unobtained(sanitizer.as_str(), class, &subject), self.naming),
+                UnresolvedAudience::OfferStands.present(&sanitizer_unobtained(sanitizer.as_str(), class, &subject)),
             )),
         }
     }
@@ -3309,7 +3308,7 @@ impl RuntimeEngine {
                 let subject = SanitizerSubject::Output { tool };
                 if let SanitizerAnswer::NoAnswer(class) = sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
                     return Ok(withheld
-                        .present(&sanitizer_unobtained(sanitizer.as_str(), class, &subject), self.naming)
+                        .present(&sanitizer_unobtained(sanitizer.as_str(), class, &subject))
                         .then);
                 }
                 Ok(Next::ResolveExternal(vec![
@@ -3346,7 +3345,7 @@ impl RuntimeEngine {
                 )));
             }
             Err(AudienceFailure::Refused(unobtained)) => {
-                return Ok(AudienceRound::Presented(unresolved.present(&unobtained, self.naming)));
+                return Ok(AudienceRound::Presented(unresolved.present(&unobtained)));
             }
         };
         match judge(&act.payload) {
@@ -3357,7 +3356,7 @@ impl RuntimeEngine {
                         Next::ResolveExternal(requests),
                     ))),
                     AudienceConsult::Unresolved(unobtained) => {
-                        Ok(AudienceRound::Presented(unresolved.present(&unobtained, self.naming)))
+                        Ok(AudienceRound::Presented(unresolved.present(&unobtained)))
                     }
                     AudienceConsult::Unconfigured(level) => Ok(AudienceRound::Presented(
                         unresolved.present_unconfigured(level, self.naming),
@@ -3441,21 +3440,20 @@ impl RuntimeEngine {
             // The refusal's own Display can carry directory data (member ids, principals)
             // the model has not seen; the model-visible detail names only the failure class
             // and its provider/selector.
-            tracing::debug!(%refusal, "gathered audience evidence refused");
-            return Err(AudienceFailure::Refused(Unobtained {
-                detail: format!(
-                    "the gathered audience evidence is not admissible: {}",
+            return Err(AudienceFailure::Refused(Unobtained::logged(
+                RetryHint::AfterRepair,
+                format_args!(
+                    "the gathered audience evidence is not admissible ({}): {refusal}",
                     refusal_class(&refusal)
                 ),
-                retry: RetryHint::AfterRepair,
-            }));
+            )));
         }
         let mut requests: Vec<ExternalRequest> = Vec::new();
         let mut failed: Vec<NoAnswer> = Vec::new();
         for owed in audience.member_lookups_owed(&payload) {
             if let Some(reason) = unanswered.members.get(&owed.member) {
                 // The member is directory data the model has not seen.
-                failed.push(NoAnswer::lookup(&owed.provider, *reason));
+                failed.push(NoAnswer::lookup(&owed.provider, &owed.member, *reason));
                 continue;
             }
             let templates = selector_templates(audience, &owed.provider)
@@ -3497,18 +3495,11 @@ impl RuntimeEngine {
             Err(Unroutable::UnmappedChain(level)) => return Ok(AudienceConsult::Unconfigured(level)),
             // A dynamically supplied reference no source serves: an operational failure,
             // never a policy state. (A statically written one refuses at policy load.)
-            Err(Unroutable::UnknownSelector { provider, selector }) => {
-                tracing::debug!(%provider, %selector, "no template of the source serves the selector");
-                return Ok(AudienceConsult::Unresolved(Unobtained {
-                    detail: format!("no template of audience source {provider:?} serves a selector lookup"),
-                    retry: RetryHint::AfterRepair,
-                }));
-            }
             Err(unroutable) => {
-                return Ok(AudienceConsult::Unresolved(Unobtained {
-                    detail: unroutable.to_string(),
-                    retry: RetryHint::AfterRepair,
-                }));
+                return Ok(AudienceConsult::Unresolved(Unobtained::logged(
+                    RetryHint::AfterRepair,
+                    format_args!("{unroutable}"),
+                )));
             }
         };
         let mut requests: Vec<ExternalRequest> = Vec::new();
@@ -3538,7 +3529,7 @@ impl RuntimeEngine {
             }
             if let Some(reason) = act.unanswered.members.get(&spec.member) {
                 // The member can be a reader a delta wrote that the model never saw.
-                failed.push(NoAnswer::lookup(&spec.provider, *reason));
+                failed.push(NoAnswer::lookup(&spec.provider, &spec.member, *reason));
                 continue;
             }
             requests.push(member_lookup(
@@ -3660,39 +3651,34 @@ fn annotation_args(
     serde_json::Value::Object(args)
 }
 
-fn unresolved_audience(tool: &str, detail: &str) -> String {
-    format!("[appa] {tool}: {detail}; the call was not checked")
-}
-
-/// One audience fact a consult did not obtain: the source and the kind of question it was
-/// asked, never a member id or a selector, and the class of the failure, never the source's
-/// own words.
+/// One audience fact a consult did not obtain: the source, what it was asked, and the class
+/// of the failure, never the source's own words. All of it is the operator's to read.
 struct NoAnswer {
     provider: String,
     asked: Asked,
     reason: crate::events::NoAnswerClass,
 }
 
-/// What a source was asked. The selector is for the operator's diagnostics only.
+/// What a source was asked.
 enum Asked {
-    MemberLookup,
+    Member(String),
     Selector(String),
 }
 
-impl Asked {
-    fn model_subject(&self) -> &'static str {
+impl std::fmt::Display for Asked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Asked::MemberLookup => "a member lookup",
-            Asked::Selector(_) => "a selector lookup",
+            Asked::Member(member) => write!(f, "the member lookup of {member}"),
+            Asked::Selector(selector) => write!(f, "selector {selector}"),
         }
     }
 }
 
 impl NoAnswer {
-    fn lookup(provider: &str, reason: crate::events::NoAnswerClass) -> NoAnswer {
+    fn lookup(provider: &str, member: &str, reason: crate::events::NoAnswerClass) -> NoAnswer {
         NoAnswer {
             provider: provider.to_string(),
-            asked: Asked::MemberLookup,
+            asked: Asked::Member(member.to_string()),
             reason,
         }
     }
@@ -3707,49 +3693,35 @@ impl NoAnswer {
 }
 
 /// The facts one round did not obtain, as one refusal. A failure only a repair fixes
-/// outranks a transient one: it decides the retry hint, is the failure named, and the next
-/// action follows from the same hint.
+/// outranks a transient one in the retry hint.
 fn unobtained(failed: &[NoAnswer]) -> Option<Unobtained> {
-    let deciding = failed
+    let retry = failed
         .iter()
-        .find(|failure| retry_hint(failure.reason) == RetryHint::AfterRepair)
-        .or(failed.first())?;
-    let retry = retry_hint(deciding.reason);
-    if let Asked::Selector(selector) = &deciding.asked {
-        tracing::debug!(provider = %deciding.provider, %selector, reason = %deciding.reason, "the deciding selector gave no answer");
+        .map(|failure| retry_hint(failure.reason))
+        .max_by_key(|retry| *retry == RetryHint::AfterRepair)?;
+    for failure in failed {
+        tracing::info!(
+            provider = %failure.provider,
+            asked = %failure.asked,
+            reason = %failure.reason,
+            "an audience source gave no answer"
+        );
     }
-    Some(Unobtained {
-        detail: format!(
-            "audience source {} gave no answer for {}: {}; {}",
-            deciding.provider,
-            deciding.asked.model_subject(),
-            no_answer_description(deciding.reason),
-            next_action(retry)
-        ),
-        retry,
-    })
+    Some(Unobtained { retry })
 }
 
-/// A sanitizer's missing derivation. On a call's input it is guided by its failure class
-/// like any other fact. A sanitizer of a confined value fails on what it read, so its class
-/// would carry a bit of that value: the model is told one thing for every class, and the
-/// class stays in the operator's diagnostics.
+/// A sanitizer's missing derivation. A sanitizer of a confined value fails on what it read,
+/// so the hint for it is the same for every class: the class would carry a bit of the value.
 fn sanitizer_unobtained(
     sanitizer: &str,
     reason: crate::events::NoAnswerClass,
     subject: &SanitizerSubject<'_>,
 ) -> Unobtained {
-    let (described, retry) = match subject {
-        SanitizerSubject::Input { .. } => (format!(": {}", no_answer_description(reason)), retry_hint(reason)),
-        SanitizerSubject::Output { .. } => (String::new(), RetryHint::AfterRepair),
+    let retry = match subject {
+        SanitizerSubject::Input { .. } => retry_hint(reason),
+        SanitizerSubject::Output { .. } => RetryHint::AfterRepair,
     };
-    Unobtained {
-        detail: format!(
-            "sanitizer {sanitizer} gave no answer{described}; {}",
-            next_action(retry)
-        ),
-        retry,
-    }
+    Unobtained::logged(retry, format_args!("sanitizer {sanitizer} gave no answer: {reason}"))
 }
 
 /// What asking again can do for a fact whose consult failed for `reason`.
@@ -3768,32 +3740,6 @@ pub(crate) fn retry_hint(reason: crate::events::NoAnswerClass) -> RetryHint {
         | NoAnswerClass::ModulePanicked => RetryHint::AfterRepair,
         #[cfg(feature = "daemon")]
         NoAnswerClass::Dismissed => RetryHint::AfterRepair,
-    }
-}
-
-/// The model-visible next action for a fact not obtained.
-pub(crate) fn next_action(retry: RetryHint) -> &'static str {
-    match retry {
-        RetryHint::Later => "retrying later may succeed",
-        RetryHint::AfterRepair => "an operator must repair the deployment; ask one to inspect the runtime diagnostics",
-    }
-}
-
-/// What happened, from the failure class alone: no external response or stderr.
-pub(crate) fn no_answer_description(reason: crate::events::NoAnswerClass) -> String {
-    use crate::events::NoAnswerClass;
-    match reason {
-        NoAnswerClass::Unregistered => "no implementation is configured".to_string(),
-        NoAnswerClass::Unreachable => "its configured implementation cannot be reached".to_string(),
-        NoAnswerClass::Timeout => "the request timed out".to_string(),
-        NoAnswerClass::NonSuccess { status } => format!("it returned non-success status {status}"),
-        NoAnswerClass::Transport => "the transport failed".to_string(),
-        NoAnswerClass::Malformed => "it returned a malformed answer".to_string(),
-        NoAnswerClass::Oversized => "its answer exceeded the configured size limit".to_string(),
-        NoAnswerClass::UnsupportedVersion => "it used an unsupported protocol version".to_string(),
-        NoAnswerClass::ModuleError | NoAnswerClass::ModulePanicked => "its module failed".to_string(),
-        #[cfg(feature = "daemon")]
-        NoAnswerClass::Dismissed => "the request was dismissed".to_string(),
     }
 }
 
@@ -3838,26 +3784,20 @@ enum UnresolvedAudience<'a> {
     /// The proposed call is denied.
     Denied { tool: &'a str },
     /// The value — a tool result or a child's return — is withheld.
-    Withheld { subject: &'static str },
+    Withheld(ValueKind),
     /// The offer stands.
     OfferStands,
 }
 
 impl UnresolvedAudience<'_> {
-    fn present(self, unobtained: &Unobtained, naming: ToolNaming) -> EngineDecision {
-        let detail = &unobtained.detail;
+    fn present(self, unobtained: &Unobtained) -> EngineDecision {
+        let missing = Outcomes::MissingFact(unobtained.retry);
         match self {
-            UnresolvedAudience::Denied { tool } => deny(
-                unresolved_audience(&naming.model_spelling(tool), detail),
-                Outcomes::MissingFact(unobtained.retry),
-            ),
-            UnresolvedAudience::Withheld { subject } => {
-                EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
-                    format!("[appa] {detail}; the {subject} is withheld"),
-                    Outcomes::MissingFact(unobtained.retry),
-                )))
-            }
-            UnresolvedAudience::OfferStands => no_answer(format!("[appa] {detail}; the offer stands")),
+            UnresolvedAudience::Denied { .. } => deny(MissingIn::Call.model_text().to_string(), missing),
+            UnresolvedAudience::Withheld(kind) => EngineDecision::deliver(Next::PresentToModel(
+                blocked_without_offers(MissingIn::Value(kind).model_text().to_string(), missing),
+            )),
+            UnresolvedAudience::OfferStands => no_answer(MissingIn::Remedy.model_text().to_string()),
         }
     }
 
@@ -3870,9 +3810,9 @@ impl UnresolvedAudience<'_> {
                 format!("[appa] {}: {detail}; the call is denied", naming.model_spelling(tool)),
                 Outcomes::Integrity,
             ),
-            UnresolvedAudience::Withheld { subject } => {
+            UnresolvedAudience::Withheld(kind) => {
                 EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
-                    format!("[appa] {detail}; the {subject} is withheld"),
+                    format!("[appa] {detail}; the {} is withheld", kind.noun()),
                     Outcomes::Integrity,
                 )))
             }
@@ -3896,11 +3836,61 @@ enum AudienceFailure {
     Refused(Unobtained),
 }
 
-/// An audience answer an act could not obtain: safe guidance on the failure, and what asking
-/// again can do.
+/// A fact an act could not obtain, as the host reads it: what asking again can do. What failed,
+/// and how, went to the diagnostics when it was built.
 pub(crate) struct Unobtained {
-    pub(crate) detail: String,
     pub(crate) retry: RetryHint,
+}
+
+impl Unobtained {
+    pub(crate) fn logged(retry: RetryHint, diagnostic: impl std::fmt::Display) -> Unobtained {
+        tracing::info!(%diagnostic, ?retry, "a fact was not obtained");
+        Unobtained { retry }
+    }
+}
+
+/// The value a withholding keeps from the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValueKind {
+    Result,
+    Return,
+}
+
+impl ValueKind {
+    fn noun(self) -> &'static str {
+        match self {
+            ValueKind::Result => "result",
+            ValueKind::Return => "return",
+        }
+    }
+}
+
+/// What a fact not obtained refused. The model reads one text per kind: nothing in it
+/// depends on which source failed or how, and whether asking again helps is the host's to
+/// read, from the typed retry hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MissingIn {
+    Call,
+    Value(ValueKind),
+    Remedy,
+}
+
+impl MissingIn {
+    pub(crate) fn model_text(self) -> &'static str {
+        match self {
+            MissingIn::Call => "[appa] this call was not checked: a fact its check needs could not be obtained.",
+            MissingIn::Value(ValueKind::Result) => {
+                "[appa] the result is withheld: a fact it needs could not be obtained."
+            }
+            MissingIn::Value(ValueKind::Return) => {
+                "[appa] the return is withheld: a fact it needs could not be obtained."
+            }
+            MissingIn::Remedy => {
+                "[appa] the plan was not applied: a fact it needs could not be obtained. Nothing changed, and the \
+                 offer still stands."
+            }
+        }
+    }
 }
 
 /// One act's validated audience payload — what the act pins — beside the consults that
@@ -5547,7 +5537,7 @@ mod tests {
         let failed = |reasons: &[NoAnswerClass]| {
             let failed: Vec<NoAnswer> = reasons
                 .iter()
-                .map(|reason| NoAnswer::lookup("slack", *reason))
+                .map(|reason| NoAnswer::lookup("slack", "slack:U-bob", *reason))
                 .collect();
             unobtained(&failed).map(|unobtained| unobtained.retry)
         };

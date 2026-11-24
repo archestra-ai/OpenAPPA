@@ -52,6 +52,13 @@ enum DispatchResponse {
     Control {
         reply: String,
     },
+    /// The report settled nothing: a fact its result needs was not obtained. The call stays
+    /// pending with the outcome already reported; report it again to resubmit that outcome,
+    /// or abandon it. `content` is what the model may read meanwhile.
+    Unsettled {
+        content: String,
+        retry: RetryHint,
+    },
 }
 
 #[derive(Serialize)]
@@ -160,6 +167,9 @@ enum DeliveryDisposition {
 
 struct Pending {
     call: ProposedCall,
+    /// The outcome a report already submitted that settled nothing: a fact its result needs
+    /// was not obtained. Reporting again resubmits it, so the tool never runs twice.
+    unsettled: Option<ToolOutcome>,
 }
 
 /// One child branch this session opened. `spawn` is the parent call whose
@@ -432,7 +442,10 @@ impl SessionInner {
             declares: None,
         })? {
             HookDecision::AllowCall { spawn: binding } => {
-                let pending = Pending { call: call.clone() };
+                let pending = Pending {
+                    call: call.clone(),
+                    unsettled: None,
+                };
                 match call_id {
                     Some(call_id) => {
                         self.identified.insert(call_id.to_string(), pending);
@@ -578,7 +591,7 @@ impl SessionInner {
         if child.is_none() {
             self.refuse_closing_a_spawn()?;
         }
-        let pending = match call_id {
+        let mut pending = match call_id {
             Some(call_id) if child.is_none() => self
                 .identified
                 .remove(call_id)
@@ -589,6 +602,7 @@ impl SessionInner {
                 .take()
                 .ok_or_else(|| "no call is pending".to_string())?,
         };
+        let outcome = pending.unsettled.take().unwrap_or(outcome);
         let (produced, as_produced) = match &outcome {
             ToolOutcome::Success {
                 body: OutcomeBody::Available(body),
@@ -606,22 +620,25 @@ impl SessionInner {
             actor: self.actor(child),
             call: pending.call.clone(),
             call_id: call_id.map(str::to_string),
-            outcome,
+            outcome: outcome.clone(),
         }) {
             Ok(decision) => decision,
             // A refused report settles nothing: the call stays pending for the host to
             // report again.
             Err(failure) => {
-                match call_id {
-                    Some(call_id) => {
-                        self.identified.insert(call_id.to_string(), pending);
-                    }
-                    None => *self.slot(child)? = Some(pending),
-                }
+                self.keep_pending(child, call_id, pending)?;
                 return Err(failure);
             }
         };
         let (content, disposition) = match decision {
+            HookDecision::ReplaceOutput {
+                output,
+                outcomes: Some(Outcomes::MissingFact(retry)),
+            } => {
+                pending.unsettled = Some(outcome);
+                self.keep_pending(child, call_id, pending)?;
+                return encode(DispatchResponse::Unsettled { content: output, retry });
+            }
             HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted),
             HookDecision::Ack => (produced, DeliveryDisposition::Sealed),
             // `DeliverValue` carries what the engine admitted in place of the
@@ -639,6 +656,21 @@ impl SessionInner {
             dispatched_arguments: arguments_value(&pending.call),
             disposition,
         })
+    }
+
+    fn keep_pending(
+        &mut self,
+        child: Option<&TrajectoryId>,
+        call_id: Option<&str>,
+        pending: Pending,
+    ) -> Result<(), Failure> {
+        match call_id {
+            Some(call_id) => {
+                self.identified.insert(call_id.to_string(), pending);
+            }
+            None => *self.slot(child)? = Some(pending),
+        }
+        Ok(())
     }
 
     fn abandon(&mut self, child: Option<&TrajectoryId>, call_id: Option<&str>) -> Result<(), Failure> {

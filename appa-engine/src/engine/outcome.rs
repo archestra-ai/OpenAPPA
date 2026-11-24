@@ -79,6 +79,17 @@ impl Engine {
         }
         let checkpointed = views.observed_result(dispatch).cloned();
         match (&checkpointed, &observed) {
+            // A success checkpointed for a derivation never obtained, abandoned: it closes
+            // withheld, its effects committed and nothing of it crossing.
+            (Some(_), None)
+                if matches!(report.outcome, ToolOutcome::Indeterminate)
+                    && views.bound_sanitizer(dispatch).is_some()
+                    && views
+                        .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+                        .is_none() =>
+            {
+                return self.admitting_outcome(view, &views, dispatch, &call, ResultAdmission::SuccessNoValue, act);
+            }
             // A recorded success cannot be withdrawn: its effects are committed.
             (Some(_), None) => return Err(TransitionError::ContradictedSuccess),
             (Some(recorded), Some(reported)) if recorded != reported => {
