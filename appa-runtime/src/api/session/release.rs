@@ -19,70 +19,46 @@ impl Session {
         }
     }
 
-    /// Record the review `quoted` showed a person as the bytes `digest` names, and return the
-    /// receipt of the record that stands for it. Only the review its block showed is recorded,
-    /// and only for the trajectory that pursues the offer. A recorded review answers the
-    /// trajectory that opened the offer or pursues it, live or ended.
+    /// Record the review `quoted` asks about as the bytes `digest` names, and return the
+    /// receipt of the record that stands for it. Only bytes an answer returned as that review
+    /// are recorded, and only for the trajectory that pursues the offer. A recorded review
+    /// answers the trajectory that opened the offer or pursues it, live or ended.
     pub(crate) async fn release_review(
         &self,
         quoted: &OfferId,
         digest: ReleaseDigest,
     ) -> Result<ReleaseReceipt, EventError> {
         let trajectory = &self.trajectory;
-        let resolved =
-            |log: &appa_eventlog::Log| crate::engine::resolve_rendered(log, quoted).ok_or(EventError::UnknownOffer);
-        let standing = self.with_view(|context| {
-            let offer = resolved(context.log)?;
-            let engine = context.engine();
-            let owns = engine.offer_opener(context.view, &offer).as_ref() == Some(trajectory)
-                || context.offer_pursuer(&offer).as_ref() == Some(trajectory);
-            Ok(owns
-                .then(|| engine.standing_review(context.view, &offer, digest))
-                .flatten())
-        })?;
-        if let Some(receipt) = standing {
-            return Ok(receipt);
-        }
         let review = |context: &Decided<'_>, _| {
-            let offer = resolved(context.log)?;
+            let offer = crate::engine::resolve_rendered(context.log, quoted).ok_or(EventError::UnknownOffer)?;
             if context.offer_pursuer(&offer).as_ref() != Some(trajectory) {
                 return Err(EventError::UnknownOffer);
             }
-            let shown = crate::engine::shown_review(context.log, &offer);
+            let shown = crate::engine::review_shown(context.log, &offer, &digest);
             Ok(EngineEvent::Review { offer, digest, shown })
         };
-        let decision = self.drive_with_evidence(review, None, None, Occasion::Other).await?;
+        let occasion = Occasion::Review(ReviewRelease { offer: quoted, digest });
+        let decision = self.drive_with_evidence(review, None, None, occasion).await?;
         match decision.then {
             Next::Released { receipt } => Ok(receipt),
             _ => Err(EventError::UnexpectedDecision),
         }
     }
+}
 
-    /// Record the digest of the review each offer of this decision's block shows a person: the
-    /// bytes a later release of that review is held to. A record that does not land leaves the
-    /// review unreleasable.
-    pub(super) fn record_shown_reviews(&self, decision: &EngineDecision) {
-        let Some(facts) = decision.append.as_ref() else {
-            return;
-        };
-        let pending: Vec<PendingReview> = match &decision.then {
-            Next::ModelResponse { feedback, .. } => feedback.iter().flat_map(|entry| entry.review.clone()).collect(),
-            Next::PresentToModel(Presentation::Blocked { review, .. }) => review.clone(),
-            _ => return,
-        };
-        for review in super::remedy::reviews(&pending, &self.deployment().externals) {
-            let Some(offer) = crate::engine::opened_in(facts, &review.offer) else {
-                continue;
-            };
-            let shown = appa_eventlog::HostObservation::ReviewShown {
-                offer,
-                digest: ReleaseDigest::of(review.text.as_bytes()),
-            };
-            if let Err(error) = self.inner.append_host(&self.root, &shown) {
-                tracing::warn!(root = %self.root.0, %error, "the review a block showed was not recorded");
-            }
-        }
-    }
+/// The receipt `release` already stands under in the log `context` reads, where `trajectory`
+/// opened its offer or pursues it.
+pub(super) fn standing_review(
+    context: &Decided<'_>,
+    trajectory: &TrajectoryId,
+    release: ReviewRelease<'_>,
+) -> Option<ReleaseReceipt> {
+    let offer = crate::engine::resolve_rendered(context.log, release.offer)?;
+    let engine = context.engine();
+    let owns = engine.offer_opener(context.view, &offer).as_ref() == Some(trajectory)
+        || context.offer_pursuer(&offer).as_ref() == Some(trajectory);
+    owns.then(|| engine.standing_review(context.view, &offer, release.digest))
+        .flatten()
 }
 
 /// Judge content at `label` into `sink(arguments)` under `deployment`'s registry, reading the
@@ -188,8 +164,7 @@ url = "http://127.0.0.1:9/annotate"
         }
     }
 
-    #[cfg(feature = "daemon")]
-    const NARROWING: &str = r#"
+    const REVIEWED: &str = r#"
 [policy]
 version = 2
 
@@ -203,12 +178,34 @@ name = "deploy"
 delta = {}
 requires = { trust = "trusted" }
 
+[[policy.tool]]
+name = "countersigned"
+delta = {}
+requires = { attention = ["countersign"] }
+
+[[policy.tool]]
+name = "stamped"
+delta = {}
+requires = { attention = ["stamp"] }
+
 [[policy.authority]]
 name = "operator"
 
 [policy.authority.permits]
 trust_below = "trusted"
-attention = ["signoff"]
+attention = ["signoff", "countersign", "stamp"]
+
+[[policy.authority]]
+name = "auditor"
+
+[policy.authority.permits]
+attention = ["countersign"]
+
+[[policy.authority]]
+name = "stock"
+
+[policy.authority.permits]
+attention = ["stamp"]
 
 [externals]
 timeout_ms = 1000
@@ -216,65 +213,187 @@ max_body_bytes = 4096
 
 [externals.authorities.operator]
 builtin = "hitl"
+
+[externals.authorities.auditor]
+builtin = "hitl"
+
+[externals.authorities.stock]
+builtin = "approve"
 "#;
+
+    async fn started(dir: &std::path::Path) -> (crate::api::Runtime, TrajectoryId) {
+        let path = dir.join("appa.toml");
+        std::fs::write(&path, REVIEWED).expect("the fixture writes");
+        let runtime = crate::api::Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.join("appa.db"),
+            None,
+        )
+        .expect("the runtime opens");
+        let root = TrajectoryId("cc:reviewed".to_string());
+        let start = appa_runtime_api::HookEvent::SessionStart {
+            root: root.clone(),
+            principal: None,
+            address: None,
+            title: None,
+            launch: None,
+            start: None,
+            settings: Default::default(),
+        };
+        assert_eq!(
+            crate::hooks::handle(&runtime, start).await,
+            appa_runtime_api::HookDecision::Ack
+        );
+        (runtime, root)
+    }
+
+    fn proposed(tool: &str) -> appa_runtime_api::ProposedCall {
+        appa_runtime_api::ProposedCall {
+            tool: tool.to_string(),
+            arguments: serde_json::value::to_raw_value(&serde_json::json!({ "body": "figures" }))
+                .expect("the arguments serialize"),
+            cwd: None,
+        }
+    }
+
+    async fn called(
+        runtime: &crate::api::Runtime,
+        root: &TrajectoryId,
+        tool: &str,
+        call_id: Option<&str>,
+    ) -> appa_runtime_api::HookDecision {
+        let call = appa_runtime_api::HookEvent::ToolCall {
+            actor: appa_runtime_api::Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: proposed(tool),
+            call_id: call_id.map(str::to_string),
+            spawn: None,
+            prompt: None,
+            ruling: None,
+            declares: None,
+        };
+        crate::hooks::handle(runtime, call).await
+    }
+
+    fn denied_reviews(decision: appa_runtime_api::HookDecision) -> Vec<appa_runtime_api::Review> {
+        match decision {
+            appa_runtime_api::HookDecision::DenyCall { review, .. } => review,
+            other => panic!("the call is denied: {other:?}"),
+        }
+    }
+
+    /// Every host record of the reviews answers returned, one per record.
+    fn shown_records(runtime: &crate::api::Runtime, root: &TrajectoryId) -> Vec<Vec<appa_eventlog::ShownReview>> {
+        let log = runtime.inner.log(root).expect("the family log reads");
+        log.host_records()
+            .iter()
+            .filter_map(|record| match &record.observation {
+                appa_eventlog::HostObservation::ReviewsShown { reviews } => Some(reviews.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    async fn released(
+        runtime: &crate::api::Runtime,
+        root: &TrajectoryId,
+        review: &appa_runtime_api::Review,
+    ) -> Result<ReleaseReceipt, EventError> {
+        runtime
+            .session_with_presentation(root, root, Default::default())
+            .expect("the root is open")
+            .release_review(
+                &OfferId(review.offer.clone()),
+                ReleaseDigest::of(review.text.as_bytes()),
+            )
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_block_the_runtime_approves_itself_returns_and_records_no_review() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = started(dir.path()).await;
+        let decision = called(&runtime, &root, "stamped", None).await;
+        assert!(
+            matches!(decision, appa_runtime_api::HookDecision::AllowCall { .. }),
+            "{decision:?}"
+        );
+        let log = runtime.inner.log(&root).expect("the family log reads");
+        assert!(
+            log.facts()
+                .iter()
+                .any(|fact| matches!(fact, appa_engine::fact::Fact::OfferOpened { .. })),
+            "the call blocked before its plan was applied"
+        );
+        assert_eq!(shown_records(&runtime, &root), Vec::<Vec<_>>::new());
+    }
+
+    #[tokio::test]
+    async fn one_answer_records_all_its_reviews_in_one_record() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = started(dir.path()).await;
+        let reviews = denied_reviews(called(&runtime, &root, "countersigned", None).await);
+        assert_eq!(
+            reviews.len(),
+            2,
+            "each officer is asked through its own offer: {reviews:?}"
+        );
+        let records = shown_records(&runtime, &root);
+        let [record] = records.as_slice() else {
+            panic!("one answer, one record: {records:?}");
+        };
+        assert_eq!(record.len(), 2);
+        for review in &reviews {
+            released(&runtime, &root, review)
+                .await
+                .expect("each returned review releases");
+        }
+    }
+
+    /// A denial decided without its reviews recorded, as a crash between the two leaves it, is
+    /// recorded by the next answer that returns it.
+    #[tokio::test]
+    async fn a_keyed_replay_records_the_reviews_its_denial_returns() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = started(dir.path()).await;
+        let session = runtime
+            .session_with_presentation(&root, &root, Default::default())
+            .expect("the root is open");
+        let undelivered = session
+            .on_tool_call_identified(proposed("publish"), Some("c1".to_string()), None, None)
+            .await
+            .expect("the call is decided");
+        assert!(matches!(undelivered, ToolCallDecision::Deny { .. }), "{undelivered:?}");
+        assert_eq!(shown_records(&runtime, &root), Vec::<Vec<_>>::new());
+
+        let [review] = denied_reviews(called(&runtime, &root, "publish", Some("c1")).await)
+            .try_into()
+            .expect("the replay returns the one review");
+        assert_eq!(shown_records(&runtime, &root).len(), 1);
+        let again = denied_reviews(called(&runtime, &root, "publish", Some("c1")).await);
+        assert_eq!(again, vec![review.clone()]);
+        assert_eq!(
+            shown_records(&runtime, &root).len(),
+            1,
+            "a recorded review is recorded once"
+        );
+        released(&runtime, &root, &review)
+            .await
+            .expect("the returned review releases");
+    }
 
     /// The block shows the tools a narrowing limits; an execution of the same offer renders the
     /// narrowing without them. Only the bytes the block showed are released.
     #[cfg(feature = "daemon")]
     #[tokio::test]
     async fn a_narrowing_review_releases_as_its_block_showed_it_and_never_as_rendered_again() {
-        use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall};
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let path = dir.path().join("appa.toml");
-        std::fs::write(&path, NARROWING).expect("the fixture writes");
-        let runtime = crate::api::Runtime::open(
-            Config::load(&path).expect("the fixture validates"),
-            dir.path().join("appa.db"),
-            None,
-        )
-        .expect("the runtime opens");
-        let root = appa_runtime_api::TrajectoryId("cc:narrowing".to_string());
-        let started = crate::hooks::handle(
-            &runtime,
-            HookEvent::SessionStart {
-                root: root.clone(),
-                principal: None,
-                address: None,
-                title: None,
-                launch: None,
-                start: None,
-                settings: Default::default(),
-            },
-        )
-        .await;
-        assert_eq!(started, HookDecision::Ack);
-        let blocked = crate::hooks::handle(
-            &runtime,
-            HookEvent::ToolCall {
-                actor: Actor {
-                    root: root.clone(),
-                    child: None,
-                },
-                call: ProposedCall {
-                    tool: "publish".to_string(),
-                    arguments: serde_json::value::to_raw_value(&serde_json::json!({ "body": "figures" }))
-                        .expect("the arguments serialize"),
-                    cwd: None,
-                },
-                call_id: None,
-                spawn: None,
-                prompt: None,
-                ruling: None,
-                declares: None,
-            },
-        )
-        .await;
-        let HookDecision::DenyCall { review, .. } = blocked else {
-            panic!("the publish blocks on the operator: {blocked:?}");
-        };
-        let [shown] = review.as_slice() else {
-            panic!("the block shows one review: {review:?}");
-        };
+        let (runtime, root) = started(dir.path()).await;
+        let [shown] = denied_reviews(called(&runtime, &root, "publish", None).await)
+            .try_into()
+            .expect("the block shows one review");
         let quoted = OfferId(shown.offer.clone());
         let session = runtime
             .session_with_presentation(&root, &root, Default::default())
@@ -295,8 +414,7 @@ builtin = "hitl"
             .release_review(&quoted, ReleaseDigest::of(rendered_again.text.as_bytes()))
             .await;
         assert!(matches!(substituted, Err(EventError::OtherReview)), "{substituted:?}");
-        let receipt = session
-            .release_review(&quoted, ReleaseDigest::of(shown.text.as_bytes()))
+        let receipt = released(&runtime, &root, &shown)
             .await
             .expect("the review the block showed releases");
         assert_eq!(receipt.digest, ReleaseDigest::of(shown.text.as_bytes()));

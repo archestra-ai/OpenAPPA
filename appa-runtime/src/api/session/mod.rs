@@ -93,7 +93,16 @@ enum Occasion<'a> {
     },
     /// A child's return without ending, under the host's identity for it.
     Return(KeyedReturn<'a>),
+    /// The host releases the review an offer asked about.
+    Review(ReviewRelease<'a>),
     Other,
+}
+
+/// The review a host releases: the offer it quotes, and the digest of the bytes.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ReviewRelease<'a> {
+    offer: &'a OfferId,
+    digest: appa_runtime_api::ReleaseDigest,
 }
 
 /// A child's return without ending the host named by an operation: what a retry of the
@@ -132,7 +141,11 @@ impl<'a> Occasion<'a> {
     fn call_id(self) -> Option<&'a str> {
         match self {
             Occasion::Proposal { call_id, .. } | Occasion::Report { call_id } => call_id,
-            Occasion::Remedy { .. } | Occasion::AheadApply { .. } | Occasion::Return(_) | Occasion::Other => None,
+            Occasion::Remedy { .. }
+            | Occasion::AheadApply { .. }
+            | Occasion::Return(_)
+            | Occasion::Review(_)
+            | Occasion::Other => None,
         }
     }
 }

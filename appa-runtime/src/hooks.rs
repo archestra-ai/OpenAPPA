@@ -643,8 +643,9 @@ pub(crate) async fn handle_internal(
     launch: SpawnLaunch,
 ) -> Handled {
     let shape = hook_shape(&event);
+    let root = hook_root(&event).clone();
     let (mut dispatch, mut presentation, mut receipt) = (None, None, None);
-    let decision = dispatch_event(
+    let mut decision = dispatch_event(
         runtime,
         event,
         Outparams {
@@ -657,7 +658,34 @@ pub(crate) async fn handle_internal(
         launch,
     )
     .await;
+    show_reviews(runtime, &root, &mut decision, &mut presentation);
     handled(shape, dispatch, presentation, receipt, decision)
+}
+
+/// Record the reviews this answer returns as returned, once for the whole answer; strip them
+/// from it where that record does not land.
+fn show_reviews(
+    runtime: &Runtime,
+    root: &TrajectoryId,
+    decision: &mut HookDecision,
+    presentation: &mut Option<RemedyPresentation>,
+) {
+    let denied = match &*decision {
+        HookDecision::DenyCall { review, .. } => review.as_slice(),
+        _ => &[],
+    };
+    let presented = presentation
+        .as_ref()
+        .map_or(&[][..], |presentation| presentation.review.as_slice());
+    if runtime.show_reviews(root, &denied.iter().chain(presented).collect::<Vec<_>>()) {
+        return;
+    }
+    if let HookDecision::DenyCall { review, .. } = decision {
+        review.clear();
+    }
+    if let Some(presentation) = presentation {
+        presentation.review.clear();
+    }
 }
 
 fn handled(

@@ -343,9 +343,11 @@ mod tests {
                 operation: ReturnOperation::new("turn:1").expect("an operation is named"),
                 id: ChildReturnId::new(TrajectoryId::new("cc:child"), 2),
             },
-            HostObservation::ReviewShown {
-                offer: serde_json::from_value(serde_json::json!("ef".repeat(32))).expect("an offer id decodes"),
-                digest: appa_runtime_api::ReleaseDigest::of(b"the review"),
+            HostObservation::ReviewsShown {
+                reviews: vec![crate::ShownReview {
+                    offer: serde_json::from_value(serde_json::json!("ef".repeat(32))).expect("an offer id decodes"),
+                    digest: appa_runtime_api::ReleaseDigest::of(b"the review"),
+                }],
             },
         ]
     }
@@ -377,7 +379,7 @@ mod tests {
             r#"{"kind":"ahead_reserved","trajectory":"cc:root","attempt":{"vouch":4},"invocation":"00000000000000000000000000000abc"}"#,
             r#"{"kind":"ahead_settled","trajectory":"cc:root","attempt":{"host":"remedy:op"},"outcome":"applied"}"#,
             r#"{"kind":"return_held","trajectory":"cc:child","operation":"turn:1","id":{"child":"cc:child","occurrence":2}}"#,
-            r#"{"kind":"review_shown","offer":"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef","digest":"746d7bc8fc6ab320d339ed6e006ac0b9bd20253dabe0d747fca19ed74647ed6a"}"#,
+            r#"{"kind":"reviews_shown","reviews":[{"offer":"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef","digest":"746d7bc8fc6ab320d339ed6e006ac0b9bd20253dabe0d747fca19ed74647ed6a"}]}"#,
         ];
         let observations = golden_observations();
         assert_eq!(observations.len(), hosts.len());

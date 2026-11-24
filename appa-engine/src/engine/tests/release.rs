@@ -267,20 +267,20 @@ fn review(
     log: &[Fact],
     offer: crate::value::OfferId,
     body: &str,
-    shown: Option<&str>,
+    shown: bool,
 ) -> Result<EngineDecision, TransitionError> {
     e.handle(
         &viewing(e, log),
         EngineEvent::Review(crate::transition::ReviewReport {
             offer,
             digest: ReleaseDigest::of(body.as_bytes()),
-            shown: shown.map(|text| ReleaseDigest::of(text.as_bytes())),
+            shown,
         }),
     )
 }
 
 #[test]
-fn a_review_is_recorded_only_as_the_bytes_its_block_showed_at_its_blocks_label() {
+fn a_review_is_recorded_only_as_bytes_an_answer_returned_at_its_blocks_label() {
     let e = engine(vec![crm_tool(), internal_read()]);
     let mut log = vec![opened(&e)];
     let at_block = viewing(&e, &log).projection().view(&traj()).current_label();
@@ -291,16 +291,12 @@ fn a_review_is_recorded_only_as_the_bytes_its_block_showed_at_its_blocks_label()
     assert_ne!(now, at_block, "the read moved the root's label past the block's");
 
     assert_eq!(
-        review(&e, &log, offer, "other bytes", Some("the review")).map(|decision| decision.append.is_some()),
-        Err(TransitionError::OtherReview)
-    );
-    assert_eq!(
-        review(&e, &log, offer, "the review", None).map(|decision| decision.append.is_some()),
+        review(&e, &log, offer, "the review", false).map(|decision| decision.append.is_some()),
         Err(TransitionError::OtherReview),
-        "an offer whose block showed no review releases none"
+        "bytes no answer returned release nothing"
     );
 
-    let recorded = review(&e, &log, offer, "the review", Some("the review")).expect("the review records");
+    let recorded = review(&e, &log, offer, "the review", true).expect("the review records");
     let at = position(&recorded);
     log.extend(appended_facts(recorded));
     let digest = ReleaseDigest::of(b"the review");
@@ -311,7 +307,7 @@ fn a_review_is_recorded_only_as_the_bytes_its_block_showed_at_its_blocks_label()
     ));
     assert_eq!(e.released_label(&viewing(&e, &log), at, &digest), Ok(at_block));
 
-    let again = review(&e, &log, offer, "the review", None).expect("the standing review answers");
+    let again = review(&e, &log, offer, "the review", false).expect("the standing review answers");
     assert!(again.append.is_none(), "a repeated review appends nothing");
     assert_eq!(released(&again), ReleasedAt { position: at, digest });
 

@@ -100,6 +100,7 @@ pub(super) struct Opening<'a> {
     took: Option<&'a Took>,
     /// A child's return without ending the host named by an operation.
     keyed: Option<KeyedReturn<'a>>,
+    review: Option<ReviewRelease<'a>>,
 }
 
 /// Where a spawn's proposal leaves the declaration its call or invocation durably took, as the
@@ -846,12 +847,7 @@ impl Session {
                         "a publish moved the head under the decision: deciding again at the head"
                     );
                 }
-                decided => {
-                    if let Ok(decision) = &decided {
-                        self.record_shown_reviews(decision);
-                    }
-                    return decided;
-                }
+                decided => return decided,
             }
         }
     }
@@ -879,6 +875,7 @@ impl Session {
                 applies: None,
                 took: Some(took),
                 keyed: None,
+                review: None,
             },
             Occasion::AheadApply { claim, .. } => Opening {
                 applies: Some(claim),
@@ -886,6 +883,10 @@ impl Session {
             },
             Occasion::Return(keyed) => Opening {
                 keyed: Some(keyed),
+                ..Opening::default()
+            },
+            Occasion::Review(review) => Opening {
+                review: Some(review),
                 ..Opening::default()
             },
             Occasion::Report { .. } | Occasion::Remedy { .. } | Occasion::Other => Opening::default(),
@@ -989,6 +990,15 @@ impl Session {
                 view: &view,
                 log: &log,
             };
+            // A review released already answers its owner whether or not it still runs.
+            if let Some(review) = opening.review
+                && let Some(receipt) = super::release::standing_review(&context, &self.trajectory, review)
+            {
+                return Ok(EngineDecision {
+                    append: None,
+                    then: Next::Released { receipt },
+                });
+            }
             if entering {
                 match policy.engine().liveness(&view, &self.trajectory) {
                     Liveness::Ended => return Err(EventError::TrajectoryEnded),
