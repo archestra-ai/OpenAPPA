@@ -122,3 +122,41 @@ fn a_rule_an_earlier_selector_always_selects_first_states_no_requirement() {
         }]
     );
 }
+
+/// A rule whose values an earlier rule's alternatives cover is never selected, so neither its
+/// attention mark nor its trust floor is listed; in the other order the narrower rule leaves
+/// the wider one the calls naming `b`.
+#[test]
+fn a_rule_whose_values_an_earlier_rule_covers_states_no_requirement() {
+    use appa_engine::label::Trust;
+    use appa_engine::names::MarkName;
+    use appa_engine::registry::{RequirementKind, UnsatisfiableRequirement};
+    use appa_engine::value::ToolName;
+
+    let unsatisfiable = |earlier: &str, later: &str| {
+        Config::from_toml_str(&format!(
+            "version = 2\n\n[deployment]\nstarting_label = {{ trust = \"suspicious\" }}\n\n\
+             [[tool]]\nname = \"mcp/ops/read({earlier})\"\n\n\
+             [[tool]]\nname = \"mcp/ops/read({later})\"\n\
+             requires = {{ attention = [\"signoff\"], trust = \"trusted\" }}\n"
+        ))
+        .expect("the policy loads")
+        .unsatisfiable_requirements()
+    };
+
+    assert_eq!(unsatisfiable("path:a|b", "path:a"), []);
+    assert_eq!(
+        unsatisfiable("path:a", "path:a|b"),
+        [
+            RequirementKind::TrustFloor {
+                required: Trust::new(1),
+                effective: Trust::new(0),
+            },
+            RequirementKind::Attention(MarkName::new("signoff")),
+        ]
+        .map(|requirement| UnsatisfiableRequirement {
+            tool: ToolName::new("mcp/ops/read"),
+            requirement,
+        })
+    );
+}

@@ -20,7 +20,7 @@ use crate::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, TagNam
 use crate::params::ArgumentShape;
 use crate::value::{ToolDeclarationId, ToolName};
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) enum ToolMatcher {
     Bare,
     Arguments(ArgumentPatterns),
@@ -31,7 +31,7 @@ pub(crate) enum ToolMatcher {
 /// `tool(owner:x,repo:y)` and `tool(repo:y,owner:x)` are the same matcher and the same
 /// policy identity. Non-emptiness is the constructor's invariant, so a matcher that would
 /// match every call vacuously cannot be built — that is what [`ToolMatcher::Bare`] is.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct ArgumentPatterns(BTreeMap<String, Pattern>);
 
 impl ArgumentPatterns {
@@ -52,7 +52,7 @@ impl ArgumentPatterns {
 /// is the normal form — alternation is commutative and idempotent, so `a|b`, `b|a` and `a|b|a`
 /// are one pattern and one policy identity. Only the clause parser builds one, and it ends
 /// every clause with an alternative, so a pattern is never empty.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Pattern(BTreeSet<Vec<PatternPart>>);
 
 impl Pattern {
@@ -64,6 +64,28 @@ impl Pattern {
         self.0
             .iter()
             .any(|alternative| alternative.contains(&PatternPart::Wildcard))
+    }
+
+    /// Whether every string `narrower` matches, this pattern matches too: each of its
+    /// alternatives is covered by one of ours. Sufficient, not necessary.
+    fn covers(&self, Pattern(narrower): &Pattern) -> bool {
+        narrower
+            .iter()
+            .all(|alternative| self.0.iter().any(|wider| alternative_covers(wider, alternative)))
+    }
+}
+
+/// Whether every string `narrower` matches, `wider` matches too: they are one alternative, or
+/// `wider` is `*`, or `wider` is `prefix*` and every match of `narrower` starts with a literal
+/// that starts with `prefix`.
+fn alternative_covers(wider: &[PatternPart], narrower: &[PatternPart]) -> bool {
+    match (wider, narrower) {
+        _ if wider == narrower => true,
+        ([PatternPart::Wildcard], _) => true,
+        ([PatternPart::Literal(prefix), PatternPart::Wildcard], [PatternPart::Literal(head), ..]) => {
+            head.starts_with(prefix.as_str())
+        }
+        _ => false,
     }
 }
 
@@ -116,6 +138,23 @@ impl ToolMatcher {
                         .iter()
                         .filter(|(_, pattern)| pattern.scans())
                         .all(clause_matches)
+            }
+        }
+    }
+
+    /// Whether every call `later` matches, this matcher matches too. Sufficient, not necessary:
+    /// each of our clauses has a clause of `later` on the same argument whose pattern ours
+    /// covers. A clause holds for a string its pattern matches or a non-empty array of such
+    /// strings, so a clause over a narrower pattern holds only where the wider one does, arrays
+    /// included, and `later`'s extra clauses only narrow it further.
+    fn covers(&self, later: &ToolMatcher) -> bool {
+        match (self, later) {
+            (ToolMatcher::Bare, _) => true,
+            (ToolMatcher::Arguments(_), ToolMatcher::Bare) => false,
+            (ToolMatcher::Arguments(ArgumentPatterns(wider)), ToolMatcher::Arguments(ArgumentPatterns(narrower))) => {
+                wider
+                    .iter()
+                    .all(|(argument, pattern)| narrower.get(argument).is_some_and(|narrower| pattern.covers(narrower)))
             }
         }
     }
@@ -2089,12 +2128,12 @@ impl Registry {
     /// only narrows from its starting label, and the call's own `forwards` narrows what it sends,
     /// so a floor above both is met only by an authority; a sanitizer settles a narrowing, never
     /// a requirement gap. Covers read the predicate planning reads. A rule is never selected,
-    /// so it neither states a requirement nor emits, where an earlier rule of a covering name is
-    /// bare or has the same normalized matcher; any other overlap leaves it selectable. An
-    /// emitter counts only where it can release its call: never the gated rule itself, never a
-    /// rule requiring `blocked`. Requirements an Annotator produces
-    /// exist per call and are its own: only the floor written beside it is judged, and an
-    /// Annotator whose mandate admits an effect counts as its emitter unless it is in
+    /// so it neither states a requirement nor emits, where the matcher of an earlier selectable
+    /// rule of a covering name [covers](ToolMatcher::covers) its own; any overlap that check
+    /// cannot prove leaves it selectable. An emitter counts only where it can release its call:
+    /// never the gated rule itself, never a rule requiring `blocked`. Requirements an Annotator
+    /// produces exist per call and are its own: only the floor written beside it is judged, and
+    /// an Annotator whose mandate admits an effect counts as its emitter unless it is in
     /// `effect_free`, whose consults never emit. The reserved `blocked` mark is unsatisfiable by
     /// design and never listed.
     pub fn unsatisfiable_requirements(&self, effect_free: &BTreeSet<AnnotatorName>) -> Vec<UnsatisfiableRequirement> {
@@ -2109,7 +2148,7 @@ impl Registry {
         );
         let starting = self.profile.starting_label().trust;
         let mut selectable: Vec<&ToolDeclaration> = Vec::new();
-        let mut earlier: BTreeMap<&ToolName, BTreeSet<&ToolMatcher>> = BTreeMap::new();
+        let mut earlier: BTreeMap<&ToolName, Vec<&ToolMatcher>> = BTreeMap::new();
         for (name, ordinal) in &self.tool_order {
             let (matcher, declaration) = &self.tools[name][*ordinal];
             let covering_selector = name
@@ -2121,11 +2160,11 @@ impl Registry {
             let shadows = |rule: &ToolName| {
                 earlier
                     .get(rule)
-                    .is_some_and(|matchers| matchers.contains(&ToolMatcher::Bare) || matchers.contains(matcher))
+                    .is_some_and(|matchers| matchers.iter().any(|earlier| earlier.covers(matcher)))
             };
             if !shadows(name) && !covering_selector.as_ref().is_some_and(shadows) {
                 selectable.push(declaration);
-                earlier.entry(name).or_default().insert(matcher);
+                earlier.entry(name).or_default().push(matcher);
             }
         }
         selectable.extend(self.wildcard.as_ref());
@@ -3818,9 +3857,81 @@ mod tests {
         );
     }
 
-    /// An earlier rule of a covering name shadows a later one when it is bare or has the same
-    /// normalized matcher. Any other overlap may leave calls to the later rule, so it still
-    /// states its requirements and still emits.
+    /// `covers` is sound against [`ToolMatcher::matches`]: wherever it holds, every sampled call
+    /// the later matcher matches, string and array arguments alike, the earlier one matches too.
+    /// Each pair it refuses has a call only the later matcher matches.
+    #[test]
+    fn a_covering_matcher_matches_every_call_the_covered_one_does() {
+        use serde_json::{Value, json};
+
+        let matcher = |selector: &str| parse_tool_selector(selector).expect("the selector parses").1;
+        let strings = [
+            "",
+            "a",
+            "b",
+            "c",
+            "ab",
+            "axb",
+            "priv",
+            "privy",
+            "private",
+            "private/notes.md",
+        ];
+        let values: Vec<Value> = strings
+            .iter()
+            .map(|one| json!(one))
+            .chain(
+                strings
+                    .iter()
+                    .flat_map(|one| strings.iter().map(move |other| json!([one, other]))),
+            )
+            .chain([json!([]), json!(1)])
+            .collect();
+        let calls: Vec<Value> = values
+            .iter()
+            .flat_map(|one| {
+                values
+                    .iter()
+                    .map(move |other| json!({"path": one, "owner": other, "repo": one, "file": other}))
+            })
+            .chain(values.iter().map(|one| json!({"path": one})))
+            .chain([json!({})])
+            .collect();
+
+        for (earlier, later) in [
+            ("t", "t"),
+            ("t", "t(path:a)"),
+            ("t(path:a|b)", "t(path:a)"),
+            ("t(path:c|a|b)", "t(path:b|a)"),
+            ("t(path:private*)", "t(path:private/notes.md)"),
+            ("t(path:priv*)", "t(path:private*|privy)"),
+            ("t(path:*)", "t(path:a*b)"),
+            ("t(owner:a)", "t(owner:a,repo:b*)"),
+            ("t(owner:a,repo:b)", "t(repo:b,owner:a)"),
+        ] {
+            let (earlier, later) = (matcher(earlier), matcher(later));
+            assert!(earlier.covers(&later), "{earlier:?} covers {later:?}");
+            for call in calls.iter().filter(|call| later.matches(call)) {
+                assert!(earlier.matches(call), "{earlier:?} matches {call} as {later:?} does");
+            }
+        }
+        for (earlier, later, only_later) in [
+            ("t(path:a)", "t", json!({})),
+            ("t(owner:a,repo:b)", "t(owner:a)", json!({"owner": "a"})),
+            ("t(path:a|b)", "t(path:a|c)", json!({"path": "c"})),
+            ("t(path:private*)", "t(path:priv*)", json!({"path": "privy"})),
+            ("t(path:a*)", "t(file:a*)", json!({"file": "a"})),
+            ("t(path:a)", "t(path:a|b)", json!({"path": ["a", "b"]})),
+        ] {
+            let (earlier, later) = (matcher(earlier), matcher(later));
+            assert!(!earlier.covers(&later), "{earlier:?} does not cover {later:?}");
+            assert!(later.matches(&only_later) && !earlier.matches(&only_later));
+        }
+    }
+
+    /// An earlier selectable rule of a covering name whose matcher covers a later one's always
+    /// selects first, so the later rule states no requirement and emits nothing. Any overlap
+    /// `covers` cannot prove leaves the later rule its calls, its requirements and its emits.
     #[test]
     fn a_rule_an_earlier_matcher_selects_first_neither_requires_nor_emits() {
         let (reviewed, signoff) = (EffectKind::new("reviewed"), MarkName::new("signoff"));
@@ -3848,6 +3959,12 @@ mod tests {
                 "mcp/demo/read(path:secret*|private*)",
             ),
             ("mcp/*/read", "mcp/demo/read(path:private*)"),
+            ("mcp/ops/read(path:a|b)", "mcp/ops/read(path:a)"),
+            ("mcp/*/read(path:a|b)", "mcp/ops/read(path:a)"),
+            ("mcp/*/read(path:private*)", "mcp/ops/read(path:private/notes.md)"),
+            ("read(path:c|a|b)", "read(path:b|a)"),
+            ("read(path:priv*)", "read(path:private*|privy)"),
+            ("read(owner:a)", "read(owner:a,repo:b*)"),
             ("read(owner:a,repo:b)", "read(repo:b,owner:a)"),
         ] {
             assert_eq!(
@@ -3860,6 +3977,11 @@ mod tests {
             ("mcp/*/read(path:public*)", "mcp/demo/read(path:private*)"),
             ("mcp/*/read(path:private*)", "mcp/demo/read"),
             ("mcp/demo/read(path:private*)", "mcp/*/read(path:private*)"),
+            ("mcp/ops/read(path:a)", "mcp/ops/read(path:a|b)"),
+            ("read(owner:a,repo:b)", "read(owner:a)"),
+            ("read(path:a|b)", "read(path:a|c)"),
+            ("read(path:private*)", "read(path:priv*)"),
+            ("read(path:a*)", "read(file:a*)"),
         ] {
             let base = later.split_once('(').map_or(later, |(base, _)| base);
             assert_eq!(
@@ -3871,6 +3993,21 @@ mod tests {
                 "{later} stays reachable after {selector}"
             );
         }
+
+        // An array clause holds when each element matches some alternative, so an array mixing
+        // `a` and `b` reaches the later rule past the narrower earlier one.
+        let registry = Registry::build_covered(with(
+            declared(vec![tool("read(path:a)"), exact("read(path:a|b)")]),
+            vec![],
+        ))
+        .expect("overlapping selectors load");
+        let selected = |path: serde_json::Value| {
+            registry
+                .select_tool(&ToolName::new("read"), &serde_json::json!({ "path": path }))
+                .map(|(id, _)| id)
+        };
+        assert_eq!(selected(serde_json::json!(["a", "a"])), ToolDeclarationId::new(0));
+        assert_eq!(selected(serde_json::json!(["a", "b"])), ToolDeclarationId::new(1));
     }
 
     #[test]
