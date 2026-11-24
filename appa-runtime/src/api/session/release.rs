@@ -29,7 +29,8 @@ impl Session {
     ///
     /// Any path that returns the block's review returns these bytes. A rendering made at
     /// execution instead, such as the message of an MCP elicitation form, is other bytes and
-    /// releases nothing.
+    /// releases nothing; so is a review a keyed replay renders again after a reload or a label
+    /// change altered its text, since the offer it reuses keeps the digest it opened with.
     pub(crate) async fn release_review(
         &self,
         quoted: &OfferId,
@@ -370,6 +371,20 @@ builtin = "approve"
             .release_review(&quoted, ReleaseDigest::of(b""))
             .await;
         assert!(matches!(refused, Err(EventError::OtherReview)), "{refused:?}");
+    }
+
+    /// A keyed replay returns its denial's review again, and the replayed bytes release.
+    #[tokio::test]
+    async fn a_keyed_replays_review_releases() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (runtime, root) = started(dir.path()).await;
+        let first = denied_reviews(called(&runtime, &root, "publish", Some("c1")).await);
+        let replayed = denied_reviews(called(&runtime, &root, "publish", Some("c1")).await);
+        assert_eq!(replayed, first);
+        let [review] = replayed.try_into().expect("the denial returns one review");
+        released(&runtime, &root, &review)
+            .await
+            .expect("the replayed review releases");
     }
 
     /// A block that asks two officers renders a review for each offer, and each releases.

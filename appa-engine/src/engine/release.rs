@@ -121,6 +121,17 @@ impl Engine {
     /// Record an offer's review at the label its blocked call was judged under. Only the bytes
     /// whose digest the offer's opening records are recorded; bytes recorded already for the
     /// offer stand as recorded.
+    /// The record that released `offer`'s review as `digest`, where one stands.
+    pub fn standing_review(
+        &self,
+        view: &EngineView,
+        offer: &crate::value::OfferId,
+        digest: appa_runtime_api::ReleaseDigest,
+    ) -> Option<ReleasedAt> {
+        let position = view.projection().standing_review(offer, &digest)?;
+        Some(ReleasedAt { position, digest })
+    }
+
     pub(super) fn decide_review(
         &self,
         view: &EngineView,

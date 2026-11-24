@@ -1851,13 +1851,9 @@ impl RuntimeEngine {
         offer: &OfferId,
         digest: appa_runtime_api::ReleaseDigest,
     ) -> Option<appa_runtime_api::ReleaseReceipt> {
-        match self.review(view, offer, digest) {
-            Ok(EngineDecision {
-                append: None,
-                then: Next::Released { receipt },
-            }) => Some(receipt),
-            _ => None,
-        }
+        let offer = parse_offer(offer)?;
+        let at = self.engine.standing_review(view, &offer, digest)?;
+        Some(receipt(view.family(), at))
     }
 
     fn release(&self, view: &EngineView, event: CoreEvent) -> Result<EngineDecision, EngineRefusal> {

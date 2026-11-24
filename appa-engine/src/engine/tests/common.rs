@@ -759,18 +759,21 @@ pub(super) fn released_under_output_sanitizer(
     ([log, release].concat(), dispatch)
 }
 
-pub(super) fn two_officer_engine() -> Engine {
-    use crate::authority::{Authority, Mandate};
-    let officer = |name: &str| Authority {
+/// An authority that may lift a call's trust up to trusted.
+pub(super) fn officer(name: &str) -> crate::authority::Authority {
+    crate::authority::Authority {
         except: Vec::new(),
         name: AuthorityName::new(name),
-        mandate: Mandate {
+        mandate: crate::authority::Mandate {
             trust_ceiling: Some(TRUSTED),
-            ..Mandate::default()
+            ..crate::authority::Mandate::default()
         },
         scope: crate::authority::Scope::default(),
         hint: None,
-    };
+    }
+}
+
+pub(super) fn two_officer_engine() -> Engine {
     let cfg = RegistryConfig {
         recorders: Default::default(),
         authorities: vec![officer("officer-a"), officer("officer-b")],

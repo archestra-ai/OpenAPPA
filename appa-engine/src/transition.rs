@@ -1461,8 +1461,14 @@ impl<'a> Sequence<'a> {
                 plan,
                 basis,
                 evidence,
-                review_digest: _,
-            } => self.offer_opened(trajectory, offer, block, act, call, subject, plan, basis, evidence)?,
+                review_digest,
+            } => {
+                // A plan that asks no authority has no review for its opening to name.
+                if review_digest.is_some() && plan.required.is_empty() {
+                    return Err(TransitionRefusal::ReviewMismatch);
+                }
+                self.offer_opened(trajectory, offer, block, act, call, subject, plan, basis, evidence)?
+            }
             Fact::OfferAccepted { trajectory, offer, .. } => self.offer_accepted(trajectory, offer)?,
             Fact::CallApprovalConsumed { trajectory, offer, .. } => self.approval_consumed(trajectory, offer)?,
             Fact::CandidateConsumed {

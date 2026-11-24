@@ -295,11 +295,18 @@ fn rendered(log: &mut [Fact], offer: crate::value::OfferId, text: &str) {
 
 #[test]
 fn a_review_is_recorded_only_as_the_bytes_its_opening_records_at_its_blocks_label() {
-    let e = engine(vec![crm_tool(), internal_read()]);
+    let e = open_engine_at(
+        RegistryConfig {
+            authorities: vec![officer("officer")],
+            ..test_config(vec![crm_tool(), internal_read()])
+        },
+        Label::new(SUSPICIOUS, Audience::public()),
+    );
     let mut log = vec![opened(&e)];
     let at_block = viewing(&e, &log).projection().view(&traj()).current_label();
     log.extend(appended_facts(blocked_batch(&e, &log, "b1", nonce())));
-    let offer = opened_offers(&log)[0].0;
+    let [(offer, plan)] = opened_offers(&log).try_into().expect("the block offers one plan");
+    assert!(!plan.required.is_empty(), "the plan asks the officer");
     reads(&e, &mut log, &traj(), "read_internal");
     let now = viewing(&e, &log).projection().view(&traj()).current_label();
     assert_ne!(now, at_block, "the read moved the root's label past the block's");
@@ -341,4 +348,16 @@ fn a_review_is_recorded_only_as_the_bytes_its_opening_records_at_its_blocks_labe
         *digest = ReleaseDigest::of(b"other bytes");
     }
     assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ReviewMismatch));
+}
+
+#[test]
+fn an_opening_whose_plan_asks_no_authority_records_no_review() {
+    let e = engine(vec![crm_tool()]);
+    let mut log = vec![opened(&e)];
+    log.extend(appended_facts(blocked_batch(&e, &log, "b1", nonce())));
+    let [(offer, plan)] = opened_offers(&log).try_into().expect("the block offers one plan");
+    assert!(plan.required.is_empty(), "accepting the narrowing asks no one");
+    assert_eq!(e.validate_replay(&log), Ok(()));
+    rendered(&mut log, offer, "the review");
+    assert_eq!(e.validate_replay(&log), Err(TransitionRefusal::ReviewMismatch));
 }
