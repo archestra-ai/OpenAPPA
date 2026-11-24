@@ -243,8 +243,10 @@ pub struct Projection {
 }
 
 /// Every record of the log a release receipt may name, by its position among the family's
-/// records: an admitted result, a crossed return, or a root's answer. No record holds a label:
-/// each is rebuilt from the terms the record names, so it crosses a revision as they do.
+/// records: an admitted result, a crossed return, or a root's answer. No record holds a meet
+/// of its terms: crossing by rank name need not keep the order of ranks, so each label is
+/// rebuilt from the terms the record names, crossed alone. The one label a record keeps is a
+/// child's resumed seed, crossed as the live fold crosses it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Released {
     /// How many records this projection folded: the position the next one lands at.
@@ -256,11 +258,48 @@ struct Released {
     returns: OrdMap<ChildReturnId, u64>,
     /// Each trajectory's latest answer.
     answers: OrdMap<TrajectoryId, u64>,
+    /// Where each dispatch's trajectory stood as the dispatch opened: the bound its result
+    /// releases at.
+    received: OrdMap<DispatchId, FoldPoint>,
+    /// The crossing each bound spawn's dispatch stood answered by as it closed: what a
+    /// repeated report of that spawn replays, whatever the child crossed since.
+    spawn_closes: OrdMap<DispatchId, u64>,
+    /// The offer whose decision admitted each confined result an offer admitted.
+    admitted_by: OrdMap<DispatchId, crate::value::OfferId>,
+}
+
+/// A trajectory's fold as it stood at one record: the resumed seed it held then and its first
+/// `terms` local values. Read back, it is rebuilt from those terms, each crossed alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FoldPoint {
+    trajectory: TrajectoryId,
+    seed: Option<Label>,
+    terms: usize,
+}
+
+impl FoldPoint {
+    fn of(
+        trajectory: &TrajectoryId,
+        local: &OrdMap<TrajectoryId, Vector<ValueId>>,
+        resumed: &OrdMap<TrajectoryId, Label>,
+    ) -> FoldPoint {
+        FoldPoint {
+            trajectory: trajectory.clone(),
+            seed: resumed.get(trajectory).cloned(),
+            terms: local.get(trajectory).map_or(0, Vector::len),
+        }
+    }
+
+    fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
+        if let Some(seed) = &mut self.seed {
+            seed.cross_value(crossing);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ReleasedRecord {
-    /// Released at the bound its dispatch received against, met with the value's own label:
+    /// Released at the fold its dispatch received against, met with the value's own label:
     /// what the trajectory sent the tool may come back in its result.
     Result {
         value: ValueId,
@@ -271,19 +310,51 @@ enum ReleasedRecord {
         value: ValueId,
         body: ValueBody,
     },
-    /// At the trajectory's label over its first `terms` local values, as the answer stood.
+    /// At the trajectory's fold as the answer stood.
     Answer {
-        trajectory: TrajectoryId,
         digest: appa_runtime_api::ReleaseDigest,
-        terms: usize,
+        at: FoldPoint,
     },
 }
 
 impl Released {
-    fn fold(&mut self, fact: &Fact, next_value: ValueId, local: &OrdMap<TrajectoryId, Vector<ValueId>>) {
+    fn fold(
+        &mut self,
+        fact: &Fact,
+        next_value: ValueId,
+        local: &OrdMap<TrajectoryId, Vector<ValueId>>,
+        resumed: &OrdMap<TrajectoryId, Label>,
+    ) {
         let position = self.folded;
         self.folded += 1;
         let record = match fact {
+            Fact::DispatchOpened {
+                trajectory, dispatch, ..
+            } => {
+                self.received
+                    .insert(dispatch.clone(), FoldPoint::of(trajectory, local, resumed));
+                return;
+            }
+            // An offer's decision admits a confined result by accepting the staged candidate, or
+            // by deriving one that owes nothing; either lands beside the admission it makes.
+            Fact::CandidateAccepted {
+                subject: SubjectKey::ConfinedResult(dispatch),
+                offer,
+                ..
+            }
+            | Fact::CandidateDerived {
+                derived:
+                    DerivedCandidate::Result {
+                        dispatch,
+                        from: crate::candidate::ConfinedFrom::Offer(offer),
+                        residual: None,
+                        ..
+                    },
+                ..
+            } => {
+                self.admitted_by.insert(dispatch.clone(), *offer);
+                return;
+            }
             Fact::ValueAdmitted { value, provenance, .. } => match provenance {
                 Provenance::ToolResult { dispatch } => {
                     self.results.insert(dispatch.clone(), position);
@@ -305,9 +376,8 @@ impl Released {
             Fact::AnswerReleased { trajectory, digest, .. } => {
                 self.answers.insert(trajectory.clone(), position);
                 ReleasedRecord::Answer {
-                    trajectory: trajectory.clone(),
                     digest: *digest,
-                    terms: local.get(trajectory).map_or(0, Vector::len),
+                    at: FoldPoint::of(trajectory, local, resumed),
                 }
             }
             _ => return,
@@ -492,6 +562,12 @@ impl Projection {
             label.cross_value(crossing);
         }
         each_mut(&mut self.candidates, |candidate| candidate.derived.cross(crossing));
+        each_mut(&mut self.released.received, |point| point.cross(crossing));
+        each_mut(&mut self.released.records, |record| {
+            if let ReleasedRecord::Answer { at, .. } = record {
+                at.cross(crossing);
+            }
+        });
         let trajectories: Vec<TrajectoryId> = self.local_label.keys().cloned().collect();
         for trajectory in trajectories {
             let snapshot = self
@@ -530,6 +606,14 @@ impl Projection {
     /// Fold one record into every view. The one fold: replay, cache rebuild, and the advance of a
     /// held view all reach the log through this function, so no second fold can drift from it.
     pub(crate) fn fold(&mut self, fact: &Fact) {
+        let spawn_close = match fact {
+            Fact::DispatchClosed { dispatch, .. } => self
+                .bound
+                .get(&ForkId::of(dispatch))
+                .and_then(|child| self.latest_crossing_at(child))
+                .map(|at| (dispatch.clone(), at)),
+            _ => None,
+        };
         let Projection {
             position: _,
             values,
@@ -572,7 +656,10 @@ impl Projection {
             versions,
             released,
         } = self;
-        released.fold(fact, ValueId::new(values.len() as u64), local);
+        released.fold(fact, ValueId::new(values.len() as u64), local, resumed);
+        if let Some((dispatch, at)) = spawn_close {
+            released.spawn_closes.insert(dispatch, at);
+        }
         match fact {
             Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                 trajectory,
@@ -980,14 +1067,11 @@ impl Projection {
         Some(match self.released.records.get(&position)? {
             ReleasedRecord::Result { value, dispatch, body } => (
                 digest(body),
-                self.receiving_bounds.get(dispatch)?.combine(self.value_label(*value)?),
+                self.fold_at(self.released.received.get(dispatch)?)
+                    .combine(self.value_label(*value)?),
             ),
             ReleasedRecord::Return { value, body } => (digest(body), self.value_label(*value)?.clone()),
-            ReleasedRecord::Answer {
-                trajectory,
-                digest,
-                terms,
-            } => (*digest, self.fold_through(trajectory, *terms)),
+            ReleasedRecord::Answer { digest, at } => (*digest, self.fold_at(at)),
         })
     }
 
@@ -1018,25 +1102,62 @@ impl Projection {
         }
     }
 
-    /// The position of `trajectory`'s latest answer.
-    pub(crate) fn answer_at(&self, trajectory: &TrajectoryId) -> Option<u64> {
-        self.released.answers.get(trajectory).copied()
+    /// The position of `trajectory`'s latest answer, where it holds `digest` at the fold
+    /// `trajectory` stands at now: the same terms, so the same label under every revision.
+    pub(crate) fn standing_answer(
+        &self,
+        trajectory: &TrajectoryId,
+        digest: &appa_runtime_api::ReleaseDigest,
+    ) -> Option<u64> {
+        let position = *self.released.answers.get(trajectory)?;
+        match self.released.records.get(&position)? {
+            ReleasedRecord::Answer { digest: recorded, at }
+                if recorded == digest && *at == FoldPoint::of(trajectory, &self.local, &self.resumed) =>
+            {
+                Some(position)
+            }
+            _ => None,
+        }
     }
 
-    /// `trajectory`'s fold as it stood when it had admitted its first `terms` local values.
-    fn fold_through(&self, trajectory: &TrajectoryId, terms: usize) -> Label {
-        let mut fold = self.opened_base(trajectory);
-        if let Some(seed) = self.resumed.get(trajectory) {
+    /// The fold `point` names, rebuilt from its terms as this projection stands.
+    fn fold_at(&self, point: &FoldPoint) -> Label {
+        let mut fold = self.opened_base(&point.trajectory);
+        if let Some(seed) = &point.seed {
             fold.fold(seed);
         }
-        for (_, label) in self.inherited_sources(trajectory) {
+        for (_, label) in self.inherited_sources(&point.trajectory) {
             fold.fold(label);
         }
-        let local = self.local.get(trajectory).into_iter().flatten().take(terms);
+        let local = self
+            .local
+            .get(&point.trajectory)
+            .into_iter()
+            .flatten()
+            .take(point.terms);
         for label in local.filter_map(|id| self.value_label(*id)) {
             fold.fold(label);
         }
         fold
+    }
+
+    /// `child`'s latest return, unless the parent addressed it again since.
+    fn latest_occurrence(&self, child: &TrajectoryId) -> Option<ChildReturnId> {
+        if self.resumed_since_return.contains(child) {
+            return None;
+        }
+        let occurrence = self.returns_by.get(child).copied().unwrap_or(0).checked_sub(1)?;
+        Some(ChildReturnId::new(child.clone(), occurrence))
+    }
+
+    /// The record that admitted `child`'s latest return into its parent, unless that return
+    /// froze as a deferral.
+    fn latest_crossing_at(&self, child: &TrajectoryId) -> Option<u64> {
+        let latest = self.latest_occurrence(child)?;
+        match self.deferrals.contains_key(&latest) {
+            true => None,
+            false => self.released.returns.get(&latest).copied(),
+        }
     }
 
     fn prepared_of(&self, child: &TrajectoryId) -> Option<&PreparedFork> {
@@ -1594,11 +1715,26 @@ impl Views<'_> {
     /// crosses anew, at the label it stands at then. A deferral's crossing, once accepted,
     /// answers the parent's settlement, not the child.
     pub(crate) fn latest_crossing(&self, child: &TrajectoryId) -> Option<crate::transition::Admitted> {
-        let latest = self.latest_occurrence(child)?;
-        match self.projection.deferrals.contains_key(&latest) {
-            true => None,
-            false => self.projection.released_return(&latest),
-        }
+        self.projection.admitted_at(self.projection.latest_crossing_at(child)?)
+    }
+
+    /// The crossing a report of the spawn `dispatch` bound to `child` answers with: while the
+    /// dispatch stands open, `child`'s latest; once closed, the one it closed answered by.
+    pub(crate) fn spawn_crossing(
+        &self,
+        dispatch: &DispatchId,
+        child: &TrajectoryId,
+    ) -> Option<crate::transition::Admitted> {
+        let at = match self.is_open(dispatch) {
+            true => self.projection.latest_crossing_at(child),
+            false => self.projection.released.spawn_closes.get(dispatch).copied(),
+        };
+        self.projection.admitted_at(at?)
+    }
+
+    /// The offer whose decision admitted `dispatch`'s confined result, if an offer's did.
+    pub(crate) fn admitted_by(&self, dispatch: &DispatchId) -> Option<&crate::value::OfferId> {
+        self.projection.released.admitted_by.get(dispatch)
     }
 
     /// The return `id` crossed into its parent, beside the record that admitted it there.
@@ -1614,21 +1750,11 @@ impl Views<'_> {
     /// The deferral `child`'s latest return froze, if it froze one: a return repeating its value
     /// is that deferral again, never a second occurrence.
     pub(crate) fn latest_deferral(&self, child: &TrajectoryId) -> Option<(ChildReturnId, &Deferral)> {
-        let latest = self.latest_occurrence(child)?;
+        let latest = self.projection.latest_occurrence(child)?;
         self.projection
             .deferrals
             .get(&latest)
             .map(|deferral| (latest, deferral))
-    }
-
-    /// `child`'s latest return, unless the parent addressed it again since.
-    fn latest_occurrence(&self, child: &TrajectoryId) -> Option<ChildReturnId> {
-        if self.projection.resumed_since_return.contains(child) {
-            return None;
-        }
-        let next = self.returns_by(child);
-        next.checked_sub(1)
-            .map(|occurrence| ChildReturnId::new(child.clone(), occurrence))
     }
 
     /// Where the deferred return at this occurrence stands, if one froze there.

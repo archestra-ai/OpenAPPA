@@ -3392,6 +3392,46 @@ async fn a_partly_cleared_derivation_is_staged_with_its_own_remedies() {
     );
 }
 
+/// A turn end that cannot close its calls leaves the answer unrecorded: a staged result
+/// stands open and refuses to close as abandoned, so the answer is not the turn's last word
+/// and its `Ack` carries no receipt.
+#[tokio::test]
+async fn a_turn_end_whose_calls_do_not_close_gives_its_answer_no_receipt() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let runtime =
+        Runtime::open(partly_cleared_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    assert!(matches!(
+        session.on_tool_call(leak(), false).await,
+        Ok(ToolCallDecision::Deny { .. })
+    ));
+    assert!(matches!(
+        run_sanitize_offer(&runtime, &mut session).await,
+        ToolResultDecision::Replace { .. }
+    ));
+    let ended = crate::hooks::handle_embedded(
+        &runtime,
+        appa_runtime_api::HookEvent::TurnEnd {
+            actor: Actor {
+                root: root(),
+                child: None,
+            },
+            open_calls: appa_runtime_api::OpenCalls::Abandon,
+            answer: Some("the summary".to_string()),
+        },
+    )
+    .await;
+    assert_eq!(
+        (
+            ended.decision,
+            ended.receipt,
+            runtime.open_dispatches(&root(), &root()).len()
+        ),
+        (appa_runtime_api::HookDecision::Ack, None, 1)
+    );
+}
+
 /// The sanitize offer a block on `trajectory` surfaced, taken and the call run to its result.
 async fn sanitized_result(runtime: &Runtime, session: &Session, trajectory: &TrajectoryId) -> ToolResultDecision {
     let quoted = runtime

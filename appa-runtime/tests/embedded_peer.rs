@@ -691,6 +691,17 @@ async fn a_completed_read_replays_its_receipt_after_a_reload_refuses_the_tool() 
         .clone()
         .expect("a delivered read carries its release receipt");
     assert_eq!(released.digest, appa_runtime_api::ReleaseDigest::of(b"hello"));
+    assert_eq!(
+        runtime
+            .judge_release(
+                std::slice::from_ref(&released),
+                "send",
+                &serde_json::value::to_raw_value(&json!({})).expect("raw")
+            )
+            .await,
+        Ok(()),
+        "the read's receipt names the record that admitted it"
+    );
 
     let path = dir.path().join("narrowing.toml");
     std::fs::write(

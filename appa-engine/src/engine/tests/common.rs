@@ -1246,6 +1246,15 @@ pub(super) fn member_started(e: &Engine, log: &mut Vec<Fact>, fan_out: &crate::v
 }
 
 pub(super) fn staged_engine() -> Engine {
+    staged_engine_on(
+        &["secret", "suspicious", "trusted"],
+        &[("redactor", 0, 1), ("scrubber", 1, 2)],
+    )
+}
+
+/// A `fetch` that reads at the lowest rank of `chain`, confined behind output `sanitizers`,
+/// each lifting trust from its floor to its rank.
+pub(super) fn staged_engine_on(chain: &[&str], sanitizers: &[(&str, u8, u8)]) -> Engine {
     let sanitizer = |name: &str, from_floor: Trust, to: Trust| crate::authority::Sanitizer {
         name: crate::names::SanitizerName::new(name),
         on: crate::authority::SanitizerPoints {
@@ -1258,11 +1267,11 @@ pub(super) fn staged_engine() -> Engine {
     };
     open_engine(RegistryConfig {
         recorders: Default::default(),
-        trust_chain: TrustChain::new(vec!["secret".into(), "suspicious".into(), "trusted".into()]),
-        sanitizers: vec![
-            sanitizer("redactor", Trust::new(0), Trust::new(1)),
-            sanitizer("scrubber", Trust::new(1), Trust::new(2)),
-        ],
+        trust_chain: TrustChain::new(chain.iter().map(|rank| rank.to_string()).collect()),
+        sanitizers: sanitizers
+            .iter()
+            .map(|(name, from_floor, to)| sanitizer(name, Trust::new(*from_floor), Trust::new(*to)))
+            .collect(),
         ..test_config(vec![
             ToolAnnotation {
                 delta: Delta {

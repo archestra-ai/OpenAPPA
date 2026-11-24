@@ -2261,3 +2261,103 @@ async fn a_replayed_return_carries_the_receipt_of_the_occurrence_it_replays() {
         "the replay names the record that crossed the bytes it returns"
     );
 }
+
+/// A crossed return's receipt is judged at the label the child's value crossed at, not
+/// above it.
+#[tokio::test]
+async fn a_crossed_returns_receipt_is_judged_at_the_label_it_crossed_at() {
+    const SINK: &str = r#"
+[[policy.tool]]
+name = "post"
+requires = { trust = "trusted" }
+delta = {}
+"#;
+    let Deployed { runtime, dir: _dir } = deployed_serving(&format!("{TOOLS}{SINK}{DEPLOYMENT}"));
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("turn one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    tainted_root(&runtime).await;
+    let second = child
+        .on_child_return("turn two".to_string(), operation("op-2"))
+        .await
+        .expect("the return is judged");
+    let ChildReturnDecision::Returned { receipt: crossed, .. } = second else {
+        panic!("the return crosses at once: {second:?}");
+    };
+    let no_args = raw(serde_json::json!({}));
+    assert_eq!(
+        runtime.judge_release(&[crossed], "post", &no_args).await,
+        Err(appa_runtime_api::ReleaseRefusal::HardBlock),
+        "a suspicious child's return does not reach a sink that requires trusted content"
+    );
+}
+
+/// A bound child of a fresh `fetch(a)` spawn released under the call id `toolu-<a>`.
+async fn bound_child(runtime: &Runtime, a: i64) -> Session {
+    let call_id = format!("toolu-{a}");
+    let fork = binding(declaring(runtime, call("fetch", a), &call_id, as_spoken()).await);
+    session(runtime)
+        .on_child_start(TrajectoryId(format!("cc:root:child-{a}")), SpawnRef::Binding(fork))
+        .expect("the fork binds and the child opens")
+}
+
+async fn crossing(child: &Session, said: &str, op: &str) -> appa_runtime_api::ReleaseReceipt {
+    match child.on_child_return(said.to_string(), operation(op)).await {
+        Ok(ChildReturnDecision::Returned { receipt, .. }) => receipt,
+        other => panic!("the return crosses: {other:?}"),
+    }
+}
+
+async fn spawn_reported(runtime: &Runtime, child: &Session, a: i64, said: &str) -> SpawnResultDecision {
+    session(runtime)
+        .on_spawn_result_identified(
+            call("fetch", a),
+            Some(format!("toolu-{a}")),
+            spoken(said),
+            Some(child.trajectory.clone()),
+            Some(said.to_string()),
+        )
+        .await
+        .expect("the spawn result is decided")
+}
+
+/// A repeated spawn result answers with the crossing its first report replayed, though the
+/// child crossed the same bytes again since.
+#[tokio::test]
+async fn a_repeated_spawn_result_replays_the_crossing_its_first_report_replayed() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = bound_child(&runtime, 1).await;
+    let first = crossing(&child, "x", "op-1").await;
+    let replayed = spawn_reported(&runtime, &child, 1, "x").await;
+    assert_eq!(
+        replayed,
+        SpawnResultDecision::Return(ChildReturnDecision::Returned {
+            value: "x".to_string(),
+            receipt: first.clone(),
+        })
+    );
+    let again = crossing(&child, "x", "op-2").await;
+    assert_ne!(again, first, "the child's second crossing is another record");
+    assert_eq!(spawn_reported(&runtime, &child, 1, "x").await, replayed);
+}
+
+/// A spawn result whose message no crossing stood for stays withheld when repeated, though
+/// the child crossed those bytes since.
+#[tokio::test]
+async fn a_repeated_withheld_spawn_result_stays_withheld_after_the_child_crosses_its_bytes() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = bound_child(&runtime, 1).await;
+    let withheld = spawn_reported(&runtime, &child, 1, "y").await;
+    assert!(
+        matches!(
+            withheld,
+            SpawnResultDecision::Return(ChildReturnDecision::Blocked { .. })
+        ),
+        "{withheld:?}"
+    );
+    crossing(&child, "y", "op-1").await;
+    assert_eq!(spawn_reported(&runtime, &child, 1, "y").await, withheld);
+}

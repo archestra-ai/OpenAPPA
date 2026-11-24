@@ -313,11 +313,12 @@ impl Session {
                         let dispatch = context.classify_spawn_report(&call, call_id.as_deref())?;
                         let fork = appa_engine::value::ForkId::of(&dispatch);
                         let status = context.fork_status(&fork);
-                        // A report repeating the bound child's latest crossing is that crossing,
-                        // whatever the child froze before it.
+                        // A report repeating the crossing the spawn answers with — the bound
+                        // child's latest while the dispatch is open, the one it closed on after —
+                        // is that crossing, whatever the child froze before it.
                         let crossed = match (&status, &child, &value) {
                             (ForkStatus::Bound(bound), Some(named), Some(said)) if named == bound => context
-                                .latest_return(named)
+                                .spawn_return(&dispatch, named)
                                 .filter(|(latest, _)| latest == said)
                                 .map(|(_, receipt)| receipt),
                             _ => None,

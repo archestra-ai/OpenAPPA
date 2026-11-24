@@ -1024,10 +1024,11 @@ pub enum HookDecision {
 }
 
 impl HookDecision {
-    /// Whether this decision lets the host deliver what the event carried or what the
-    /// decision names, so a release receipt may stand beside it. A context decision
-    /// acknowledges its event with notices beside it.
-    pub fn releases(&self) -> bool {
+    /// Whether this decision's kind may carry a release receipt on the wire. This checks the
+    /// envelope only and authorizes no delivery: a `ChildReturn` may name a staged
+    /// replacement the child must resubmit before it crosses. Only the receipt itself names
+    /// released content. A context decision acknowledges its event with notices beside it.
+    pub fn may_carry_receipt(&self) -> bool {
         matches!(
             self,
             HookDecision::Ack

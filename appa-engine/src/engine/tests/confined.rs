@@ -910,7 +910,7 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
         "taking the candidate ends every other offer standing on it: {hopped:?}"
     );
     let after = e
-        .view(&traj(), [log.clone(), hopped].concat(), (log.len() + 8) as u64)
+        .view(&traj(), [log.clone(), hopped.clone()].concat(), (log.len() + 8) as u64)
         .expect("the hop's batch replays");
     assert_eq!(
         after.projection().view(&traj()).current_label(),
@@ -924,6 +924,21 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
             .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
             .is_none(),
         "an admitted candidate leaves the staging model"
+    );
+    let rehopped = execute_offer(
+        &e,
+        &[log.clone(), hopped].concat(),
+        hop,
+        OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+            sanitizer: crate::names::SanitizerName::new("scrubber"),
+            source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+            derived: scrubbed.clone(),
+        }),
+    )
+    .expect("the repeat answers");
+    assert!(
+        matches!(&offer_answer(&rehopped), OfferFollowUp::Admitted { value } if value.body == scrubbed),
+        "the hop that admitted the result is answered with that admission when repeated"
     );
 
     let accepted = execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("the acceptance runs");
@@ -999,6 +1014,59 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
         .map(|_| ()),
         Err(TransitionError::PlanOutcomeMismatch),
         "an acceptance carrying evidence is refused after the offer ends, as it is before"
+    );
+}
+
+/// A hop that leaves a residual stages again; the acceptance offered on that stage admits.
+/// Repeated, the acceptance is answered with its admission and the hop is not: the hop's
+/// decision admitted nothing, and the stage it left no longer stands.
+#[test]
+fn a_repeated_hop_is_not_answered_with_the_admission_a_later_offer_made() {
+    let e = staged_engine_on(
+        &["secret", "suspicious", "vetted", "trusted"],
+        &[("redactor", 0, 1), ("scrubber", 1, 2)],
+    );
+    let (log, _, derived, staged) = staged_candidate(&e);
+    let stage = confined_of(&staged.follow_up).clone();
+    let log = [log, appended_facts(staged)].concat();
+    let hop = stage
+        .offers
+        .iter()
+        .find(|(_, plan)| plan.hop().is_some())
+        .expect("the stage offers its hop")
+        .0;
+    let scrubbed = ValueBody::new("page bytes, redacted, scrubbed");
+    let derivation = || {
+        OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+            sanitizer: crate::names::SanitizerName::new("scrubber"),
+            source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+            derived: scrubbed.clone(),
+        })
+    };
+    let hopped = execute_offer(&e, &log, hop, derivation()).expect("the hop runs");
+    let restaged = confined_of(&hopped.follow_up).clone();
+    let log = [log, appended_facts(hopped)].concat();
+    let accept = restaged
+        .offers
+        .iter()
+        .find(|(_, plan)| plan.narrowing().is_some())
+        .expect("the stage offers its acceptance")
+        .0;
+    let accepted = execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("the acceptance runs");
+    let admitted = offer_answer(&accepted).clone();
+    assert!(
+        matches!(&admitted, OfferFollowUp::Admitted { value } if value.body == scrubbed),
+        "{admitted:?}"
+    );
+    let log = [log, appended_facts(accepted)].concat();
+    let repeat =
+        |offer, outcome| offer_answer(&execute_offer(&e, &log, offer, outcome).expect("the repeat answers")).clone();
+    assert_eq!(
+        (
+            repeat(accept, OfferOutcome::Approved(Vec::new())),
+            repeat(hop, derivation())
+        ),
+        (admitted, OfferFollowUp::Invalidated)
     );
 }
 

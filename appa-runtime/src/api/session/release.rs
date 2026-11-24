@@ -33,12 +33,14 @@ pub(in crate::api) async fn judge_release(
     let approves =
         |authority: &appa_engine::names::AuthorityName| deployment.externals.is_stock_approve(authority.as_str());
     let mut evidence = Vec::new();
-    for _ in 0..RESOLUTION_ROUNDS {
+    // One judgment beyond the last batch reads that batch's answers.
+    for consulted in 0..=RESOLUTION_ROUNDS {
         match deployment
             .resident
             .judge_release(label, sink, arguments, principal, &evidence, approves)
         {
             ReleaseRound::Judged(judged) => return judged,
+            ReleaseRound::Consult(_) if consulted == RESOLUTION_ROUNDS => break,
             ReleaseRound::Consult(requests) => {
                 let asked = requests.iter().map(|request| membership(deployment, request));
                 for answered in crate::external::settle_batch(asked).await {

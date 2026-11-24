@@ -1585,3 +1585,101 @@ async fn a_release_reads_membership_at_the_judgment_and_fails_closed_without_an_
     );
     assert_eq!(audit_len(&runtime), before);
 }
+
+/// `send` under `groups` stock `approve` authorities, each permitting the readers of its own
+/// directory group, in declaration order `via-g1`, `via-g2`, ….
+fn covered_by_groups_policy(groups: u32) -> String {
+    let each = |template: &str| -> String { (1..=groups).map(|k| template.replace("{k}", &k.to_string())).collect() };
+    let named = each("\n[policy.audience.group.g{k}]\nfrom = [\"slack:user-group/g{k}\"]\n");
+    let authorities = each(
+        "\n[[policy.authority]]\nname = \"via-g{k}\"\n[policy.authority.permits]\naudience_missing = [\"@g{k}\"]\n",
+    );
+    let bound = each("\n[externals.authorities.via-g{k}]\nbuiltin = \"approve\"\n");
+    format!(
+        r#"
+[policy]
+version = 2
+{named}
+[[policy.tool]]
+name = "read_hr"
+delta = {{ audience = ["alice@corp.example", "bob@corp.example"] }}
+
+[[policy.tool]]
+name = "send"
+parameters = {{ type = "object", properties = {{ to = {{ type = "string" }} }}, required = ["to"] }}
+requires = {{ audience = {{ contains = ["$to"] }} }}
+delta = {{}}
+{authorities}
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+{bound}
+[externals.audience.slack]
+url = "AUDIENCE_URL"
+selectors = [{{ template = "user-group/<handle>" }}]
+"#
+    )
+}
+
+/// The root's answer, its audience narrowed to Alice and Bob, judged into `send` to Eve.
+async fn answer_sent_to_eve(
+    dir: &tempfile::TempDir,
+    groups: u32,
+    url: &str,
+) -> Result<(), appa_runtime_api::ReleaseRefusal> {
+    let runtime = narrowed_under(dir, &covered_by_groups_policy(groups), url).await;
+    let answer = hooks::handle_embedded(
+        &runtime,
+        HookEvent::TurnEnd {
+            actor: actor(),
+            open_calls: appa_runtime_api::OpenCalls::Abandon,
+            answer: Some("the summary".to_string()),
+        },
+    )
+    .await
+    .receipt
+    .expect("a recorded answer carries its receipt");
+    runtime
+        .judge_release(
+            std::slice::from_ref(&answer),
+            "send",
+            &raw(serde_json::json!({ "to": "eve@corp.example" })),
+        )
+        .await
+}
+
+fn selectors_read(directory: &Directory) -> Vec<String> {
+    directory
+        .requests()
+        .iter()
+        .filter_map(|request| request["artifact"]["selector"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A cover whose roster does not answer leaves the next independent cover to be read: the
+/// release is judged on the cover that answers.
+#[tokio::test]
+async fn a_release_whose_first_cover_does_not_answer_is_judged_on_the_next() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, directory) = serve_directory().await;
+    directory.group("user-group/g2", "eve@corp.example", None);
+    assert_eq!(answer_sent_to_eve(&dir, 2, &url).await, Ok(()));
+    assert_eq!(selectors_read(&directory), ["user-group/g1", "user-group/g2"]);
+}
+
+/// Eight covers read one roster a batch, the eighth the one that holds the recipient: the
+/// judgment after the eighth batch reads its answer.
+#[tokio::test]
+async fn a_release_is_judged_on_the_answer_of_its_eighth_consult_batch() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, directory) = serve_directory().await;
+    for k in 1..=7 {
+        directory.group(&format!("user-group/g{k}"), "zed@corp.example", None);
+    }
+    directory.group("user-group/g8", "eve@corp.example", None);
+    assert_eq!(answer_sent_to_eve(&dir, 8, &url).await, Ok(()));
+    assert_eq!(
+        selectors_read(&directory),
+        (1..=8).map(|k| format!("user-group/g{k}")).collect::<Vec<_>>()
+    );
+}

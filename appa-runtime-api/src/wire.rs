@@ -1703,7 +1703,7 @@ impl WireDecision {
                 running: self.running.ok_or_else(|| missing("running"))?,
             },
         };
-        match receipted && !decision.releases() {
+        match receipted && !decision.may_carry_receipt() {
             true => Err(malformed(format!("{name:?} with a receipt"))),
             false => Ok(decision),
         }

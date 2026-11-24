@@ -510,3 +510,199 @@ async fn components_of_two_families_combine_only_under_one_principal() {
     );
     assert_eq!(judge(&runtime, &[a, c], "post", "eve@corp.example").await, Ok(()));
 }
+
+/// A chain whose `mid` rank a later revision drops: `vetted` sits below it, so admitting a
+/// `mid` value after a `vetted` one moves nothing until the rank is gone.
+const FOUR_RANKS: &str = r#"
+[policy]
+version = 2
+trust_chain = ["low", "vetted", "mid", "high"]
+
+[[policy.tool]]
+name = "read_mid"
+delta = { trust = "mid" }
+
+[[policy.tool]]
+name = "read_vetted"
+delta = { trust = "vetted" }
+
+[[policy.tool]]
+name = "lookup"
+delta = {}
+
+[[policy.tool]]
+name = "post"
+requires = { trust = "vetted" }
+delta = {}
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+"#;
+
+/// [`FOUR_RANKS`] without `mid`: a `mid` value crosses to the lowest rank.
+const MID_DROPPED: &str = r#"
+[policy]
+version = 2
+trust_chain = ["low", "vetted", "high"]
+
+[[policy.tool]]
+name = "read_vetted"
+delta = { trust = "vetted" }
+
+[[policy.tool]]
+name = "lookup"
+delta = {}
+
+[[policy.tool]]
+name = "post"
+requires = { trust = "vetted" }
+delta = {}
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+"#;
+
+/// A result's receiving bound is rebuilt from the terms its trajectory held as the dispatch
+/// opened, each crossed alone: after a revision drops a rank, the echo of what the root sent a
+/// tool stands where the root and its answer stand.
+#[tokio::test]
+async fn a_results_bound_crosses_a_revision_as_the_roots_label_does() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, FOUR_RANKS).expect("the fixture writes");
+    let runtime = Arc::new(
+        Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens"),
+    );
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+                settings: Default::default(),
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+    for (tool, body) in [("read_mid", "a mid fact"), ("read_vetted", "a vetted fact")] {
+        if let HookDecision::DenyCall { feedback, .. } = propose(&runtime, call(tool)).await {
+            assert!(matches!(
+                runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+                RemedyOutcome::Authorized { .. }
+            ));
+            result_receipt(&runtime, tool, body).await;
+        } else {
+            panic!("{tool} narrows the root and is offered for acceptance");
+        }
+    }
+    let echoed = result_receipt(&runtime, "lookup", "no match for: a mid fact").await;
+    let answer = turn_end(&runtime, Some("built from both facts"))
+        .await
+        .receipt
+        .expect("recorded");
+    assert_eq!(runtime.status(&root()).expect("status").trust, "vetted");
+
+    std::fs::write(&path, MID_DROPPED).expect("the fixture writes");
+    runtime
+        .reload(Config::load(&path).expect("the revision validates"))
+        .expect("the revision publishes");
+    let root_trust = runtime.status(&root()).expect("status").trust;
+    let no_args = raw(serde_json::json!({}));
+    let answered = runtime.judge_release(&[answer], "post", &no_args).await;
+    let echo = runtime.judge_release(&[echoed], "post", &no_args).await;
+    assert_eq!(
+        (root_trust.as_str(), answered, echo),
+        ("low", Err(ReleaseRefusal::HardBlock), Err(ReleaseRefusal::HardBlock)),
+        "the echo of what the root sent stands where the root and its answer stand"
+    );
+}
+
+/// The same answer bytes given again after an admission that moved no label are another
+/// record: that admission lowers the label across a revision, and the second answer's label
+/// holds it.
+#[tokio::test]
+async fn a_repeated_answer_after_an_admission_is_another_record_over_its_terms() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, FOUR_RANKS).expect("the fixture writes");
+    let runtime = Arc::new(
+        Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens"),
+    );
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+                settings: Default::default(),
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+    let HookDecision::DenyCall { feedback, .. } = propose(&runtime, call("read_vetted")).await else {
+        panic!("read_vetted narrows the root");
+    };
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    result_receipt(&runtime, "read_vetted", "a vetted fact").await;
+    let first = turn_end(&runtime, Some("done")).await.receipt.expect("recorded");
+    // `mid` is above `vetted`: admitting it moves nothing under the first chain.
+    result_receipt(&runtime, "read_mid", "a mid fact").await;
+    let second = turn_end(&runtime, Some("done")).await.receipt.expect("recorded");
+    assert_eq!(runtime.status(&root()).expect("status").trust, "vetted");
+
+    std::fs::write(&path, MID_DROPPED).expect("the fixture writes");
+    runtime
+        .reload(Config::load(&path).expect("the revision validates"))
+        .expect("the revision publishes");
+    let root_trust = runtime.status(&root()).expect("status").trust;
+    let judged = runtime
+        .judge_release(std::slice::from_ref(&second), "post", &raw(serde_json::json!({})))
+        .await;
+    assert_eq!(
+        (root_trust.as_str(), second == first, judged),
+        ("low", false, Err(ReleaseRefusal::HardBlock)),
+        "the second answer stands where the root stood when it was given"
+    );
+}
+
+/// The same answer bytes given again after the root narrowed are another record at the
+/// narrower label, and the earlier record keeps the label it was released at.
+#[tokio::test]
+async fn the_same_answer_after_a_narrowing_is_another_record_at_the_narrower_label() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = opened(&dir).await;
+    let before = turn_end(&runtime, Some("ok")).await.receipt.expect("recorded");
+    narrowed(&runtime).await;
+    let after = turn_end(&runtime, Some("ok")).await.receipt.expect("recorded");
+    assert_ne!(after.fact_position, before.fact_position);
+    assert_eq!(
+        judge(&runtime, std::slice::from_ref(&after), "post", "eve@corp.example").await,
+        Err(ReleaseRefusal::HardBlock)
+    );
+    assert_eq!(judge(&runtime, &[before], "post", "eve@corp.example").await, Ok(()));
+}

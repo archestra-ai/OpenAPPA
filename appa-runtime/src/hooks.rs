@@ -637,7 +637,7 @@ fn handled(
     receipt: Option<ReleaseReceipt>,
     decision: HookDecision,
 ) -> Handled {
-    let receipt = receipt.filter(|_| decision.releases());
+    let receipt = receipt.filter(|_| decision.may_carry_receipt());
     let presentation = presentation.or_else(|| presentation_for(&decision));
     let (outcome, mut offers) = hook_result(&decision);
     if let Some(presentation) = &presentation {

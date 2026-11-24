@@ -476,8 +476,9 @@ fn released_label(
             .store
             .log(root)
             .map_err(|error| match appa_eventlog::StoreErrorClass::from(&error) {
+                // A judgment changes nothing a later report reads, so the failure is traced only.
                 appa_eventlog::StoreErrorClass::Storage => {
-                    inner.note_store_error(Some(root), crate::events::StoreOperation::Read, &error);
+                    tracing::warn!(root = %root.0, %error, "a receipt's log did not read");
                     ReleaseRefusal::MissingFact(RetryHint::Later)
                 }
                 _ => {

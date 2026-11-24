@@ -451,13 +451,13 @@ impl Engine {
                 (OfferEnd::Accepted, OfferOutcome::Derived(Evidence::Sanitizer { .. }), Some(_)) => {
                     Ok(EngineDecision {
                         append: None,
-                        follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch)),
+                        follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch, &execution.offer)),
                     })
                 }
                 (OfferEnd::Accepted, OfferOutcome::Approved(evidence), None) if evidence.is_empty() => {
                     Ok(EngineDecision {
                         append: None,
-                        follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch)),
+                        follow_up: FollowUp::Offer(self.confined_repeat(views, dispatch, &execution.offer)),
                     })
                 }
                 (OfferEnd::Invalidated, _, _) => Ok(EngineDecision {
@@ -516,8 +516,12 @@ impl Engine {
         })
     }
 
-    fn confined_repeat(&self, views: &Views, dispatch: &DispatchId) -> OfferFollowUp {
-        if let Some(value) = views.admitted_result(dispatch) {
+    /// A repeat of an accepted offer on a confined result: the admission, where this offer's
+    /// decision made it; the stage it left, while that stands; or no longer standing.
+    fn confined_repeat(&self, views: &Views, dispatch: &DispatchId, offer: &crate::value::OfferId) -> OfferFollowUp {
+        if views.admitted_by(dispatch) == Some(offer)
+            && let Some(value) = views.admitted_result(dispatch)
+        {
             return OfferFollowUp::Admitted { value };
         }
         let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());

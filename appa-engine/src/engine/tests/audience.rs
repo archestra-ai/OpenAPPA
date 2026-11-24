@@ -1770,7 +1770,8 @@ mod symbolic_audiences {
 
     /// A release is withheld at a gap no admitted authority can cover, without reading the
     /// membership another gap's cover would need; where every gap has a possible cover, the
-    /// judgment asks for the membership of the first one still unresolved.
+    /// judgment names each possible cover's membership of the first gap still unresolved as
+    /// one alternative, so a cover whose membership cannot be read leaves the next one to read.
     #[test]
     fn a_release_reads_membership_only_where_every_gap_has_a_possible_cover() {
         use crate::engine::{ReleaseError, ReleaseJudgment};
@@ -1784,18 +1785,21 @@ mod symbolic_audiences {
             },
             ..Requires::default()
         };
-        let officer = crate::authority::Authority {
+        let approver = |name: &str, group: &str| crate::authority::Authority {
             except: Vec::new(),
-            name: AuthorityName::new("officer"),
+            name: AuthorityName::new(name),
             mandate: crate::authority::Mandate {
-                reader_ceiling: Some(grouped(&[], &["board"])),
+                reader_ceiling: Some(grouped(&[], &[group])),
                 ..crate::authority::Mandate::default()
             },
             scope: crate::authority::Scope::default(),
             hint: None,
         };
         let e = grouped_engine(
-            config(vec![post], vec![officer]),
+            config(
+                vec![post],
+                vec![approver("officer", "board"), approver("deputy", "officers")],
+            ),
             &[],
             Label::new(TRUSTED, Audience::public()),
         );
@@ -1820,8 +1824,10 @@ mod symbolic_audiences {
         assert!(
             matches!(
                 judge(TRUSTED),
-                Err(ReleaseError::MembershipNeeded { ref needed })
-                    if *needed == vec![SymbolicAtom::Group(crate::label::GroupRef::Named(GroupName::new("board")))]
+                Err(ReleaseError::MembershipNeeded { ref alternatives })
+                    if *alternatives == ["board", "officers"].map(|group| vec![
+                        SymbolicAtom::Group(crate::label::GroupRef::Named(GroupName::new(group)))
+                    ])
             ),
             "{:?}",
             judge(TRUSTED)

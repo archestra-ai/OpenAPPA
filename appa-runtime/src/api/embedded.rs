@@ -1035,6 +1035,10 @@ max_body_bytes = 65536
             .await
             .expect("the committed admission is restored");
         assert_eq!(restored.decision, read.decision);
+        assert_eq!(
+            restored.receipt, read.receipt,
+            "recovery names the record that admitted the read"
+        );
         let admitted = runtime
             .audit(&family())
             .expect("the family audits")

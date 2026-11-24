@@ -1769,11 +1769,22 @@ impl RuntimeEngine {
         ReleaseRound::Judged(match judged {
             Ok(ReleaseJudgment::Released { .. }) => Ok(()),
             Ok(ReleaseJudgment::Withheld { .. }) => Err(Unreleased::Withheld),
-            Err(ReleaseError::MembershipNeeded { needed }) => match self.audience_consult(&act, needed, principal) {
-                Ok(AudienceConsult::Requests(requests)) => return ReleaseRound::Consult(requests),
-                Ok(AudienceConsult::Unresolved(unobtained)) => Err(Unreleased::Unobtained(unobtained.retry)),
-                Ok(AudienceConsult::Unconfigured(_)) | Err(_) => Err(Unreleased::Unjudgeable),
-            },
+            // Any one alternative answered lets the judgment go on, so one that cannot be
+            // answered leaves the next to be read; the release misses a fact only when none can.
+            Err(ReleaseError::MembershipNeeded { alternatives }) => {
+                let mut unresolved = None;
+                for needed in alternatives {
+                    match self.audience_consult(&act, needed, principal) {
+                        Ok(AudienceConsult::Requests(requests)) => return ReleaseRound::Consult(requests),
+                        Ok(AudienceConsult::Unresolved(unobtained)) => {
+                            unresolved.get_or_insert(unobtained.retry);
+                        }
+                        Ok(AudienceConsult::Unconfigured(_)) => {}
+                        Err(_) => return ReleaseRound::Judged(Err(Unreleased::Unjudgeable)),
+                    }
+                }
+                Err(unresolved.map_or(Unreleased::Unjudgeable, Unreleased::Unobtained))
+            }
             Err(ReleaseError::Sink(refusal)) => Err(Unreleased::Sink(refusal)),
             Err(error) => {
                 tracing::info!(%error, "a release could not be judged into its sink");
@@ -2846,14 +2857,15 @@ impl RuntimeEngine {
         }
     }
 
-    /// The value `child` crossed most recently, as the harness would deliver it, and the
-    /// record that admitted it into the parent.
-    pub(crate) fn latest_return(
+    /// The value `child` crossed that a report of the spawn `dispatch` answers with, as the
+    /// harness would deliver it, and the record that admitted it into the parent.
+    pub(crate) fn spawn_return(
         &self,
         view: &EngineView,
+        dispatch: &appa_engine::value::DispatchId,
         child: &TrajectoryId,
     ) -> Option<(String, appa_runtime_api::ReleaseReceipt)> {
-        self.engine.latest_return_of(view, child).map(|admitted| {
+        self.engine.spawn_return_of(view, dispatch, child).map(|admitted| {
             (
                 admitted.body.as_str().to_string(),
                 receipt(view.family(), admitted.released()),

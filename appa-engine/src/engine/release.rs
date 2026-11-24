@@ -55,8 +55,10 @@ pub enum ReleaseError {
     Sink(#[from] SinkRefusal),
     #[error(transparent)]
     Call(#[from] EngineError),
+    /// Answering the membership of any one alternative lets the judgment go on; the next round
+    /// judges again with its answer.
     #[error("the release reads symbolic audiences without pinned answers")]
-    MembershipNeeded { needed: Vec<SymbolicAtom> },
+    MembershipNeeded { alternatives: Vec<Vec<SymbolicAtom>> },
     #[error(transparent)]
     Evidence(#[from] TransitionError),
 }
@@ -70,7 +72,7 @@ pub enum ReleaseJudgment {
 }
 
 impl Engine {
-    /// Record the root's answer at the label the root holds. The same bytes at the same label
+    /// Record the root's answer at the label the root holds. The same bytes over the same terms
     /// as the root's latest answer stand recorded already.
     pub(super) fn decide_answer(
         &self,
@@ -83,13 +85,7 @@ impl Engine {
         if views.has_ended(trajectory) {
             return Err(TransitionError::BranchEnded);
         }
-        let label = views.current_label();
-        let standing = projection.answer_at(trajectory).filter(|position| {
-            projection
-                .released(*position)
-                .is_some_and(|(digest, recorded)| digest == report.digest && recorded == label)
-        });
-        if let Some(position) = standing {
+        if let Some(position) = projection.standing_answer(trajectory, &report.digest) {
             return Ok(EngineDecision {
                 append: None,
                 follow_up: FollowUp::Answer {
@@ -103,7 +99,7 @@ impl Engine {
         let answer = Fact::AnswerReleased {
             trajectory: trajectory.clone(),
             digest: report.digest,
-            label,
+            label: views.current_label(),
         };
         let batch = self.decided(view, crate::basis::DecidedAct::Answer(trajectory.clone()), vec![answer])?;
         let offset = batch
@@ -174,7 +170,9 @@ impl Engine {
             &CallStage::default(),
             &context,
         )
-        .map_err(|needed| ReleaseError::MembershipNeeded { needed: needed.needed })?;
+        .map_err(|needed| ReleaseError::MembershipNeeded {
+            alternatives: vec![needed.needed],
+        })?;
         let judgment = match raw.is_hard() {
             true => ReleaseJudgment::Withheld {
                 gaps: raw.requirement_gaps,
@@ -186,8 +184,9 @@ impl Engine {
     }
 
     /// Each gap covered by an authority `approves` admits, or withheld at the first gap none of
-    /// them can cover. A gap whose only possible covers read membership not yet answered asks for
-    /// the first such cover's membership alone: the next round judges again with its answer.
+    /// them can cover. Where the first gap left unresolved has only covers that read membership
+    /// not yet answered, each such cover's membership is one alternative: answering any one of
+    /// them lets the next round judge again.
     fn approved(
         &self,
         gaps: &[Gap],
@@ -203,23 +202,23 @@ impl Engine {
             .collect();
         let (mut approved_by, mut unresolved) = (Vec::new(), None);
         for gap in gaps {
-            let mut open = None;
+            let mut open = Vec::new();
             let cover = eligible
                 .iter()
                 .find_map(|authority| match plan::gap_cover(authority, gap, tags, context) {
                     Evaluation::Holds => Some(authority.name.clone()),
                     Evaluation::Needs(ask) => {
-                        open.get_or_insert(ask.needed);
+                        open.push(ask.needed);
                         None
                     }
                     Evaluation::Fails => None,
                 });
-            match (cover, open) {
+            match (cover, open.is_empty()) {
                 (Some(name), _) => approved_by.push(name),
-                (None, Some(needed)) => {
-                    unresolved.get_or_insert(needed);
+                (None, false) => {
+                    unresolved.get_or_insert(open);
                 }
-                (None, None) => {
+                (None, true) => {
                     return Ok(ReleaseJudgment::Withheld {
                         gaps: vec![gap.clone()],
                     });
@@ -227,7 +226,7 @@ impl Engine {
             }
         }
         match unresolved {
-            Some(needed) => Err(ReleaseError::MembershipNeeded { needed }),
+            Some(alternatives) => Err(ReleaseError::MembershipNeeded { alternatives }),
             None => {
                 approved_by.sort();
                 approved_by.dedup();
