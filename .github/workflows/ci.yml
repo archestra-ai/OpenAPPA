@@ -1183,7 +1183,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4.4.0
+        uses: docker/setup-buildx-action@v4.4.1
 
       # These builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
@@ -1359,7 +1359,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4.4.0
+        uses: docker/setup-buildx-action@v4.4.1
       - name: Build runtime
         uses: docker/build-push-action@v7.4.0
         with:
@@ -1438,7 +1438,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4.4.0
+        uses: docker/setup-buildx-action@v4.4.1
 
       - name: Build the shared runtime image
         uses: docker/build-push-action@v7.4.0
