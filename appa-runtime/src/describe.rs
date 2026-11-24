@@ -464,12 +464,14 @@ impl Description {
 pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, session_tools: &[String]) -> Description {
     let (mut config, mut policy, loaded) = inspect(path, battery_dirs);
     let mut served_policy = None;
+    let mut resolves = false;
     let served = served(adapter);
     if let Some(loaded) = &loaded {
         let resolved =
             crate::tool_validation::resolve(loaded.policy_file().value(), served, &loaded.inventory, &loaded.aliases);
         let authored_tools = policy.tools.clone();
         served_policy = describe_policy_value(&resolved.policy, Bindings::Loaded(&loaded.externals), &mut policy);
+        resolves = resolved.report.errors.is_empty();
         policy.tools = authored_tools;
     }
     let validation = match loaded {
@@ -477,8 +479,8 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
         None => Err("configuration cannot be loaded; check the configuration diagnostics above".to_string()),
     };
     let loads = validation.is_ok();
-    let unsatisfiable = served_policy
-        .as_ref()
+    let linted = served_policy.as_ref().filter(|_| resolves);
+    let unsatisfiable = linted
         .map(appa_policy::Config::unsatisfiable_requirements)
         .unwrap_or_default();
     if !loads && config.state == ConfigState::Loadable {
@@ -633,9 +635,12 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
             let _ = writeln!(output, "Validation failed: {error}");
         }
     }
-    match served_policy.as_ref() {
+    match linted {
         None => {
-            let _ = writeln!(output, "Authoring check: unavailable (the policy does not compile)");
+            let _ = writeln!(
+                output,
+                "Authoring check: unavailable (the policy does not compile or its tools do not resolve)"
+            );
         }
         Some(_) if unsatisfiable.is_empty() => {
             let _ = writeln!(output, "Authoring check: passed");
@@ -855,6 +860,19 @@ mod tests {
 
         let met = described(&format!("{backup}{deploy}"));
         assert!(met.loads && met.unsatisfiable.is_empty() && met.passes_check());
+    }
+
+    /// A tool that does not resolve fails loading and leaves no authoring findings: the lint
+    /// would otherwise judge a policy with that rule dropped.
+    #[test]
+    fn a_tool_that_does_not_resolve_suppresses_the_authoring_check() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appa.toml");
+        std::fs::write(&path, "[policy]\nversion = 2\n[[policy.tool]]\nname = \"mcp/ops/backup\"\nserver = \"ops\"\neffects = [\"backup.completed\"]\ndelta = {}\n[[policy.tool]]\nname = \"mcp/ops/deploy\"\nrequires = { effects = { contains = [\"backup.completed\"] } }\ndelta = {}\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n").unwrap();
+        let description = render(&path, &[], AdapterName::ClaudeCode, &[]);
+        assert!(!description.loads);
+        assert!(description.unsatisfiable.is_empty());
+        assert!(!description.passes_check());
     }
 
     /// A deployment binding the configuration lacks fails loading, and the authoring check

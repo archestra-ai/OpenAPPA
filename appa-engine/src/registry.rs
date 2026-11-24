@@ -2125,8 +2125,8 @@ impl Registry {
             };
             if !shadows(name) && !covering_selector.as_ref().is_some_and(shadows) {
                 selectable.push(declaration);
+                earlier.entry(name).or_default().insert(matcher);
             }
-            earlier.entry(name).or_default().insert(matcher);
         }
         selectable.extend(self.wildcard.as_ref());
         let releasing = |declaration: &ToolDeclaration| {
