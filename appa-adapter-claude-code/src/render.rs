@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use appa_runtime_api::{HookDecision, HookEvent, ToolOutcome};
 
-use crate::redact::{Replacement, replacement, restated, restates_unchanged};
+use crate::redact::{Replacement, replacement, restated, restates};
 
 pub(crate) fn withheld(reason: &str) -> String {
     format!("[appa] the tool result was withheld: {reason}")
@@ -111,9 +111,9 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
             Some(replacement) => replaced(replacement, None),
             None => block(output),
         },
-        // A value restated as the very response delivered rewrites nothing.
+        // A value the delivered response already says, and nothing beside it, rewrites nothing.
         HookDecision::DeliverValue { value } => match replacement(event, value) {
-            Some(replacement) if restates_unchanged(event, &replacement) => serde_json::json!({}),
+            Some(_) if restates(event, value) => serde_json::json!({}),
             Some(replacement) => replaced(replacement, None),
             None => block(value),
         },

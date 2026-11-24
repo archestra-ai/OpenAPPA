@@ -975,8 +975,40 @@ func TestAChildReturnSubstitutesWhatTheParentReceives(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the child return must substitute, not fail: %v", err)
 	}
-	if !reflect.DeepEqual(returned, map[string]any{"result": "the redacted summary"}) {
+	if !reflect.DeepEqual(returned, map[string]any{"result": "the redacted summary", "subagent_session_id": "child-ctx"}) {
 		t.Errorf("child_return must substitute what the parent receives, got %v", returned)
+	}
+}
+
+func TestADeliveredSpawnValueReplacesTheReplyUnlessItIsTheWholeReply(t *testing.T) {
+	const value = "the total is 42"
+	cases := []struct {
+		name   string
+		result map[string]any
+		want   map[string]any
+	}{
+		{"the value beside its session id", map[string]any{"result": value, "subagent_session_id": "child-ctx"}, nil},
+		{"the value alone", map[string]any{"result": value}, nil},
+		{"a key beside the value", map[string]any{"result": value, "note": "bytes no stop checked"}, map[string]any{"result": value}},
+		{"other words", map[string]any{"result": "other words", "subagent_session_id": "child-ctx"}, map[string]any{"result": value, "subagent_session_id": "child-ctx"}},
+		{"nested content in the session slot", map[string]any{"result": value, "subagent_session_id": map[string]any{"note": "bytes no stop checked"}}, map[string]any{"result": value}},
+		{"a null session id", map[string]any{"result": value, "subagent_session_id": nil}, map[string]any{"result": value}},
+		{"a result of another shape", map[string]any{"result": []any{value}, "subagent_session_id": "child-ctx"}, map[string]any{"result": value, "subagent_session_id": "child-ctx"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHook(t, map[string]any{"protocol": 1, "decision": "deliver_value", "value": value})
+			p := pluginOver(t, h)
+			returned, err := p.afterTool(
+				newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__billing_agent"},
+				map[string]any{}, c.result, nil)
+			if err != nil {
+				t.Fatalf("the delivered value must reach the parent, not fail: %v", err)
+			}
+			if !reflect.DeepEqual(returned, c.want) {
+				t.Errorf("got %v, want %v", returned, c.want)
+			}
+		})
 	}
 }
 
@@ -1170,7 +1202,7 @@ func TestTheBytesOfAChildReturnCrossAsTheRuntimeCrossedThem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the child return must substitute, not fail: %v", err)
 	}
-	if !reflect.DeepEqual(returned, map[string]any{"result": value}) {
+	if !reflect.DeepEqual(returned, map[string]any{"result": value, "subagent_session_id": "child-ctx"}) {
 		t.Errorf("the crossed bytes must reach the parent as they stand, got %v", returned)
 	}
 }

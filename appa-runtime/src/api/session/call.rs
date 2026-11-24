@@ -170,10 +170,6 @@ impl Session {
                 None => Ok(decision),
             };
         };
-        let returns = match crate::engine::fixed_class(proposal.declares.as_ref()) {
-            Some(returns) => returns,
-            None => self.with_view(|context| context.declared_class(proposal.declares.as_ref()))?,
-        };
         for _ in 0..DECLARATION_ROUNDS {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
                 return Ok(decision);
@@ -182,7 +178,7 @@ impl Session {
             let claim = AheadClaim {
                 attempt: &attempt,
                 spawn,
-                returns,
+                declares: proposal.declares.as_ref(),
                 offers: &offers,
             };
             let (offer, arguments) = match self.settle_terminal(&claim)? {

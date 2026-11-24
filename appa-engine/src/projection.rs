@@ -1720,9 +1720,16 @@ impl Views<'_> {
     }
 
     /// The return a close of the open spawn `dispatch` may deliver: its bound child's latest,
-    /// where that crossed.
+    /// where that crossed and no return of the child awaits its parent's decision, whose notice
+    /// answers the spawn instead. A live close and a replayed one are held to this alike.
     pub(crate) fn spawn_delivery(&self, dispatch: &DispatchId) -> Option<ChildReturnId> {
         let child = self.projection.bound.get(&ForkId::of(dispatch))?;
+        if self
+            .deferrals_by(child)
+            .any(|(_, deferral)| deferral.standing == DeferralStanding::Pending)
+        {
+            return None;
+        }
         self.projection.latest_crossing_of(child)
     }
 
@@ -1774,7 +1781,10 @@ impl Views<'_> {
     }
 
     /// The deferred returns `child` froze, settled or not, in occurrence order.
-    pub(crate) fn deferrals_by(&self, child: &TrajectoryId) -> impl Iterator<Item = (&ChildReturnId, &Deferral)> {
+    pub(crate) fn deferrals_by(
+        &self,
+        child: &TrajectoryId,
+    ) -> impl DoubleEndedIterator<Item = (&ChildReturnId, &Deferral)> {
         self.projection
             .deferrals
             .range(ChildReturnId::new(child.clone(), 0)..=ChildReturnId::new(child.clone(), u32::MAX))

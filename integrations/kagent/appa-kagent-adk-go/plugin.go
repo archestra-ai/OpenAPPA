@@ -1440,10 +1440,17 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 		switch decision.Kind {
 		case "ack":
 			return nil, nil
-		case "child_return", "deliver_value":
+		case "deliver_value":
+			// The crossed value restating the reply it came in, beside the
+			// child's session id alone, is that reply: kagent keeps it as it is.
+			if restatesSpawnReply(result, decision.Value) {
+				return nil, nil
+			}
+			return spawnReplacement(result, decision.Value), nil
+		case "child_return":
 			// The bytes the value crossed with, never spelled over:
 			// the parent receives what the runtime admitted.
-			return map[string]any{"result": decision.Value}, nil
+			return spawnReplacement(result, decision.Value), nil
 		case "replace_output":
 			return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
 		case "block":
@@ -1739,6 +1746,41 @@ func contentText(content *genai.Content) string {
 		return string(rendered)
 	}
 	return fmt.Sprintf("%v", content)
+}
+
+// restatesSpawnReply reports whether value is the whole of what a spawn
+// reply carries from its child. A Task reply is {"result": ...}, the value
+// as a string, with the child's context id, a string, under
+// "subagent_session_id"; any other key, or a slot of another shape, is not
+// known to be the harness's own and may carry the child's bytes.
+func restatesSpawnReply(result map[string]any, value string) bool {
+	said, ok := result["result"].(string)
+	if !ok || said != value {
+		return false
+	}
+	for key, field := range result {
+		switch key {
+		case "result":
+		case "subagent_session_id":
+			if _, ok := field.(string); !ok {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// spawnReplacement is the reply the parent receives in place of a spawn
+// result: the admitted value, beside the child's session id the reply
+// bound, which the parent and the UI read to follow the child.
+func spawnReplacement(result map[string]any, value string) map[string]any {
+	replaced := map[string]any{"result": value}
+	if session, ok := result["subagent_session_id"].(string); ok {
+		replaced["subagent_session_id"] = session
+	}
+	return replaced
 }
 
 // spawnReturn extracts the (spawned child id, returned value) a spawn

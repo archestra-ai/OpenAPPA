@@ -1586,6 +1586,40 @@ async fn a_release_reads_membership_at_the_judgment_and_fails_closed_without_an_
     assert_eq!(audit_len(&runtime), before);
 }
 
+/// A recipient the sink names by provider id is read through its own lookup, which no
+/// roster pins: the release is judged on the principal the lookup names.
+#[tokio::test]
+async fn a_release_to_a_qualified_recipient_is_judged_through_its_lookup() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let runtime = narrowed(&dir, &url).await;
+    let answer = hooks::handle_embedded(
+        &runtime,
+        HookEvent::TurnEnd {
+            actor: actor(),
+            open_calls: appa_runtime_api::OpenCalls::Abandon,
+            answer: Some("the summary".to_string()),
+        },
+    )
+    .await
+    .receipt
+    .expect("a recorded answer carries its receipt");
+    let asked = source.requests().len();
+
+    source.principal(Some(Some("bob@corp.example")));
+    assert_eq!(
+        runtime
+            .judge_release(
+                std::slice::from_ref(&answer),
+                "send",
+                &raw(serde_json::json!({ "to": "slack:U-bob" }))
+            )
+            .await,
+        Ok(())
+    );
+    assert_eq!(source.requests().len(), asked + 1, "the recipient is looked up once");
+}
+
 /// `send` under `groups` stock `approve` authorities, each permitting the readers of its own
 /// directory group, in declaration order `via-g1`, `via-g2`, ….
 fn covered_by_groups_policy(groups: u32) -> String {
@@ -1719,4 +1753,32 @@ async fn a_release_whose_first_roster_holds_an_unseatable_member_is_judged_on_th
         Ok(())
     );
     assert_eq!(selectors_read(&directory), ["user-group/g1", "user-group/g2"]);
+}
+
+/// A roster that reports one member twice, or a lookup that names a principal outside its
+/// provider's namespace, is no answer for the cover that reads it: the release is judged on
+/// the cover whose roster is well formed.
+#[tokio::test]
+async fn a_release_whose_second_roster_answers_malformed_is_judged_on_the_first() {
+    let twice = vec!["bob@corp.example".to_string(), "bob@corp.example".to_string()];
+    for (policy, members, principal) in [
+        (covered_by_groups_policy(2), twice, None),
+        (
+            covered_by_redirected_groups_policy(2),
+            vec!["slack:U2".to_string()],
+            Some("github:bob"),
+        ),
+    ] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, directory) = serve_directory().await;
+        directory.group("user-group/g1", "eve@corp.example", None);
+        directory.group("user-group/g2", "slack:U2", principal);
+        directory
+            .members
+            .lock()
+            .unwrap()
+            .insert("user-group/g2".to_string(), members);
+        assert_eq!(answer_sent_to_eve(&dir, &policy, &url).await, Ok(()), "{principal:?}");
+        assert_eq!(selectors_read(&directory), ["user-group/g1", "user-group/g2"]);
+    }
 }

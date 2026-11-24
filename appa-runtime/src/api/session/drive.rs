@@ -419,10 +419,14 @@ impl Decided<'_> {
             return Ok(Judgment::Settled(AheadOutcome::Ended));
         }
         // Arguments the committing policy no longer accepts would be refused by every
-        // application round.
+        // application round. The block's class is resolved in this same view.
+        let returns = match crate::engine::fixed_class(claim.declares) {
+            Some(returns) => returns,
+            None => self.declared_class(claim.declares)?,
+        };
         if self
             .engine()
-            .declare_ahead(self.view, trajectory, &declared.arguments, claim.returns)
+            .declare_ahead(self.view, trajectory, &declared.arguments, returns)
             .is_err()
         {
             return Ok(Judgment::Settled(AheadOutcome::Unfit));
@@ -438,11 +442,11 @@ impl Decided<'_> {
     }
 
     /// The mark a proposal starting `spawn` wears. A repeat of the decision `replay` names that
-    /// declares the same kind of return is judged as that decision was: a deciding parent's floor
-    /// resolves at the label the parent stood at then, and where a revision other than the head's
-    /// decided it, under a chain that may have renumbered or dropped the floor's ranks, the repeat
-    /// wears the recorded mark. A deployment that does not control subagent context marks
-    /// nothing, so no floor is resolved there.
+    /// declares the same kind of return wears the recorded mark, and a deciding parent's floor
+    /// only where the revision that decided it resolves it, at the label the parent stood at
+    /// then, to the recorded floor: a later revision may renumber or drop its ranks. A
+    /// deployment that does not control subagent context marks nothing, so no floor is resolved
+    /// there.
     pub(super) fn spawn_mark(
         &self,
         spawn: Option<SpawnKind>,
@@ -464,17 +468,15 @@ impl Decided<'_> {
             let Some(DeclaredReturn::Decides(spelling)) = declares else {
                 return Ok(Some(recorded));
             };
-            return match self
+            // Resolved by the revision and at the label that decided it, a floor other than the
+            // recorded one, or one that revision cannot spell, is another act.
+            let floor = self
                 .policy
-                .label_at_proposal(self.log, batch, &self.session.trajectory)
-                .map_err(EventError::from)?
-            {
-                None => Ok(Some(recorded)),
-                // Under the chain that decided it, a floor it cannot spell is not the recorded one.
-                Some(label) => match self.engine().deciding_floor(label, spelling) {
-                    Ok(floor) => Ok(Some(SpawnMark::decides(0, floor))),
-                    Err(_) => Err(EventError::CallIdReused),
-                },
+                .floor_at_proposal(self.log, batch, &self.session.trajectory, spelling)
+                .map_err(EventError::from)?;
+            return match floor.map(ReturnClass::Decides) == Some(recorded.returns()) {
+                true => Ok(Some(recorded)),
+                false => Err(EventError::CallIdReused),
             };
         }
         if !self.engine().controls_context() {

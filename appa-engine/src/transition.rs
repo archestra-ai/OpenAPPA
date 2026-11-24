@@ -3151,6 +3151,10 @@ impl<'a> Sequence<'a> {
                 if self.projection.admitted_result(dispatch) {
                     return Err(TransitionRefusal::RepeatAdmission);
                 }
+                // A close that delivered its child's crossing admits nothing of its own.
+                if views.spawn_crossing(dispatch).is_some() {
+                    return Err(TransitionRefusal::ForgedEvidence);
+                }
                 // A withheld result admits nothing, whatever a sanitizer derived from it.
                 if views.withholds_output(dispatch) {
                     return Err(TransitionRefusal::ForgedLabel);

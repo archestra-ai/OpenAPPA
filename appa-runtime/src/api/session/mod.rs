@@ -111,7 +111,9 @@ pub(super) struct KeyedReturn<'a> {
 pub(super) struct AheadClaim<'a> {
     attempt: &'a appa_eventlog::AheadAttempt,
     spawn: SpawnKind,
-    returns: appa_engine::transition::ReturnClass,
+    /// What the spawn's proposal declares: its block's return class is resolved from it in the
+    /// view that judges the declaration made ahead.
+    declares: Option<&'a DeclaredReturn>,
     offers: &'a [appa_runtime_api::OfferedRemedy],
 }
 
@@ -119,8 +121,8 @@ impl AheadClaim<'_> {
     /// The return the declaration made ahead declares for this spawn: one whose parent decides
     /// holds what falls below the declared floor.
     fn declared(&self, arguments: RemedyArguments) -> DeclaredReturn {
-        match (self.returns, &arguments.label) {
-            (appa_engine::transition::ReturnClass::Decides(_), Some(label)) => DeclaredReturn::Decides(label.clone()),
+        match (self.declares, &arguments.label) {
+            (Some(DeclaredReturn::Decides(_)), Some(label)) => DeclaredReturn::Decides(label.clone()),
             _ => DeclaredReturn::Arguments(arguments),
         }
     }

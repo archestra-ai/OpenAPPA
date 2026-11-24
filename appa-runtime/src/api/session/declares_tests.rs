@@ -2707,3 +2707,64 @@ async fn a_withheld_spawn_result_reported_again_with_the_crossed_bytes_stays_wit
         "{again:?}"
     );
 }
+
+/// A deciding spawn's retry after a reload is judged by the revision that released it: a floor
+/// that revision resolves to another one is another act, never an answer from the weaker
+/// release.
+#[tokio::test]
+async fn a_released_deciding_spawns_retry_under_another_floor_after_a_reload_reuses_its_call_id() {
+    let deployed = deployed_serving(&format!("{MIDDLE}{DEPLOYMENT}"));
+    let runtime = &deployed.runtime;
+    let released = binding(retried_spawn(runtime, "toolu-1", deciding_at("suspicious")).await);
+    runtime
+        .reload(deployed.config(&format!("{NO_MIDDLE}{DEPLOYMENT}")))
+        .expect("the policy reloads");
+    assert!(matches!(
+        retried_spawn(runtime, "toolu-1", deciding_at("trusted")).await,
+        Err(EventError::CallIdReused)
+    ));
+    assert_eq!(
+        binding(retried_spawn(runtime, "toolu-1", deciding_at("suspicious")).await),
+        released
+    );
+    assert_eq!(forks(runtime), 1);
+}
+
+/// A spawn result that closed the spawn on the child's crossing is answered from that close
+/// when repeated, though the child has since frozen a return awaiting the parent's decision.
+#[tokio::test]
+async fn a_repeated_spawn_result_is_answered_from_its_close_past_a_later_held_return() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    let receipt = crossing(&child, "x", "op-1").await;
+    let first = spawn_result_saying(&runtime, &child, "x").await;
+    assert_eq!(
+        first,
+        SpawnResultDecision::Return(ChildReturnDecision::Returned {
+            value: "x".to_string(),
+            receipt,
+        })
+    );
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("y".to_string(), operation("op-2")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert_eq!(spawn_result_saying(&runtime, &child, "x").await, first);
+}
+
+/// A floor the releasing revision cannot spell is not the one it released under, whatever the
+/// serving revision spells.
+#[tokio::test]
+async fn a_deciding_spawns_retry_under_a_floor_its_releasing_revision_cannot_spell_reuses_its_call_id() {
+    let deployed = deployed_serving(&format!("{NO_MIDDLE}{DEPLOYMENT}"));
+    let runtime = &deployed.runtime;
+    binding(retried_spawn(runtime, "toolu-1", deciding_at("trusted")).await);
+    runtime
+        .reload(deployed.config(&format!("{MIDDLE}{DEPLOYMENT}")))
+        .expect("the policy reloads");
+    assert!(matches!(
+        retried_spawn(runtime, "toolu-1", deciding_at("middle")).await,
+        Err(EventError::CallIdReused)
+    ));
+}

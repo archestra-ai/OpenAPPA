@@ -271,14 +271,28 @@ const COMMAND_RECORDER_PERMITS: usize = 2;
 /// Settle a batch of consults, every sibling included, as many at a time as the
 /// command gate admits. A consult's deadline covers its wait for a permit, so a wider
 /// fan-out would time out in the queue rather than run; a narrower one would cost a
-/// batch the sum of its members instead of its slowest.
+/// batch the sum of its members instead of its slowest. Consults settle in completion order,
+/// so a stalled one never holds back those queued behind it; the outputs keep request order.
 pub(crate) async fn settle_batch<F: std::future::Future>(consults: impl IntoIterator<Item = F>) -> Vec<F::Output> {
     use futures_util::StreamExt;
 
-    futures_util::stream::iter(consults)
-        .buffered(COMMAND_CONSULT_PERMITS)
+    async fn indexed<F: std::future::Future>(index: usize, consult: F) -> (usize, F::Output) {
+        (index, consult.await)
+    }
+
+    // Built before they settle: a lazy map's closure does not type-check through the stream
+    // adapter in a `Send` caller.
+    let indexed: Vec<_> = consults
+        .into_iter()
+        .enumerate()
+        .map(|(index, consult)| indexed(index, consult))
+        .collect();
+    let mut settled: Vec<(usize, F::Output)> = futures_util::stream::iter(indexed)
+        .buffer_unordered(COMMAND_CONSULT_PERMITS)
         .collect()
-        .await
+        .await;
+    settled.sort_unstable_by_key(|(index, _)| *index);
+    settled.into_iter().map(|(_, output)| output).collect()
 }
 
 /// What every deployment the runtime builds shares: a reload's old and new snapshots, every

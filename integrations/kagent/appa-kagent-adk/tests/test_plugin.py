@@ -1012,7 +1012,7 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
         tool_context=FakeContext(FakeSession("s1")),
         result={"result": "the raw child answer", "subagent_session_id": "child-ctx"},
     )
-    assert returned == {"result": "the redacted summary"}
+    assert returned == {"result": "the redacted summary", "subagent_session_id": "child-ctx"}
 
 
 @pytest.mark.parametrize(
@@ -1021,7 +1021,20 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
         ({"result": "the total is 42", "subagent_session_id": "child-ctx"}, None),
         ("the total is 42", None),
         ({"result": "the total is 42", "note": "bytes no stop checked"}, {"result": "the total is 42"}),
-        ({"result": "other words", "subagent_session_id": "child-ctx"}, {"result": "the total is 42"}),
+        (
+            {"result": "other words", "subagent_session_id": "child-ctx"},
+            {"result": "the total is 42", "subagent_session_id": "child-ctx"},
+        ),
+        ({"result": "the total is 42"}, None),
+        ({"result": "the total is 42", "subagent_session_id": None}, {"result": "the total is 42"}),
+        (
+            {"result": "the total is 42", "subagent_session_id": {"note": "bytes no stop checked"}},
+            {"result": "the total is 42"},
+        ),
+        (
+            {"result": ["the total is 42"], "subagent_session_id": "child-ctx"},
+            {"result": "the total is 42", "subagent_session_id": "child-ctx"},
+        ),
     ],
 )
 async def test_a_delivered_spawn_value_replaces_the_reply_unless_it_is_the_whole_reply(result, returned):
@@ -1174,7 +1187,7 @@ async def test_the_bytes_of_a_child_return_cross_as_the_runtime_crossed_them():
         tool_context=dispatch(FakeSession("s1")),
         result={"result": "the analyst answer", "subagent_session_id": "child-ctx"},
     )
-    assert returned == {"result": value}
+    assert returned == {"result": value, "subagent_session_id": "child-ctx"}
 
 
 # -- liveness gates ---------------------------------------------------

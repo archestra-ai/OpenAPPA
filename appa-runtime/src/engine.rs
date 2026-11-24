@@ -849,15 +849,16 @@ impl<'a> PolicyEngine<'a> {
         self.engine().rebuild_view(log, &earlier)
     }
 
-    /// The label `trajectory` stood at when the batch `batch` was proposed, replayed from the log
-    /// before it; `None` when a revision other than the head's decided that batch, whose floors
-    /// were resolved under another chain.
-    pub(crate) fn label_at_proposal(
+    /// The floor `spelling` names for `trajectory` as the batch `batch` was proposed: resolved by
+    /// the revision that decided that batch, at the label the trajectory stood at then. `None`
+    /// where that revision cannot spell it, or where this policy holds no engine of it.
+    pub(crate) fn floor_at_proposal(
         &self,
         log: &Log,
         batch: &ProposalBatchId,
         trajectory: &TrajectoryId,
-    ) -> Result<Option<Label>, EngineRefusal> {
+        spelling: &LabelSpelling,
+    ) -> Result<Option<appa_engine::value::FloorDigest>, EngineRefusal> {
         let batches = log.stamped_batches();
         let at = batches
             .iter()
@@ -870,18 +871,38 @@ impl<'a> PolicyEngine<'a> {
             .ok_or_else(|| EngineRefusal::Invariant {
                 detail: "a recorded batch is in no batch of its log".to_string(),
             })?;
-        if batches[at].revision != self.engine().engine.revision() {
+        let Some(revision) = batches[at].revision else {
             return Ok(None);
-        }
-        let earlier: Vec<&Engine> = self.earlier.iter().map(|engine| &engine.engine).collect();
-        let before = self
-            .engine()
-            .engine
-            .replay(log.root(), &batches[..at], &earlier)
-            .map_err(|error| EngineRefusal::Invariant {
-                detail: format!("replaying a log before its recorded batch: {error}"),
-            })?;
-        Ok(before.views(trajectory).map(|views| views.current_label()))
+        };
+        let Some(deciding) = std::iter::once(self.engine())
+            .chain(self.earlier.iter().map(|engine| &**engine))
+            .find(|engine| engine.engine.revision() == Some(revision))
+        else {
+            return Ok(None);
+        };
+        // A floor that spells every dimension keeps no part of the label it is resolved at.
+        let label = match (&spelling.trust, &spelling.audience) {
+            (Some(_), Some(_)) => deciding.engine.profile().starting_label().clone(),
+            _ => {
+                let earlier: Vec<&Engine> = self
+                    .earlier
+                    .iter()
+                    .map(|engine| &engine.engine)
+                    .filter(|engine| engine.revision() < Some(revision))
+                    .collect();
+                let before = deciding
+                    .engine
+                    .replay(log.root(), &batches[..at], &earlier)
+                    .map_err(|error| EngineRefusal::Invariant {
+                        detail: format!("replaying a log before its recorded batch: {error}"),
+                    })?;
+                match before.views(trajectory) {
+                    Some(views) => views.current_label(),
+                    None => return Ok(None),
+                }
+            }
+        };
+        Ok(deciding.deciding_floor(label, spelling).ok())
     }
 
     /// Render the family's recorded decisions; see [`RuntimeEngine::audit`].
@@ -1810,21 +1831,28 @@ impl RuntimeEngine {
         approves: impl Fn(&AuthorityName) -> bool,
     ) -> ReleaseRound {
         use appa_engine::engine::{ReleaseError, ReleaseJudgment};
-        let act = match self.act_audience(evidence, principal, LostLookup::LosesItsSources) {
+        let mut act = match self.act_audience(evidence, principal, LostLookup::LosesItsSources) {
             Ok(act) => act,
             Err(AudienceFailure::Consult(requests)) => return ReleaseRound::Consult(requests),
             Err(AudienceFailure::Refused(unobtained)) => {
                 return ReleaseRound::Judged(Err(Unreleased::Unobtained(unobtained.retry)));
             }
         };
-        let judged = self.engine.judge_release(
-            label,
-            ToolName::new(sink),
-            arguments,
-            act.payload.clone(),
-            principal.cloned(),
-            approves,
-        );
+        let judged = loop {
+            let judged = self.engine.judge_release(
+                label,
+                ToolName::new(sink),
+                arguments,
+                act.payload.clone(),
+                principal.cloned(),
+                &approves,
+            );
+            match &judged {
+                Err(ReleaseError::MembershipNeeded { alternatives })
+                    if act.restore_read(self.engine.registry().audience(), alternatives, principal) => {}
+                _ => break judged,
+            }
+        };
         ReleaseRound::Judged(match judged {
             Ok(ReleaseJudgment::Released { .. }) => Ok(()),
             Ok(ReleaseJudgment::Withheld { .. }) => Err(Unreleased::Withheld),
@@ -3072,15 +3100,10 @@ impl RuntimeEngine {
         if self.liveness(view, parent) == Liveness::Ended {
             return None;
         }
-        let mut frozen = self.child_occurrences(view, parent, dispatch);
-        let latest = self.engine.returns_by(view, frozen.first()?.id.child()).checked_sub(1);
-        let at = match frozen.iter().rposition(|deferred| deferred.settled.is_none()) {
-            Some(pending) => pending,
-            None => frozen
-                .iter()
-                .rposition(|deferred| deferred.settled.is_some() && Some(deferred.id.occurrence()) == latest)?,
-        };
-        Some(frozen.swap_remove(at))
+        match self.engine.fork_status(view, &ForkId::of(dispatch)) {
+            ForkStatus::Bound(child) => self.engine.noticed_return(view, parent, &child),
+            _ => None,
+        }
     }
 
     /// Every return the child `parent`'s spawn `dispatch` bound froze, held or at its stop, in
@@ -3778,6 +3801,52 @@ impl RuntimeEngine {
                 _ => {}
             }
         }
+        if let LostLookup::LosesItsSources = lost {
+            // Each answer meets the engine's test alone first: a malformed one is no answer for
+            // what reads it, never a veto on the covers the rest of the batch answers.
+            let (sources, lookups) = (
+                std::mem::take(&mut payload.sources),
+                std::mem::take(&mut payload.lookups),
+            );
+            for claims in sources {
+                let alone = AudienceEvidence {
+                    sources: vec![claims],
+                    lookups: Vec::new(),
+                };
+                match audience.expansions(&alone, principal) {
+                    Ok(_) => payload.sources.extend(alone.sources),
+                    Err(refusal) => {
+                        tracing::info!(%refusal, "an audience source answered inadmissibly");
+                        for claims in alone.sources {
+                            let spec = SelectorSpec {
+                                provider: claims.provider,
+                                selector: claims.selector,
+                            };
+                            unanswered
+                                .selectors
+                                .insert(spec, crate::events::NoAnswerClass::Malformed);
+                        }
+                    }
+                }
+            }
+            for lookup in lookups {
+                let alone = AudienceEvidence {
+                    sources: Vec::new(),
+                    lookups: vec![lookup],
+                };
+                match audience.expansions(&alone, principal) {
+                    Ok(_) => payload.lookups.extend(alone.lookups),
+                    Err(refusal) => {
+                        tracing::info!(%refusal, "a member lookup answered inadmissibly");
+                        for lookup in alone.lookups {
+                            unanswered
+                                .members
+                                .insert(lookup.member, crate::events::NoAnswerClass::Malformed);
+                        }
+                    }
+                }
+            }
+        }
         if let Err(refusal) = audience.expansions(&payload, principal) {
             // The refusal's own Display can carry directory data (member ids, principals)
             // the model has not seen; the model-visible detail names only the failure class
@@ -3790,15 +3859,23 @@ impl RuntimeEngine {
                 ),
             )));
         }
+        let mut set_aside = Vec::new();
         if let LostLookup::LosesItsSources = lost {
-            for owed in audience.member_lookups_owed(&payload) {
-                let Some(reason) = unanswered.members.get(&owed.member) else {
-                    continue;
-                };
-                payload.sources.retain(|claims| {
-                    let reports = claims.provider == owed.provider
-                        && claims.members.iter().any(|member| member.as_str() == owed.member);
-                    if reports {
+            let owed = audience.member_lookups_owed(&payload);
+            let lost_members: BTreeMap<(&str, &str), crate::events::NoAnswerClass> = owed
+                .iter()
+                .filter_map(|owed| {
+                    let reason = unanswered.members.get(&owed.member)?;
+                    Some(((owed.provider.as_str(), owed.member.as_str()), *reason))
+                })
+                .collect();
+            payload.sources.retain(|claims| {
+                let reason = claims
+                    .members
+                    .iter()
+                    .find_map(|member| lost_members.get(&(claims.provider.as_str(), member.as_str())));
+                match reason {
+                    Some(reason) => {
                         unanswered.selectors.insert(
                             SelectorSpec {
                                 provider: claims.provider.clone(),
@@ -3806,16 +3883,25 @@ impl RuntimeEngine {
                             },
                             *reason,
                         );
+                        false
                     }
-                    !reports
-                });
-            }
-            payload.lookups.retain(|lookup| {
-                payload.sources.iter().any(|claims| {
-                    claims.provider == lookup.provider
-                        && claims.members.iter().any(|member| member.as_str() == lookup.member)
-                })
+                    None => true,
+                }
             });
+            // A lookup no standing roster pins waits for the judgment to read its member.
+            let pinned: BTreeSet<(&str, &str)> = payload
+                .sources
+                .iter()
+                .flat_map(|claims| {
+                    claims
+                        .members
+                        .iter()
+                        .map(|member| (claims.provider.as_str(), member.as_str()))
+                })
+                .collect();
+            (payload.lookups, set_aside) = std::mem::take(&mut payload.lookups)
+                .into_iter()
+                .partition(|lookup| pinned.contains(&(lookup.provider.as_str(), lookup.member.as_str())));
         }
         let mut requests: Vec<ExternalRequest> = Vec::new();
         let mut failed: Vec<NoAnswer> = Vec::new();
@@ -3845,7 +3931,11 @@ impl RuntimeEngine {
         if !requests.is_empty() {
             return Err(AudienceFailure::Consult(requests));
         }
-        Ok(ActAudience { payload, unanswered })
+        Ok(ActAudience {
+            payload,
+            unanswered,
+            set_aside,
+        })
     }
 
     /// The consults that answer the symbolic atoms an act still needs, or the operational
@@ -4320,6 +4410,35 @@ impl MissingIn {
 struct ActAudience {
     payload: AudienceEvidence,
     unanswered: Unanswered,
+    /// Answered lookups no standing roster pins, held out of the payload until the judgment
+    /// reads their member: a lookup nothing reads is evidence the act never asked for.
+    set_aside: Vec<MemberLookup>,
+}
+
+impl ActAudience {
+    /// Return to the payload every set-aside lookup one of `alternatives` reads, and say
+    /// whether any came back.
+    fn restore_read(
+        &mut self,
+        audience: &appa_engine::audience::AudienceRegistry,
+        alternatives: &[Vec<SymbolicAtom>],
+        principal: Option<&ReaderId>,
+    ) -> bool {
+        let read: BTreeSet<appa_engine::audience::LookupSpec> = alternatives
+            .iter()
+            .filter_map(|needed| audience.needed_primitives(needed, principal).ok())
+            .flat_map(|primitives| primitives.lookups)
+            .collect();
+        let (restored, kept): (Vec<MemberLookup>, Vec<MemberLookup>) =
+            std::mem::take(&mut self.set_aside).into_iter().partition(|lookup| {
+                read.iter()
+                    .any(|spec| spec.provider == lookup.provider && spec.member == lookup.member)
+            });
+        self.set_aside = kept;
+        let any = !restored.is_empty();
+        self.payload.lookups.extend(restored);
+        any
+    }
 }
 
 /// The selector templates the policy registers for one provider, as a consult's declaration

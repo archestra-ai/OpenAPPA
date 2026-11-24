@@ -787,7 +787,7 @@ class AppaPluginKagent(BasePlugin):
                 if decision.kind in ("child_return", "deliver_value"):
                     # The bytes the value crossed with, never spelled over:
                     # the parent receives what the runtime admitted.
-                    return {"result": decision.value}
+                    return _spawn_replacement(result, decision.value)
                 if decision.kind == "replace_output":
                     return {"result": self._for_model(decision.output, tool_context)}
                 if decision.kind == "block":
@@ -1199,15 +1199,33 @@ def _plain_json(value: Any) -> Any:
 def _restates_spawn_reply(result: Any, value: str | None) -> bool:
     """Whether ``value`` is the whole of what a spawn reply carries from its child.
 
-    A bare string reply is its value. A Task reply is ``{"result": ...}``, with
-    the child's context id under ``subagent_session_id``; any other key is not
-    known to be the harness's own and may carry the child's bytes.
+    A bare string reply is its value. A Task reply is ``{"result": ...}``, the
+    value as a string, with the child's context id, a string, under
+    ``subagent_session_id``; any other key, or a slot of another shape, is
+    not known to be the harness's own and may carry the child's bytes.
     """
     if isinstance(result, str):
         return result == value
     if isinstance(result, dict):
-        return set(result) <= {"result", "subagent_session_id"} and result.get("result") == value
+        said = result.get("result")
+        return (
+            set(result) <= {"result", "subagent_session_id"}
+            and isinstance(said, str)
+            and said == value
+            and isinstance(result.get("subagent_session_id", ""), str)
+        )
     return False
+
+
+def _spawn_replacement(result: Any, value: str | None) -> dict[str, Any]:
+    """The reply the parent receives in place of a spawn result: the admitted
+    value, beside the child's session id the reply bound, which the parent
+    and the UI read to follow the child."""
+    replaced: dict[str, Any] = {"result": value}
+    session = result.get("subagent_session_id") if isinstance(result, dict) else None
+    if isinstance(session, str):
+        replaced["subagent_session_id"] = session
+    return replaced
 
 
 def _spawn_return(result: Any) -> tuple[str | None, str | None]:

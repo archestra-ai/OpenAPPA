@@ -909,3 +909,96 @@ fn a_deciding_spawn_declares_only_the_floor_its_proposal_names() {
         Err(crate::plan::ReturnPolicyRefusal::FloorUndeclared)
     );
 }
+
+/// The spawn whose fork bound `child` in `log`.
+fn spawn_dispatch(log: &[Fact], child: &TrajectoryId) -> crate::value::DispatchId {
+    let fork = fork_in(log, child);
+    log.iter()
+        .find_map(|fact| match fact {
+            Fact::DispatchOpened { dispatch, .. } if crate::value::ForkId::of(dispatch) == fork => {
+                Some(dispatch.clone())
+            }
+            _ => None,
+        })
+        .expect("the spawn opened its fork")
+}
+
+fn spawn_reported(dispatch: &crate::value::DispatchId, body: crate::transition::OutcomeBody) -> EngineEvent {
+    EngineEvent::Outcome(crate::transition::ToolReport {
+        dispatch: dispatch.clone(),
+        outcome: crate::transition::ToolOutcome::Success { body },
+        evidence: Vec::new(),
+        offer_nonce: nonce(),
+        audience: crate::audience::AudienceEvidence::default(),
+    })
+}
+
+/// `facts` with every successful close recording `crossing` as the return it delivered.
+fn delivering_forged(facts: &[Fact], crossing: &ChildReturnId) -> Vec<Fact> {
+    facts
+        .iter()
+        .cloned()
+        .map(|fact| match fact {
+            Fact::DispatchClosed {
+                trajectory,
+                dispatch,
+                outcome: crate::fact::CloseOutcome::Success { effects, .. },
+            } => Fact::DispatchClosed {
+                trajectory,
+                dispatch,
+                outcome: crate::fact::CloseOutcome::Success {
+                    effects,
+                    crossing: Some(crossing.clone()),
+                },
+            },
+            fact => fact,
+        })
+        .collect()
+}
+
+/// A held return still awaiting its parent's decision answers the spawn with its notice, so no
+/// close delivers the child's later crossing, live or replayed; once it is settled one does.
+#[test]
+fn a_spawn_close_delivers_no_crossing_while_a_held_return_awaits_its_parent() {
+    use crate::transition::OutcomeBody;
+    let e = open_engine(returning_registry(vec![]));
+    let child = TrajectoryId::new("child");
+    let mut log = background_turn(&e, &child, "read_suspicious", "one");
+    reads(&e, &mut log, &traj(), "read_suspicious");
+    assert!(matches!(
+        decided(&e, &mut log, |log| returned(log, &child, "two", ReturnKind::Turn)),
+        FollowUp::Child(ChildFollowUp::Merged { .. })
+    ));
+    let dispatch = spawn_dispatch(&log, &child);
+    let crossing = ChildReturnId::new(child.clone(), 1);
+    let view = viewing(&e, &log);
+    assert_eq!(e.spawn_return_of(&view, &dispatch), None);
+    assert_eq!(
+        e.handle(&view, spawn_reported(&dispatch, OutcomeBody::Crossed(crossing.clone())))
+            .err(),
+        Some(TransitionError::ObservationMismatch)
+    );
+    let plain = appended_facts(
+        e.handle(
+            &view,
+            spawn_reported(&dispatch, OutcomeBody::Available(ValueBody::new("y"))),
+        )
+        .expect("the report closes as the host says"),
+    );
+    assert_eq!(e.validate_replay(&[log.clone(), plain.clone()].concat()), Ok(()));
+    assert_eq!(
+        e.validate_replay(&[log.clone(), delivering_forged(&plain, &crossing)].concat()),
+        Err(crate::transition::TransitionRefusal::ForgedEvidence)
+    );
+
+    let mut settled = log.clone();
+    decided(&e, &mut settled, |_| settle(&child, 0, ReturnDecision::Discard));
+    let closed = appended_facts(
+        e.handle(
+            &viewing(&e, &settled),
+            spawn_reported(&dispatch, OutcomeBody::Crossed(crossing.clone())),
+        )
+        .expect("with nothing awaiting a decision the close delivers the crossing"),
+    );
+    assert_eq!(e.validate_replay(&[settled, closed].concat()), Ok(()));
+}

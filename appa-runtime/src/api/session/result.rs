@@ -315,22 +315,20 @@ impl Session {
                         let fork = appa_engine::value::ForkId::of(&dispatch);
                         let status = context.fork_status(&fork);
                         // A report repeating the crossing the spawn answers with — the bound
-                        // child's latest while the dispatch is open, the one it closed on after —
-                        // is that crossing, whatever the child froze before it.
+                        // child's latest while the dispatch is open and no return of the child
+                        // awaits a decision, the one its close delivered after — is that
+                        // crossing, and a closed one is answered from its close alone.
                         let crossed = match (&status, &child, &value) {
                             (ForkStatus::Bound(bound), Some(named), Some(said)) if named == bound => {
                                 context.spawn_return(&dispatch).filter(|crossed| &crossed.said == said)
                             }
                             _ => None,
                         };
-                        // That crossing answers past a return the parent already decided on, never
-                        // past one still awaiting its decision.
-                        deferral = match (&crossed, context.spawn_deferral(&dispatch)) {
-                            (_, None) => None,
-                            (Some(_), Some(deferred)) if deferred.settled.is_some() => None,
-                            (_, Some(deferred)) => {
-                                Some(context.engine().deferral_notice(&deferred, &self.presentation))
-                            }
+                        deferral = match crossed {
+                            Some(_) => None,
+                            None => context
+                                .spawn_deferral(&dispatch)
+                                .map(|deferred| context.engine().deferral_notice(&deferred, &self.presentation)),
                         };
                         let next = match (status, &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,

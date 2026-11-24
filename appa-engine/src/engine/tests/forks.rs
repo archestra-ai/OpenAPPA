@@ -646,3 +646,59 @@ fn a_spawn_answers_only_with_its_own_childs_crossing() {
         .expect("the second spawn answers with its child's crossing");
     assert_eq!((crossing.child(), admitted.body), (&second, ValueBody::new("y")));
 }
+
+/// A spawn close that admitted the report's own result delivered no crossing: a log recording
+/// that close as the delivery of the child's crossing is forged.
+#[test]
+fn a_spawn_close_that_admitted_its_own_result_delivered_no_crossing() {
+    let e = engine_at(vec![], Label::new(SUSPICIOUS, Audience::public()));
+    let child = TrajectoryId::new("child");
+    let mut log = spawn_family(&e, &child);
+    log.extend(crossed_report(&e, &log.clone(), &child, "x"));
+    let dispatch = spawn_of(&log, &child);
+    let (crossing, _) = e
+        .spawn_return_of(&viewing(&e, &log), &dispatch)
+        .expect("the open spawn answers with the child's crossing");
+    let plain = appended_facts(
+        e.handle(
+            &viewing(&e, &log),
+            EngineEvent::Outcome(ToolReport {
+                dispatch: dispatch.clone(),
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available(ValueBody::new("y")),
+                },
+                evidence: Vec::new(),
+                offer_nonce: nonce(),
+                audience: crate::audience::AudienceEvidence::default(),
+            }),
+        )
+        .expect("the report closes with its own result"),
+    );
+    assert!(
+        plain.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })),
+        "{plain:?}"
+    );
+    assert_eq!(e.validate_replay(&[log.clone(), plain.clone()].concat()), Ok(()));
+    let forged: Vec<Fact> = plain
+        .into_iter()
+        .map(|fact| match fact {
+            Fact::DispatchClosed {
+                trajectory,
+                dispatch,
+                outcome: crate::fact::CloseOutcome::Success { effects, .. },
+            } => Fact::DispatchClosed {
+                trajectory,
+                dispatch,
+                outcome: crate::fact::CloseOutcome::Success {
+                    effects,
+                    crossing: Some(crossing.clone()),
+                },
+            },
+            fact => fact,
+        })
+        .collect();
+    assert_eq!(
+        e.validate_replay(&[log, forged].concat()),
+        Err(TransitionRefusal::ForgedEvidence)
+    );
+}

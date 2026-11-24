@@ -836,6 +836,33 @@ impl Engine {
         }
     }
 
+    /// The deferred return `parent`'s child `child` froze that a notice quotes to the parent:
+    /// the latest one awaiting its decision, else the child's latest occurrence once the parent
+    /// decided on it. Only that record is read out.
+    pub fn noticed_return(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        child: &TrajectoryId,
+    ) -> Option<DeferredReturn> {
+        let views = view.projection().view(parent);
+        if views.parent_of(child) != Some(parent) {
+            return None;
+        }
+        let latest = views.returns_by(child).checked_sub(1);
+        let (id, deferral) = views
+            .deferrals_by(child)
+            .rev()
+            .find(|(_, deferral)| deferral.standing == crate::projection::DeferralStanding::Pending)
+            .or_else(|| {
+                views
+                    .deferrals_by(child)
+                    .next_back()
+                    .filter(|(id, _)| Some(id.occurrence()) == latest)
+            })?;
+        Some(DeferredReturn::of(id, deferral))
+    }
+
     /// How many values `child` has returned, crossed or frozen: its latest occurrence is the
     /// one below.
     pub fn returns_by(&self, view: &EngineView, child: &TrajectoryId) -> u32 {
