@@ -1593,6 +1593,76 @@ async fn a_silent_report_a_deferral_answered_repeats_as_a_neutral_deferral() {
     );
 }
 
+async fn silent_report(runtime: &Runtime, child: &TrajectoryId) -> SpawnResultDecision {
+    session(runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            spoken(""),
+            Some(child.clone()),
+            None,
+            SpawnLaunch::Undeclared,
+        )
+        .await
+        .expect("the spawn's result is decided")
+}
+
+fn neutral_deferral() -> SpawnResultDecision {
+    SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+        placeholder: super::result::DEFERRED.to_string(),
+        presentation: None,
+    })
+}
+
+/// A held return the parent settled before the spawn's first report leaves nothing to act on:
+/// that report and its repeat both carry the neutral deferral notice.
+#[tokio::test]
+async fn a_silent_report_after_its_deferral_was_settled_is_neutral_first_and_on_repeat() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    let [held] = notices(&runtime).try_into().expect("one occurrence");
+    settling(&runtime, &parent(), &held.discard).await;
+    assert_eq!(silent_report(&runtime, &child.trajectory).await, neutral_deferral());
+    assert_eq!(silent_report(&runtime, &child.trajectory).await, neutral_deferral());
+}
+
+/// The occurrence a deferral answered with stays actionable while it pends, though the child
+/// froze a newer return since: the repeat carries that occurrence's own notice.
+#[tokio::test]
+async fn a_silent_reports_occurrence_stays_actionable_beside_a_newer_pending_return() {
+    let Deployed { runtime, .. } = deployed(false);
+    let fork = binding(deferring(&runtime, call("fetch", 1), "toolu-1").await);
+    let child_id = TrajectoryId("cc:root:child".to_string());
+    let child = session(&runtime)
+        .on_child_start(child_id.clone(), SpawnRef::Binding(fork.clone()))
+        .expect("the fork binds and the child opens");
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("turn one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    let [first] = notices(&runtime).try_into().expect("one occurrence");
+    let actionable = SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+        placeholder: first.feedback.clone(),
+        presentation: None,
+    });
+    assert_eq!(silent_report(&runtime, &child_id).await, actionable);
+    session(&runtime)
+        .on_child_start(child_id.clone(), SpawnRef::Binding(fork))
+        .expect("the parent steers its child");
+    assert!(matches!(
+        child.on_child_return("turn two".to_string(), operation("op-2")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert_eq!(notices(&runtime).len(), 2, "both occurrences pend");
+    assert_eq!(silent_report(&runtime, &child_id).await, actionable);
+}
+
 /// A held return the parent accepted, then a stop that crosses: the spawn's result repeating
 /// the crossing delivers it, and no notice of the earlier decision stands in for it.
 #[tokio::test]

@@ -390,55 +390,48 @@ impl Session {
                         // A success with no message from the bound child is taken once: the record
                         // that first observed it fixes how, and every repeat is taken the same way,
                         // whatever the child, a deferral or the size limit did since.
-                        let silent = match (&status, &child, &value, &outcome) {
-                            (ForkStatus::Bound(bound), Some(named), None, ToolOutcome::Success { .. })
-                                if named == bound =>
-                            {
-                                Some(bound.clone())
-                            }
-                            _ => None,
+                        let silent = matches!(
+                            (&status, &child, &value, &outcome),
+                            (ForkStatus::Bound(bound), Some(named), None, ToolOutcome::Success { .. }) if named == bound
+                        );
+                        let committed = match silent {
+                            true => context.engine().committed_spawn_report(context.view, &dispatch),
+                            false => None,
                         };
-                        let committed = silent
-                            .as_ref()
-                            .and_then(|_| context.engine().committed_spawn_report(context.view, &dispatch));
-                        let next = match (status, &child) {
+                        let next = match (status, &child, committed) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
-                            _ if committed.is_some() => match (committed.clone(), &silent) {
-                                (Some(CommittedSpawnReport::Recorded(report)), _) => SpawnPlan::Reported {
-                                    report,
-                                    taken: Taken::Recorded,
-                                },
-                                // Untagged closes come only from releases before classes were
-                                // recorded, which held no returns, deferred none and made no
-                                // launch fields. A body they admitted repeats only as the launch
-                                // fields the digest check holds to it; without such fields
-                                // nothing may answer it, so the repeat is refused.
-                                (Some(CommittedSpawnReport::Untagged(ObservedResult::Available(_))), _) => {
-                                    match &fields {
-                                        Some(_) => SpawnPlan::Reported {
-                                            report: SpawnReport::Launch(LaunchAdmission::Fields),
-                                            taken: Taken::Untagged,
-                                        },
-                                        None => return Err(EventError::OutcomeMismatch),
-                                    }
-                                }
-                                (Some(CommittedSpawnReport::Untagged(ObservedResult::Unavailable)), _) => {
-                                    SpawnPlan::Reported {
-                                        report: SpawnReport::NoReturn,
-                                        taken: Taken::Untagged,
-                                    }
-                                }
-                                (None, _) => unreachable!("a committed report was just matched"),
+                            (_, _, Some(CommittedSpawnReport::Recorded(report))) => SpawnPlan::Reported {
+                                report,
+                                taken: Taken::Recorded,
                             },
-                            (ForkStatus::Unprepared | ForkStatus::FanOut, _) => SpawnPlan::Outcome,
+                            // Untagged closes come only from releases before classes were
+                            // recorded, which held no returns, deferred none and made no launch
+                            // fields. A body they admitted repeats only as the launch fields the
+                            // digest check holds to it; without such fields nothing may answer
+                            // it, so the repeat is refused.
+                            (_, _, Some(CommittedSpawnReport::Untagged(ObservedResult::Available(_)))) => match &fields
+                            {
+                                Some(_) => SpawnPlan::Reported {
+                                    report: SpawnReport::Launch(LaunchAdmission::Fields),
+                                    taken: Taken::Untagged,
+                                },
+                                None => return Err(EventError::OutcomeMismatch),
+                            },
+                            (_, _, Some(CommittedSpawnReport::Untagged(ObservedResult::Unavailable))) => {
+                                SpawnPlan::Reported {
+                                    report: SpawnReport::NoReturn,
+                                    taken: Taken::Untagged,
+                                }
+                            }
+                            (ForkStatus::Unprepared | ForkStatus::FanOut, _, None) => SpawnPlan::Outcome,
                             // A deferred return answers every report of its spawn with the notice,
                             // so the report closes the dispatch as what the host says it was; a
                             // report with no message records that the deferral answered it.
-                            (ForkStatus::Bound(bound), named)
+                            (ForkStatus::Bound(bound), named, None)
                                 if deferral.is_some() && named.as_ref().is_none_or(|named| *named == bound) =>
                             {
-                                match (&silent, &deferred) {
-                                    (Some(_), Some(deferred)) => SpawnPlan::Reported {
+                                match (silent, &deferred) {
+                                    (true, Some(deferred)) => SpawnPlan::Reported {
                                         report: SpawnReport::Deferred {
                                             occurrence: deferred.id.clone(),
                                         },
@@ -447,23 +440,24 @@ impl Session {
                                     _ => SpawnPlan::Outcome,
                                 }
                             }
-                            (ForkStatus::Prepared, Some(child)) => SpawnPlan::Bind {
+                            (ForkStatus::Prepared, Some(child), None) => SpawnPlan::Bind {
                                 fork: fork.clone(),
                                 child: child.clone(),
                             },
                             // A failure that names no child: the subagent ended before it
                             // returned. No child bound to a prepared fork, so that subagent
                             // never started; a bound one stopped.
-                            (ForkStatus::Prepared, None) if matches!(outcome, ToolOutcome::Failure { .. }) => {
+                            (ForkStatus::Prepared, None, None) if matches!(outcome, ToolOutcome::Failure { .. }) => {
                                 SpawnPlan::Close(EventError::SpawnNeverStarted)
                             }
-                            (ForkStatus::Bound(_), None) if matches!(outcome, ToolOutcome::Failure { .. }) => {
+                            (ForkStatus::Bound(_), None, None) if matches!(outcome, ToolOutcome::Failure { .. }) => {
                                 SpawnPlan::Close(EventError::SpawnStopped)
                             }
-                            (ForkStatus::Prepared, None) | (ForkStatus::Failed | ForkStatus::ParentEnded, _) => {
+                            (ForkStatus::Prepared, None, None)
+                            | (ForkStatus::Failed | ForkStatus::ParentEnded, _, None) => {
                                 SpawnPlan::Close(EventError::SpawnNotTaken)
                             }
-                            (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
+                            (ForkStatus::Bound(bound), Some(child), None) if *child == bound => match &value {
                                 // A success with no message, first reported: a child that runs with
                                 // nothing returned is launched, and its return crosses at its own
                                 // stop. The size limit applies to the launch fields once that is
@@ -488,19 +482,20 @@ impl Session {
                                     (None, _) => SpawnPlan::Withheld,
                                 },
                             },
-                            (ForkStatus::Bound(_), _) => SpawnPlan::Close(EventError::BindingMismatch),
+                            (ForkStatus::Bound(_), _, None) => SpawnPlan::Close(EventError::BindingMismatch),
                         };
-                        // A repeat of a report a deferral answered repeats its actionable notice
-                        // while that occurrence still pends, and the neutral one once it is
-                        // settled or superseded.
+                        // A report a deferral answered carries the actionable notice of the
+                        // occurrence it names while that occurrence pends among the live parent's
+                        // deferrals, first and on every repeat alike, and the neutral one once it is
+                        // settled or gone.
                         actionable = match &next {
                             SpawnPlan::Reported {
                                 report: SpawnReport::Deferred { occurrence },
-                                taken: Taken::Recorded,
-                            } => deferred
-                                .as_ref()
-                                .filter(|deferred| deferred.id == *occurrence && deferred.settled.is_none())
-                                .and(deferral.clone()),
+                                ..
+                            } => context
+                                .engine()
+                                .pending_deferral(context.view, &self.trajectory, occurrence)
+                                .map(|deferred| context.engine().deferral_notice(&deferred, &self.presentation)),
                             _ => None,
                         };
                         let event = match &next {
@@ -605,7 +600,7 @@ impl Session {
                 }
                 // The admitted fields restate the reply in its place; any other answer to a launch —
                 // the size limit's, a withholding, a sanitizer's derivation — is the call's own.
-                SpawnPlan::Reported { report, taken } => {
+                SpawnPlan::Reported { report, .. } => {
                     return Ok(match report {
                         SpawnReport::Launch(LaunchAdmission::Fields | LaunchAdmission::OverLimit { .. }) => {
                             let decided = self
@@ -634,10 +629,7 @@ impl Session {
                         SpawnReport::Deferred { .. } => {
                             outcome_decision(decision, &self.deployment().externals)?;
                             SpawnResultDecision::Outcome(ToolResultDecision::Replace {
-                                placeholder: match (taken, deferral) {
-                                    (Taken::First, Some(notice)) => notice,
-                                    _ => actionable.unwrap_or_else(|| DEFERRED.to_string()),
-                                },
+                                placeholder: actionable.unwrap_or_else(|| DEFERRED.to_string()),
                                 presentation: None,
                             })
                         }

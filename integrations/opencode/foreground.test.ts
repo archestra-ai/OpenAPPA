@@ -653,6 +653,11 @@ test('a blocked background launch tells the parent the runtime reason and takes 
   expect(replacedDecision).toBeUndefined()
   expect(JSON.stringify(blocked.history)).toContain(reason)
   await expect(lastLaunch(blocked.session.id)).rejects.toThrow('No launch handle')
+  const launch = hooks.find(hook => hook.event.root_id === blocked.session.id &&
+    hook.event.event === 'spawn_result' && hook.event.outcome?.status === 'success')
+  expect(launch).toBeDefined()
+  const cancelled = await taskCalls(blocked.session.id, [{ name: 'appa_cancel', input: { task: launch!.event.spawned_id } }])
+  expect(JSON.stringify(cancelled)).toContain('Unknown task or task not owned')
 }, 45_000)
 
 test('lost background launch and return replies fail closed; delivery retries the exact return', async () => {
@@ -669,6 +674,7 @@ test('lost background launch and return replies fail closed; delivery retries th
   expect(acknowledged).toBeDefined()
   expect(recovered.content).toHaveLength(1)
   expect(recovered.content[0]).toMatchObject({ type: 'text', text: acknowledged!.event.spawned_id })
+  expect(await taskHandle(lost.session.id)).toBe(acknowledged!.event.spawned_id)
   for (const mode of ['raw', 'sanitize private']) {
     corruptDecision = 'child_end'
     corruptValue = mode === 'raw' ? 'child:bg-raw' : 'alice@corp.example'

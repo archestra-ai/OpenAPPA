@@ -3119,6 +3119,23 @@ impl RuntimeEngine {
         self.engine.deferred_return(view, parent, id)
     }
 
+    /// The deferred return frozen at `id` while it awaits the decision of `parent`, which owns
+    /// it and has not ended.
+    pub(crate) fn pending_deferral(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        id: &ChildReturnId,
+    ) -> Option<DeferredReturn> {
+        match self.liveness(view, parent) {
+            Liveness::Ended => None,
+            _ => self
+                .engine
+                .deferred_return(view, parent, id)
+                .filter(|deferred| deferred.settled.is_none()),
+        }
+    }
+
     /// The deferred returns `parent`'s child `child` froze, in occurrence order.
     pub(crate) fn deferred_returns_by(
         &self,
