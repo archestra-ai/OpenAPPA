@@ -112,10 +112,32 @@ fn checked(policy: &str) -> std::process::ExitStatus {
         .status
 }
 
+/// A policy every requirement of which can be met, routing a tool through an Annotator the
+/// deployment never binds.
+const UNBOUND: &str = r#"[policy]
+version = 2
+
+[[policy.annotator]]
+name = "classifier"
+
+[[policy.tool]]
+name = "mcp/ops/read"
+annotator = "classifier"
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 65536
+"#;
+
 #[test]
 fn describe_check_fails_on_a_requirement_nothing_can_meet() {
     assert!(!checked(UNSATISFIABLE).success());
     assert!(checked(SATISFIABLE).success());
+}
+
+#[test]
+fn describe_check_fails_on_a_configuration_that_does_not_load_without_findings() {
+    assert!(!checked(UNBOUND).success());
 }
 
 /// The check is an authoring check: the policy still loads, and its call is refused with no

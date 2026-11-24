@@ -447,7 +447,7 @@ pub struct Description {
     /// Whether the complete configuration loads for the served adapter.
     pub loads: bool,
     /// The authoring check over the served policy: empty where it passes, and where the
-    /// configuration does not load.
+    /// policy does not compile. Independent of `loads`, which also covers deployment bindings.
     pub unsatisfiable: Vec<UnsatisfiableRequirement>,
 }
 
@@ -479,7 +479,6 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
     let loads = validation.is_ok();
     let unsatisfiable = served_policy
         .as_ref()
-        .filter(|_| loads)
         .map(appa_policy::Config::unsatisfiable_requirements)
         .unwrap_or_default();
     if !loads && config.state == ConfigState::Loadable {
@@ -634,9 +633,9 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
             let _ = writeln!(output, "Validation failed: {error}");
         }
     }
-    match served_policy.as_ref().filter(|_| loads) {
+    match served_policy.as_ref() {
         None => {
-            let _ = writeln!(output, "Authoring check: unavailable (the configuration does not load)");
+            let _ = writeln!(output, "Authoring check: unavailable (the policy does not compile)");
         }
         Some(_) if unsatisfiable.is_empty() => {
             let _ = writeln!(output, "Authoring check: passed");
@@ -856,6 +855,25 @@ mod tests {
 
         let met = described(&format!("{backup}{deploy}"));
         assert!(met.loads && met.unsatisfiable.is_empty() && met.passes_check());
+    }
+
+    /// A deployment binding the configuration lacks fails loading, and the authoring check
+    /// still reports what the compiled policy shows.
+    #[test]
+    fn an_unbound_annotator_fails_loading_and_keeps_the_authoring_findings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("appa.toml");
+        std::fs::write(&path, "[policy]\nversion = 2\n[[policy.annotator]]\nname = \"classifier\"\n[[policy.tool]]\nname = \"read\"\nannotator = \"classifier\"\n[[policy.tool]]\nname = \"mcp/ops/deploy\"\nrequires = { attention = [\"signoff\"] }\ndelta = {}\n[externals]\ntimeout_ms = 1000\nmax_body_bytes = 65536\n").unwrap();
+        let description = render(&path, &[], AdapterName::Kagent, &[]);
+        assert!(!description.loads);
+        assert_eq!(
+            description.unsatisfiable,
+            [UnsatisfiableRequirement {
+                tool: appa_engine::value::ToolName::new("mcp/ops/deploy"),
+                requirement: RequirementKind::Attention(appa_engine::names::MarkName::new("signoff")),
+            }]
+        );
+        assert!(!description.passes_check());
     }
 
     #[test]

@@ -662,7 +662,7 @@ Authorities with `permits = { attention = ["*"] }` can approve any declared atte
 Use `blocked` to deny a call outright. Any other requirement that nothing in the policy can meet has the same effect on a new trajectory that inherits nothing: while a call selects that tool rule, it is never dispatched. `appa describe --check` reports each such requirement apart from whether the configuration loads, and exits unsuccessfully:
 
 - an attention mark that no authority permits;
-- an effect in `effects.contains` that no in-scope authority waives with `prior_effects_containing`, and that no other tool rule emits, counting only rules a call can select and release: a rule that an earlier unconditional rule of the same name shadows, a rule that requires `blocked`, and a tool served by the `jev` annotator emit nothing;
+- an effect in `effects.contains` that no in-scope authority waives with `prior_effects_containing`, and that no other tool rule emits, counting only rules a call can select and release: a rule that an earlier rule for the same tool always matches first because it has no argument selector or the same one, a rule that requires `blocked`, and a tool served by the `jev` annotator emit nothing;
 - a trust floor above the trust the call carries once its own `forwards` narrows the starting label, which no in-scope authority covers with `trust_below`.
 
 Such a policy still loads, and the runtime refuses the call with no remedy plan. The check judges the policy revision it reads: a trajectory carried from an earlier revision, or a sanitizer that rewrites a call onto another tool rule, can still reach the call. The check reads only the requirements that the policy writes. It does not read the requirements that an annotator returns for a call.

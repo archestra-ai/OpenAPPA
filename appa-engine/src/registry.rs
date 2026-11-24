@@ -20,7 +20,7 @@ use crate::names::{AnnotatorName, AuthorityName, MarkName, SanitizerName, TagNam
 use crate::params::ArgumentShape;
 use crate::value::{ToolDeclarationId, ToolName};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) enum ToolMatcher {
     Bare,
     Arguments(ArgumentPatterns),
@@ -31,7 +31,7 @@ pub(crate) enum ToolMatcher {
 /// `tool(owner:x,repo:y)` and `tool(repo:y,owner:x)` are the same matcher and the same
 /// policy identity. Non-emptiness is the constructor's invariant, so a matcher that would
 /// match every call vacuously cannot be built — that is what [`ToolMatcher::Bare`] is.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub(crate) struct ArgumentPatterns(BTreeMap<String, Pattern>);
 
 impl ArgumentPatterns {
@@ -52,7 +52,7 @@ impl ArgumentPatterns {
 /// is the normal form — alternation is commutative and idempotent, so `a|b`, `b|a` and `a|b|a`
 /// are one pattern and one policy identity. Only the clause parser builds one, and it ends
 /// every clause with an alternative, so a pattern is never empty.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Pattern(BTreeSet<Vec<PatternPart>>);
 
 impl Pattern {
@@ -2088,10 +2088,11 @@ impl Registry {
     /// Every [`UnsatisfiableRequirement`] of the rules a call can select. A trajectory's trust
     /// only narrows from its starting label, and the call's own `forwards` narrows what it sends,
     /// so a floor above both is met only by an authority; a sanitizer settles a narrowing, never
-    /// a requirement gap. Covers read the predicate planning reads. A rule an earlier
-    /// unconditional rule of a covering name shadows is never selected, so it neither states a
-    /// requirement nor emits. An emitter counts only where it can release its call: never the
-    /// gated rule itself, never a rule requiring `blocked`. Requirements an Annotator produces
+    /// a requirement gap. Covers read the predicate planning reads. A rule is never selected,
+    /// so it neither states a requirement nor emits, where an earlier rule of a covering name is
+    /// bare or has the same normalized matcher; any other overlap leaves it selectable. An
+    /// emitter counts only where it can release its call: never the gated rule itself, never a
+    /// rule requiring `blocked`. Requirements an Annotator produces
     /// exist per call and are its own: only the floor written beside it is judged, and an
     /// Annotator whose mandate admits an effect counts as its emitter unless it is in
     /// `effect_free`, whose consults never emit. The reserved `blocked` mark is unsatisfiable by
@@ -2108,7 +2109,7 @@ impl Registry {
         );
         let starting = self.profile.starting_label().trust;
         let mut selectable: Vec<&ToolDeclaration> = Vec::new();
-        let mut unconditional: BTreeSet<ToolName> = BTreeSet::new();
+        let mut earlier: BTreeMap<&ToolName, BTreeSet<&ToolMatcher>> = BTreeMap::new();
         for (name, ordinal) in &self.tool_order {
             let (matcher, declaration) = &self.tools[name][*ordinal];
             let covering_selector = name
@@ -2117,14 +2118,15 @@ impl Registry {
                 .and_then(|rest| rest.split_once('/'))
                 .map(|(_, leaf)| ToolName::new(format!("mcp/*/{leaf}")))
                 .filter(|selector| selector.matches_name(name));
-            let shadowed = unconditional.contains(name)
-                || covering_selector.is_some_and(|selector| unconditional.contains(&selector));
-            if !shadowed {
+            let shadows = |rule: &ToolName| {
+                earlier
+                    .get(rule)
+                    .is_some_and(|matchers| matchers.contains(&ToolMatcher::Bare) || matchers.contains(matcher))
+            };
+            if !shadows(name) && !covering_selector.as_ref().is_some_and(shadows) {
                 selectable.push(declaration);
             }
-            if matches!(matcher, ToolMatcher::Bare) {
-                unconditional.insert(name.clone());
-            }
+            earlier.entry(name).or_default().insert(matcher);
         }
         selectable.extend(self.wildcard.as_ref());
         let releasing = |declaration: &ToolDeclaration| {
@@ -2133,24 +2135,34 @@ impl Registry {
                 .is_none_or(|tool| !tool.requires.attention_marks().iter().any(MarkName::is_blocked))
         };
         let mut emitters: BTreeMap<&EffectKind, BTreeSet<usize>> = BTreeMap::new();
+        let mut consulted: BTreeSet<&AnnotatorName> = BTreeSet::new();
         for (index, declaration) in selectable.iter().enumerate().filter(|(_, d)| releasing(d)) {
-            let emits: Vec<&EffectKind> = match declaration {
-                ToolDeclaration::Declared(tool) => tool.emits.iter().collect(),
-                ToolDeclaration::Annotated { annotator, .. } if effect_free.contains(annotator) => Vec::new(),
-                ToolDeclaration::Annotated { annotator, .. } => self
-                    .annotators
-                    .get(annotator)
-                    .map(|mandate| mandate.effects.iter().collect())
-                    .unwrap_or_default(),
-            };
-            for kind in emits {
-                emitters.entry(kind).or_default().insert(index);
+            match declaration {
+                ToolDeclaration::Declared(tool) => {
+                    for kind in tool.emits.iter() {
+                        emitters.entry(kind).or_default().insert(index);
+                    }
+                }
+                ToolDeclaration::Annotated { annotator, .. } if effect_free.contains(annotator) => {}
+                ToolDeclaration::Annotated { annotator, .. } => {
+                    consulted.insert(annotator);
+                }
             }
         }
-        let provider_run: BTreeSet<&EffectKind> =
-            self.provider_run.values().flat_map(|tool| tool.emits.iter()).collect();
+        // A gated rule is always a declared one, so neither of these is ever the gated rule.
+        let emitted_elsewhere: BTreeSet<&EffectKind> = self
+            .provider_run
+            .values()
+            .flat_map(|tool| tool.emits.iter())
+            .chain(
+                consulted
+                    .into_iter()
+                    .filter_map(|annotator| self.annotators.get(annotator))
+                    .flat_map(|mandate| mandate.effects.iter()),
+            )
+            .collect();
         let emitted_for = |kind: &EffectKind, gated: usize| {
-            provider_run.contains(kind)
+            emitted_elsewhere.contains(kind)
                 || emitters
                     .get(kind)
                     .is_some_and(|emitters| emitters.iter().any(|&emitter| emitter != gated))
@@ -3804,6 +3816,61 @@ mod tests {
                 })
                 .to_vec()
         );
+    }
+
+    /// An earlier rule of a covering name shadows a later one when it is bare or has the same
+    /// normalized matcher. Any other overlap may leave calls to the later rule, so it still
+    /// states its requirements and still emits.
+    #[test]
+    fn a_rule_an_earlier_matcher_selects_first_neither_requires_nor_emits() {
+        let (reviewed, signoff) = (EffectKind::new("reviewed"), MarkName::new("signoff"));
+        let mut gated = tool("gated");
+        gated.requires.history = vec![HistoryRequirement::Prior(reviewed.clone())];
+        let exact = |name: &str| {
+            let mut exact = tool(name);
+            exact.emits = EffectSet::new([reviewed.clone()]).unwrap();
+            exact.requires.attention = vec![signoff.clone()];
+            exact
+        };
+        let census = |selector: &str, later: &str| {
+            unsatisfiable(with(
+                [tool(selector), exact(later), gated.clone()]
+                    .into_iter()
+                    .map(ToolDeclaration::Declared)
+                    .collect(),
+                vec![],
+            ))
+        };
+
+        for (selector, later) in [
+            (
+                "mcp/*/read(path:private*|secret*)",
+                "mcp/demo/read(path:secret*|private*)",
+            ),
+            ("mcp/*/read", "mcp/demo/read(path:private*)"),
+            ("read(owner:a,repo:b)", "read(repo:b,owner:a)"),
+        ] {
+            assert_eq!(
+                census(selector, later),
+                listed(RequirementKind::Prior(reviewed.clone())),
+                "{selector} shadows {later}"
+            );
+        }
+        for (selector, later) in [
+            ("mcp/*/read(path:public*)", "mcp/demo/read(path:private*)"),
+            ("mcp/*/read(path:private*)", "mcp/demo/read"),
+            ("mcp/demo/read(path:private*)", "mcp/*/read(path:private*)"),
+        ] {
+            let base = later.split_once('(').map_or(later, |(base, _)| base);
+            assert_eq!(
+                census(selector, later),
+                vec![UnsatisfiableRequirement {
+                    tool: ToolName::new(base),
+                    requirement: RequirementKind::Attention(signoff.clone()),
+                }],
+                "{later} stays reachable after {selector}"
+            );
+        }
     }
 
     #[test]

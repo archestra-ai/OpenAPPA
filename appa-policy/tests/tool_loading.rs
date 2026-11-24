@@ -95,3 +95,30 @@ fn a_jev_annotator_emits_nothing_a_prior_can_wait_for() {
     );
     assert_eq!(unsatisfiable(""), []);
 }
+
+/// Selection is first match wins, so a rule an earlier selector always selects first states no
+/// requirement; a selector with another matcher leaves the rule its calls.
+#[test]
+fn a_rule_an_earlier_selector_always_selects_first_states_no_requirement() {
+    use appa_engine::names::MarkName;
+    use appa_engine::registry::{RequirementKind, UnsatisfiableRequirement};
+    use appa_engine::value::ToolName;
+
+    let unsatisfiable = |selector: &str| {
+        Config::from_toml_str(&format!(
+            "version = 2\n\n[[tool]]\nname = \"mcp/*/read({selector})\"\n\n\
+             [[tool]]\nname = \"mcp/demo/read(path:private*)\"\nrequires = {{ attention = [\"signoff\"] }}\n"
+        ))
+        .expect("the policy loads")
+        .unsatisfiable_requirements()
+    };
+
+    assert_eq!(unsatisfiable("path:private*"), []);
+    assert_eq!(
+        unsatisfiable("path:public*"),
+        [UnsatisfiableRequirement {
+            tool: ToolName::new("mcp/demo/read"),
+            requirement: RequirementKind::Attention(MarkName::new("signoff")),
+        }]
+    );
+}
