@@ -3,7 +3,10 @@
 use crate::common;
 
 use appa_runtime::api::{RemedyOutcome, Runtime};
-use appa_runtime_api::{HookDecision, ProposedCall};
+use appa_runtime::hooks;
+use appa_runtime_api::{
+    HookDecision, HookEvent, OutcomeBody, ProposedCall, ReleaseReceipt, ReleaseRefusal, ToolOutcome,
+};
 use axum::{Router, routing::post};
 use common::{actor, offer_of, offers, propose, ran, raw, repo_root, serve, session_runtime};
 use std::sync::Arc;
@@ -38,18 +41,52 @@ async fn archestra_source() -> String {
     format!("{}/audience", serve(router).await)
 }
 
-/// The shipped rules, with the battery's own `command` binding swapped for the loopback
-/// source: the helper has its own tests, and a root cannot rebind a battery's provider.
+/// A loopback `chatops` source, answering as the Archestra host does: a member as their
+/// email, an account outside the organization as `chatops:<provider>/<id>`, whose lookup
+/// finds no member, and no answer for a channel named `open`, whose roster is not closed.
+async fn chatops_source() -> String {
+    let router = Router::new().route(
+        "/audience",
+        post(|body: String| async move {
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let answer = match (
+                request["artifact"]["selector"].as_str(),
+                request["artifact"]["member"].as_str(),
+            ) {
+                (Some(selector), None) => match selector.split_once('/').unwrap() {
+                    (_, "open") => return (axum::http::StatusCode::SERVICE_UNAVAILABLE, String::new()),
+                    (_, "all") => serde_json::json!({ "members": ["alice@corp.example", "bob@corp.example"] }),
+                    (_, "t1") => serde_json::json!({ "members": ["alice@corp.example"] }),
+                    (_, "guest") => serde_json::json!({ "members": ["alice@corp.example", "chatops:slack/U-guest"] }),
+                    other => panic!("unexpected channel {other:?}"),
+                },
+                (None, Some("chatops:slack/U-guest")) => serde_json::json!({ "principal": null }),
+                other => panic!("unexpected chatops consult {other:?}"),
+            };
+            let reply = serde_json::json!({ "version": 1, "answer": answer }).to_string();
+            (axum::http::StatusCode::OK, reply)
+        }),
+    );
+    format!("{}/audience", serve(router).await)
+}
+
+/// The shipped rules, with the battery's own `command` bindings swapped for the loopback
+/// sources: the helper has its own tests, and a root cannot rebind a battery's provider.
 /// The root adds one read per label a probe needs and one sink per requirement.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
     let shipped = std::fs::read_to_string(repo_root().join("marketplace/batteries/archestra/appa.toml")).unwrap();
     let mut battery: toml_edit::DocumentMut = shipped.parse().unwrap();
-    let binding = battery["externals"]["audience"]["archestra"]
-        .as_table_mut()
-        .expect("the battery binds its source");
-    binding.remove("command");
-    binding.remove("token_env");
-    binding.insert("url", toml_edit::value(archestra_source().await));
+    for (source, url) in [
+        ("archestra", archestra_source().await),
+        ("chatops", chatops_source().await),
+    ] {
+        let binding = battery["externals"]["audience"][source]
+            .as_table_mut()
+            .expect("the battery binds its source");
+        binding.remove("command");
+        binding.remove("token_env");
+        binding.insert("url", toml_edit::value(url));
+    }
     let target = dir.path().join("batteries/archestra");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("appa.toml"), battery.to_string()).unwrap();
@@ -573,4 +610,183 @@ async fn a_suspicious_session_cannot_save_a_file() {
     )
     .await;
     assert!(!runs_after_remedies(&runtime, save).await);
+}
+
+/// The receipt of `read`'s result in a fresh session that took the read's narrowing: content
+/// at exactly the label `read` adds.
+async fn content_of(read: ProposedCall) -> (tempfile::TempDir, Arc<Runtime>, ReleaseReceipt) {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir).await;
+    let decision = match propose(&runtime, read.clone()).await {
+        HookDecision::DenyCall { feedback, .. } => {
+            assert!(matches!(
+                runtime.execute_remedy(&actor(), common::last_offer(&feedback)).await,
+                RemedyOutcome::Authorized { .. }
+            ));
+            propose(&runtime, read.clone()).await
+        }
+        decision => decision,
+    };
+    assert_eq!(decision, HookDecision::AllowCall { spawn: None });
+    let outcome = hooks::handle_embedded(
+        &runtime,
+        HookEvent::ToolResult {
+            actor: actor(),
+            call: read,
+            call_id: None,
+            outcome: ToolOutcome::Success {
+                body: OutcomeBody::Available("the content".to_string()),
+            },
+        },
+    )
+    .await;
+    assert_eq!(outcome.decision, HookDecision::Ack);
+    let receipt = outcome.receipt.expect("a delivered result carries its receipt");
+    (dir, runtime, receipt)
+}
+
+async fn judge(
+    runtime: &Runtime,
+    receipt: &ReleaseReceipt,
+    sink: &str,
+    recipients: serde_json::Value,
+) -> Result<(), ReleaseRefusal> {
+    runtime
+        .judge_release(
+            std::slice::from_ref(receipt),
+            &format!("host/archestra/{sink}"),
+            &raw(recipients),
+        )
+        .await
+}
+
+const RELEASED: Result<(), ReleaseRefusal> = Ok(());
+const WITHHELD: Result<(), ReleaseRefusal> = Err(ReleaseRefusal::HardBlock);
+
+fn channel(binding: &str, channel: &str) -> serde_json::Value {
+    serde_json::json!({ "binding": binding, "channel": channel })
+}
+
+fn recipient(recipient: &str) -> serde_json::Value {
+    serde_json::json!({ "recipient": recipient })
+}
+
+/// Every sink releases the organization's content to recipients inside the organization
+/// and withholds it from anyone outside, whether named directly or seated in a channel.
+#[tokio::test]
+async fn each_sink_releases_internal_content_only_to_recipients_the_organization_covers() {
+    let (_dir, runtime, internal) = content_of(archestra("get_agent", serde_json::json!({ "id": "a" }))).await;
+    let cases = [
+        ("a2a", recipient("alice@corp.example"), RELEASED),
+        ("a2a", recipient("eve@outside.example"), WITHHELD),
+        ("email", recipient("bob@corp.example"), RELEASED),
+        ("email", recipient("eve@outside.example"), WITHHELD),
+        ("chatops_reply", channel("slack-1", "all"), RELEASED),
+        ("chatops_reply", channel("slack-1", "guest"), WITHHELD),
+        ("jira_reply", channel("jira-1", "all"), RELEASED),
+        ("jira_reply", channel("jira-1", "guest"), WITHHELD),
+        ("agent_run_post", channel("teams-1", "all"), RELEASED),
+        ("agent_run_post", channel("teams-1", "guest"), WITHHELD),
+    ];
+    for (sink, recipients, expected) in cases {
+        assert_eq!(
+            judge(&runtime, &internal, sink, recipients.clone()).await,
+            expected,
+            "{sink} {recipients}"
+        );
+    }
+}
+
+/// Content one team may read reaches that team, as a channel of its members or as the
+/// group an A2A team token reads as, and no wider audience.
+#[tokio::test]
+async fn team_content_reaches_only_recipients_inside_the_team() {
+    let (_dir, runtime, team) = content_of(call("read_note", serde_json::json!({}))).await;
+    let cases = [
+        ("chatops_reply", channel("slack-1", "t1"), RELEASED),
+        ("chatops_reply", channel("slack-1", "all"), WITHHELD),
+        ("a2a", recipient("@archestra:team/t1"), RELEASED),
+        ("a2a", recipient("internal"), WITHHELD),
+        ("email", recipient("alice@corp.example"), RELEASED),
+        ("email", recipient("bob@corp.example"), WITHHELD),
+    ];
+    for (sink, recipients, expected) in cases {
+        assert_eq!(
+            judge(&runtime, &team, sink, recipients.clone()).await,
+            expected,
+            "{sink} {recipients}"
+        );
+    }
+}
+
+/// A channel whose roster the host cannot close, such as a Telegram group or a Jira project,
+/// has no answer: a release that reads the roster is refused for the missing fact, never
+/// judged open. Public content reads no roster.
+#[tokio::test]
+async fn a_channel_without_a_closed_roster_is_a_missing_fact() {
+    let (_dir, runtime, internal) = content_of(archestra("get_agent", serde_json::json!({ "id": "a" }))).await;
+    for (sink, binding) in [
+        ("chatops_reply", "telegram-1"),
+        ("jira_reply", "jira-1"),
+        ("agent_run_post", "telegram-1"),
+    ] {
+        assert!(
+            matches!(
+                judge(&runtime, &internal, sink, channel(binding, "open")).await,
+                Err(ReleaseRefusal::MissingFact(_))
+            ),
+            "{sink}"
+        );
+    }
+
+    let (_dir, runtime, public) = content_of(archestra("search_tools", serde_json::json!({ "query": "github" }))).await;
+    assert_eq!(
+        judge(&runtime, &public, "chatops_reply", channel("telegram-1", "open")).await,
+        RELEASED,
+        "public content reads no roster"
+    );
+}
+
+/// Email, Jira replies and run posts keep their trust rule: text strangers wrote reaches no
+/// one through them, even inside the organization. A channel reply and an A2A answer carry
+/// it to the readers the audience covers.
+#[tokio::test]
+async fn email_jira_and_run_posts_withhold_suspicious_content() {
+    let (_dir, runtime, suspicious) = content_of(archestra(
+        "query_knowledge_sources",
+        serde_json::json!({ "query": "invoices" }),
+    ))
+    .await;
+    let cases = [
+        ("email", recipient("alice@corp.example"), WITHHELD),
+        ("jira_reply", channel("jira-1", "all"), WITHHELD),
+        ("agent_run_post", channel("slack-1", "all"), WITHHELD),
+        ("chatops_reply", channel("slack-1", "all"), RELEASED),
+        ("a2a", recipient("alice@corp.example"), RELEASED),
+    ];
+    for (sink, recipients, expected) in cases {
+        assert_eq!(
+            judge(&runtime, &suspicious, sink, recipients.clone()).await,
+            expected,
+            "{sink} {recipients}"
+        );
+    }
+}
+
+/// The sinks are a closed set: a sink the battery does not name, or a call missing the
+/// recipients its contract reads, is not judged.
+#[tokio::test]
+async fn an_unnamed_sink_or_one_without_its_recipients_is_an_integrity_failure() {
+    let (_dir, runtime, internal) = content_of(archestra("get_agent", serde_json::json!({ "id": "a" }))).await;
+    for (sink, recipients) in [
+        ("slack_reply", channel("slack-1", "all")),
+        ("chatops_reply", serde_json::json!({ "binding": "slack-1" })),
+        ("email", serde_json::json!({})),
+    ] {
+        assert_eq!(
+            judge(&runtime, &internal, sink, recipients.clone()).await,
+            Err(ReleaseRefusal::Integrity),
+            "{sink} {recipients}"
+        );
+    }
 }

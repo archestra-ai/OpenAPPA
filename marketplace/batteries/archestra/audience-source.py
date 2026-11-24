@@ -1,8 +1,9 @@
-"""The archestra audience source. The runtime runs this script once for
-each membership read or member lookup, passes the consult request as
-JSON on standard input, and reads one JSON answer from standard output.
+"""The archestra and chatops audience sources. The runtime runs this script
+once for each membership read or member lookup, passes the consult request
+as JSON on standard input, and reads one JSON answer from standard output.
 
-Serves these selector templates over Archestra's audience API:
+The `archestra` source serves these selector templates over Archestra's
+audience API:
 
   members          every member of the organization the token belongs to
   team/<team>      one team, named by its id or its name
@@ -10,6 +11,12 @@ Serves these selector templates over Archestra's audience API:
 
 and the member lookup that resolves one `archestra:<user-id>` member to
 that user's email.
+
+The `chatops` source serves `<binding>/<channel>`: who reads one channel of
+a ChatOps binding. Archestra answers a member as their email and an account
+outside the organization as `chatops:<provider>/<id>`, which the member
+lookup resolves. A channel whose roster Archestra cannot close gets no
+member list, which is no answer.
 
 Every member is reported as the email address Archestra holds for the
 account — the address the identity provider signs the user in with — so
@@ -34,18 +41,20 @@ import urllib.request
 
 BASE_URL_VAR = "ARCHESTRA_BASE_URL"
 TOKEN_VAR = "APPA_PROVIDER_ARCHESTRA_TOKEN"
-SOURCE_NAME = "archestra"
-SERVED_TEMPLATES = ["members", "team/<team>", "user/<user>"]
+SERVED_TEMPLATES = {
+    "archestra": ["members", "team/<team>", "user/<user>"],
+    "chatops": ["<binding>/<channel>"],
+}
 TIMEOUT_SECONDS = 30
 MAX_MEMBERS = 5000
 
 
-def audience_api(base_url, token):
+def audience_api(base_url, token, source):
     endpoint = f"{base_url.rstrip('/')}/api/openappa/audience"
 
     def call(**params):
         request = urllib.request.Request(
-            f"{endpoint}?{urllib.parse.urlencode(params)}",
+            f"{endpoint}?{urllib.parse.urlencode({'source': source, **params})}",
             headers={"Authorization": f"Bearer {token}"},
         )
         try:
@@ -57,18 +66,20 @@ def audience_api(base_url, token):
     return call
 
 
-def served(selector):
-    match selector.split("/"):
-        case ["members"]:
+def served(source, selector):
+    match source, selector.split("/"):
+        case "archestra", ["members"]:
             return True
-        case ["team" | "user", name]:
+        case "archestra", ["team" | "user", name]:
             return bool(name)
+        case "chatops", [binding, channel]:
+            return bool(binding) and bool(channel)
         case _:
             return False
 
 
-def members(call, selector):
-    if not isinstance(selector, str) or not served(selector):
+def members(call, source, selector):
+    if not isinstance(selector, str) or not served(source, selector):
         raise ValueError(f"{selector!r} names no collection this source serves")
     found = call(selector=selector).get("members")
     if not isinstance(found, list) or not all(isinstance(member, str) and member for member in found):
@@ -78,10 +89,10 @@ def members(call, selector):
     return found
 
 
-def member_principal(call, member):
-    prefix = "archestra:"
+def member_principal(call, source, member):
+    prefix = f"{source}:"
     if not isinstance(member, str) or not member.startswith(prefix) or member == prefix:
-        raise ValueError(f"{member!r} is not an archestra-qualified member")
+        raise ValueError(f"{member!r} is not a {source}-qualified member")
     answer = call(member=member[len(prefix) :])
     if "principal" not in answer:
         raise RuntimeError(f"the answer for {member!r} carries no principal")
@@ -97,19 +108,19 @@ def member_principal(call, member):
             raise RuntimeError(f"the answer for {member!r} carries no principal")
 
 
-def answer(call, artifact):
+def answer(call, source, artifact):
     if not isinstance(artifact, dict):
         raise ValueError("the artifact must be an object")
     match sorted(artifact):
         case ["selector"]:
-            return {"members": members(call, artifact["selector"])}
+            return {"members": members(call, source, artifact["selector"])}
         case ["member"]:
-            return {"principal": member_principal(call, artifact["member"])}
+            return {"principal": member_principal(call, source, artifact["member"])}
         case _:
             raise ValueError("the artifact must carry exactly a selector or a member")
 
 
-def check_declaration(request):
+def check_declaration(source, request):
     """The policy's declared templates against the ones this script serves.
 
     A mismatch is a version skew between policy and script, refused before
@@ -117,9 +128,9 @@ def check_declaration(request):
     provider failure.
     """
     declared = request.get("declaration", {}).get("templates")
-    if declared != SERVED_TEMPLATES:
+    if declared != SERVED_TEMPLATES[source]:
         print(
-            f"{SOURCE_NAME} audience source: the policy declares {declared!r}, this script serves {SERVED_TEMPLATES!r}",
+            f"{source} audience source: the policy declares {declared!r}, this script serves {SERVED_TEMPLATES[source]!r}",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -132,9 +143,10 @@ def main():
         raise ValueError("unsupported request version")
     if request.get("kind") != "audience":
         raise ValueError("unexpected consult kind")
-    if request.get("name") != SOURCE_NAME:
+    source = request.get("name")
+    if source not in SERVED_TEMPLATES:
         raise ValueError("unexpected source name")
-    check_declaration(request)
+    check_declaration(source, request)
 
     base_url = os.environ.get(BASE_URL_VAR)
     if not base_url:
@@ -143,7 +155,7 @@ def main():
     if not token:
         raise RuntimeError(f"{TOKEN_VAR} is not set")
 
-    json.dump({"version": 1, "answer": answer(audience_api(base_url, token), request.get("artifact"))}, sys.stdout)
+    json.dump({"version": 1, "answer": answer(audience_api(base_url, token, source), source, request.get("artifact"))}, sys.stdout)
     sys.stdout.write("\n")
 
 
@@ -151,5 +163,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(f"archestra audience source: {error}", file=sys.stderr)
+        print(f"archestra battery audience source: {error}", file=sys.stderr)
         raise SystemExit(1)

@@ -56,11 +56,11 @@ class RecordedArchestra:
         return f"http://{host}:{port}/"
 
 
-def consult(artifact, base_url, token=TOKEN, templates=TEMPLATES):
+def consult(artifact, base_url, token=TOKEN, templates=TEMPLATES, name="archestra"):
     request = {
         "version": 1,
         "kind": "audience",
-        "name": "archestra",
+        "name": name,
         "declaration": {"templates": templates},
         "artifact": artifact,
     }
@@ -89,9 +89,9 @@ def answered(completed):
 class SelectorTests(unittest.TestCase):
     def test_each_selector_reads_its_collection_as_emails(self):
         answers = {
-            (("selector", "members"),): (200, {"members": ["alice@corp.com", "bob@corp.com"]}),
-            (("selector", "team/Platform"),): (200, {"members": ["alice@corp.com"]}),
-            (("selector", "user/u-1"),): (200, {"members": ["carol@corp.com"]}),
+            (("selector", "members"), ("source", "archestra")): (200, {"members": ["alice@corp.com", "bob@corp.com"]}),
+            (("selector", "team/Platform"), ("source", "archestra")): (200, {"members": ["alice@corp.com"]}),
+            (("selector", "user/u-1"), ("source", "archestra")): (200, {"members": ["carol@corp.com"]}),
         }
         with RecordedArchestra(answers) as archestra:
             self.assertEqual(
@@ -117,10 +117,10 @@ class SelectorTests(unittest.TestCase):
 
     def test_an_api_failure_or_malformed_answer_is_no_answer(self):
         answers = {
-            (("selector", "team/gone"),): (404, {"error": "no such team"}),
-            (("selector", "team/odd"),): (200, {"members": "alice@corp.com"}),
-            (("selector", "team/blank"),): (200, {"members": [""]}),
-            (("selector", "team/huge"),): (200, {"members": [f"u{i}@corp.com" for i in range(5001)]}),
+            (("selector", "team/gone"), ("source", "archestra")): (404, {"error": "no such team"}),
+            (("selector", "team/odd"), ("source", "archestra")): (200, {"members": "alice@corp.com"}),
+            (("selector", "team/blank"), ("source", "archestra")): (200, {"members": [""]}),
+            (("selector", "team/huge"), ("source", "archestra")): (200, {"members": [f"u{i}@corp.com" for i in range(5001)]}),
         }
         with RecordedArchestra(answers) as archestra:
             for team in ["gone", "odd", "blank", "huge"]:
@@ -132,9 +132,9 @@ class SelectorTests(unittest.TestCase):
 class MemberLookupTests(unittest.TestCase):
     def test_a_user_id_resolves_to_its_email_or_to_nothing(self):
         answers = {
-            (("member", "u-1"),): (200, {"principal": "alice@corp.com"}),
-            (("member", "u-2"),): (200, {"principal": None}),
-            (("member", "u-3"),): (200, {}),
+            (("member", "u-1"), ("source", "archestra")): (200, {"principal": "alice@corp.com"}),
+            (("member", "u-2"), ("source", "archestra")): (200, {"principal": None}),
+            (("member", "u-3"), ("source", "archestra")): (200, {}),
         }
         with RecordedArchestra(answers) as archestra:
             self.assertEqual(
@@ -149,13 +149,49 @@ class MemberLookupTests(unittest.TestCase):
             self.assertEqual(consult({"member": "slack:U1"}, archestra.base_url).returncode, 1)
 
 
+class ChatopsTests(unittest.TestCase):
+    def chatops(self, artifact, base_url, templates=("<binding>/<channel>",)):
+        return consult(artifact, base_url, templates=list(templates), name="chatops")
+
+    def test_a_channel_reads_its_roster_and_an_outside_account_looks_up_to_nothing(self):
+        answers = {
+            (("selector", "slack-1/C1"), ("source", "chatops")): (
+                200,
+                {"members": ["alice@corp.com", "chatops:slack/U9"]},
+            ),
+            (("member", "slack/U9"), ("source", "chatops")): (200, {"principal": None}),
+        }
+        with RecordedArchestra(answers) as archestra:
+            self.assertEqual(
+                answered(self.chatops({"selector": "slack-1/C1"}, archestra.base_url)),
+                {"members": ["alice@corp.com", "chatops:slack/U9"]},
+            )
+            self.assertEqual(
+                answered(self.chatops({"member": "chatops:slack/U9"}, archestra.base_url)),
+                {"principal": None},
+            )
+
+    def test_an_open_roster_or_an_unserved_selector_is_no_answer(self):
+        answers = {(("selector", "telegram-1/G1"), ("source", "chatops")): (200, {"members": None})}
+        with RecordedArchestra(answers) as archestra:
+            self.assertEqual(self.chatops({"selector": "telegram-1/G1"}, archestra.base_url).returncode, 1)
+            for selector in ["members", "slack-1/", "slack-1/C1/x"]:
+                self.assertEqual(self.chatops({"selector": selector}, archestra.base_url).returncode, 1, selector)
+            self.assertEqual(self.chatops({"member": "archestra:u-1"}, archestra.base_url).returncode, 1)
+            self.assertEqual([query for _, query, _ in archestra.seen], [answers.popitem()[0]])
+
+    def test_each_source_checks_its_own_declaration(self):
+        self.assertEqual(self.chatops({"selector": "slack-1/C1"}, None, templates=TEMPLATES).returncode, 2)
+        self.assertEqual(consult({"selector": "members"}, None, token=None, name="chatops").returncode, 2)
+
+
 class RequestTests(unittest.TestCase):
     def test_a_declaration_skew_exits_2_before_reading_credentials(self):
         completed = consult({"selector": "members"}, None, token=None, templates=["members"])
         self.assertEqual(completed.returncode, 2)
 
     def test_missing_configuration_is_no_answer(self):
-        with RecordedArchestra({(("selector", "members"),): (200, {"members": []})}) as archestra:
+        with RecordedArchestra({(("selector", "members"), ("source", "archestra")): (200, {"members": []})}) as archestra:
             self.assertEqual(consult({"selector": "members"}, None).returncode, 1)
             self.assertEqual(consult({"selector": "members"}, archestra.base_url, token=None).returncode, 1)
             self.assertEqual(consult({"selector": "members"}, archestra.base_url, token="wrong").returncode, 1)

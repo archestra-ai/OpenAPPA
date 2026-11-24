@@ -55,9 +55,23 @@ A run and its workspace are one container the organization may read, because adm
 - `list_agent_runs` adds `internal`, because it names the organization's agents, requesters, and channels.
 - `post_agent_run_message` and `post_agent_run_file` post to the run's messaging thread. They require `trusted` data sharable with `internal`.
 
+## Release sinks
+
+Content that leaves Archestra goes through a `host/archestra/<sink>` contract. The host judges each message it sends or serves into one sink, with the recipients it reaches as arguments. A refused message is replaced by a placeholder. Every sink requires that the content's audience contains its recipients:
+
+| Sink | Covers | Recipients | Also requires |
+| --- | --- | --- | --- |
+| `host/archestra/a2a` | an A2A answer pushed to its caller or read through GetTask, ListTasks, Subscribe, CancelTask or a download ticket | `$recipient`, the authenticated reader | |
+| `host/archestra/chatops_reply` | a Slack, Teams or Telegram reply or completion, tool cards included | `@chatops:$binding/$channel` | |
+| `host/archestra/jira_reply` | a reply on a Jira issue | `@chatops:$binding/$channel` | `trusted` |
+| `host/archestra/agent_run_post` | one `post_agent_run_message` or `post_agent_run_file` delivery | `@chatops:$binding/$channel`, the run's thread | `trusted` |
+| `host/archestra/email` | an email or an Outlook reply, judged once for each address | `$recipient` | `trusted` |
+
+A channel's recipients come from the `chatops` source. A channel whose roster Archestra cannot close, such as a Telegram group or a Jira project, gets no answer. A release that must read that roster is refused for the missing fact. Public content reads no roster.
+
 ## Audiences
 
-The source builds:
+The `archestra` source builds:
 
 - `internal` from the organization's members;
 - a team's members from `team/<team>`, by team id or name; and
@@ -69,6 +83,8 @@ Every member is reported as their email, so Archestra readers compare with reade
 [policy.audience]
 internal = ["archestra:members"]
 ```
+
+The `chatops` source answers `<binding>/<channel>`: the readers of one channel of a ChatOps binding. A member is reported as their email. An account outside the organization is reported as `chatops:<provider>/<id>`, so no organization audience contains it.
 
 Set `ARCHESTRA_BASE_URL` to your Archestra API and pass an API key allowed to read organization membership through `APPA_PROVIDER_ARCHESTRA_TOKEN`.
 

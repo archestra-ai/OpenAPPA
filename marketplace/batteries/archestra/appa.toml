@@ -33,6 +33,10 @@
 # create that sends grants requires `internal`, which holds every principal
 # a grant can name.
 #
+# The release sinks at the end are the calls the host judges content into
+# before it leaves Archestra. The `chatops` audience source answers who
+# reads a channel.
+#
 # The root config maps `internal` onto the `archestra` audience source,
 # which resolves each collection through Archestra's own API. The README
 # shows the wiring.
@@ -983,6 +987,49 @@ parameters = { type = "object", properties = { teams = { type = "array", items =
 delta = {}
 requires = { trust = "trusted", audience = { contains = ["@archestra:team/$teams"] } }
 
+# --- release sinks: content that leaves Archestra. The host judges each
+# message it sends or serves as a call to one of these, with the recipients
+# it reaches as arguments, and sends the placeholder when the call is
+# refused. Every sink requires that the content's audience covers its
+# recipients. Email, Jira replies and run posts also require `trusted`
+# content, as the run post tools do. A channel's recipients are its
+# `chatops` roster; a roster Archestra cannot close, such as a Telegram
+# group or a Jira project, gets no answer, so the release is refused ---
+
+# An A2A answer, pushed to its caller or read back through GetTask,
+# ListTasks, a Subscribe frame, a CancelTask snapshot or a download ticket.
+# `recipient` is the authenticated reader.
+[[policy.tool]]
+name = "host/archestra/a2a"
+delta = {}
+requires = { audience = { contains = ["$recipient"] } }
+
+# A reply or completion in a Slack, Teams or Telegram channel, tool cards
+# included.
+[[policy.tool]]
+name = "host/archestra/chatops_reply"
+delta = {}
+requires = { audience = { contains = ["@chatops:$binding/$channel"] } }
+
+# A reply on a Jira issue.
+[[policy.tool]]
+name = "host/archestra/jira_reply"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@chatops:$binding/$channel"] } }
+
+# One `post_agent_run_message` or `post_agent_run_file` delivery, into its
+# run's thread.
+[[policy.tool]]
+name = "host/archestra/agent_run_post"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["@chatops:$binding/$channel"] } }
+
+# An email or an Outlook reply, judged once for each address it is sent to.
+[[policy.tool]]
+name = "host/archestra/email"
+delta = {}
+requires = { trust = "trusted", audience = { contains = ["$recipient"] } }
+
 [externals.audience.archestra]
 command = ["python3", "audience-source.py"]
 token_env = "APPA_PROVIDER_ARCHESTRA_TOKEN"
@@ -991,3 +1038,8 @@ selectors = [
   { template = "team/<team>" },
   { template = "user/<user>" },
 ]
+
+[externals.audience.chatops]
+command = ["python3", "audience-source.py"]
+token_env = "APPA_PROVIDER_ARCHESTRA_TOKEN"
+selectors = [{ template = "<binding>/<channel>" }]

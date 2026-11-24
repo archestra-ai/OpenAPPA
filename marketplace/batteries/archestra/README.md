@@ -1,7 +1,8 @@
 # Archestra battery
 
-Rules for every tool of Archestra's built-in MCP server, plus the
-`archestra` audience source.
+Rules for every tool of Archestra's built-in MCP server, the contracts of
+the sinks Archestra releases content into, and the `archestra` and
+`chatops` audience sources.
 
 ## Files
 
@@ -57,21 +58,39 @@ here with `builtin = "claude-code"`. An Archestra root redeclares it with
 A team list names one collection per team, and OpenAPPA reads at most 100
 of them per call.
 
+The release sinks are the calls the host judges content into before it
+leaves Archestra, with the recipients it reaches as arguments. Each
+requires that the content's audience contains its recipients:
+
+| Sink | Covers | Recipients | Also requires |
+| --- | --- | --- | --- |
+| `host/archestra/a2a` | A2A answers, pushed or read back | `$recipient`, the authenticated reader | |
+| `host/archestra/chatops_reply` | Slack, Teams and Telegram replies | `@chatops:$binding/$channel` | |
+| `host/archestra/jira_reply` | Jira replies | `@chatops:$binding/$channel` | `trusted` |
+| `host/archestra/agent_run_post` | each `post_agent_run_*` delivery | `@chatops:$binding/$channel` | `trusted` |
+| `host/archestra/email` | email and Outlook replies, once per address | `$recipient` | `trusted` |
+
 **`audience-source.py`** — answers these selectors through Archestra's
-`GET /api/openappa/audience` endpoint:
+`GET /api/openappa/audience` endpoint, naming the source in `source`:
 
 - `archestra:members` — every member of the organization the token
   belongs to. Feeds `internal`.
 - `archestra:team/<team>` — one team, by id or name.
 - `archestra:user/<user>` — one member, by user id or email.
+- `chatops:<binding>/<channel>` — the readers of one channel of a ChatOps
+  binding: a member as their email, an account outside the organization
+  as `chatops:<provider>/<id>`. A channel whose roster Archestra cannot
+  close, such as a Telegram group or a Jira project, has no member list,
+  which is no answer.
 
-The member lookup resolves an `archestra:<user-id>` member to that user's
-email; it answers `null` for a user Archestra does not know. Every member
+The member lookup resolves an `archestra:<user-id>` or
+`chatops:<provider>/<id>` member to that user's email; it answers `null`
+for an account Archestra does not know. Every member
 is the account's email, as Archestra holds it, so Archestra readers compare with the
 readers of any other email-keyed source, such as `google-workspace`.
 
-The battery binds the source under `[externals.audience.archestra]` and
-declares the three templates above. Audience mappings are root-only, so
+The battery binds the sources under `[externals.audience.archestra]` and
+`[externals.audience.chatops]` and declares the templates above. Audience mappings are root-only, so
 the root config maps `internal` onto the source:
 
 ```toml
