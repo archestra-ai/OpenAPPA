@@ -626,6 +626,7 @@ fn a_marked_spawn_prepares_its_fork_from_its_own_position() {
         .handle(
             &viewing(&e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -634,7 +635,6 @@ fn a_marked_spawn_prepares_its_fork_from_its_own_position() {
                 audience: crate::audience::AudienceEvidence::default(),
             }),
         )
-                initiator: appa_runtime_api::Initiator::Agent,
         .expect("the declaration approves the marked quiet call");
     let log = [log, appended_facts(approved)].concat();
     let released_spawn = e

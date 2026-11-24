@@ -501,12 +501,12 @@ mod held_view_law {
                         })
                     });
                     Some(EngineEvent::ExecuteOffer(OfferExecution {
+                        initiator: appa_runtime_api::Initiator::Agent,
                         trajectory,
                         offer,
                         outcome,
                         return_policy,
                         offer_nonce: nonce(),
-                        initiator: appa_runtime_api::Initiator::Agent,
                         audience: crate::audience::AudienceEvidence::default(),
                     }))
                 }

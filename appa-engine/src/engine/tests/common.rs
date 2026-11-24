@@ -834,6 +834,7 @@ pub(super) fn execute_offer_with(
     e.handle(
         &view,
         EngineEvent::ExecuteOffer(OfferExecution {
+            initiator: appa_runtime_api::Initiator::Agent,
             trajectory: traj(),
             offer,
             outcome,
@@ -863,7 +864,6 @@ pub(super) fn restrictable_tool(name: &str) -> ToolAnnotation {
         },
         ..plain_tool(name)
     }
-            initiator: appa_runtime_api::Initiator::Agent,
 }
 
 pub(super) fn strict_tool(name: &str) -> ToolAnnotation {
@@ -1201,6 +1201,7 @@ pub(super) fn fan_out_family(e: &Engine, floor: Label) -> (Vec<Fact>, crate::val
         .handle(
             &viewing(e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -1230,7 +1231,6 @@ pub(super) fn fan_out_family(e: &Engine, floor: Label) -> (Vec<Fact>, crate::val
 
 pub(super) fn member_started(e: &Engine, log: &mut Vec<Fact>, fan_out: &crate::value::ForkId, child: &TrajectoryId) {
     let bound = e
-                initiator: appa_runtime_api::Initiator::Agent,
         .handle(
             &viewing(e, log),
             EngineEvent::BindFork(crate::transition::ForkBinding {
