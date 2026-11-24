@@ -1049,16 +1049,20 @@ impl Dispatcher<'_> {
         }
     }
 
-    /// Record an offer's review, its receipt riding on the `Ack`.
+    /// Record an offer's review, its receipt riding on the `Ack`. Only a family already open
+    /// answers: a release opens no session.
     async fn review_release(&mut self, actor: Actor, offer: String, digest: ReleaseDigest) -> HookDecision {
         let Ok(offer) = crate::api::OfferId::parse(&offer) else {
             return refuse(EventError::UnknownOffer);
         };
-        let released = on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
-            let offer = offer.clone();
-            async move { session.release_review(&offer, digest).await }
-        })
-        .await;
+        let acting = actor.child.as_ref().unwrap_or(&actor.root);
+        let released = match self
+            .runtime
+            .session_with_presentation(&actor.root, acting, self.options.clone())
+        {
+            Ok(session) => session.release_review(&offer, digest).await,
+            Err(error) => Err(error),
+        };
         match released {
             Ok(receipt) => {
                 *self.receipt = Some(receipt);

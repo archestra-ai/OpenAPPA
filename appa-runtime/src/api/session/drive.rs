@@ -846,7 +846,12 @@ impl Session {
                         "a publish moved the head under the decision: deciding again at the head"
                     );
                 }
-                decided => return decided,
+                decided => {
+                    if let Ok(decision) = &decided {
+                        self.record_shown_reviews(decision);
+                    }
+                    return decided;
+                }
             }
         }
     }

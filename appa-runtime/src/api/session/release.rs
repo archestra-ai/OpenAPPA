@@ -19,34 +19,68 @@ impl Session {
         }
     }
 
-    /// Record the review `offer` shows a person as the bytes `digest` names, and return the
-    /// receipt of the record that stands for it. The review is rendered here as the block's
-    /// feedback renders it; other bytes are refused.
+    /// Record the review `quoted` showed a person as the bytes `digest` names, and return the
+    /// receipt of the record that stands for it. Only the review its block showed is recorded,
+    /// and only for the trajectory that pursues the offer. A recorded review answers the
+    /// trajectory that opened the offer or pursues it, live or ended.
     pub(crate) async fn release_review(
         &self,
         quoted: &OfferId,
         digest: ReleaseDigest,
     ) -> Result<ReleaseReceipt, EventError> {
+        let trajectory = &self.trajectory;
+        let resolved =
+            |log: &appa_eventlog::Log| crate::engine::resolve_rendered(log, quoted).ok_or(EventError::UnknownOffer);
+        let standing = self.with_view(|context| {
+            let offer = resolved(context.log)?;
+            let engine = context.engine();
+            let owns = engine.offer_opener(context.view, &offer).as_ref() == Some(trajectory)
+                || context.offer_pursuer(&offer).as_ref() == Some(trajectory);
+            Ok(owns
+                .then(|| engine.standing_review(context.view, &offer, digest))
+                .flatten())
+        })?;
+        if let Some(receipt) = standing {
+            return Ok(receipt);
+        }
         let review = |context: &Decided<'_>, _| {
-            let offer = crate::engine::resolve_rendered(context.log, quoted).ok_or(EventError::UnknownOffer)?;
-            let pending = context
-                .offer_pursuer(&offer)
-                .map(|pursuer| context.engine().offer_reviews(context.view, &pursuer, &offer))
-                .unwrap_or_default();
-            let rendered = super::remedy::reviews(&pending, &self.deployment().externals)
-                .into_iter()
-                .next()
-                .map(|review| ReleaseDigest::of(review.text.as_bytes()));
-            Ok(EngineEvent::Review {
-                offer,
-                digest,
-                rendered,
-            })
+            let offer = resolved(context.log)?;
+            if context.offer_pursuer(&offer).as_ref() != Some(trajectory) {
+                return Err(EventError::UnknownOffer);
+            }
+            let shown = crate::engine::shown_review(context.log, &offer);
+            Ok(EngineEvent::Review { offer, digest, shown })
         };
         let decision = self.drive_with_evidence(review, None, None, Occasion::Other).await?;
         match decision.then {
             Next::Released { receipt } => Ok(receipt),
             _ => Err(EventError::UnexpectedDecision),
+        }
+    }
+
+    /// Record the digest of the review each offer of this decision's block shows a person: the
+    /// bytes a later release of that review is held to. A record that does not land leaves the
+    /// review unreleasable.
+    pub(super) fn record_shown_reviews(&self, decision: &EngineDecision) {
+        let Some(facts) = decision.append.as_ref() else {
+            return;
+        };
+        let pending: Vec<PendingReview> = match &decision.then {
+            Next::ModelResponse { feedback, .. } => feedback.iter().flat_map(|entry| entry.review.clone()).collect(),
+            Next::PresentToModel(Presentation::Blocked { review, .. }) => review.clone(),
+            _ => return,
+        };
+        for review in super::remedy::reviews(&pending, &self.deployment().externals) {
+            let Some(offer) = crate::engine::opened_in(facts, &review.offer) else {
+                continue;
+            };
+            let shown = appa_eventlog::HostObservation::ReviewShown {
+                offer,
+                digest: ReleaseDigest::of(review.text.as_bytes()),
+            };
+            if let Err(error) = self.inner.append_host(&self.root, &shown) {
+                tracing::warn!(root = %self.root.0, %error, "the review a block showed was not recorded");
+            }
         }
     }
 }
@@ -152,5 +186,119 @@ url = "http://127.0.0.1:9/annotate"
                 "{sink}"
             );
         }
+    }
+
+    #[cfg(feature = "daemon")]
+    const NARROWING: &str = r#"
+[policy]
+version = 2
+
+[[policy.tool]]
+name = "publish"
+delta = { trust = "suspicious" }
+requires = { attention = ["signoff"] }
+
+[[policy.tool]]
+name = "deploy"
+delta = {}
+requires = { trust = "trusted" }
+
+[[policy.authority]]
+name = "operator"
+
+[policy.authority.permits]
+trust_below = "trusted"
+attention = ["signoff"]
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+
+[externals.authorities.operator]
+builtin = "hitl"
+"#;
+
+    /// The block shows the tools a narrowing limits; an execution of the same offer renders the
+    /// narrowing without them. Only the bytes the block showed are released.
+    #[cfg(feature = "daemon")]
+    #[tokio::test]
+    async fn a_narrowing_review_releases_as_its_block_showed_it_and_never_as_rendered_again() {
+        use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall};
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, NARROWING).expect("the fixture writes");
+        let runtime = crate::api::Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the runtime opens");
+        let root = appa_runtime_api::TrajectoryId("cc:narrowing".to_string());
+        let started = crate::hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root.clone(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+                settings: Default::default(),
+            },
+        )
+        .await;
+        assert_eq!(started, HookDecision::Ack);
+        let blocked = crate::hooks::handle(
+            &runtime,
+            HookEvent::ToolCall {
+                actor: Actor {
+                    root: root.clone(),
+                    child: None,
+                },
+                call: ProposedCall {
+                    tool: "publish".to_string(),
+                    arguments: serde_json::value::to_raw_value(&serde_json::json!({ "body": "figures" }))
+                        .expect("the arguments serialize"),
+                    cwd: None,
+                },
+                call_id: None,
+                spawn: None,
+                prompt: None,
+                ruling: None,
+                declares: None,
+            },
+        )
+        .await;
+        let HookDecision::DenyCall { review, .. } = blocked else {
+            panic!("the publish blocks on the operator: {blocked:?}");
+        };
+        let [shown] = review.as_slice() else {
+            panic!("the block shows one review: {review:?}");
+        };
+        let quoted = OfferId(shown.offer.clone());
+        let session = runtime
+            .session_with_presentation(&root, &root, Default::default())
+            .expect("the root is open");
+        let rendered_again = session
+            .with_view(|context| {
+                let offer = crate::engine::resolve_rendered(context.log, &quoted).expect("the offer resolves");
+                let pending = context.engine().offer_reviews(context.view, &root, &offer);
+                Ok(super::super::remedy::reviews(&pending, &session.deployment().externals))
+            })
+            .expect("the view reads");
+        let [rendered_again] = rendered_again.as_slice() else {
+            panic!("the execution renders one review: {rendered_again:?}");
+        };
+        assert_ne!(rendered_again.text, shown.text, "the two renders of a narrowing differ");
+
+        let substituted = session
+            .release_review(&quoted, ReleaseDigest::of(rendered_again.text.as_bytes()))
+            .await;
+        assert!(matches!(substituted, Err(EventError::OtherReview)), "{substituted:?}");
+        let receipt = session
+            .release_review(&quoted, ReleaseDigest::of(shown.text.as_bytes()))
+            .await
+            .expect("the review the block showed releases");
+        assert_eq!(receipt.digest, ReleaseDigest::of(shown.text.as_bytes()));
     }
 }

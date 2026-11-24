@@ -257,14 +257,14 @@ pub struct AnswerReport {
     pub digest: appa_runtime_api::ReleaseDigest,
 }
 
-/// An offer's review text, by the digest of the bytes its host may show a reader. `rendered`
-/// is the digest of the text the offer renders now, read by the host that renders it; `None`
-/// where the offer renders none.
+/// An offer's review text, by the digest of the bytes its host may show a reader. `shown` is
+/// the digest of the review the offer's block showed, as the host recorded it there; `None`
+/// where the block showed none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewReport {
     pub offer: crate::value::OfferId,
     pub digest: appa_runtime_api::ReleaseDigest,
-    pub rendered: Option<appa_runtime_api::ReleaseDigest>,
+    pub shown: Option<appa_runtime_api::ReleaseDigest>,
 }
 
 /// The parent's decision on one deferred return: `trajectory` is the parent that owns it.
@@ -702,7 +702,7 @@ pub enum TransitionError {
     Plan(#[from] crate::execute::PlanError),
     #[error("no offer of this family carries that identity")]
     UnknownOffer,
-    #[error("the review names other bytes than its offer renders")]
+    #[error("the review names other bytes than its offer's block showed")]
     OtherReview,
     #[error("the offer belongs to another trajectory of this family")]
     OfferElsewhere,

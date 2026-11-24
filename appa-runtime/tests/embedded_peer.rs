@@ -38,12 +38,26 @@ delta = {}
 name = "spawn"
 delta = {}
 
+[[policy.tool]]
+name = "signed"
+delta = {}
+requires = { attention = ["signoff"] }
+
+[[policy.authority]]
+name = "operator"
+
+[policy.authority.permits]
+attention = ["signoff"]
+
 [policy.deployment]
 context_control = true
 
 [externals]
 timeout_ms = 2000
 max_body_bytes = 65536
+
+[externals.authorities.operator]
+builtin = "hitl"
 "#;
 
 fn runtime() -> (tempfile::TempDir, Runtime) {
@@ -279,6 +293,78 @@ async fn a_send_does_not_fold_and_an_unstarted_child_stays_held() {
         audit.iter().all(|entry| entry.trajectory != child().0
             || !matches!(entry.event, appa_runtime::api::AuditEvent::Admitted { .. })),
         "an unstarted recipient has no admitted peer body"
+    );
+}
+
+async fn release_review(
+    runtime: &Runtime,
+    who: Option<&TrajectoryId>,
+    review: &appa_runtime_api::Review,
+) -> appa_runtime::api::EmbeddedHookOutcome {
+    hooks::handle_embedded(
+        runtime,
+        HookEvent::ReviewRelease {
+            actor: actor(who),
+            offer: review.offer.clone(),
+            digest: appa_runtime_api::ReleaseDigest::of(review.text.as_bytes()),
+        },
+    )
+    .await
+}
+
+/// A review is released only for the trajectory that pursues its offer. Once recorded, it
+/// answers that trajectory again even after it ended; its parent, which pursued nothing
+/// while the child was live, is refused.
+#[tokio::test]
+async fn only_the_trajectory_that_pursues_an_offer_releases_its_review() {
+    let (_dir, runtime) = runtime();
+    start(&runtime).await;
+    open_child(&runtime).await;
+    let blocked = release(&runtime, Some(&child()), "signed", "signed-1").await;
+    let HookDecision::DenyCall { review, .. } = blocked else {
+        panic!("the child's signed call blocks on the operator: {blocked:?}");
+    };
+    let [shown] = review.as_slice() else {
+        panic!("the block shows one review: {review:?}");
+    };
+    let refused = |outcome: &appa_runtime::api::EmbeddedHookOutcome| {
+        matches!(
+            outcome.decision,
+            HookDecision::Refuse {
+                class: appa_runtime_api::RefusalClass::Remedy,
+                ..
+            }
+        ) && outcome.receipt.is_none()
+    };
+
+    assert!(
+        refused(&release_review(&runtime, None, shown).await),
+        "the parent pursues no live child's offer"
+    );
+    let released = release_review(&runtime, Some(&child()), shown).await;
+    assert_eq!(released.decision, HookDecision::Ack);
+    let receipt = released.receipt.expect("the pursuer's release carries its receipt");
+    assert!(
+        refused(&release_review(&runtime, None, shown).await),
+        "a standing review answers no trajectory beside the one that owns it"
+    );
+
+    let ended = hooks::handle(
+        &runtime,
+        HookEvent::ChildEnd {
+            root: family(),
+            child: child(),
+            value: None,
+            open_calls: appa_runtime_api::OpenCalls::Abandon,
+        },
+    )
+    .await;
+    assert!(!matches!(ended, HookDecision::Refuse { .. }), "{ended:?}");
+    let retried = release_review(&runtime, Some(&child()), shown).await;
+    assert_eq!(
+        retried.receipt,
+        Some(receipt),
+        "the ended child's retry finds its standing review"
     );
 }
 

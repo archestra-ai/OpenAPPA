@@ -365,12 +365,12 @@ pub enum EngineEvent {
     Answer {
         digest: appa_runtime_api::ReleaseDigest,
     },
-    /// An offer's review, by the digest of its bytes, beside the digest of the review text the
-    /// offer renders now.
+    /// An offer's review, by the digest of its bytes, beside the digest of the review its block
+    /// showed.
     Review {
         offer: OfferId,
         digest: appa_runtime_api::ReleaseDigest,
-        rendered: Option<appa_runtime_api::ReleaseDigest>,
+        shown: Option<appa_runtime_api::ReleaseDigest>,
     },
 }
 
@@ -649,7 +649,7 @@ pub enum EngineRefusal {
     DispatchClosed,
     #[error("the offer is not one this family carries")]
     UnknownOffer,
-    #[error("the review names other bytes than its offer renders")]
+    #[error("the review names other bytes than its offer's block showed")]
     OtherReview,
     /// The call already carries a current approval another plan recorded.
     #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
@@ -1251,6 +1251,11 @@ impl RuntimeEngine {
             .map_or(crate::api::OfferStanding::Ended, offer_standing_of)
     }
 
+    /// Which trajectory opened this offer.
+    pub(crate) fn offer_opener(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
+        view.offer_trajectory(&parse_offer(offer)?).cloned()
+    }
+
     /// Which trajectory pursues this offer.
     pub(crate) fn offer_pursuer(&self, view: &EngineView, offer: &OfferId) -> Option<TrajectoryId> {
         let engine_offer = parse_offer(offer)?;
@@ -1809,11 +1814,7 @@ impl RuntimeEngine {
                 decision,
             } => self.settle_return(view, parent, id, decision),
             EngineEvent::Answer { digest } => self.answer(view, trajectory, digest),
-            EngineEvent::Review {
-                offer,
-                digest,
-                rendered,
-            } => self.review(view, &offer, digest, rendered),
+            EngineEvent::Review { offer, digest, shown } => self.review(view, &offer, digest, shown),
         }
     }
 
@@ -1839,15 +1840,27 @@ impl RuntimeEngine {
         view: &EngineView,
         offer: &OfferId,
         digest: appa_runtime_api::ReleaseDigest,
-        rendered: Option<appa_runtime_api::ReleaseDigest>,
+        shown: Option<appa_runtime_api::ReleaseDigest>,
     ) -> Result<EngineDecision, EngineRefusal> {
         let offer = parse_offer(offer).ok_or(EngineRefusal::UnknownOffer)?;
-        let report = appa_engine::transition::ReviewReport {
-            offer,
-            digest,
-            rendered,
-        };
+        let report = appa_engine::transition::ReviewReport { offer, digest, shown };
         self.release(view, CoreEvent::Review(report))
+    }
+
+    /// The receipt of the record that released `offer`'s review as `digest`, where one stands.
+    pub(crate) fn standing_review(
+        &self,
+        view: &EngineView,
+        offer: &OfferId,
+        digest: appa_runtime_api::ReleaseDigest,
+    ) -> Option<appa_runtime_api::ReleaseReceipt> {
+        match self.review(view, offer, digest, None) {
+            Ok(EngineDecision {
+                append: None,
+                then: Next::Released { receipt },
+            }) => Some(receipt),
+            _ => None,
+        }
     }
 
     fn release(&self, view: &EngineView, event: CoreEvent) -> Result<EngineDecision, EngineRefusal> {
@@ -2361,6 +2374,7 @@ impl RuntimeEngine {
 
     /// The reviews executing this standing offer would raise, read without executing it.
     /// Empty for an offer that no longer stands or consults no authority.
+    #[cfg(feature = "daemon")]
     pub(crate) fn offer_reviews(
         &self,
         view: &EngineView,
@@ -4802,6 +4816,26 @@ pub(crate) fn renders_offer(quoted: &OfferId) -> bool {
             .0
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+/// The digest of the review the block that opened `offer` showed, as the host recorded it.
+pub(crate) fn shown_review(log: &Log, offer: &OfferId) -> Option<appa_runtime_api::ReleaseDigest> {
+    let offer = parse_offer(offer)?;
+    log.host_records()
+        .iter()
+        .rev()
+        .find_map(|record| match &record.observation {
+            appa_eventlog::HostObservation::ReviewShown { offer: shown, digest } if *shown == offer => Some(*digest),
+            _ => None,
+        })
+}
+
+/// The canonical identity of the offer `facts` open under the rendered id `rendered`.
+pub(crate) fn opened_in(facts: &[Fact], rendered: &str) -> Option<EngineOfferId> {
+    facts.iter().find_map(|fact| match fact {
+        Fact::OfferOpened { offer, .. } if offer_id(offer).0 == rendered => Some(*offer),
+        _ => None,
+    })
 }
 
 /// The canonical identity a quoted id names, resolved against the offers this

@@ -75,11 +75,15 @@ fn call(tool: &str) -> ProposedCall {
     }
 }
 
-async fn opened(dir: &tempfile::TempDir) -> Arc<Runtime> {
+fn unstarted(dir: &tempfile::TempDir) -> Arc<Runtime> {
     let path = dir.path().join("appa.toml");
     std::fs::write(&path, POLICY).expect("the fixture writes");
     let config = Config::load(&path).expect("the fixture validates");
-    let runtime = Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"));
+    Arc::new(Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens"))
+}
+
+async fn opened(dir: &tempfile::TempDir) -> Arc<Runtime> {
+    let runtime = unstarted(dir);
     assert_eq!(
         hooks::handle(
             &runtime,
@@ -795,5 +799,31 @@ async fn a_released_review_reaches_the_readers_its_blocks_label_allows() {
     assert_eq!(
         judge(&runtime, &[forged], "post", "alice@corp.example").await,
         Err(ReleaseRefusal::Integrity)
+    );
+}
+
+#[tokio::test]
+async fn a_review_release_before_its_session_start_is_refused_and_opens_no_session() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = unstarted(&dir);
+    let early = release_review(&runtime, "0123456789abcdef", "a review").await;
+    assert!(matches!(early.decision, HookDecision::Refuse { .. }), "{early:?}");
+    assert_eq!(early.receipt, None);
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: Some("alice@corp.example".to_string()),
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+                settings: Default::default(),
+            }
+        )
+        .await,
+        HookDecision::Ack,
+        "the start opens the root under the principal it names"
     );
 }

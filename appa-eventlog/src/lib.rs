@@ -385,6 +385,12 @@ pub enum HostObservation {
         operation: ReturnOperation,
         id: ChildReturnId,
     },
+    /// A block showed a person the review of `offer` whose bytes digest to `digest`: the only
+    /// bytes a release of that review may name.
+    ReviewShown {
+        offer: appa_engine::value::OfferId,
+        digest: appa_runtime_api::ReleaseDigest,
+    },
 }
 
 impl HostObservation {
@@ -411,7 +417,8 @@ impl HostObservation {
             | Self::LaunchMoved { .. }
             | Self::AheadReserved { .. }
             | Self::AheadSettled { .. }
-            | Self::ReturnHeld { .. } => None,
+            | Self::ReturnHeld { .. }
+            | Self::ReviewShown { .. } => None,
         }
     }
 }

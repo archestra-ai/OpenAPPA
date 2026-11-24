@@ -267,20 +267,20 @@ fn review(
     log: &[Fact],
     offer: crate::value::OfferId,
     body: &str,
-    rendered: Option<&str>,
+    shown: Option<&str>,
 ) -> Result<EngineDecision, TransitionError> {
     e.handle(
         &viewing(e, log),
         EngineEvent::Review(crate::transition::ReviewReport {
             offer,
             digest: ReleaseDigest::of(body.as_bytes()),
-            rendered: rendered.map(|text| ReleaseDigest::of(text.as_bytes())),
+            shown: shown.map(|text| ReleaseDigest::of(text.as_bytes())),
         }),
     )
 }
 
 #[test]
-fn a_review_is_recorded_only_as_its_rendered_bytes_at_its_blocks_label() {
+fn a_review_is_recorded_only_as_the_bytes_its_block_showed_at_its_blocks_label() {
     let e = engine(vec![crm_tool(), internal_read()]);
     let mut log = vec![opened(&e)];
     let at_block = viewing(&e, &log).projection().view(&traj()).current_label();
@@ -297,7 +297,7 @@ fn a_review_is_recorded_only_as_its_rendered_bytes_at_its_blocks_label() {
     assert_eq!(
         review(&e, &log, offer, "the review", None).map(|decision| decision.append.is_some()),
         Err(TransitionError::OtherReview),
-        "an offer that renders no review releases none"
+        "an offer whose block showed no review releases none"
     );
 
     let recorded = review(&e, &log, offer, "the review", Some("the review")).expect("the review records");
