@@ -24,7 +24,8 @@
 //! enumerator, and the redispatch list is checked against an independent direct-set reference.
 //!
 //! **Implemented remedy subset (the honest bound).** `Authorize` (trust floor via `trust_ceiling`,
-//! `includes` via `reader_ceiling`, `no_prior` via `waivers`, attention via `attends`), `Accept`
+//! `includes` via `reader_ceiling`, `no_prior` via `waivers`, `prior` via `prior_waivers`,
+//! attention via `attends`), `Accept`
 //! (narrowing), `Withhold` (execution without admitting result output), `Sanitize` (an
 //! output sanitizer's relabel standing in for the raw crossing),
 //! `Derive` (an input sanitizer's substitution of the whole argument set), and `Redispatch` over direct `prior(k)` emitters, in
@@ -1040,16 +1041,16 @@ pub(crate) fn gap_power_cmp(
                 b.derives_within_audience(a, within),
             )
         }
-        Gap::NoPrior(_) => {
-            let a: BTreeSet<&EffectKind> = a.waivers.iter().collect();
-            let b: BTreeSet<&EffectKind> = b.waivers.iter().collect();
-            inclusion_cmp(a.is_subset(&b), b.is_subset(&a))
-        }
+        Gap::NoPrior(_) => waiver_cmp(&a.waivers, &b.waivers),
+        Gap::Prior(_) => waiver_cmp(&a.prior_waivers, &b.prior_waivers),
         Gap::Attention(_) => Some(Ordering::Equal),
-        // These gaps have no covering authority by construction (`enumerate_assignments` returns
-        // `None`), so no assignment reaching this comparison carries one.
-        Gap::Prior(_) => Some(Ordering::Equal),
     }
+}
+
+fn waiver_cmp(a: &[EffectKind], b: &[EffectKind]) -> Option<Ordering> {
+    let a: BTreeSet<&EffectKind> = a.iter().collect();
+    let b: BTreeSet<&EffectKind> = b.iter().collect();
+    inclusion_cmp(a.is_subset(&b), b.is_subset(&a))
 }
 
 pub(crate) fn inclusion_cmp(a_in_b: bool, b_in_a: bool) -> Option<Ordering> {
@@ -1598,9 +1599,9 @@ pub(crate) fn gap_cover(
             }
         }
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.in_scope(tags) && mandate.waivers.contains(kind)),
+        Gap::Prior(kind) => Evaluation::of_exact(authority.in_scope(tags) && mandate.prior_waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark — never by scope.
         Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
-        Gap::Prior(_) => Evaluation::Fails,
     }
 }
 
@@ -3001,6 +3002,94 @@ mod tests {
     }
 
     #[test]
+    fn a_prior_gap_is_waived_only_by_a_matching_prior_waiver() {
+        let history = |requirement: HistoryRequirement| {
+            requiring(
+                "deploy",
+                Requires {
+                    history: vec![requirement],
+                    ..Requires::default()
+                },
+            )
+        };
+        let waiving = |waivers: &[&str], prior_waivers: &[&str]| {
+            mandated(
+                "desk",
+                Mandate {
+                    waivers: waivers.iter().copied().map(EffectKind::new).collect(),
+                    prior_waivers: prior_waivers.iter().copied().map(EffectKind::new).collect(),
+                    ..Mandate::default()
+                },
+            )
+        };
+        let planned = |tool: ToolAnnotation, desk: Authority, log: &[Fact]| {
+            plan_of(
+                &registry(vec![tool], vec![desk], vec![]),
+                log,
+                &call("deploy", json!({})),
+            )
+        };
+        let clean = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        let reviewed = EffectKind::new("reviewed");
+        let after_review = vec![clean[0].clone(), committed_effect(reviewed.clone())];
+        let prior = HistoryRequirement::Prior(reviewed.clone());
+        let no_prior = HistoryRequirement::NoPrior(reviewed.clone());
+
+        let waived = planned(history(prior.clone()), waiving(&[], &["reviewed"]), &clean);
+        assert_eq!(waived.raw.requirement_gaps, [Gap::Prior(reviewed.clone())]);
+        let [RemedyPlan::Executable(plan)] = waived.plans.as_slice() else {
+            panic!("one ruling plan: {:?}", waived.plans);
+        };
+        assert_eq!(plan.steps, [RemedyStep::Authorize(AuthorityName::new("desk"))]);
+        assert_eq!(
+            plan.required,
+            [RequiredRuling {
+                authority: AuthorityName::new("desk"),
+                covers: vec![Gap::Prior(reviewed.clone())],
+            }]
+        );
+
+        for desk in [waiving(&["reviewed"], &[]), waiving(&[], &["approved"])] {
+            let refused = planned(history(prior.clone()), desk, &clean);
+            assert_eq!(refused.raw.requirement_gaps, [Gap::Prior(reviewed.clone())]);
+            assert!(!refused.is_curable(), "{:?}", refused.plans);
+        }
+
+        let forbidden = planned(history(no_prior), waiving(&[], &["reviewed"]), &after_review);
+        assert_eq!(forbidden.raw.requirement_gaps, [Gap::NoPrior(reviewed)]);
+        assert!(!forbidden.is_curable(), "{:?}", forbidden.plans);
+    }
+
+    #[test]
+    fn a_prior_waiver_binds_only_in_scope() {
+        let tool = ToolAnnotation {
+            tags: vec![TagName::new("prod")],
+            ..requiring(
+                "deploy",
+                Requires {
+                    history: vec![HistoryRequirement::Prior(EffectKind::new("reviewed"))],
+                    ..Requires::default()
+                },
+            )
+        };
+        let desk = Authority {
+            scope: Scope {
+                tags: vec![TagName::new("staging")],
+            },
+            ..mandated(
+                "desk",
+                Mandate {
+                    prior_waivers: vec![EffectKind::new("reviewed")],
+                    ..Mandate::default()
+                },
+            )
+        };
+        let registry = registry(vec![tool], vec![desk], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        assert!(!plan_of(&registry, &log, &call("deploy", json!({}))).is_curable());
+    }
+
+    #[test]
     fn a_reservation_at_the_emitters_own_block_does_not_suppress_the_offer() {
         let delete = requiring(
             "delete_db",
@@ -3969,8 +4058,8 @@ mod tests {
                     })
                 }
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
+                Gap::Prior(kind) => authority.mandate.prior_waivers.contains(kind),
                 Gap::Attention(mark) => authority.mandate.attends.covers(mark),
-                Gap::Prior(_) => false,
             })
         }
 
@@ -4108,24 +4197,28 @@ mod tests {
             prop::option::of((0u8..2).prop_map(Trust::new)),
             prop::option::of(small_audience()),
             prop::collection::vec(small_effect(), 0..2),
+            prop::collection::vec(small_effect(), 0..2),
             prop_oneof![
                 Just(Attends::Named(vec![])),
                 Just(Attends::Named(vec![MarkName::new("m0")])),
                 Just(Attends::Any),
             ],
         )
-            .prop_map(move |(trust_ceiling, reader_ceiling, waivers, attends)| Authority {
-                except: Vec::new(),
-                name: name.clone(),
-                mandate: Mandate {
-                    trust_ceiling,
-                    reader_ceiling: reader_ceiling.map(DeclaredAudience::literal),
-                    waivers,
-                    attends,
+            .prop_map(
+                move |(trust_ceiling, reader_ceiling, waivers, prior_waivers, attends)| Authority {
+                    except: Vec::new(),
+                    name: name.clone(),
+                    mandate: Mandate {
+                        trust_ceiling,
+                        reader_ceiling: reader_ceiling.map(DeclaredAudience::literal),
+                        waivers,
+                        prior_waivers,
+                        attends,
+                    },
+                    scope: Scope::default(),
+                    hint: None,
                 },
-                scope: Scope::default(),
-                hint: None,
-            })
+            )
     }
 
     fn a_state() -> impl Strategy<Value = State> {
@@ -4367,15 +4460,6 @@ mod tests {
             for kind in &no_priors {
                 multiply(authorities.iter().filter(|a| a.mandate.waivers.contains(kind)).count());
             }
-            let marks: BTreeSet<_> = contract.requires.attention_marks().iter().collect();
-            for mark in &marks {
-                multiply(authorities.iter().filter(|a| a.mandate.attends.covers(mark)).count());
-            }
-            let output_sanitizers = registry.sanitizers().filter(|sanitizer| sanitizer.on.output).count();
-            let withhold = u128::from(
-                registry.profile().confines_result(&contract.name) && !contract.emits.is_empty(),
-            );
-            bound = bound.saturating_mul(1 + withhold + output_sanitizers as u128);
             let priors: BTreeSet<&EffectKind> = contract
                 .requires
                 .history
@@ -4385,6 +4469,18 @@ mod tests {
                     HistoryRequirement::NoPrior(_) => None,
                 })
                 .collect();
+            for kind in &priors {
+                multiply(authorities.iter().filter(|a| a.mandate.prior_waivers.contains(kind)).count());
+            }
+            let marks: BTreeSet<_> = contract.requires.attention_marks().iter().collect();
+            for mark in &marks {
+                multiply(authorities.iter().filter(|a| a.mandate.attends.covers(mark)).count());
+            }
+            let output_sanitizers = registry.sanitizers().filter(|sanitizer| sanitizer.on.output).count();
+            let withhold = u128::from(
+                registry.profile().confines_result(&contract.name) && !contract.emits.is_empty(),
+            );
+            bound = bound.saturating_mul(1 + withhold + output_sanitizers as u128);
             let redispatches = registry
                 .tools()
                 .filter_map(ToolDeclaration::declared)
@@ -4424,8 +4520,8 @@ mod tests {
                     Gap::Includes { recipients } => scoped && authority.mandate.reader_ceiling.as_ref()
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
+                    Gap::Prior(kind) => scoped && authority.mandate.prior_waivers.contains(kind),
                     Gap::Attention(mark) => authority.mandate.attends.covers(mark),
-                    Gap::Prior(_) => false,
                 }
             };
             let per_gap: Vec<Vec<&Authority>> = raw.requirement_gaps.iter()
@@ -4485,7 +4581,12 @@ mod tests {
                         let sb: std::collections::BTreeSet<_> = b.waivers.iter().collect();
                         inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
                     }
-                    Gap::Attention(_) | Gap::Prior(_) => Some(O::Equal),
+                    Gap::Prior(_) => {
+                        let sa: std::collections::BTreeSet<_> = a.prior_waivers.iter().collect();
+                        let sb: std::collections::BTreeSet<_> = b.prior_waivers.iter().collect();
+                        inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
+                    }
+                    Gap::Attention(_) => Some(O::Equal),
                 }
             };
             let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {

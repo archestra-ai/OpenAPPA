@@ -511,6 +511,7 @@ pub enum ReviewRequirement {
     PublicAudience,
     Audience { readers: Vec<String> },
     Effect { excludes: String },
+    Prior { contains: String },
 }
 
 /// What approving also does to the rest of the conversation.

@@ -1854,6 +1854,15 @@ mod tests {
                 serde_json::json!({"kind": "requirement", "requirement": {"type": "effect", "excludes": "deploy"}, "text": "t"}),
             ),
             (
+                ReviewScopeItem::Requirement {
+                    requirement: ReviewRequirement::Prior {
+                        contains: "reviewed".to_string(),
+                    },
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "requirement", "requirement": {"type": "prior", "contains": "reviewed"}, "text": "t"}),
+            ),
+            (
                 ReviewScopeItem::Narrowing {
                     narrowing: ReviewNarrowing::Blocked {
                         tools: vec!["a".to_string()],

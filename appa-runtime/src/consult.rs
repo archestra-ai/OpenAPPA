@@ -260,6 +260,8 @@ pub struct DeclaredPermits {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audience_missing: Option<WireAudience>,
     pub effects_containing: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub prior_effects_containing: Vec<String>,
     pub attention: Vec<String>,
 }
 
@@ -272,6 +274,11 @@ impl AuthorityDeclaration {
                 trust_below: mandate.trust_ceiling.map(|ceiling| rank_name(chain, ceiling)),
                 audience_missing: mandate.reader_ceiling.as_ref().map(WireAudience::declared),
                 effects_containing: mandate.waivers.iter().map(|kind| kind.as_str().to_string()).collect(),
+                prior_effects_containing: mandate
+                    .prior_waivers
+                    .iter()
+                    .map(|kind| kind.as_str().to_string())
+                    .collect(),
                 attention: mandate.attends.spellings(),
             },
         }
@@ -343,6 +350,7 @@ pub enum Requirement {
     Trust { required: String },
     Audience { required: AudienceRequirement },
     Effect { excludes: String },
+    Prior { contains: String },
     Attention { mark: String },
 }
 
@@ -367,8 +375,7 @@ impl Serialize for AudienceRequirement {
 }
 
 impl Requirement {
-    /// Project one assigned gap. A `prior` gap is never assigned to an authority — no
-    /// mandate covers it — so meeting one here is a broken planning invariant.
+    /// Project one assigned gap.
     pub fn of(gap: &Gap, chain: &TrustChain) -> Requirement {
         match gap {
             Gap::TrustFloor { required, .. } => Requirement::Trust {
@@ -386,9 +393,9 @@ impl Requirement {
             Gap::Attention(mark) => Requirement::Attention {
                 mark: mark.as_str().to_string(),
             },
-            Gap::Prior(_) => {
-                unreachable!("authorities are assigned only coverable gaps; a prior gap has no mandate")
-            }
+            Gap::Prior(effect) => Requirement::Prior {
+                contains: effect.as_str().to_string(),
+            },
         }
     }
 }
@@ -1175,6 +1182,7 @@ mod tests {
                 recipients: DeclaredAudience::Public,
             },
             Gap::NoPrior(EffectKind::new("network")),
+            Gap::Prior(EffectKind::new("reviewed")),
             Gap::Attention(MarkName::new("review")),
         ]
         .iter()
@@ -1188,6 +1196,7 @@ mod tests {
                 serde_json::json!({"kind": "audience", "required": ["internal", "@finance", "carol"]}),
                 serde_json::json!({"kind": "audience", "required": "public"}),
                 serde_json::json!({"kind": "effect", "excludes": "network"}),
+                serde_json::json!({"kind": "prior", "contains": "reviewed"}),
                 serde_json::json!({"kind": "attention", "mark": "review"}),
             ]
         );
@@ -1459,6 +1468,38 @@ mod tests {
     }
 
     #[test]
+    fn a_declaration_names_its_prior_waivers_only_where_it_has_some() {
+        use appa_engine::authority::{Mandate, Scope};
+        use appa_engine::fact::EffectKind;
+        use appa_engine::names::AuthorityName;
+
+        let permits = |mandate: Mandate| {
+            let authority = Authority {
+                name: AuthorityName::new("desk"),
+                mandate,
+                scope: Scope::default(),
+                except: Vec::new(),
+                hint: None,
+            };
+            serde_json::to_value(AuthorityDeclaration::of(&authority, &chain()).permits).expect("serializes")
+        };
+        assert_eq!(
+            permits(Mandate {
+                waivers: vec![EffectKind::new("deploy")],
+                ..Mandate::default()
+            }),
+            serde_json::json!({"effects_containing": ["deploy"], "attention": []})
+        );
+        assert_eq!(
+            permits(Mandate {
+                prior_waivers: vec![EffectKind::new("reviewed")],
+                ..Mandate::default()
+            }),
+            serde_json::json!({"effects_containing": [], "prior_effects_containing": ["reviewed"], "attention": []})
+        );
+    }
+
+    #[test]
     fn the_envelope_carries_exactly_five_keys_per_kind() {
         let consult = Consult {
             name: "desk".to_string(),
@@ -1469,6 +1510,7 @@ mod tests {
                         trust_below: Some("trusted".to_string()),
                         audience_missing: None,
                         effects_containing: vec![],
+                        prior_effects_containing: vec![],
                         attention: vec![],
                     },
                 },

@@ -1371,6 +1371,68 @@ async fn a_block_holds_what_its_offered_plans_settle() {
     assert_eq!(held(gap), (Outcome::WaivableGap, 1));
 }
 
+/// A missing required prior is a gap an authority's `prior_effects_containing` waives by
+/// effect name; a `no_prior` waiver or another effect's name leaves it with no remedy.
+#[tokio::test]
+async fn a_prior_waiver_makes_a_missing_prior_a_waivable_gap() {
+    use appa_runtime_api::{Outcome, Outcomes, ReviewRequirement, ReviewScopeItem};
+    let decide = |permits: &str| {
+        let text = format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"deploy\"\ndelta = {{}}\n\
+             requires = {{ effects = {{ contains = [\"reviewed\"] }} }}\n\
+             [[policy.authority]]\nname = \"desk\"\n[policy.authority.permits]\n{permits}\n\
+             [externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\
+             [externals.authorities.desk]\nbuiltin = \"hitl\"\n"
+        );
+        async move {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime =
+                Runtime::open(config_from(&text), dir.path().join("appa.db"), None).expect("the deployment opens");
+            let session = runtime.create_session(root(), None).expect("a fresh id opens");
+            let deploy = ProposedCall {
+                tool: "deploy".to_string(),
+                arguments: raw(serde_json::json!({})),
+                cwd: None,
+            };
+            match session.on_tool_call(deploy, false).await.expect("the call is judged") {
+                ToolCallDecision::Deny {
+                    outcomes,
+                    offers,
+                    review,
+                    ..
+                } => (outcomes, offers.len(), review),
+                allowed => panic!("the missing prior blocks, got {allowed:?}"),
+            }
+        }
+    };
+
+    let (outcomes, offers, review) = decide("prior_effects_containing = [\"reviewed\"]").await;
+    assert_eq!(outcomes.deciding(), Outcome::WaivableGap);
+    assert_eq!(outcomes.held().collect::<Vec<_>>(), [Outcome::WaivableGap]);
+    assert_eq!(offers, 1);
+    let [review] = review.as_slice() else {
+        panic!("one offer asks the desk: {review:?}");
+    };
+    assert!(
+        matches!(
+            review.scope.as_deref(),
+            Some([ReviewScopeItem::Requirement {
+                requirement: ReviewRequirement::Prior { contains },
+                ..
+            }]) if contains == "reviewed"
+        ),
+        "{review:?}"
+    );
+
+    for permits in [
+        "effects_containing = [\"reviewed\"]",
+        "prior_effects_containing = [\"approved\"]",
+    ] {
+        let (outcomes, offers, _) = decide(permits).await;
+        assert_eq!((outcomes, offers), (Outcomes::HardBlock, 0), "{permits}");
+    }
+}
+
 #[tokio::test]
 async fn a_subject_a_concurrent_event_moved_reads_as_lifecycle_not_a_fault() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

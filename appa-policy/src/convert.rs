@@ -312,6 +312,7 @@ impl RawPermits {
                 .map(|r| parse_declared_audience(&r, &format!("{ctx} audience_missing")))
                 .transpose()?,
             waivers: self.effects_containing.into_iter().map(EffectKind::new).collect(),
+            prior_waivers: self.prior_effects_containing.into_iter().map(EffectKind::new).collect(),
             attends: parse_attends(self.attention, ctx)?,
         })
     }

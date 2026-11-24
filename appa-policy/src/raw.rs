@@ -212,6 +212,8 @@ pub(crate) struct RawPermits {
     #[serde(default)]
     pub(crate) effects_containing: Vec<String>,
     #[serde(default)]
+    pub(crate) prior_effects_containing: Vec<String>,
+    #[serde(default)]
     pub(crate) attention: Vec<String>,
 }
 

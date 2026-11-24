@@ -1082,21 +1082,22 @@ fn worst_case_plan_alternatives(
                     AudienceRequirement::Includes(_) => {}
                 }
             }
-            let mut seen_no_prior: Vec<&EffectKind> = Vec::new();
+            let mut seen_history: Vec<&HistoryRequirement> = Vec::new();
             for requirement in &tool.requires.history {
-                match requirement {
-                    HistoryRequirement::NoPrior(kind) if !seen_no_prior.contains(&kind) => {
-                        seen_no_prior.push(kind);
-                        let gap = Gap::NoPrior(kind.clone());
-                        multiply(
-                            authorities
-                                .iter()
-                                .filter(|authority| covers_gap(authority, &gap, tags, context))
-                                .count(),
-                        );
-                    }
-                    HistoryRequirement::NoPrior(_) | HistoryRequirement::Prior(_) => {}
+                if seen_history.contains(&requirement) {
+                    continue;
                 }
+                seen_history.push(requirement);
+                let gap = match requirement {
+                    HistoryRequirement::NoPrior(kind) => Gap::NoPrior(kind.clone()),
+                    HistoryRequirement::Prior(kind) => Gap::Prior(kind.clone()),
+                };
+                multiply(
+                    authorities
+                        .iter()
+                        .filter(|authority| covers_gap(authority, &gap, tags, context))
+                        .count(),
+                );
             }
             let mut seen_marks: Vec<&crate::names::MarkName> = Vec::new();
             for mark in tool.requires.attention_marks() {
@@ -3894,6 +3895,36 @@ mod tests {
             Registry::build_covered_with_cap(wide(4), PlannerCap::new(64).expect("nonzero")),
             Err(LoadError::TooManyPlanAlternatives { count: 129, max: 64, ref tool }) if tool == "wire"
         ));
+    }
+
+    #[test]
+    fn the_cap_counts_the_authorities_that_waive_a_required_prior() {
+        let waiving = |n: usize, kind: &str| {
+            let mut deploy = tool("deploy");
+            deploy.requires.history = vec![HistoryRequirement::Prior(EffectKind::new("reviewed"))];
+            let mut cfg = base();
+            cfg.tools = declared(vec![deploy]);
+            cfg.authorities = (0..n)
+                .map(|index| Authority {
+                    except: Vec::new(),
+                    name: AuthorityName::new(format!("a{index}")),
+                    mandate: Mandate {
+                        prior_waivers: vec![EffectKind::new(kind)],
+                        ..Mandate::default()
+                    },
+                    scope: Scope::default(),
+                    hint: None,
+                })
+                .collect();
+            cfg
+        };
+        let cap = || PlannerCap::new(64).expect("nonzero");
+        assert!(Registry::build_covered_with_cap(waiving(64, "reviewed"), cap()).is_ok());
+        assert!(matches!(
+            Registry::build_covered_with_cap(waiving(65, "reviewed"), cap()),
+            Err(LoadError::TooManyPlanAlternatives { count: 65, max: 64, ref tool }) if tool == "deploy"
+        ));
+        assert!(Registry::build_covered_with_cap(waiving(65, "approved"), cap()).is_ok());
     }
 
     /// The cap bounds the plans a block can surface, so it must count the authorities
