@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use appa_runtime_api::{HookDecision, HookEvent, ToolOutcome};
 
-use crate::redact::{Replacement, replacement, restated};
+use crate::redact::{Replacement, replacement, restated, restates_unchanged};
 
 pub(crate) fn withheld(reason: &str) -> String {
     format!("[appa] the tool result was withheld: {reason}")
@@ -107,12 +107,16 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
         // What stands in for the body the model asked for: an admitted value, or the
         // runtime's own words about the result. Claude Code dispatches the spellings this
         // adapter identifies from, so nothing here is spelled back and both render alike.
-        HookDecision::ReplaceOutput { output, .. } | HookDecision::DeliverValue { value: output } => {
-            match replacement(event, output) {
-                Some(replacement) => replaced(replacement, None),
-                None => block(output),
-            }
-        }
+        HookDecision::ReplaceOutput { output, .. } => match replacement(event, output) {
+            Some(replacement) => replaced(replacement, None),
+            None => block(output),
+        },
+        // A value restated as the very response delivered rewrites nothing.
+        HookDecision::DeliverValue { value } => match replacement(event, value) {
+            Some(replacement) if restates_unchanged(event, &replacement) => serde_json::json!({}),
+            Some(replacement) => replaced(replacement, None),
+            None => block(value),
+        },
         // No hook rewrites what a subagent's stop delivers, so the
         // subagent is held until it returns the crossing value itself.
         HookDecision::ChildReturn { value } => match replacement(event, value) {

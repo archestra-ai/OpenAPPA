@@ -323,9 +323,14 @@ impl Session {
                                 .map(|(_, receipt)| receipt),
                             _ => None,
                         };
-                        deferral = match crossed {
-                            Some(_) => None,
-                            None => context.deferral_notice(&dispatch),
+                        // That crossing answers past a return the parent already decided on, never
+                        // past one still awaiting its decision.
+                        deferral = match (&crossed, context.spawn_deferral(&dispatch)) {
+                            (_, None) => None,
+                            (Some(_), Some(deferred)) if deferred.settled.is_some() => None,
+                            (_, Some(deferred)) => {
+                                Some(context.engine().deferral_notice(&deferred, &self.presentation))
+                            }
                         };
                         let next = match (status, &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
@@ -428,10 +433,20 @@ impl Session {
                 },
                 SpawnPlan::Replay { receipt } => {
                     outcome_decision(decision, &self.deployment().externals)?;
-                    return Ok(SpawnResultDecision::Return(ChildReturnDecision::Returned {
-                        value: value.expect("a replay repeats a delivered message"),
-                        receipt,
-                    }));
+                    let value = value.expect("a replay repeats a delivered message");
+                    // A body the report carries beside the crossed value was never checked, so
+                    // the harness delivers the value in its place.
+                    return Ok(match &outcome {
+                        ToolOutcome::Success {
+                            body: OutcomeBody::Available(body),
+                        } if *body != value => {
+                            SpawnResultDecision::Outcome(ToolResultDecision::Deliver { value, receipt })
+                        }
+                        ToolOutcome::Success {
+                            body: OutcomeBody::TooLarge { .. },
+                        } => SpawnResultDecision::Outcome(ToolResultDecision::Deliver { value, receipt }),
+                        _ => SpawnResultDecision::Return(ChildReturnDecision::Returned { value, receipt }),
+                    });
                 }
                 SpawnPlan::Withheld => {
                     outcome_decision(decision, &self.deployment().externals)?;

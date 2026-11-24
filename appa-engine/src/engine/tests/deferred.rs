@@ -344,9 +344,23 @@ fn an_acceptance_is_held_to_the_parents_floor_where_it_settles() {
             floor: Label::new(TRUSTED, Audience::public())
         })
     );
-    assert!(
-        first.handle(&viewing(&first, &log), accept).is_ok(),
-        "the floor the first revision reads holds the acceptance"
+    let mut accepted = appended_facts(
+        first
+            .handle(&viewing(&first, &log), accept)
+            .expect("the floor the first revision reads holds the acceptance"),
+    );
+    // The same acceptance stamped as the second revision's does not replay either.
+    let Some(Fact::BasisAdvanced { revision, .. }) = accepted.first_mut() else {
+        panic!("a decided batch leads with its declaration");
+    };
+    *revision = Some(PolicyRevision::new(2));
+    let forged = StampedBatch {
+        revision: Some(PolicyRevision::new(2)),
+        facts: &accepted,
+    };
+    assert_eq!(
+        second.replay(&traj(), &[recorded, forged], &[&first]).err(),
+        Some(ReplayRefusal::Transition(TransitionRefusal::ReturnBelowFloor))
     );
 }
 
@@ -368,6 +382,40 @@ fn only_the_parent_that_owns_a_deferred_return_settles_it() {
         e.handle(&viewing(&e, &log), settle(&child, 1, ReturnDecision::Accept)),
         Err(TransitionError::NoDeferredReturn)
     );
+}
+
+/// A recorded settlement replays only for the parent that owns the return: one the child wrote
+/// for itself is refused, whether it accepts or discards.
+#[test]
+fn a_settlement_recorded_by_a_trajectory_that_does_not_own_the_return_does_not_replay() {
+    let e = open_engine(returning_registry(vec![]));
+    let child = TrajectoryId::new("child");
+    let log = frozen_family(&e, &child, "the answer");
+    for decision in [ReturnDecision::Accept, ReturnDecision::Discard] {
+        let forged: Vec<Fact> = appended_facts(
+            e.handle(&viewing(&e, &log), settle(&child, 0, decision))
+                .expect("the parent settles"),
+        )
+        .into_iter()
+        .map(|fact| match fact {
+            Fact::ReturnAccepted { id, narrowing, .. } => Fact::ReturnAccepted {
+                trajectory: child.clone(),
+                id,
+                narrowing,
+            },
+            Fact::ReturnDiscarded { id, .. } => Fact::ReturnDiscarded {
+                trajectory: child.clone(),
+                id,
+            },
+            fact => fact,
+        })
+        .collect();
+        assert_eq!(
+            e.validate_replay(&[log.clone(), forged].concat()),
+            Err(TransitionRefusal::ForeignTrajectory),
+            "{decision:?}"
+        );
+    }
 }
 
 #[test]

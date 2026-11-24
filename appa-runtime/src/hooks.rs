@@ -2502,8 +2502,10 @@ mod tests {
         .await;
         assert_eq!(
             returned,
-            HookDecision::Ack,
-            "the return replays through the spawn's result"
+            HookDecision::DeliverValue {
+                value: "found it".to_string()
+            },
+            "the return replays through the spawn's result, its value standing in for the envelope"
         );
         assert_eq!(runtime.open_dispatches(&root, &root).len(), 1, "the spawn closed");
     }

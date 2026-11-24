@@ -146,7 +146,7 @@ pub(crate) fn compose_batch<'a>(
     batch: ComposingBatch<'_>,
     proposals: &[ResolvedCall],
     spawn: Option<SpawnMark>,
-    approval: &impl Fn(&Views, &ResolvedCall) -> Vec<crate::value::OfferId>,
+    approval: &impl Fn(&Views, &ResolvedCall, crate::transition::ReturnClass) -> Vec<crate::value::OfferId>,
     staged: &impl Fn(
         &Views,
         &ResolvedCall,
@@ -175,20 +175,25 @@ pub(crate) fn compose_batch<'a>(
             //
             // A marked spawn may hold its return declaration beside the approval that covers its
             // other gaps, which carries the same declaration; the covering one is spent.
-            let spendable: Vec<crate::value::OfferId> = if singleton { approval(&views, call) } else { Vec::new() }
-                .into_iter()
-                .filter(|offer| {
-                    views.approval(offer).is_some_and(|prepared| {
-                        prepared.return_policy.is_some() == marked
-                            && prepared.returns == proposing.returns()
-                            && (proposing.spawn() == Some(crate::transition::SpawnKind::Single)
-                                || !prepared
-                                    .return_policy
-                                    .as_ref()
-                                    .is_some_and(ReturnPolicy::holds_below_floor))
-                    })
+            let returns = proposing.returns();
+            let spendable: Vec<crate::value::OfferId> = if singleton {
+                approval(&views, call, returns)
+            } else {
+                Vec::new()
+            }
+            .into_iter()
+            .filter(|offer| {
+                views.approval(offer).is_some_and(|prepared| {
+                    prepared.return_policy.is_some() == marked
+                        && prepared.returns == returns
+                        && (proposing.spawn() == Some(crate::transition::SpawnKind::Single)
+                            || !prepared
+                                .return_policy
+                                .as_ref()
+                                .is_some_and(ReturnPolicy::holds_below_floor))
                 })
-                .collect();
+            })
+            .collect();
             let spends = spendable
                 .iter()
                 .find(|offer| views.approval(offer).is_some_and(|prepared| !prepared.declares_only()))

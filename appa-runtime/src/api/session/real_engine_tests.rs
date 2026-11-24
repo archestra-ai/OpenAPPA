@@ -5410,9 +5410,13 @@ async fn a_spawn_result_for_a_returned_child_replays_its_return_and_withholds_an
         )
         .await
         .expect("the same message replays");
+    let ChildReturnDecision::Returned { value, receipt } = crossed else {
+        panic!("the child's end crossed: {crossed:?}");
+    };
+    // The harness's envelope beside the value was never checked, so the value stands in for it.
     assert_eq!(
         decision,
-        SpawnResultDecision::Return(crossed),
+        SpawnResultDecision::Outcome(ToolResultDecision::Deliver { value, receipt }),
         "the replay carries the receipt of the crossing it repeats"
     );
     assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
@@ -5948,7 +5952,7 @@ async fn a_turn_end_leaves_a_running_subagents_spawn_open_for_its_return() {
         .expect("the spawn's result is reported after the turn");
     assert!(matches!(
         &decision,
-        SpawnResultDecision::Return(ChildReturnDecision::Returned { value, .. }) if value == "all done"
+        SpawnResultDecision::Outcome(ToolResultDecision::Deliver { value, .. }) if value == "all done"
     ));
     assert!(
         runtime.open_dispatches(&root(), &root()).len() == 1,
@@ -6011,7 +6015,7 @@ async fn a_call_without_an_id_runs_beside_a_running_subagents_spawn() {
             )
             .await
             .expect("the spawn's result replays"),
-        SpawnResultDecision::Return(ChildReturnDecision::Returned { value, .. }) if value == "all done"
+        SpawnResultDecision::Outcome(ToolResultDecision::Deliver { value, .. }) if value == "all done"
     ));
 }
 

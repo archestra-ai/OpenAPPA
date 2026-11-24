@@ -437,6 +437,59 @@ impl Decided<'_> {
         })
     }
 
+    /// The mark a proposal starting `spawn` wears. A repeat of the decision `replay` names that
+    /// declares the same kind of return is judged as that decision was: a deciding parent's floor
+    /// resolves at the label the parent stood at then, and where a revision other than the head's
+    /// decided it, under a chain that may have renumbered or dropped the floor's ranks, the repeat
+    /// wears the recorded mark. A deployment that does not control subagent context marks
+    /// nothing, so no floor is resolved there.
+    pub(super) fn spawn_mark(
+        &self,
+        spawn: Option<SpawnKind>,
+        declares: Option<&DeclaredReturn>,
+        replay: Option<&ProposalBatchId>,
+    ) -> Result<Option<SpawnMark>, EventError> {
+        let Some(spawn) = spawn else {
+            return Ok(None);
+        };
+        if let Some(batch) = replay
+            && let Some(recorded) = self.engine().recorded_spawn(self.view, batch)
+            && matches!(
+                (spawn, recorded.kind()),
+                (SpawnKind::Single, appa_engine::transition::SpawnKind::Single)
+                    | (SpawnKind::FanOut, appa_engine::transition::SpawnKind::FanOut)
+            )
+            && crate::engine::declares_alike(declares, recorded.returns())
+        {
+            let Some(DeclaredReturn::Decides(spelling)) = declares else {
+                return Ok(Some(recorded));
+            };
+            return match self
+                .policy
+                .label_at_proposal(self.log, batch, &self.session.trajectory)
+                .map_err(EventError::from)?
+            {
+                None => Ok(Some(recorded)),
+                // Under the chain that decided it, a floor it cannot spell is not the recorded one.
+                Some(label) => match self.engine().deciding_floor(label, spelling) {
+                    Ok(floor) => Ok(Some(SpawnMark::decides(0, floor))),
+                    Err(_) => Err(EventError::CallIdReused),
+                },
+            };
+        }
+        if !self.engine().controls_context() {
+            return Ok(None);
+        }
+        Ok(Some(match spawn {
+            SpawnKind::FanOut => SpawnMark::fan_out(0),
+            SpawnKind::Single => match self.declared_class(declares)? {
+                ReturnClass::Planned => SpawnMark::at(0),
+                ReturnClass::Deferred => SpawnMark::deferred(0),
+                ReturnClass::Decides(floor) => SpawnMark::decides(0, floor),
+            },
+        }))
+    }
+
     /// The return class of a single spawn whose proposal declares `declares`, at this
     /// trajectory's label now: a spawn whose parent decides is of the floor it names.
     pub(super) fn declared_class(&self, declares: Option<&DeclaredReturn>) -> Result<ReturnClass, EventError> {
@@ -679,10 +732,17 @@ impl Decided<'_> {
     /// What this trajectory's spawn `dispatch` answers its result with once its child's answer
     /// was deferred; `None` for every other dispatch.
     pub(super) fn deferral_notice(&self, dispatch: &appa_engine::value::DispatchId) -> Option<String> {
-        let deferred = self
-            .engine()
-            .deferred_return_of(self.view, &self.session.trajectory, dispatch)?;
-        Some(self.engine().deferral_notice(&deferred, &self.session.presentation))
+        self.spawn_deferral(dispatch)
+            .map(|deferred| self.engine().deferral_notice(&deferred, &self.session.presentation))
+    }
+
+    /// The deferred return this trajectory's spawn `dispatch` tells its parent about.
+    pub(super) fn spawn_deferral(
+        &self,
+        dispatch: &appa_engine::value::DispatchId,
+    ) -> Option<crate::engine::DeferredReturn> {
+        self.engine()
+            .deferred_return_of(self.view, &self.session.trajectory, dispatch)
     }
 
     /// The dispatch this trajectory's call `call_id` was released as.

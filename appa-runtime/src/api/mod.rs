@@ -143,7 +143,7 @@ pub struct DeferredReturnNotice {
 /// One return a spawn's child froze for its parent, held or at its stop: its occurrence among
 /// the child's returns, where the parent's decision on it stands, the host operation that made
 /// it where the host named one, and what the parent is told about it, while the parent can
-/// still quote it: never for a return whose parent ended before deciding.
+/// still quote it: never once the parent ended, whether or not it decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildOccurrence {
     pub occurrence: u32,
@@ -4128,7 +4128,8 @@ impl Runtime {
     }
 
     /// What the spawn `call_id` of `acting` is told when its subagent's answer was deferred,
-    /// before and after `acting` decides; `None` for a spawn with no deferred return.
+    /// before and after `acting` decides; `None` for a spawn with no deferred return, and once
+    /// `acting` ended.
     pub fn deferred_return(
         &self,
         acting: &Actor,

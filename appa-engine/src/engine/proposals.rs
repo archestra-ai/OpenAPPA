@@ -167,11 +167,13 @@ impl Engine {
             composing,
             &proposals,
             batch.spawn,
-            &|views, call| {
+            &|views, call, returns| {
                 views
                     .approvals_for(call)
                     .filter(|(offer, approval)| {
-                        approval.basis == views.basis_after(&admissions, &crate::basis::SubjectKey::Approval(*offer))
+                        approval.returns == returns
+                            && approval.basis
+                                == views.basis_after(&admissions, &crate::basis::SubjectKey::Approval(*offer))
                     })
                     .map(|(offer, _)| offer)
                     .collect()

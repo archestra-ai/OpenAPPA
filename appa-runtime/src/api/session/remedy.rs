@@ -108,8 +108,8 @@ impl Session {
                         occurrence: deferred.id.occurrence(),
                         state,
                         operation: context.log.held_operation(&deferred.id).cloned(),
-                        notice: (state != crate::api::OccurrenceState::ParentEnded)
-                            .then(|| self.notice(context, deferred)),
+                        // A parent that ended makes no choice, so none is quoted to it.
+                        notice: (!ended).then(|| self.notice(context, deferred)),
                     }
                 })
                 .collect())

@@ -295,8 +295,8 @@ fn a_held_return_never_crosses_live_into_a_parent_that_ended() {
     );
     assert_eq!(
         e.validate_replay(&[log, accepted].concat()),
-        Ok(()),
-        "a recorded acceptance replays by its ownership and its pending standing, as a discard does"
+        Err(crate::transition::TransitionRefusal::BranchEnded),
+        "a recorded acceptance of a held return into a parent that ended is refused, as live"
     );
 }
 

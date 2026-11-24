@@ -149,8 +149,9 @@ impl Session {
     /// applied, and one a turn boundary cleared is dropped. Each settlement is judged and
     /// written where it commits, the first one wins, and a retry of the call reads it back.
     ///
-    /// A blocked single spawn that took no declaration ahead applies the return its proposal
-    /// declares, if it declares one ([`Session::apply_declared`]). A deployment that does not
+    /// A blocked single spawn that took no declaration ahead, or took one that was not applied,
+    /// applies the return its proposal declares, if it declares one ([`Session::apply_declared`]).
+    /// A deployment that does not
     /// control subagent context releases a spawn unmarked, so nothing is applied there: the
     /// host declares for every spawn and cannot know the deployment's choice.
     async fn propose_tool_call(&self, proposal: Proposal) -> Result<ToolCallDecision, EventError> {
@@ -169,6 +170,10 @@ impl Session {
                 None => Ok(decision),
             };
         };
+        let returns = match crate::engine::fixed_class(proposal.declares.as_ref()) {
+            Some(returns) => returns,
+            None => self.with_view(|context| context.declared_class(proposal.declares.as_ref()))?,
+        };
         for _ in 0..DECLARATION_ROUNDS {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
                 return Ok(decision);
@@ -177,17 +182,23 @@ impl Session {
             let claim = AheadClaim {
                 attempt: &attempt,
                 spawn,
-                returns: self.with_view(|context| context.declared_class(proposal.declares.as_ref()))?,
+                returns,
                 offers: &offers,
             };
             let (offer, arguments) = match self.settle_terminal(&claim)? {
                 Judgment::Settled(AheadOutcome::Applied) => {
                     return Ok(self.propose_resolving(&proposal, Some(invocation)).await?.0);
                 }
-                Judgment::Settled(AheadOutcome::Ended) => return Ok(decision),
-                Judgment::Settled(AheadOutcome::Lapsed) => return Ok(noted(&decision, LAPSED_AHEAD)),
-                Judgment::Settled(AheadOutcome::Unfit) => return Ok(noted(&decision, UNFIT_AHEAD)),
-                Judgment::Settled(AheadOutcome::FanOut) => return Ok(noted(&decision, FAN_OUT_AHEAD)),
+                Judgment::Settled(AheadOutcome::Ended) => return self.unapplied_ahead(&proposal, decision, None).await,
+                Judgment::Settled(AheadOutcome::Lapsed) => {
+                    return self.unapplied_ahead(&proposal, decision, Some(LAPSED_AHEAD)).await;
+                }
+                Judgment::Settled(AheadOutcome::Unfit) => {
+                    return self.unapplied_ahead(&proposal, decision, Some(UNFIT_AHEAD)).await;
+                }
+                Judgment::Settled(AheadOutcome::FanOut) => {
+                    return self.unapplied_ahead(&proposal, decision, Some(FAN_OUT_AHEAD)).await;
+                }
                 Judgment::Apply { offer, arguments } => (offer, arguments),
                 Judgment::Stale => {
                     decision = self.propose_resolving(&proposal, Some(invocation)).await?.0;
@@ -213,6 +224,25 @@ impl Session {
             }),
             released => Ok(released),
         }
+    }
+
+    /// A blocked spawn whose declaration made ahead was not applied applies the return its
+    /// proposal declares, as a spawn that took none does; `notice` says why the declaration
+    /// made ahead was not applied.
+    async fn unapplied_ahead(
+        &self,
+        proposal: &Proposal,
+        decision: ToolCallDecision,
+        notice: Option<&str>,
+    ) -> Result<ToolCallDecision, EventError> {
+        let decision = match &proposal.declares {
+            Some(declares) => self.apply_declared(proposal, declares, decision).await?,
+            None => decision,
+        };
+        Ok(match notice {
+            Some(notice) => noted(&decision, notice),
+            None => decision,
+        })
     }
 
     /// Apply the return a blocked single spawn's proposal declares through its block's own
@@ -426,15 +456,8 @@ impl Session {
             .drive_with_evidence(
                 |context, mut evidence| {
                     auto_apply = crate::api::pinned_settings(context.log).auto_apply;
-                    let mark = match spawn {
-                        None => None,
-                        Some(SpawnKind::FanOut) => Some(SpawnMark::fan_out(0)),
-                        Some(SpawnKind::Single) => Some(match context.declared_class(declares.as_ref())? {
-                            ReturnClass::Planned => SpawnMark::at(0),
-                            ReturnClass::Deferred => SpawnMark::deferred(0),
-                            ReturnClass::Decides(floor) => SpawnMark::decides(0, floor),
-                        }),
-                    };
+                    let replay = context.replay_batch(call, call_id.as_deref())?;
+                    let mark = context.spawn_mark(spawn, declares.as_ref(), replay.as_ref())?;
                     if let Some(message) = held_message {
                         evidence.push(ExternalEvidence::Held {
                             message: message.clone(),
@@ -445,7 +468,7 @@ impl Session {
                         evidence,
                         entropy: fresh_entropy(),
                         spawn: mark,
-                        replay: context.replay_batch(call, call_id.as_deref())?,
+                        replay,
                     })
                 },
                 None,

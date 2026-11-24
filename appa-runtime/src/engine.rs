@@ -841,6 +841,41 @@ impl<'a> PolicyEngine<'a> {
         self.engine().rebuild_view(log, &earlier)
     }
 
+    /// The label `trajectory` stood at when the batch `batch` was proposed, replayed from the log
+    /// before it; `None` when a revision other than the head's decided that batch, whose floors
+    /// were resolved under another chain.
+    pub(crate) fn label_at_proposal(
+        &self,
+        log: &Log,
+        batch: &ProposalBatchId,
+        trajectory: &TrajectoryId,
+    ) -> Result<Option<Label>, EngineRefusal> {
+        let batches = log.stamped_batches();
+        let at = batches
+            .iter()
+            .position(|stamped| {
+                stamped
+                    .facts
+                    .iter()
+                    .any(|fact| matches!(fact, Fact::ProposalBatchDecided { batch: decided, .. } if decided == batch))
+            })
+            .ok_or_else(|| EngineRefusal::Invariant {
+                detail: "a recorded batch is in no batch of its log".to_string(),
+            })?;
+        if batches[at].revision != self.engine().engine.revision() {
+            return Ok(None);
+        }
+        let earlier: Vec<&Engine> = self.earlier.iter().map(|engine| &engine.engine).collect();
+        let before = self
+            .engine()
+            .engine
+            .replay(log.root(), &batches[..at], &earlier)
+            .map_err(|error| EngineRefusal::Invariant {
+                detail: format!("replaying a log before its recorded batch: {error}"),
+            })?;
+        Ok(before.views(trajectory).map(|views| views.current_label()))
+    }
+
     /// Render the family's recorded decisions; see [`RuntimeEngine::audit`].
     pub(crate) fn audit(&self, log: &Log) -> Result<Option<Vec<AuditEntry>>, EngineRefusal> {
         let earlier: Vec<&Engine> = self.earlier.iter().map(|engine| &engine.engine).collect();
@@ -2741,7 +2776,7 @@ impl RuntimeEngine {
                     .to_string(),
             );
         };
-        let floor = self.floor_of(views, spelling)?;
+        let floor = self.floor_of(views.current_label(), spelling)?;
         let sanitizer = match step {
             Some(name) if name.is_attest_schema() => {
                 let Some(schema) = &arguments.return_schema else {
@@ -2773,8 +2808,7 @@ impl RuntimeEngine {
     }
 
     /// The floor `spelling` names, as a delta over this trajectory's current label.
-    fn floor_of(&self, views: &Views, spelling: &LabelSpelling) -> Result<Label, String> {
-        let current = views.current_label();
+    fn floor_of(&self, current: Label, spelling: &LabelSpelling) -> Result<Label, String> {
         let delta = appa_policy::parse_delta(
             spelling.trust.as_deref(),
             spelling.audience.as_deref(),
@@ -2798,6 +2832,17 @@ impl RuntimeEngine {
         })
     }
 
+    /// Whether the deployment controls subagent context: where it does not, a spawn is
+    /// released unmarked and declares no return.
+    pub(crate) fn controls_context(&self) -> bool {
+        self.engine.profile().context_control()
+    }
+
+    /// The spawn mark the batch `batch` was decided under.
+    pub(crate) fn recorded_spawn(&self, view: &EngineView, batch: &ProposalBatchId) -> Option<SpawnMark> {
+        self.engine.recorded_batch(view, batch)?.spawn
+    }
+
     /// The return class of a single spawn whose proposal declares `declares`, at this
     /// trajectory's label now: a spawn whose parent decides is of the floor it names.
     pub(crate) fn declared_class(
@@ -2813,10 +2858,20 @@ impl RuntimeEngine {
                 let views = view
                     .views(trajectory)
                     .ok_or_else(|| "this session has not opened".to_string())?;
-                let floor = self.floor_of(&views, spelling)?;
-                Ok(ReturnClass::Decides(appa_engine::value::FloorDigest::of(&floor)))
+                Ok(ReturnClass::Decides(
+                    self.deciding_floor(views.current_label(), spelling)?,
+                ))
             }
         }
+    }
+
+    /// The floor `spelling` names for a deciding parent standing at `label`.
+    pub(crate) fn deciding_floor(
+        &self,
+        label: Label,
+        spelling: &LabelSpelling,
+    ) -> Result<appa_engine::value::FloorDigest, String> {
+        Ok(appa_engine::value::FloorDigest::of(&self.floor_of(label, spelling)?))
     }
 
     /// Return contract context provided to a starting subagent.
@@ -2969,19 +3024,22 @@ impl RuntimeEngine {
     /// The frozen return of the child `parent`'s spawn `dispatch` bound that its parent is told
     /// about: the latest one awaiting its decision, else the child's latest occurrence once the
     /// parent decided on it, so the spawn's result keeps its notice. A return the child made
-    /// after a decided one supersedes its notice, and a parent that ended is offered no decision.
+    /// after a decided one supersedes its notice, and a parent that ended is told of none: its
+    /// notice would quote settlement choices it can no longer make.
     pub(crate) fn deferred_return_of(
         &self,
         view: &EngineView,
         parent: &TrajectoryId,
         dispatch: &EngineDispatchId,
     ) -> Option<DeferredReturn> {
+        if self.liveness(view, parent) == Liveness::Ended {
+            return None;
+        }
         let mut frozen = self.child_occurrences(view, parent, dispatch);
-        let decides = self.liveness(view, parent) != Liveness::Ended;
         let latest = self.engine.returns_by(view, frozen.first()?.id.child()).checked_sub(1);
         let at = match frozen.iter().rposition(|deferred| deferred.settled.is_none()) {
-            Some(pending) if decides => pending,
-            _ => frozen
+            Some(pending) => pending,
+            None => frozen
                 .iter()
                 .rposition(|deferred| deferred.settled.is_some() && Some(deferred.id.occurrence()) == latest)?,
         };
@@ -5555,6 +5613,27 @@ pub(crate) fn decided_floor(label: &appa_runtime_api::LabelSpelling) -> RemedyAr
     RemedyArguments {
         label: Some(label.clone()),
         return_schema: None,
+    }
+}
+
+/// The return class a spawn's proposal declaring `declares` is of, where no label decides it:
+/// every class but a deciding parent's, whose floor is resolved at the parent's label.
+pub(crate) fn fixed_class(declares: Option<&appa_runtime_api::DeclaredReturn>) -> Option<ReturnClass> {
+    match declares {
+        None | Some(appa_runtime_api::DeclaredReturn::Arguments(_)) => Some(ReturnClass::Planned),
+        Some(appa_runtime_api::DeclaredReturn::Deferred) => Some(ReturnClass::Deferred),
+        Some(appa_runtime_api::DeclaredReturn::Decides(_)) => None,
+    }
+}
+
+/// Whether a proposal declaring `declares` declares the kind of return `recorded` is. A
+/// deciding parent's floor is not compared: it was resolved at the label, and under the chain,
+/// the recorded decision read.
+pub(crate) fn declares_alike(declares: Option<&appa_runtime_api::DeclaredReturn>, recorded: ReturnClass) -> bool {
+    match (fixed_class(declares), recorded) {
+        (Some(class), recorded) => class == recorded,
+        (None, ReturnClass::Decides(_)) => true,
+        (None, ReturnClass::Planned | ReturnClass::Deferred) => false,
     }
 }
 

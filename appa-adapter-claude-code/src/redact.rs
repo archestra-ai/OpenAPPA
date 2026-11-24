@@ -83,6 +83,16 @@ pub(crate) fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> 
     }
 }
 
+/// Whether `replacement` is the response `event` delivered, unchanged and with no context.
+pub(crate) fn restates_unchanged(event: &HookEvent, replacement: &Replacement) -> bool {
+    match event {
+        HookEvent::SpawnResult { outcome, .. } | HookEvent::ToolResult { outcome, .. } => {
+            replacement.context.is_none() && delivered(outcome).as_ref() == Some(&replacement.output)
+        }
+        _ => false,
+    }
+}
+
 /// One delivered response restated in place of itself.
 pub(crate) fn restated(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
     match Restatement::of(tool) {

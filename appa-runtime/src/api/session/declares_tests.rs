@@ -610,7 +610,7 @@ async fn a_deployment_without_context_control_releases_a_declaring_spawn_unmarke
     assert!(
         matches!(
             declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await,
-            Ok(ToolCallDecision::Allow { .. })
+            Ok(ToolCallDecision::Allow { spawn: None, .. })
         ),
         "the deployment releases the spawn unmarked, so there is no fork for a declaration to bind"
     );
@@ -696,7 +696,7 @@ async fn a_deployment_that_does_not_control_context_releases_a_deferring_spawn_u
         deployed_serving(&policy(false).replace("context_control = true", "context_control = false"));
     assert!(matches!(
         deferring(&runtime, call("fetch", 1), "toolu-1").await,
-        Ok(ToolCallDecision::Allow { .. })
+        Ok(ToolCallDecision::Allow { spawn: None, .. })
     ));
     assert_eq!(forks(&runtime), 0);
     assert_eq!(declarations(&runtime), 0);
@@ -2360,4 +2360,326 @@ async fn a_repeated_withheld_spawn_result_stays_withheld_after_the_child_crosses
     );
     crossing(&child, "y", "op-1").await;
     assert_eq!(spawn_reported(&runtime, &child, 1, "y").await, withheld);
+}
+
+/// A spawn result repeating its child's crossing answers with that crossing. A body the report
+/// carries beyond the crossed value was never checked, so the value is delivered in its place;
+/// a report of the value alone is the crossing itself.
+#[tokio::test]
+async fn a_spawn_result_carrying_more_than_its_crossed_value_delivers_the_value_in_its_place() {
+    for (body, delivers) in [
+        (OutcomeBody::Available("x".to_string()), false),
+        (OutcomeBody::Unavailable, false),
+        (OutcomeBody::Available("x, and bytes no stop checked".to_string()), true),
+        (OutcomeBody::Available("x".repeat(70_000)), true),
+    ] {
+        let Deployed { runtime, .. } = deployed(false);
+        let child = bound_child(&runtime, 1).await;
+        let receipt = crossing(&child, "x", "op-1").await;
+        let reported = session(&runtime)
+            .on_spawn_result_identified(
+                call("fetch", 1),
+                Some("toolu-1".to_string()),
+                ToolOutcome::Success { body: body.clone() },
+                Some(child.trajectory.clone()),
+                Some("x".to_string()),
+            )
+            .await
+            .expect("the spawn result is decided");
+        let value = "x".to_string();
+        let expected = match delivers {
+            true => SpawnResultDecision::Outcome(ToolResultDecision::Deliver { value, receipt }),
+            false => SpawnResultDecision::Return(ChildReturnDecision::Returned { value, receipt }),
+        };
+        assert_eq!(reported, expected, "{body:?}");
+    }
+}
+
+fn deciding_here() -> DeclaredReturn {
+    DeclaredReturn::Decides(LabelSpelling::default())
+}
+
+async fn retried_spawn(
+    runtime: &Runtime,
+    call_id: &str,
+    declares: DeclaredReturn,
+) -> Result<ToolCallDecision, EventError> {
+    session(runtime)
+        .on_spawn_declaring(call("fetch", 1), Some(call_id.to_string()), None, declares)
+        .await
+}
+
+/// A released deciding spawn's floor was resolved at the parent's label when it was proposed: a
+/// retry after the parent narrowed answers that release, and a retry naming another floor
+/// there is another act.
+#[tokio::test]
+async fn a_released_deciding_spawns_retry_answers_its_release_after_the_parents_label_moved() {
+    let Deployed { runtime, .. } = deployed(false);
+    let released = binding(retried_spawn(&runtime, "toolu-1", deciding_here()).await);
+    tainted(&runtime, &session(&runtime)).await;
+    assert_eq!(
+        binding(retried_spawn(&runtime, "toolu-1", deciding_here()).await),
+        released
+    );
+    assert!(matches!(
+        retried_spawn(&runtime, "toolu-1", deciding_at("suspicious")).await,
+        Err(EventError::CallIdReused)
+    ));
+    assert_eq!(forks(&runtime), 1);
+}
+
+/// A spawn released under a chain a reload renumbers, or drops its floor's rank from, answers
+/// its retry with the release, whatever return it declares.
+#[tokio::test]
+async fn a_released_spawns_retry_after_a_reload_that_renumbers_the_chain_answers_its_release() {
+    for declares in [
+        DeclaredReturn::Arguments(as_spoken()),
+        DeclaredReturn::Deferred,
+        deciding_here(),
+        deciding_at("trusted"),
+        deciding_at("middle"),
+        deciding_at("suspicious"),
+    ] {
+        let deployed = deployed_serving(&format!("{MIDDLE}{DEPLOYMENT}"));
+        let runtime = &deployed.runtime;
+        let released = binding(retried_spawn(runtime, "toolu-1", declares.clone()).await);
+        runtime
+            .reload(deployed.config(&format!("{NO_MIDDLE}{DEPLOYMENT}")))
+            .expect("the policy reloads");
+        assert_eq!(
+            binding(retried_spawn(runtime, "toolu-1", declares.clone()).await),
+            released,
+            "{declares:?}"
+        );
+        assert_eq!(forks(runtime), 1, "{declares:?}");
+    }
+}
+
+/// A denied deciding spawn's retry under the floor it was denied under is answered from the
+/// denial; under another floor, the same call id is another act.
+#[tokio::test]
+async fn a_denied_deciding_spawns_retry_under_another_floor_reuses_its_call_id() {
+    let url = super::real_engine_tests::stub(serde_json::json!({"ruling": "approve"})).await;
+    let deployed = deployed_serving(&signed_off(&url));
+    let runtime = &deployed.runtime;
+    let denied = |decision: Result<ToolCallDecision, EventError>| match decision {
+        Ok(ToolCallDecision::Deny { offers, .. }) => offers,
+        other => panic!("the signoff blocks the spawn: {other:?}"),
+    };
+    let offers = denied(retried_spawn(runtime, "toolu-1", deciding_at("suspicious")).await);
+    assert_eq!(
+        denied(retried_spawn(runtime, "toolu-1", deciding_at("suspicious")).await),
+        offers
+    );
+    assert!(matches!(
+        retried_spawn(runtime, "toolu-1", deciding_at("middle")).await,
+        Err(EventError::CallIdReused)
+    ));
+    assert_eq!(declarations(runtime), 1);
+}
+
+/// A deployment that does not control subagent context releases a deciding spawn unmarked,
+/// whatever floor its host names: no floor is resolved there.
+#[tokio::test]
+async fn a_deployment_without_context_control_releases_a_deciding_spawn_whatever_floor_it_names() {
+    let Deployed { runtime, .. } = deployed_serving(&format!(
+        "{TOOLS}{}",
+        DEPLOYMENT.replace("context_control = true", "context_control = false")
+    ));
+    let released = retried_spawn(&runtime, "toolu-1", deciding_at("middle")).await;
+    assert!(
+        matches!(released, Ok(ToolCallDecision::Allow { spawn: None, .. })),
+        "{released:?}"
+    );
+    assert_eq!(
+        (forks(&runtime), declarations(&runtime), dispatches(&runtime)),
+        (0, 0, 1)
+    );
+}
+
+/// A return declared ahead at a floor other than the one a deciding spawn names is not applied
+/// to it; the spawn takes the floor its own proposal declares.
+#[tokio::test]
+async fn a_deciding_spawn_unfit_for_the_return_declared_ahead_takes_its_own_declaration() {
+    let Deployed { runtime, .. } = deployed_serving(&format!("{MIDDLE}{DEPLOYMENT}"));
+    let acting = Actor {
+        root: root(),
+        child: None,
+    };
+    let ahead = RemedyArguments {
+        label: Some(middle_floor()),
+        return_schema: None,
+    };
+    assert!(matches!(
+        runtime
+            .declare_return_ahead(&acting, ahead, RemedyAttempt("r1".to_string()))
+            .await,
+        RemedyOutcome::Returned { .. }
+    ));
+    binding(retried_spawn(&runtime, "toolu-1", deciding_here()).await);
+    let state = AheadState::fold(runtime.inner.log(&root()).expect("the log reads").host_records());
+    assert_eq!(
+        state.settlement(&root(), &AheadAttempt::Host("r1".to_string())),
+        Some(AheadOutcome::Unfit)
+    );
+    let trusted = session(&runtime)
+        .with_view(|context| Ok(context.engine().trust_chain().rank_of("trusted")))
+        .expect("the chain reads")
+        .expect("the chain names the rank");
+    assert_eq!(fork_floors(&runtime), vec![trusted]);
+}
+
+/// A held return still awaiting its parent's decision, then a stop that crosses: the spawn's
+/// result repeating the crossing carries the pending return's notice, which still settles.
+#[tokio::test]
+async fn a_crossing_after_a_pending_held_return_answers_with_the_pending_notice() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    tainted(&runtime, &session(&runtime)).await;
+    assert!(matches!(
+        child.on_child_end(Some("two".to_string())).await,
+        Ok(ChildReturnDecision::Returned { .. })
+    ));
+    assert!(
+        matches!(
+            spawn_result_saying(&runtime, &child, "two").await,
+            SpawnResultDecision::Outcome(ToolResultDecision::Replace { .. })
+        ),
+        "the pending return's notice stands in for the crossing"
+    );
+    let [pending] = notices(&runtime).try_into().expect("one held occurrence");
+    assert!(matches!(
+        settling(&runtime, &parent(), &pending.accept).await,
+        RemedyOutcome::Returned { .. }
+    ));
+}
+
+async fn failed_saying(parent: &Session, child: &Session, said: &str) -> SpawnResultDecision {
+    parent
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            ToolOutcome::Failure {
+                message: "the harness lost the subagent".to_string(),
+            },
+            Some(child.trajectory.clone()),
+            Some(said.to_string()),
+        )
+        .await
+        .expect("the spawn result is decided")
+}
+
+/// A held return the parent accepted, then a stop that crosses, then the spawn's result reported
+/// as a failure repeating it: the report closes as a deferred spawn's whose child held nothing
+/// does, with no notice.
+#[tokio::test]
+async fn a_failed_spawn_result_repeating_a_crossing_after_an_accepted_held_return_carries_no_notice() {
+    let unheld = deployed(false);
+    let crossed = deferred_child(&unheld.runtime).await;
+    assert!(matches!(
+        crossed.on_child_end(Some("two".to_string())).await,
+        Ok(ChildReturnDecision::Returned { .. })
+    ));
+    let unheld = failed_saying(&session(&unheld.runtime), &crossed, "two").await;
+
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    let [held] = notices(&runtime).try_into().expect("one occurrence");
+    settling(&runtime, &parent(), &held.accept).await;
+    assert!(matches!(
+        child.on_child_end(Some("two".to_string())).await,
+        Ok(ChildReturnDecision::Returned { .. })
+    ));
+    assert_eq!(failed_saying(&session(&runtime), &child, "two").await, unheld);
+}
+
+/// A parent that ended after deciding on its child's return is quoted no settlement for it by
+/// either reader.
+#[tokio::test]
+async fn a_parent_that_ended_after_deciding_is_quoted_no_settlement() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    let fork = binding(
+        child
+            .on_spawn_declaring(
+                call("fetch", 2),
+                Some("toolu-g".to_string()),
+                None,
+                DeclaredReturn::Deferred,
+            )
+            .await,
+    );
+    let grandchild = child
+        .on_child_start(TrajectoryId("cc:root:grandchild".to_string()), SpawnRef::Binding(fork))
+        .expect("the grandchild opens");
+    tainted(&runtime, &grandchild).await;
+    assert!(matches!(
+        grandchild.on_child_return("found".to_string(), operation("op-g")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    let acting = Actor {
+        root: root(),
+        child: Some(child.trajectory.clone()),
+    };
+    let presentation = EmbeddedPresentationOptions::default();
+    let notice = runtime
+        .deferred_return(&acting, "toolu-g", &presentation)
+        .expect("the family reads")
+        .expect("the live parent is told of the held return");
+    settling(&runtime, &acting, &notice.discard).await;
+    assert!(matches!(
+        child.on_child_end(None).await,
+        Ok(ChildReturnDecision::NoValue)
+    ));
+    assert_eq!(
+        runtime
+            .deferred_return(&acting, "toolu-g", &presentation)
+            .expect("the family reads"),
+        None
+    );
+    let [occurrence] = runtime
+        .child_occurrences(&acting, "toolu-g", &presentation)
+        .expect("the family reads")
+        .try_into()
+        .expect("one occurrence");
+    assert_eq!(occurrence.notice, None);
+}
+
+/// A held return's retry through a runtime pinned to another deployment line is refused: the
+/// family follows its own line, and no other line's policy answers it.
+#[tokio::test]
+async fn a_held_returns_retry_through_another_line_is_refused() {
+    let deployed = deployed(false);
+    let runtime = &deployed.runtime;
+    let child = deferred_child(runtime).await;
+    tainted(runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    let published = runtime
+        .publish(
+            &appa_engine::profile::DeploymentName::new("other"),
+            &runtime
+                .prepare_deployment(deployed.config(&policy(false)))
+                .expect("the deployment loads"),
+        )
+        .expect("the line publishes");
+    let pinned = runtime.pinned(&published);
+    let retried = pinned
+        .session(&root(), &child.trajectory)
+        .expect("the child reattaches")
+        .on_child_return("one".to_string(), operation("op-1"))
+        .await;
+    assert!(matches!(retried, Err(EventError::PolicyUnavailable(_))), "{retried:?}");
 }

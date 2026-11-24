@@ -2880,9 +2880,10 @@ impl<'a> Sequence<'a> {
             crate::engine::ComposingBatch { trajectory, id: batch },
             proposals,
             spawn,
-            &|views, call| {
+            &|views, call, returns| {
                 views
                     .approvals_for(call)
+                    .filter(|(_, approval)| approval.returns == returns)
                     .map(|(offer, approval)| (offer, approval.basis))
                     .filter(|(offer, basis)| {
                         self.may_spend(trajectory, &crate::basis::SubjectKey::Approval(*offer), basis)
@@ -3368,9 +3369,10 @@ impl<'a> Sequence<'a> {
     }
 
     /// The value a pending deferred return froze, for the parent that owns it. A recorded
-    /// decision is judged by this, not by the parent's liveness: an engine before held returns
-    /// let a parent that had ended accept or discard what its child froze, and its logs replay.
-    /// A live decision refuses a parent that ended.
+    /// decision on a deferral at its child's stop is judged by this, not by the parent's
+    /// liveness: an engine before held returns let a parent that had ended accept or discard
+    /// what its child froze, and its logs replay. A held return came later, and a decision on it
+    /// refuses a parent that ended, as every live decision does.
     fn pending_deferral(
         &self,
         parent: &TrajectoryId,
@@ -3380,10 +3382,11 @@ impl<'a> Sequence<'a> {
         if views.parent_of(id.child()) != Some(parent) {
             return Err(TransitionRefusal::ForeignTrajectory);
         }
-        views
-            .deferral(id)
-            .and_then(crate::projection::Deferral::pending)
-            .ok_or(TransitionRefusal::NoDeferredReturn)
+        let deferral = views.deferral(id).ok_or(TransitionRefusal::NoDeferredReturn)?;
+        if deferral.held && views.has_ended(parent) {
+            return Err(TransitionRefusal::BranchEnded);
+        }
+        deferral.pending().ok_or(TransitionRefusal::NoDeferredReturn)
     }
 
     /// An acceptance records exactly the narrowing the frozen value causes at the parent's
