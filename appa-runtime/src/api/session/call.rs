@@ -177,11 +177,7 @@ impl Session {
             let claim = AheadClaim {
                 attempt: &attempt,
                 spawn,
-                returns: match &proposal.declares {
-                    Some(DeclaredReturn::Deferred) => ReturnClass::Deferred,
-                    Some(DeclaredReturn::Decides(_)) => ReturnClass::Decides,
-                    Some(DeclaredReturn::Arguments(_)) | None => ReturnClass::Planned,
-                },
+                returns: self.with_view(|context| context.declared_class(proposal.declares.as_ref()))?,
                 offers: &offers,
             };
             let (offer, arguments) = match self.settle_terminal(&claim)? {
@@ -243,20 +239,21 @@ impl Session {
             }
             let fit = self.with_view(|context| {
                 // Arguments the policy does not accept here are refused by every application.
-                let fitting = |arguments: &RemedyArguments, returns| match context.engine().declare_ahead(
-                    context.view,
-                    &self.trajectory,
-                    arguments,
-                    returns,
-                ) {
-                    Err(_) => Fit::Unfit,
-                    Ok(_) => context.fitting_offer(offers, arguments),
+                let fitting = |arguments: &RemedyArguments| {
+                    let stands = context.declared_class(Some(declares)).is_ok_and(|returns| {
+                        context
+                            .engine()
+                            .declare_ahead(context.view, &self.trajectory, arguments, returns)
+                            .is_ok()
+                    });
+                    match stands {
+                        true => context.fitting_offer(offers, arguments),
+                        false => Fit::Unfit,
+                    }
                 };
                 Ok(match declares {
-                    DeclaredReturn::Arguments(arguments) => fitting(arguments, ReturnClass::Planned),
-                    DeclaredReturn::Decides(label) => {
-                        fitting(&crate::engine::decided_floor(label), ReturnClass::Decides)
-                    }
+                    DeclaredReturn::Arguments(arguments) => fitting(arguments),
+                    DeclaredReturn::Decides(label) => fitting(&crate::engine::decided_floor(label)),
                     // A deferred return rides the plan that takes the return as spoken.
                     DeclaredReturn::Deferred => context.fitting_offer(offers, &RemedyArguments::default()),
                 })
@@ -414,12 +411,6 @@ impl Session {
             declares,
         } = proposal;
         let spawn = *spawn;
-        let mark = spawn.map(|kind| match (kind, declares) {
-            (SpawnKind::Single, Some(DeclaredReturn::Deferred)) => SpawnMark::deferred(0),
-            (SpawnKind::Single, Some(DeclaredReturn::Decides(_))) => SpawnMark::decides(0),
-            (SpawnKind::Single, _) => SpawnMark::at(0),
-            (SpawnKind::FanOut, _) => SpawnMark::fan_out(0),
-        });
         self.inner.note_working_directory(&self.root, call.cwd.as_deref());
         if spawn.is_some()
             && self.inner.shared.naming.spawn_coverage() == crate::api::SpawnCoverage::Declared
@@ -435,6 +426,15 @@ impl Session {
             .drive_with_evidence(
                 |context, mut evidence| {
                     auto_apply = crate::api::pinned_settings(context.log).auto_apply;
+                    let mark = match spawn {
+                        None => None,
+                        Some(SpawnKind::FanOut) => Some(SpawnMark::fan_out(0)),
+                        Some(SpawnKind::Single) => Some(match context.declared_class(declares.as_ref())? {
+                            ReturnClass::Planned => SpawnMark::at(0),
+                            ReturnClass::Deferred => SpawnMark::deferred(0),
+                            ReturnClass::Decides(floor) => SpawnMark::decides(0, floor),
+                        }),
+                    };
                     if let Some(message) = held_message {
                         evidence.push(ExternalEvidence::Held {
                             message: message.clone(),

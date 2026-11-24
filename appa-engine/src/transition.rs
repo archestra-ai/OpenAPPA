@@ -120,14 +120,15 @@ pub struct SpawnMark {
 }
 
 /// What the host declared about a spawn's return on its own proposal: nothing, so the policy's
-/// plans declare it; a deferred return; or a floor under which its parent decides what falls
-/// below it. An approval made for a proposal of one class covers no proposal of another.
+/// plans declare it; a deferred return; or the floor under which its parent decides what falls
+/// below it. An approval made for a proposal of one class covers no proposal of another, and
+/// two floors are two classes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ReturnClass {
     #[default]
     Planned,
     Deferred,
-    Decides,
+    Decides(crate::value::FloorDigest),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -136,8 +137,8 @@ struct MarkRecord {
     kind: SpawnKind,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     deferral: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    decides: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    decides: Option<crate::value::FloorDigest>,
 }
 
 impl From<SpawnMark> for MarkRecord {
@@ -146,7 +147,10 @@ impl From<SpawnMark> for MarkRecord {
             index: mark.index,
             kind: mark.kind,
             deferral: mark.returns == ReturnClass::Deferred,
-            decides: mark.returns == ReturnClass::Decides,
+            decides: match mark.returns {
+                ReturnClass::Decides(floor) => Some(floor),
+                ReturnClass::Planned | ReturnClass::Deferred => None,
+            },
         }
     }
 }
@@ -156,13 +160,13 @@ impl TryFrom<MarkRecord> for SpawnMark {
 
     fn try_from(record: MarkRecord) -> Result<SpawnMark, Self::Error> {
         let returns = match (record.deferral, record.decides) {
-            (false, false) => ReturnClass::Planned,
-            (true, false) => ReturnClass::Deferred,
-            (false, true) => ReturnClass::Decides,
-            (true, true) => return Err("a spawn declares a deferred return or a deciding parent, not both"),
+            (false, None) => ReturnClass::Planned,
+            (true, None) => ReturnClass::Deferred,
+            (false, Some(floor)) => ReturnClass::Decides(floor),
+            (true, Some(_)) => return Err("a spawn declares a deferred return or a deciding parent, not both"),
         };
         match (record.kind, returns) {
-            (SpawnKind::FanOut, ReturnClass::Deferred | ReturnClass::Decides) => {
+            (SpawnKind::FanOut, ReturnClass::Deferred | ReturnClass::Decides(_)) => {
                 Err("a fan-out spawn declares no deferred return and no deciding parent")
             }
             (kind, returns) => Ok(SpawnMark {
@@ -202,12 +206,12 @@ impl SpawnMark {
     }
 
     /// A single spawn whose host declared on this proposal that its parent decides on a return
-    /// below the floor.
-    pub const fn decides(index: usize) -> SpawnMark {
+    /// below `floor`.
+    pub const fn decides(index: usize, floor: crate::value::FloorDigest) -> SpawnMark {
         SpawnMark {
             index,
             kind: SpawnKind::Single,
-            returns: ReturnClass::Decides,
+            returns: ReturnClass::Decides(floor),
         }
     }
 

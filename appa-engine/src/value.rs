@@ -142,7 +142,10 @@ impl CanonicalDigest {
                 match mark.returns() {
                     crate::transition::ReturnClass::Planned => {}
                     crate::transition::ReturnClass::Deferred => hasher.update(b"deferral"),
-                    crate::transition::ReturnClass::Decides => hasher.update(b"decides"),
+                    crate::transition::ReturnClass::Decides(floor) => {
+                        hasher.update(b"decides");
+                        hasher.update(floor.0);
+                    }
                 }
             }
             None => hasher.update([0u8]),
@@ -164,6 +167,21 @@ impl CanonicalDigest {
 
     pub fn bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+/// A digest of the floor a spawn whose parent decides declares on its own proposal. It is part
+/// of the spawn's return class, so an approval made under one floor covers no proposal under
+/// another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct FloorDigest(#[serde(with = "crate::hex32")] [u8; 32]);
+
+impl FloorDigest {
+    pub fn of(floor: &Label) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"appa.decided-floor.v1");
+        hasher.update(canonical_json(floor));
+        FloorDigest(hasher.finalize().into())
     }
 }
 
@@ -694,24 +712,37 @@ mod tests {
         assert_eq!(over("sha256:aa").digest(), over("sha256:bb").digest());
     }
 
-    /// What the host declared about a single spawn's return is part of the batch identity, and
-    /// a batch marked before either class existed keeps its digest.
+    /// What the host declared about a single spawn's return, the floor a deciding parent names
+    /// included, is part of the batch identity, and a planned or deferred batch keeps the digest
+    /// it was recorded under.
     #[test]
     fn a_spawns_return_class_is_part_of_the_batch_identity() {
+        use crate::label::{Audience, Trust};
         use crate::transition::SpawnMark;
         let spawn = call("Agent", json!({ "prompt": "go" }));
-        let digests = [SpawnMark::at(0), SpawnMark::deferred(0), SpawnMark::decides(0)]
-            .map(|mark| CanonicalDigest::of_batch([&spawn], Some(mark)));
+        let floor = |trust| FloorDigest::of(&Label::new(Trust::new(trust), Audience::public()));
+        let digests = [
+            SpawnMark::at(0),
+            SpawnMark::deferred(0),
+            SpawnMark::decides(0, floor(0)),
+            SpawnMark::decides(0, floor(1)),
+        ]
+        .map(|mark| CanonicalDigest::of_batch([&spawn], Some(mark)));
         for (at, digest) in digests.iter().enumerate() {
             assert!(!digests[..at].contains(digest), "mark {at}");
         }
-        let mut planned = Sha256::new();
-        planned.update(b"appa.proposal-batch.v1");
-        planned.update([1u8]);
-        planned.update(0usize.to_be_bytes());
-        planned.update([0u8]);
-        planned.update(spawn.digest().0);
-        assert_eq!(digests[0], CanonicalDigest(planned.finalize().into()));
+        let recorded = |class: &[u8]| {
+            let mut hasher = Sha256::new();
+            hasher.update(b"appa.proposal-batch.v1");
+            hasher.update([1u8]);
+            hasher.update(0usize.to_be_bytes());
+            hasher.update(class);
+            hasher.update([0u8]);
+            hasher.update(spawn.digest().0);
+            CanonicalDigest(hasher.finalize().into())
+        };
+        assert_eq!(digests[0], recorded(b""));
+        assert_eq!(digests[1], recorded(b"deferral"));
     }
 
     #[test]

@@ -1296,6 +1296,13 @@ fn a_child_stop_carries_its_parents_declared_floor_to_a_grandchild() {
 /// `spawn` requires `partner` among its readers, which `officer` may approve, while the session
 /// holds `insider`; `open_spawn` has no gap. The replay fixture was recorded under this engine.
 pub(super) fn gapped_spawn_engine() -> Engine {
+    open_engine_at(
+        gapped_spawn_registry(),
+        Label::new(SUSPICIOUS, Audience::restricted([ReaderId::new("insider")])),
+    )
+}
+
+pub(super) fn gapped_spawn_registry() -> RegistryConfig {
     let mut spawn = plain_tool("spawn");
     spawn.requires = Requires {
         label: LabelRequirements {
@@ -1320,10 +1327,7 @@ pub(super) fn gapped_spawn_engine() -> Engine {
         scope: crate::authority::Scope::default(),
         hint: None,
     }];
-    open_engine_at(
-        cfg,
-        Label::new(SUSPICIOUS, Audience::restricted([ReaderId::new("insider")])),
-    )
+    cfg
 }
 
 fn marked(id: &str, tool: &str) -> EngineEvent {

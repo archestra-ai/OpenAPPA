@@ -1385,7 +1385,7 @@ fn return_options(
     class: crate::check::SpawnClass,
 ) -> Vec<ReturnRoute> {
     let kind = class.kind;
-    if class.returns == crate::transition::ReturnClass::Decides {
+    if matches!(class.returns, crate::transition::ReturnClass::Decides(_)) {
         return match floor {
             None => vec![ReturnRoute::Raw],
             Some(_) => Vec::new(),
@@ -1495,6 +1495,8 @@ pub enum ReturnPolicyRefusal {
         "a return below its floor is held exactly for the single spawn whose own proposal carries the host's declaration that its parent decides, and that spawn takes no other return"
     )]
     HoldUndeclared,
+    #[error("a spawn whose parent decides holds what falls below the floor its own proposal declares, and no other")]
+    FloorUndeclared,
 }
 
 /// Is `policy` the declaration `step` asks for, at this trajectory's label? A void return
@@ -1524,10 +1526,25 @@ pub(crate) fn declared_return_policy(
                 returns,
             })
     };
-    // A spawn whose parent decides takes a held crossing and nothing else: no other return
-    // waits for that decision.
-    if policy.holds_below_floor() != single(ReturnClass::Decides) {
-        return Err(ReturnPolicyRefusal::HoldUndeclared);
+    // A spawn whose parent decides takes a held crossing at the floor its proposal declares and
+    // nothing else: no other return waits for that decision.
+    let decides = match declarer {
+        CallRole::MarkedSpawn(crate::check::SpawnClass {
+            kind: SpawnKind::Single,
+            returns: ReturnClass::Decides(floor),
+        }) => Some(floor),
+        CallRole::MarkedSpawn(_) | CallRole::Ordinary => None,
+    };
+    match (
+        decides,
+        policy
+            .crossing()
+            .filter(|crossing| crossing.below_floor == crate::fact::BelowFloor::Hold),
+    ) {
+        (None, None) => {}
+        (Some(declared), Some(held)) if crate::value::FloorDigest::of(&held.floor) == declared => {}
+        (Some(_), Some(_)) => return Err(ReturnPolicyRefusal::FloorUndeclared),
+        (Some(_), None) | (None, Some(_)) => return Err(ReturnPolicyRefusal::HoldUndeclared),
     }
     match policy {
         ReturnPolicy::Void => Ok(()),

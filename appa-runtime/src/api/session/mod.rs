@@ -118,7 +118,7 @@ impl AheadClaim<'_> {
     /// holds what falls below the declared floor.
     fn declared(&self, arguments: RemedyArguments) -> DeclaredReturn {
         match (self.returns, &arguments.label) {
-            (appa_engine::transition::ReturnClass::Decides, Some(label)) => DeclaredReturn::Decides(label.clone()),
+            (appa_engine::transition::ReturnClass::Decides(_), Some(label)) => DeclaredReturn::Decides(label.clone()),
             _ => DeclaredReturn::Arguments(arguments),
         }
     }

@@ -2546,7 +2546,7 @@ impl RuntimeEngine {
         returns: ReturnClass,
     ) -> Result<Label, String> {
         let below_floor = match returns {
-            ReturnClass::Decides => BelowFloor::Hold,
+            ReturnClass::Decides(_) => BelowFloor::Hold,
             ReturnClass::Planned | ReturnClass::Deferred => BelowFloor::Refuse,
         };
         if !self.engine.registry().profile().context_control() {
@@ -2625,28 +2625,7 @@ impl RuntimeEngine {
                     .to_string(),
             );
         };
-        let current = views.current_label();
-        let delta = appa_policy::parse_delta(
-            spelling.trust.as_deref(),
-            spelling.audience.as_deref(),
-            self.engine.registry().trust_chain(),
-            "label",
-        )
-        .map_err(|error| format!("`label` is not a label this policy spells: {error}"))?;
-        let floor = Label {
-            trust: delta.trust.unwrap_or(current.trust),
-            audience: match delta.audience {
-                Some(DeltaAudience::Static(declared)) => Audience::of_declared(&declared),
-                // A floor is a label, not a contract: there is no call whose argument a
-                // placeholder could read.
-                Some(DeltaAudience::Selector(placeholder)) => {
-                    return Err(format!(
-                        "`label` spells the selector placeholder \"@{placeholder}\", which reads a call argument; a return floor names its audience outright"
-                    ));
-                }
-                None => current.audience,
-            },
-        };
+        let floor = self.floor_of(views, spelling)?;
         let sanitizer = match step {
             Some(name) if name.is_attest_schema() => {
                 let Some(schema) = &arguments.return_schema else {
@@ -2675,6 +2654,53 @@ impl RuntimeEngine {
             sanitizer,
             below_floor,
         }))
+    }
+
+    /// The floor `spelling` names, as a delta over this trajectory's current label.
+    fn floor_of(&self, views: &Views, spelling: &LabelSpelling) -> Result<Label, String> {
+        let current = views.current_label();
+        let delta = appa_policy::parse_delta(
+            spelling.trust.as_deref(),
+            spelling.audience.as_deref(),
+            self.engine.registry().trust_chain(),
+            "label",
+        )
+        .map_err(|error| format!("`label` is not a label this policy spells: {error}"))?;
+        Ok(Label {
+            trust: delta.trust.unwrap_or(current.trust),
+            audience: match delta.audience {
+                Some(DeltaAudience::Static(declared)) => Audience::of_declared(&declared),
+                // A floor is a label, not a contract: there is no call whose argument a
+                // placeholder could read.
+                Some(DeltaAudience::Selector(placeholder)) => {
+                    return Err(format!(
+                        "`label` spells the selector placeholder \"@{placeholder}\", which reads a call argument; a return floor names its audience outright"
+                    ));
+                }
+                None => current.audience,
+            },
+        })
+    }
+
+    /// The return class of a single spawn whose proposal declares `declares`, at this
+    /// trajectory's label now: a spawn whose parent decides is of the floor it names.
+    pub(crate) fn declared_class(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        declares: Option<&appa_runtime_api::DeclaredReturn>,
+    ) -> Result<ReturnClass, String> {
+        match declares {
+            None | Some(appa_runtime_api::DeclaredReturn::Arguments(_)) => Ok(ReturnClass::Planned),
+            Some(appa_runtime_api::DeclaredReturn::Deferred) => Ok(ReturnClass::Deferred),
+            Some(appa_runtime_api::DeclaredReturn::Decides(spelling)) => {
+                let views = view
+                    .views(trajectory)
+                    .ok_or_else(|| "this session has not opened".to_string())?;
+                let floor = self.floor_of(&views, spelling)?;
+                Ok(ReturnClass::Decides(appa_engine::value::FloorDigest::of(&floor)))
+            }
+        }
     }
 
     /// Return contract context provided to a starting subagent.

@@ -1,6 +1,6 @@
 mod held;
 
-use super::returns::{execute_offer_declaring, gapped_spawn_engine};
+use super::returns::{execute_offer_declaring, gapped_spawn_engine, gapped_spawn_registry};
 use super::*;
 use crate::transition::{ReturnDecision, ReturnSettlement, SettlementFollowUp, SpawnMark};
 

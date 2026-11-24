@@ -437,6 +437,14 @@ impl Decided<'_> {
         })
     }
 
+    /// The return class of a single spawn whose proposal declares `declares`, at this
+    /// trajectory's label now: a spawn whose parent decides is of the floor it names.
+    pub(super) fn declared_class(&self, declares: Option<&DeclaredReturn>) -> Result<ReturnClass, EventError> {
+        self.engine()
+            .declared_class(self.view, &self.session.trajectory, declares)
+            .map_err(|detail| EventError::FloorUnspelled { detail })
+    }
+
     /// The block's declaration offer for the route `arguments` ask for: `attest-schema` with a
     /// schema, as spoken without one. Only an offer that declares and asks no authority fits.
     pub(super) fn fitting_offer(&self, offers: &[appa_runtime_api::OfferedRemedy], arguments: &RemedyArguments) -> Fit {

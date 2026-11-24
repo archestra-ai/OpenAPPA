@@ -751,6 +751,10 @@ pub(crate) enum EventError {
     /// finds the answer it decides on by that id.
     #[error("a spawn that declares a deferred or held return carries the host's call id; this one carries none")]
     DeferralUnkeyed,
+    /// The host declared a floor its spawn's parent decides below that this policy does not
+    /// spell at the trajectory's label.
+    #[error("the floor this spawn's parent decides below does not stand: {detail}")]
+    FloorUnspelled { detail: String },
     #[error("the host reused a call id")]
     CallIdReused,
     /// A retry of a child's return carried other words than the return it repeats.
@@ -946,7 +950,8 @@ impl EventError {
             | EventError::SpawnStopped
             | EventError::SpawnNeverStarted
             | EventError::DeclaresOffSpawn
-            | EventError::DeferralUnkeyed => RefusalClass::Spawn,
+            | EventError::DeferralUnkeyed
+            | EventError::FloorUnspelled { .. } => RefusalClass::Spawn,
         }
     }
 
@@ -976,6 +981,7 @@ impl EventError {
             | EventError::LaunchedLineVariant
             | EventError::DeclaresOffSpawn
             | EventError::DeferralUnkeyed
+            | EventError::FloorUnspelled { .. }
             | EventError::UnexpectedDecision => true,
             EventError::CallOutstanding
             | EventError::SpawnOutstanding

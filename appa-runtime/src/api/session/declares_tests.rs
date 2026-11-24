@@ -610,7 +610,7 @@ async fn a_deployment_without_context_control_releases_a_declaring_spawn_unmarke
     assert!(
         matches!(
             declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await,
-            Ok(ToolCallDecision::Allow { spawn: None, .. })
+            Ok(ToolCallDecision::Allow { .. })
         ),
         "the deployment releases the spawn unmarked, so there is no fork for a declaration to bind"
     );
@@ -696,7 +696,7 @@ async fn a_deployment_that_does_not_control_context_releases_a_deferring_spawn_u
         deployed_serving(&policy(false).replace("context_control = true", "context_control = false"));
     assert!(matches!(
         deferring(&runtime, call("fetch", 1), "toolu-1").await,
-        Ok(ToolCallDecision::Allow { spawn: None, .. })
+        Ok(ToolCallDecision::Allow { .. })
     ));
     assert_eq!(forks(&runtime), 0);
     assert_eq!(declarations(&runtime), 0);
@@ -1957,4 +1957,168 @@ async fn a_deciding_spawns_own_result_admits_nothing_where_a_plain_spawns_does()
     };
     assert_eq!(admits(DeclaredReturn::Arguments(as_spoken())).await, 1);
     assert_eq!(admits(DeclaredReturn::Decides(LabelSpelling::default())).await, 0);
+}
+
+/// [`MIDDLE`]'s `fetch` behind a `signoff` the authority at `url` rules on.
+fn signed_off(url: &str) -> String {
+    format!(
+        r#"
+[policy]
+version = 2
+trust_chain = ["suspicious", "middle", "trusted"]
+
+[[policy.tool]]
+name = "fetch"
+parameters = {{ type = "object", properties = {{ a = {{ type = "integer" }} }} }}
+requires = {{ attention = ["signoff"] }}
+delta = {{}}
+
+[[policy.authority]]
+name = "signoff"
+[policy.authority.permits]
+attention = ["signoff"]
+{DEPLOYMENT}
+[externals.authorities.signoff]
+url = "{url}"
+"#
+    )
+}
+
+fn deciding_at(trust: &str) -> DeclaredReturn {
+    DeclaredReturn::Decides(LabelSpelling {
+        trust: Some(trust.to_string()),
+        audience: None,
+    })
+}
+
+/// A deciding spawn of `fetch` declared under `declares`, blocked on its signoff, which is then
+/// approved: the call stays unreleased.
+async fn signed_off_unreleased(runtime: &Runtime, call_id: &str, declares: DeclaredReturn) {
+    let blocked = session(runtime)
+        .on_spawn_declaring(call("fetch", 1), Some(call_id.to_string()), None, declares)
+        .await
+        .expect("the spawn is judged");
+    let ToolCallDecision::Deny { offers, .. } = &blocked else {
+        panic!("the signoff blocks the spawn: {blocked:?}");
+    };
+    let [signoff] = offers.as_slice() else {
+        panic!("the declaration stands and the signoff alone is offered: {offers:?}");
+    };
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    let signoff = crate::engine::resolve_rendered(&log, &OfferId(signoff.id.clone())).expect("the offer resolves");
+    assert!(matches!(
+        session(runtime)
+            .on_remedy(signoff, RemedyArguments::default(), None, None)
+            .await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+}
+
+fn fork_floors(runtime: &Runtime) -> Vec<appa_engine::label::Trust> {
+    fork_returns(runtime)
+        .iter()
+        .map(|policy| match policy {
+            ReturnPolicy::Crossing(crossing) if crossing.below_floor == appa_engine::fact::BelowFloor::Hold => {
+                crossing.floor.trust
+            }
+            other => panic!("a deciding spawn's fork holds below its floor: {other:?}"),
+        })
+        .collect()
+}
+
+/// A deciding spawn's signoff approved under the `suspicious` floor is not spent by the same call
+/// proposed under the `middle` floor: that proposal declares for itself, and its own signoff
+/// releases it under the `middle` floor. The call proposed again under the `suspicious` floor
+/// spends the approval made under it, and a replica answers each release's retry from the log.
+#[tokio::test]
+async fn a_deciding_spawns_approval_under_one_floor_is_not_spent_under_another() {
+    let url = super::real_engine_tests::stub(serde_json::json!({"ruling": "approve"})).await;
+    let deployed = deployed_serving(&signed_off(&url));
+    let runtime = &deployed.runtime;
+    let rank = |name: &str| {
+        session(runtime)
+            .with_view(|context| Ok(context.engine().trust_chain().rank_of(name)))
+            .expect("the chain reads")
+            .expect("the chain names the rank")
+    };
+    signed_off_unreleased(runtime, "toolu-1", deciding_at("suspicious")).await;
+    signed_off_unreleased(runtime, "toolu-2", deciding_at("middle")).await;
+    assert_eq!((spent(runtime).len(), dispatches(runtime)), (0, 0));
+    assert_eq!(declarations(runtime), 2, "each floor declared for itself");
+
+    let middle = binding(
+        session(runtime)
+            .on_spawn_declaring(
+                call("fetch", 1),
+                Some("toolu-3".to_string()),
+                None,
+                deciding_at("middle"),
+            )
+            .await,
+    );
+    assert_eq!(fork_floors(runtime), vec![rank("middle")]);
+    session(runtime)
+        .on_child_start(
+            TrajectoryId("cc:root:middle".to_string()),
+            SpawnRef::Binding(middle.clone()),
+        )
+        .expect("the middle child starts");
+
+    let suspicious = binding(
+        session(runtime)
+            .on_spawn_declaring(
+                call("fetch", 1),
+                Some("toolu-4".to_string()),
+                None,
+                deciding_at("suspicious"),
+            )
+            .await,
+    );
+    assert_eq!(fork_floors(runtime), vec![rank("middle"), rank("suspicious")]);
+    let spent = spent(runtime);
+    assert_eq!(
+        spent.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        spent.len(),
+        "no approval was spent twice: {spent:?}"
+    );
+
+    // A replica answers each release's retry from the log, and a retry under the other floor
+    // is another act.
+    let replica = deployed.replica();
+    let retried = |call_id: &'static str, floor: &'static str| {
+        let session = replica.session(&root(), &root()).expect("the session reattaches");
+        async move {
+            session
+                .on_spawn_declaring(call("fetch", 1), Some(call_id.to_string()), None, deciding_at(floor))
+                .await
+        }
+    };
+    assert!(matches!(
+        retried("toolu-3", "middle").await,
+        Ok(ToolCallDecision::Allow { .. })
+    ));
+    assert_eq!(binding(retried("toolu-4", "suspicious").await), suspicious);
+    assert!(matches!(
+        retried("toolu-4", "middle").await,
+        Err(EventError::CallIdReused)
+    ));
+    assert_eq!(dispatches(runtime), 2);
+}
+
+#[tokio::test]
+async fn a_deciding_spawn_whose_floor_the_policy_does_not_spell_is_refused_and_writes_nothing() {
+    let Deployed { runtime, .. } = deployed(false);
+    let refused = session(&runtime)
+        .on_spawn_declaring(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            None,
+            deciding_at("middle"),
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(error @ EventError::FloorUnspelled { .. }) if error.is_operational()),
+        "{refused:?}"
+    );
+    assert_eq!((approvals(&runtime), dispatches(&runtime)), (0, 0));
 }

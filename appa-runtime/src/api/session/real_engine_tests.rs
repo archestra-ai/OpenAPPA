@@ -245,7 +245,7 @@ async fn open_child_via(
         .expect("the fork binds and the child opens")
 }
 
-async fn stub(answer: serde_json::Value) -> String {
+pub(super) async fn stub(answer: serde_json::Value) -> String {
     use axum::routing::post;
     let app = axum::Router::new().route(
         "/",

@@ -5,7 +5,7 @@ use crate::transition::{
     ChildFollowUp, ChildReport, ChildSubmission, EngineEvent, FollowUp, ForkBinding, ReturnClass, ReturnDecision,
     ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark, TransitionError,
 };
-use crate::value::ChildReturnId;
+use crate::value::{ChildReturnId, FloorDigest};
 
 fn returned(log: &[Fact], child: &TrajectoryId, body: &str, kind: ReturnKind) -> EngineEvent {
     EngineEvent::ChildReturn(ChildReport {
@@ -300,9 +300,26 @@ fn middle_rank_engine() -> Engine {
     open_engine(cfg)
 }
 
+/// The return class of a spawn whose host declared that its parent decides below `floor`.
+fn deciding_below(floor: &Label) -> ReturnClass {
+    ReturnClass::Decides(FloorDigest::of(floor))
+}
+
+/// The mark of a single spawn whose host declared that its parent decides below `floor`.
+fn deciding(floor: &Label) -> SpawnMark {
+    SpawnMark::decides(0, FloorDigest::of(floor))
+}
+
+/// The mark of a spawn whose host declared that its parent decides below the floor `policy`
+/// holds.
+fn deciding_under(policy: &ReturnPolicy) -> SpawnMark {
+    deciding(&policy.crossing().expect("a deciding spawn holds a crossing").floor)
+}
+
 /// [`spawn_family_at`] for a spawn whose host declared that its parent decides.
 fn deciding_family(e: &Engine, log: &[Fact], child: &TrajectoryId, policy: ReturnPolicy) -> Vec<Fact> {
-    spawn_family_marked(e, log, &traj(), child, policy, SpawnMark::decides(0))
+    let mark = deciding_under(&policy);
+    spawn_family_marked(e, log, &traj(), child, policy, mark)
 }
 
 /// The child returns at its floor under revision 1, whose chain names the middle rank. Revision
@@ -320,7 +337,7 @@ fn below_floor_return(below_floor: BelowFloor) -> Result<(EngineDecision, Vec<Fa
         ..crossing
     });
     let mark = match below_floor {
-        BelowFloor::Hold => SpawnMark::decides(0),
+        BelowFloor::Hold => deciding_under(&policy),
         BelowFloor::Refuse => SpawnMark::at(0),
     };
     let mut log = [
@@ -378,7 +395,12 @@ fn a_return_below_the_floor_is_held_only_for_a_raw_return_under_no_floor_of_the_
         })
     };
     let check = |log: &[Fact], trajectory: &TrajectoryId, policy: ReturnPolicy| {
-        e.check_return_declaration(&viewing(&e, log), trajectory, &policy, ReturnClass::Decides)
+        e.check_return_declaration(
+            &viewing(&e, log),
+            trajectory,
+            &policy,
+            deciding_below(&floor_crossing(&e, &root).floor),
+        )
     };
     assert_eq!(check(&root, &traj(), holding(floor_crossing(&e, &root))), Ok(()));
     assert_eq!(
@@ -394,12 +416,13 @@ fn a_return_below_the_floor_is_held_only_for_a_raw_return_under_no_floor_of_the_
     );
     // A hold is declared exactly for the spawn whose parent decides, and that spawn takes
     // nothing but a hold.
+    let held = deciding_below(&floor_crossing(&e, &root).floor);
     for (policy, returns) in [
         (holding(floor_crossing(&e, &root)), ReturnClass::Planned),
         (holding(floor_crossing(&e, &root)), ReturnClass::Deferred),
-        (ReturnPolicy::Crossing(floor_crossing(&e, &root)), ReturnClass::Decides),
-        (ReturnPolicy::Void, ReturnClass::Decides),
-        (ReturnPolicy::Deferred, ReturnClass::Decides),
+        (ReturnPolicy::Crossing(floor_crossing(&e, &root)), held),
+        (ReturnPolicy::Void, held),
+        (ReturnPolicy::Deferred, held),
     ] {
         assert_eq!(
             e.check_return_declaration(&viewing(&e, &root), &traj(), &policy, returns),
@@ -684,8 +707,9 @@ fn a_deciding_spawns_declaration_menu_offers_only_a_route_that_can_hold() {
             .filter_map(|(_, plan)| plan.return_step().cloned())
             .collect::<Vec<_>>()
     };
-    assert_eq!(routes(&traj(), SpawnMark::decides(0)), vec![ReturnRoute::Raw]);
-    assert_eq!(routes(&child, SpawnMark::decides(0)), Vec::new());
+    let floor = floor_crossing(&e, &root).floor;
+    assert_eq!(routes(&traj(), deciding(&floor)), vec![ReturnRoute::Raw]);
+    assert_eq!(routes(&child, deciding(&floor)), Vec::new());
     assert_eq!(
         routes(&traj(), SpawnMark::at(0)),
         vec![
@@ -733,9 +757,11 @@ fn a_floor_held_for_a_deciding_parent_covers_no_other_proposal_and_no_fan_out_ho
     for mark in [SpawnMark::at(0), SpawnMark::fan_out(0)] {
         assert!(declare(mark, holding.clone()).is_err(), "{mark:?} holds nothing");
     }
-    assert!(declare(SpawnMark::decides(0), refusing.clone()).is_err());
+    let held = deciding_under(&holding);
+    assert!(declare(held, refusing.clone()).is_err());
+    let floor = serde_json::to_value(FloorDigest::of(&floor_crossing(&e, &parent).floor)).expect("a digest serializes");
     assert!(
-        serde_json::from_value::<SpawnMark>(serde_json::json!({ "index": 0, "kind": "FanOut", "decides": true }))
+        serde_json::from_value::<SpawnMark>(serde_json::json!({ "index": 0, "kind": "FanOut", "decides": floor }))
             .is_err(),
         "no fan-out is marked as deciding"
     );
@@ -748,11 +774,128 @@ fn a_floor_held_for_a_deciding_parent_covers_no_other_proposal_and_no_fan_out_ho
         matches!(answered(&decided), ([_], []))
     };
     let plain = declare(SpawnMark::at(0), refusing).expect("a plain spawn declares its floor");
-    assert!(!releases(&plain, SpawnMark::decides(0)));
+    assert!(!releases(&plain, held));
     assert!(releases(&plain, SpawnMark::at(0)));
-    let deciding = declare(SpawnMark::decides(0), holding).expect("the deciding spawn declares its hold");
+    let deciding = declare(held, holding).expect("the deciding spawn declares its hold");
     for other in [SpawnMark::at(0), SpawnMark::fan_out(0)] {
         assert!(!releases(&deciding, other), "{other:?}");
     }
-    assert!(releases(&deciding, SpawnMark::decides(0)));
+    assert!(releases(&deciding, held));
+}
+
+/// [`gapped_spawn_registry`] under a chain with a middle rank, its parent opened trusted: a
+/// deciding parent may floor its child at either lower rank.
+fn ranked_gapped_engine() -> Engine {
+    let mut cfg = gapped_spawn_registry();
+    cfg.trust_chain = TrustChain::new(vec!["suspicious".into(), "middle".into(), "trusted".into()]);
+    open_engine_at(
+        cfg,
+        Label::new(Trust::new(2), Audience::restricted([ReaderId::new("insider")])),
+    )
+}
+
+fn prepared_returns(facts: &[Fact]) -> Vec<ReturnPolicy> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ForkPrepared { return_policy, .. } => Some(return_policy.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A gapped spawn whose parent decides is declared and covered under the `suspicious` floor. The
+/// same call proposed under the `middle` floor spends neither approval: it is offered its own
+/// declaration, and once declared and covered it releases under the `middle` floor. Proposed
+/// again under the `suspicious` floor, the call spends the approval made under it.
+#[test]
+fn an_approval_made_under_one_decided_floor_covers_no_proposal_under_another() {
+    let e = ranked_gapped_engine();
+    let log = vec![opened(&e)];
+    let holding_at = |trust| {
+        ReturnPolicy::Crossing(CrossingReturn {
+            floor: Label::new(trust, label_of(&e, &log, &traj()).audience),
+            below_floor: BelowFloor::Hold,
+            ..floor_crossing(&e, &log)
+        })
+    };
+    let (suspicious, middle) = (holding_at(Trust::new(0)), holding_at(Trust::new(1)));
+    let log = [
+        log.clone(),
+        declare_gapped(
+            &e,
+            &log,
+            "suspicious-1",
+            deciding_under(&suspicious),
+            suspicious.clone(),
+        ),
+    ]
+    .concat();
+    let log = [
+        log.clone(),
+        cover_gap(&e, &log, "suspicious-2", deciding_under(&suspicious)),
+    ]
+    .concat();
+
+    let other = appended_facts(
+        e.handle(&viewing(&e, &log), gapped("middle-0", deciding_under(&middle)))
+            .expect("the proposal decides"),
+    );
+    assert!(
+        !other
+            .iter()
+            .any(|fact| matches!(fact, Fact::CallApprovalConsumed { .. })),
+        "an approval made under another floor is not spent"
+    );
+    assert!(
+        opened_offers(&other).iter().any(|(_, plan)| plan.declares_only()),
+        "the proposal under another floor is offered its own declaration"
+    );
+
+    let declared = [
+        log.clone(),
+        declare_gapped(&e, &log, "middle-1", deciding_under(&middle), middle.clone()),
+    ]
+    .concat();
+    let covered = [
+        declared.clone(),
+        cover_gap(&e, &declared, "middle-2", deciding_under(&middle)),
+    ]
+    .concat();
+    let released = appended_facts(
+        e.handle(&viewing(&e, &covered), gapped("middle-3", deciding_under(&middle)))
+            .expect("the proposal decides"),
+    );
+    assert_eq!(prepared_returns(&released), vec![middle]);
+    assert_eq!(e.validate_replay(&[covered, released].concat()), Ok(()));
+
+    let reused = appended_facts(
+        e.handle(&viewing(&e, &log), gapped("suspicious-3", deciding_under(&suspicious)))
+            .expect("the proposal decides"),
+    );
+    assert_eq!(prepared_returns(&reused), vec![suspicious]);
+    assert_eq!(e.validate_replay(&[log, reused].concat()), Ok(()));
+}
+
+/// A declaration under another floor than the one the deciding proposal declares is refused.
+#[test]
+fn a_deciding_spawn_declares_only_the_floor_its_proposal_names() {
+    let e = ranked_gapped_engine();
+    let log = vec![opened(&e)];
+    let holding_at = |trust| {
+        ReturnPolicy::Crossing(CrossingReturn {
+            floor: Label::new(trust, label_of(&e, &log, &traj()).audience),
+            below_floor: BelowFloor::Hold,
+            ..floor_crossing(&e, &log)
+        })
+    };
+    assert_eq!(
+        e.check_return_declaration(
+            &viewing(&e, &log),
+            &traj(),
+            &holding_at(Trust::new(0)),
+            deciding_under(&holding_at(Trust::new(1))).returns()
+        ),
+        Err(crate::plan::ReturnPolicyRefusal::FloorUndeclared)
+    );
 }
