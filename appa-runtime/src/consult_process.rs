@@ -281,6 +281,14 @@ pub(crate) const CONSULT_TIMEOUT_VARIABLE: &str = "APPA_CONSULT_TIMEOUT_MS";
 /// `sysexits.h`. Any other non-zero exit is a failure asking again does not help.
 pub(crate) const TEMPORARY_FAILURE_EXIT: u16 = 75;
 
+/// The reason a command's non-zero exit `status` gives no answer.
+pub(crate) fn command_exit(status: u16, detail: Option<String>) -> NoAnswerReason {
+    match status {
+        TEMPORARY_FAILURE_EXIT => NoAnswerReason::TemporaryFailure { detail },
+        status => NoAnswerReason::CommandExit { status, detail },
+    }
+}
+
 /// `parent` without the runtime's own namespace. A consult child starts from exactly this,
 /// its environment cleared first: filtering one read of the environment, rather than
 /// removing names from the live one, leaves no gap for a variable set in between.
@@ -391,8 +399,7 @@ async fn run_command_process(
     let line = detail.as_deref().unwrap_or_default();
     tracing::warn!(code = ?status.code(), stderr = %line, "the command exited without an answer");
     match status.code().and_then(|code| u16::try_from(code).ok()) {
-        Some(TEMPORARY_FAILURE_EXIT) => Err(NoAnswerReason::TemporaryFailure { detail }),
-        Some(status) => Err(NoAnswerReason::NonSuccess { status, detail }),
+        Some(status) => Err(command_exit(status, detail)),
         // A signal or another platform-specific status establishes no useful failure
         // classification, so unlike an exit code's, its stderr line stays in logs and the
         // recorder.
@@ -403,6 +410,20 @@ async fn run_command_process(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the temporary-failure status reads as a failure that may pass; any other exit,
+    /// even one that spells an HTTP server error (a Windows exit code may), stays a command's.
+    #[test]
+    fn a_command_exit_is_never_read_as_an_http_status() {
+        use crate::events::NoAnswerClass;
+        let class = |status| NoAnswerClass::from(&command_exit(status, None));
+        assert_eq!(class(TEMPORARY_FAILURE_EXIT), NoAnswerClass::TemporaryFailure);
+        assert!(class(TEMPORARY_FAILURE_EXIT).is_transient());
+        for status in [1, 74, 76, 429, 503] {
+            assert_eq!(class(status), NoAnswerClass::CommandExit { status });
+            assert!(!class(status).is_transient(), "{status}");
+        }
+    }
 
     /// Where names ignore case, the runtime's namespace does too: a lower-case `appa_`
     /// credential is the runtime's own, and stays out of the child.

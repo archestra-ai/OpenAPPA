@@ -896,6 +896,11 @@ static NON_SUCCESS: Table = Table {
     entries: &[("status", NUMBER)],
 };
 
+static COMMAND_EXIT: Table = Table {
+    name: "NoAnswerClass::CommandExit",
+    entries: &[("status", NUMBER)],
+};
+
 static NO_ANSWER_CLASS: Table = Table {
     name: "NoAnswerClass",
     entries: &[
@@ -903,6 +908,7 @@ static NO_ANSWER_CLASS: Table = Table {
         ("unreachable", Rule::Keep),
         ("dismissed", Rule::Keep),
         ("non_success", Rule::Table(&NON_SUCCESS)),
+        ("command_exit", Rule::Table(&COMMAND_EXIT)),
         ("temporary_failure", Rule::Keep),
         ("timeout", Rule::Keep),
         ("transport", Rule::Keep),

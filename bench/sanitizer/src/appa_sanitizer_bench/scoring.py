@@ -9,7 +9,8 @@ Every consult ends one of three ways a session can observe:
   `timeout`, `oversized` (the answer exceeded `max_body_bytes`), `malformed`, or `rejected`.
 - `unresolved`: nothing measured the sanitizer. The policy cannot answer what the harness
   asked, or the backend failed to answer at all: a provider that refused the call
-  (`non_success`, such as an exhausted credit balance or a `claude` CLI that did not start)
+  (`non_success`, such as an exhausted credit balance, or `command_exit`, such as a `claude`
+  CLI that did not start)
   or was never reached (`transport`). A session would fail closed here too, but scoring it
   as stopped would credit the sanitizer with an outage. This invalidates the run.
 

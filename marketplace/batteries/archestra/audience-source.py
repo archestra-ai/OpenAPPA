@@ -74,7 +74,7 @@ def audience_api(base_url, token, source):
             with urllib.request.urlopen(request, timeout=timeout_seconds()) as response:
                 return json.load(response)
         except urllib.error.HTTPError as error:
-            failure = TemporaryFailure if error.code == 429 or error.code >= 500 else RuntimeError
+            failure = TemporaryFailure if error.code == 429 or 500 <= error.code <= 599 else RuntimeError
             raise failure(f"GET {endpoint} failed: {error.code}") from error
         except TimeoutError as error:
             raise TemporaryFailure(f"GET {endpoint} timed out") from error

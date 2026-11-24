@@ -3981,7 +3981,8 @@ pub(crate) fn retry_hint(reason: crate::events::NoAnswerClass) -> RetryHint {
         NoAnswerClass::NonSuccess { .. } if reason.is_transient() => RetryHint::Later,
         // Neither throttled nor a server fault: nothing says asking again helps.
         NoAnswerClass::NonSuccess { .. } => RetryHint::AfterRepair,
-        NoAnswerClass::Unregistered
+        NoAnswerClass::CommandExit { .. }
+        | NoAnswerClass::Unregistered
         | NoAnswerClass::Malformed
         | NoAnswerClass::Oversized
         | NoAnswerClass::UnsupportedVersion
@@ -5911,6 +5912,10 @@ mod tests {
             (vec![NoAnswerClass::Timeout, unavailable], Some(RetryHint::Later)),
             (vec![NoAnswerClass::NonSuccess { status: 429 }], Some(RetryHint::Later)),
             (vec![NoAnswerClass::TemporaryFailure], Some(RetryHint::Later)),
+            (
+                vec![NoAnswerClass::CommandExit { status: 503 }],
+                Some(RetryHint::AfterRepair),
+            ),
             (
                 vec![NoAnswerClass::NonSuccess { status: 404 }],
                 Some(RetryHint::AfterRepair),

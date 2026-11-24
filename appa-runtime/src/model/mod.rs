@@ -130,9 +130,15 @@ async fn attempt(
         // A non-success response's detail, such as the provider's error message, becomes
         // the consult's diagnostics.
         seen.diagnostics = match &answered {
-            Err(NoAnswerReason::NonSuccess {
-                detail: Some(detail), ..
-            }) => Some(Diagnostics::head(detail.as_bytes())),
+            Err(
+                NoAnswerReason::NonSuccess {
+                    detail: Some(detail), ..
+                }
+                | NoAnswerReason::CommandExit {
+                    detail: Some(detail), ..
+                }
+                | NoAnswerReason::TemporaryFailure { detail: Some(detail) },
+            ) => Some(Diagnostics::head(detail.as_bytes())),
             _ => None,
         };
     }

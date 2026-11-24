@@ -128,9 +128,10 @@ class SelectorTests(unittest.TestCase):
             (("selector", "team/odd"), ("source", "archestra")): (200, {"members": "alice@corp.com"}),
             (("selector", "team/blank"), ("source", "archestra")): (200, {"members": [""]}),
             (("selector", "team/huge"), ("source", "archestra")): (200, {"members": [f"u{i}@corp.com" for i in range(5001)]}),
+            (("selector", "team/odd-status"), ("source", "archestra")): (600, {"error": "not http"}),
         }
         with RecordedArchestra(answers) as archestra:
-            for team in ["gone", "odd", "blank", "huge"]:
+            for team in ["gone", "odd", "blank", "huge", "odd-status"]:
                 completed = consult({"selector": f"team/{team}"}, archestra.base_url)
                 self.assertEqual(completed.returncode, 1, team)
                 self.assertEqual(completed.stdout, "")

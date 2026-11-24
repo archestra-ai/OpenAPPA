@@ -236,7 +236,7 @@ pub(crate) async fn run_claude_code(
             "claude exited without an answer"
         );
         return Err(match status.code().and_then(|code| u16::try_from(code).ok()) {
-            Some(status) => NoAnswerReason::NonSuccess { status, detail },
+            Some(status) => crate::consult_process::command_exit(status, detail),
             // As for a `command` external: a signal establishes no failure classification.
             None => NoAnswerReason::Transport,
         });
@@ -327,7 +327,7 @@ mod tests {
         let logged_out = r#"echo '{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}'"#;
         assert_eq!(
             failed_consult(logged_out).await,
-            Err(NoAnswerReason::NonSuccess {
+            Err(NoAnswerReason::CommandExit {
                 status: 1,
                 detail: Some("Not logged in · Please run /login".to_string()),
             })
@@ -337,7 +337,7 @@ mod tests {
             "echo 'warning: something else' >&2\necho '[claude-code:unrecognized_model] {\"model\":\"m\"}' >&2";
         assert_eq!(
             failed_consult(bad_model).await,
-            Err(NoAnswerReason::NonSuccess {
+            Err(NoAnswerReason::CommandExit {
                 status: 1,
                 detail: Some("[claude-code:unrecognized_model] {\"model\":\"m\"}".to_string()),
             })
@@ -345,7 +345,7 @@ mod tests {
 
         assert_eq!(
             failed_consult("").await,
-            Err(NoAnswerReason::NonSuccess {
+            Err(NoAnswerReason::CommandExit {
                 status: 1,
                 detail: None
             })

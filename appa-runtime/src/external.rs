@@ -42,15 +42,21 @@ pub enum NoAnswerReason {
     Unreachable,
     #[cfg(feature = "daemon")]
     Dismissed,
-    /// A non-success exit or HTTP status. `detail` is what the external said about its
-    /// refusal, as [`error_line`] bounds and redacts it: the last line a command wrote to
-    /// stderr, or a `url` external's diagnostics header, else the error its body carries.
+    /// A non-success HTTP status. `detail` is what the external said about its refusal, as
+    /// [`error_line`] bounds and redacts it: a `url` external's diagnostics header, else the
+    /// error its body carries.
     NonSuccess {
         status: u16,
         detail: Option<String>,
     },
+    /// A command's non-zero exit status, other than the temporary failure. `detail` is the
+    /// last line it wrote to stderr, as [`error_line`] bounds and redacts it.
+    CommandExit {
+        status: u16,
+        detail: Option<String>,
+    },
     /// A command exited with [`crate::consult_process::TEMPORARY_FAILURE_EXIT`]: what it asked
-    /// failed for now, so asking again later may get an answer. `detail` as for `NonSuccess`.
+    /// failed for now, so asking again later may get an answer. `detail` as for `CommandExit`.
     TemporaryFailure {
         detail: Option<String>,
     },
@@ -74,6 +80,10 @@ impl NoAnswerReason {
                 status,
                 detail: Some(detail),
             } => format!("non_success status={status} detail={detail:?}"),
+            NoAnswerReason::CommandExit {
+                status,
+                detail: Some(detail),
+            } => format!("command_exit status={status} detail={detail:?}"),
             NoAnswerReason::TemporaryFailure { detail: Some(detail) } => {
                 format!("temporary_failure detail={detail:?}")
             }
@@ -1609,7 +1619,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 "exit 7",
                 budget_ms(),
                 1024,
-                NoAnswerReason::NonSuccess {
+                NoAnswerReason::CommandExit {
                     status: 7,
                     detail: None,
                 },
@@ -1639,7 +1649,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                 "printf '%s' '{\"version\":1,\"answer\":{\"delta.trust\":\"trusted\"}}'; exit 7",
                 budget_ms(),
                 1024,
-                NoAnswerReason::NonSuccess {
+                NoAnswerReason::CommandExit {
                     status: 7,
                     detail: None,
                 },
@@ -1850,7 +1860,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         // shell can take over a second to start, and that is not the failure under test.
         assert_eq!(
             run(fake_claude(dir.path(), "exit 7"), 5000, 1024).await,
-            Err(NoAnswerReason::NonSuccess {
+            Err(NoAnswerReason::CommandExit {
                 status: 7,
                 detail: None
             })
@@ -2199,7 +2209,7 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
             let script = format!("echo 'a first line' >&2; echo '{said}' >&2; exit 1");
             assert_eq!(
                 resolve_command(&command_services(dir.path(), &script, budget_ms(), 1024)).await,
-                ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+                ConsultOutcome::NoAnswer(NoAnswerReason::CommandExit {
                     status: 1,
                     detail: Some(redacted.to_string())
                 }),
@@ -2718,14 +2728,14 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
         let (transcribed, transcript) = services.consult_transcribed(&consult, None, None).await;
         assert_eq!(
             transcribed,
-            ConsultOutcome::NoAnswer(NoAnswerReason::NonSuccess {
+            ConsultOutcome::NoAnswer(NoAnswerReason::CommandExit {
                 status: 3,
                 detail: Some("model refused".to_string())
             })
         );
         assert_eq!(
             crate::events::ExternalOutcome::from(&transcribed),
-            crate::events::ExternalOutcome::NoAnswer(crate::events::NoAnswerClass::NonSuccess { status: 3 })
+            crate::events::ExternalOutcome::NoAnswer(crate::events::NoAnswerClass::CommandExit { status: 3 })
         );
         assert_eq!(transcribed, services.consult(&consult, None, None).await);
         let transcript = transcript.expect("a command consult is transcribed");

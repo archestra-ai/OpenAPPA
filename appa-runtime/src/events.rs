@@ -174,6 +174,9 @@ pub enum NoAnswerClass {
     NonSuccess {
         status: u16,
     },
+    CommandExit {
+        status: u16,
+    },
     TemporaryFailure,
     Timeout,
     Transport,
@@ -189,6 +192,7 @@ impl std::fmt::Display for NoAnswerClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NoAnswerClass::NonSuccess { status } => write!(f, "non_success status={status}"),
+            NoAnswerClass::CommandExit { status } => write!(f, "command_exit status={status}"),
             NoAnswerClass::TemporaryFailure => f.write_str("temporary_failure"),
             NoAnswerClass::Unregistered => f.write_str("unregistered"),
             NoAnswerClass::Unreachable => f.write_str("unreachable"),
@@ -208,8 +212,8 @@ impl std::fmt::Display for NoAnswerClass {
 impl NoAnswerClass {
     /// Whether asking again later may get an answer: the external was unreachable, timed
     /// out, or failed in transport, its HTTP status was 429 or 5xx, or a command exited with
-    /// the temporary-failure status. Any other command exit code also arrives as `NonSuccess`;
-    /// on Unix it is at most 255, so it never reads as transient.
+    /// the temporary-failure status. Any other command exit is a `CommandExit`, never read as
+    /// an HTTP status, so it is never transient.
     pub fn is_transient(&self) -> bool {
         match self {
             NoAnswerClass::Unreachable
@@ -217,7 +221,8 @@ impl NoAnswerClass {
             | NoAnswerClass::Transport
             | NoAnswerClass::TemporaryFailure => true,
             NoAnswerClass::NonSuccess { status } => matches!(status, 429 | 500..=599),
-            NoAnswerClass::Unregistered
+            NoAnswerClass::CommandExit { .. }
+            | NoAnswerClass::Unregistered
             | NoAnswerClass::Malformed
             | NoAnswerClass::Oversized
             | NoAnswerClass::UnsupportedVersion
@@ -239,6 +244,7 @@ impl From<&crate::external::NoAnswerReason> for NoAnswerClass {
             Reason::Dismissed => NoAnswerClass::Dismissed,
             // The detail is what the command said on stderr, and it is not carried.
             Reason::NonSuccess { status, .. } => NoAnswerClass::NonSuccess { status: *status },
+            Reason::CommandExit { status, .. } => NoAnswerClass::CommandExit { status: *status },
             Reason::TemporaryFailure { .. } => NoAnswerClass::TemporaryFailure,
             Reason::Timeout => NoAnswerClass::Timeout,
             Reason::Transport => NoAnswerClass::Transport,
@@ -820,6 +826,9 @@ mod tests {
             (NoAnswerClass::Timeout, true),
             (NoAnswerClass::Transport, true),
             (NoAnswerClass::TemporaryFailure, true),
+            (NoAnswerClass::CommandExit { status: 1 }, false),
+            (NoAnswerClass::CommandExit { status: 429 }, false),
+            (NoAnswerClass::CommandExit { status: 503 }, false),
             (NoAnswerClass::NonSuccess { status: 429 }, true),
             (NoAnswerClass::NonSuccess { status: 500 }, true),
             (NoAnswerClass::NonSuccess { status: 503 }, true),
