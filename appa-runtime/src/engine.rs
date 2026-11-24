@@ -365,12 +365,10 @@ pub enum EngineEvent {
     Answer {
         digest: appa_runtime_api::ReleaseDigest,
     },
-    /// An offer's review, by the digest of its bytes, and whether an answer returned exactly
-    /// those bytes for it.
+    /// An offer's review, by the digest of its bytes.
     Review {
         offer: OfferId,
         digest: appa_runtime_api::ReleaseDigest,
-        shown: bool,
     },
 }
 
@@ -1814,7 +1812,7 @@ impl RuntimeEngine {
                 decision,
             } => self.settle_return(view, parent, id, decision),
             EngineEvent::Answer { digest } => self.answer(view, trajectory, digest),
-            EngineEvent::Review { offer, digest, shown } => self.review(view, &offer, digest, shown),
+            EngineEvent::Review { offer, digest } => self.review(view, &offer, digest),
         }
     }
 
@@ -1840,10 +1838,9 @@ impl RuntimeEngine {
         view: &EngineView,
         offer: &OfferId,
         digest: appa_runtime_api::ReleaseDigest,
-        shown: bool,
     ) -> Result<EngineDecision, EngineRefusal> {
         let offer = parse_offer(offer).ok_or(EngineRefusal::UnknownOffer)?;
-        let report = appa_engine::transition::ReviewReport { offer, digest, shown };
+        let report = appa_engine::transition::ReviewReport { offer, digest };
         self.release(view, CoreEvent::Review(report))
     }
 
@@ -1854,7 +1851,7 @@ impl RuntimeEngine {
         offer: &OfferId,
         digest: appa_runtime_api::ReleaseDigest,
     ) -> Option<appa_runtime_api::ReleaseReceipt> {
-        match self.review(view, offer, digest, false) {
+        match self.review(view, offer, digest) {
             Ok(EngineDecision {
                 append: None,
                 then: Next::Released { receipt },
@@ -4766,7 +4763,7 @@ impl<'a> Initiated<'a> {
 
 const RENDERED_OFFER_CHARS: usize = 16;
 
-fn offer_id(offer: &EngineOfferId) -> OfferId {
+pub(crate) fn offer_id(offer: &EngineOfferId) -> OfferId {
     let mut hex = offer.to_hex();
     hex.truncate(RENDERED_OFFER_CHARS);
     OfferId(hex)
@@ -4816,39 +4813,6 @@ pub(crate) fn renders_offer(quoted: &OfferId) -> bool {
             .0
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
-fn shown_reviews(log: &Log) -> impl Iterator<Item = &appa_eventlog::ShownReview> {
-    log.host_records().iter().flat_map(|record| match &record.observation {
-        appa_eventlog::HostObservation::ReviewsShown { reviews } => reviews.as_slice(),
-        _ => &[],
-    })
-}
-
-/// Whether an answer returned the bytes `digest` names as `offer`'s review.
-pub(crate) fn review_shown(log: &Log, offer: &OfferId, digest: &appa_runtime_api::ReleaseDigest) -> bool {
-    parse_offer(offer)
-        .is_some_and(|offer| shown_reviews(log).any(|shown| shown.offer == offer && shown.digest == *digest))
-}
-
-/// The reviews among `reviews` no answer is recorded as returning yet, each once; `None` when
-/// one of them quotes no offer this log opened alone.
-pub(crate) fn unrecorded_reviews(
-    log: &Log,
-    reviews: &[&appa_runtime_api::Review],
-) -> Option<Vec<appa_eventlog::ShownReview>> {
-    let quoted: Vec<OfferId> = reviews.iter().map(|review| OfferId(review.offer.clone())).collect();
-    let mut unrecorded: Vec<appa_eventlog::ShownReview> = Vec::new();
-    for (review, offer) in reviews.iter().zip(resolve_rendered_all(log, &quoted)) {
-        let shown = appa_eventlog::ShownReview {
-            offer: parse_offer(&offer?)?,
-            digest: appa_runtime_api::ReleaseDigest::of(review.text.as_bytes()),
-        };
-        if !unrecorded.contains(&shown) && !shown_reviews(log).any(|recorded| *recorded == shown) {
-            unrecorded.push(shown);
-        }
-    }
-    Some(unrecorded)
 }
 
 /// The canonical identity a quoted id names, resolved against the offers this

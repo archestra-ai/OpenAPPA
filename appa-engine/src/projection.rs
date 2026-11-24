@@ -271,6 +271,8 @@ struct Released {
     /// Where each offer's trajectory stood as its block opened it: the label its review
     /// releases at.
     offered: OrdMap<crate::value::OfferId, FoldPoint>,
+    /// The digest of the review each offer's block rendered, where its opening records one.
+    review_digests: OrdMap<crate::value::OfferId, appa_runtime_api::ReleaseDigest>,
     /// The record that released each review, by its offer and bytes.
     reviews: OrdMap<(crate::value::OfferId, appa_runtime_api::ReleaseDigest), u64>,
 }
@@ -347,8 +349,16 @@ impl Released {
                     .insert(dispatch.clone(), FoldPoint::of(trajectory, local, resumed));
                 return;
             }
-            Fact::OfferOpened { trajectory, offer, .. } => {
+            Fact::OfferOpened {
+                trajectory,
+                offer,
+                review_digest,
+                ..
+            } => {
                 self.offered.insert(*offer, FoldPoint::of(trajectory, local, resumed));
+                if let Some(digest) = review_digest {
+                    self.review_digests.insert(*offer, *digest);
+                }
                 return;
             }
             Fact::DispatchClosed {
@@ -1146,6 +1156,11 @@ impl Projection {
     pub(crate) fn offered_at(&self, offer: &crate::value::OfferId) -> Option<(TrajectoryId, Label)> {
         let at = self.released.offered.get(offer)?;
         Some((at.trajectory.clone(), self.fold_at(at)))
+    }
+
+    /// The digest of the review `offer`'s block rendered, where its opening records one.
+    pub(crate) fn review_digest(&self, offer: &crate::value::OfferId) -> Option<appa_runtime_api::ReleaseDigest> {
+        self.released.review_digests.get(offer).copied()
     }
 
     /// The position of the record that released `offer`'s review as `digest`.

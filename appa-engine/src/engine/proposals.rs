@@ -424,6 +424,7 @@ impl Engine {
                 plan: executable.clone(),
                 basis,
                 evidence: under.pinned().clone(),
+                review_digest: None,
             });
         }
         (block_id, ids, facts)

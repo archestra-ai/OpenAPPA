@@ -119,7 +119,8 @@ impl Engine {
     }
 
     /// Record an offer's review at the label its blocked call was judged under. Only the bytes
-    /// an answer returned for the offer are recorded; bytes recorded already for the offer stand as recorded.
+    /// whose digest the offer's opening records are recorded; bytes recorded already for the
+    /// offer stand as recorded.
     pub(super) fn decide_review(
         &self,
         view: &EngineView,
@@ -141,7 +142,7 @@ impl Engine {
         let (trajectory, label) = projection
             .offered_at(&report.offer)
             .ok_or(TransitionError::UnknownOffer)?;
-        if !report.shown {
+        if projection.review_digest(&report.offer) != Some(report.digest) {
             return Err(TransitionError::OtherReview);
         }
         let review = Fact::ReviewReleased {

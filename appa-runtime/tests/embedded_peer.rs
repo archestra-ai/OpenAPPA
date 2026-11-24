@@ -368,6 +368,40 @@ async fn only_the_trajectory_that_pursues_an_offer_releases_its_review() {
     );
 }
 
+/// A peer read the runtime denies returns its block's review, as a tool call does, and that
+/// review releases for the reader that pursues it.
+#[tokio::test]
+async fn a_denied_peer_reads_review_releases() {
+    let (_dir, runtime) = runtime();
+    start(&runtime).await;
+    open_child(&runtime).await;
+    assert!(matches!(
+        release(&runtime, None, "send", "send-held").await,
+        HookDecision::AllowCall { .. }
+    ));
+    let notice = runtime
+        .send_embedded_peer(&family(), &family(), &child(), None, "send-held", "held")
+        .expect("the send records");
+    let read = runtime
+        .read_embedded_peer(
+            &actor(Some(&child())),
+            "signed-read",
+            &notice.id,
+            call("signed", json!({"message_id": notice.id.as_str()})),
+        )
+        .await
+        .expect("the read is decided");
+    let HookDecision::DenyCall { review, .. } = read.decision else {
+        panic!("the signed read blocks on the operator: {:?}", read.decision);
+    };
+    let [shown] = review.as_slice() else {
+        panic!("the block shows one review: {review:?}");
+    };
+    let released = release_review(&runtime, Some(&child()), shown).await;
+    assert_eq!(released.decision, HookDecision::Ack);
+    assert!(released.receipt.is_some(), "the reader's release carries its receipt");
+}
+
 /// The embedded dispatcher hands a host the receipt of a return the child crossed without
 /// ending, beside the `Ack` of its admission.
 #[tokio::test]

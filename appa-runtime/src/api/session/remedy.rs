@@ -22,8 +22,8 @@ pub(super) fn remedy_presentation(
 /// `hitl` authority, the texts of several such authorities joined. A joined review names no
 /// one authority, hint or scope, so those read as unknown and a host shows the whole text.
 /// Authorities of every other backend answer themselves and need no person here.
-pub(in crate::api) fn reviews(
-    pending_reviews: &[PendingReview],
+pub(in crate::api) fn reviews<'a>(
+    pending_reviews: impl IntoIterator<Item = &'a PendingReview>,
     externals: &crate::external::ExternalServices,
 ) -> Vec<appa_runtime_api::Review> {
     let mut reviews: Vec<appa_runtime_api::Review> = Vec::new();

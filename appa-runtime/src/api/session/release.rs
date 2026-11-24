@@ -1,4 +1,5 @@
 use super::*;
+use appa_engine::fact::Fact;
 use appa_engine::label::Label;
 use appa_runtime_api::{ReleaseDigest, ReleaseReceipt, RetryHint};
 
@@ -20,28 +21,64 @@ impl Session {
     }
 
     /// Record the review `quoted` asks about as the bytes `digest` names, and return the
-    /// receipt of the record that stands for it. Only bytes an answer returned as that review
-    /// are recorded, and only for the trajectory that pursues the offer. A recorded review
-    /// answers the trajectory that opened the offer or pursues it, live or ended.
+    /// receipt of the record that stands for it. Only the review text the offer's block
+    /// rendered is recorded ([`stamp_review_digests`]), and only for the trajectory that
+    /// pursues the offer. A recorded review answers the trajectory that opened the offer or
+    /// pursues it, live or ended: read without the family's writer first, then again inside
+    /// the step that would record it.
+    ///
+    /// Any path that returns the block's review returns these bytes. A rendering made at
+    /// execution instead, such as the message of an MCP elicitation form, is other bytes and
+    /// releases nothing.
     pub(crate) async fn release_review(
         &self,
         quoted: &OfferId,
         digest: ReleaseDigest,
     ) -> Result<ReleaseReceipt, EventError> {
         let trajectory = &self.trajectory;
+        let release = ReviewRelease { offer: quoted, digest };
+        if let Some(receipt) = self.with_view(|context| Ok(standing_review(context, trajectory, release)))? {
+            return Ok(receipt);
+        }
         let review = |context: &Decided<'_>, _| {
             let offer = crate::engine::resolve_rendered(context.log, quoted).ok_or(EventError::UnknownOffer)?;
             if context.offer_pursuer(&offer).as_ref() != Some(trajectory) {
                 return Err(EventError::UnknownOffer);
             }
-            let shown = crate::engine::review_shown(context.log, &offer, &digest);
-            Ok(EngineEvent::Review { offer, digest, shown })
+            Ok(EngineEvent::Review { offer, digest })
         };
-        let occasion = Occasion::Review(ReviewRelease { offer: quoted, digest });
-        let decision = self.drive_with_evidence(review, None, None, occasion).await?;
+        let decision = self
+            .drive_with_evidence(review, None, None, Occasion::Review(release))
+            .await?;
         match decision.then {
             Next::Released { receipt } => Ok(receipt),
             _ => Err(EventError::UnexpectedDecision),
+        }
+    }
+}
+
+/// Record on each offer `facts` open the digest of the review the block renders for it, as
+/// `then` carries it to the people its `hitl` authorities ask: the bytes a release of that
+/// review may name. The only writer of [`Fact::OfferOpened`]'s `review_digest`, run on a
+/// decided batch before it is appended.
+pub(super) fn stamp_review_digests(facts: &mut [Fact], then: &Next, externals: &crate::external::ExternalServices) {
+    let rendered = match then {
+        Next::ModelResponse { feedback, .. } => {
+            super::remedy::reviews(feedback.iter().flat_map(|entry| &entry.review), externals)
+        }
+        Next::PresentToModel(Presentation::Blocked { review, .. }) => super::remedy::reviews(review, externals),
+        _ => return,
+    };
+    for fact in facts {
+        if let Fact::OfferOpened {
+            offer, review_digest, ..
+        } = fact
+        {
+            let id = crate::engine::offer_id(offer);
+            *review_digest = rendered
+                .iter()
+                .find(|review| review.offer == id.0)
+                .map(|review| ReleaseDigest::of(review.text.as_bytes()));
         }
     }
 }
@@ -284,18 +321,6 @@ builtin = "approve"
         }
     }
 
-    /// Every host record of the reviews answers returned, one per record.
-    fn shown_records(runtime: &crate::api::Runtime, root: &TrajectoryId) -> Vec<Vec<appa_eventlog::ShownReview>> {
-        let log = runtime.inner.log(root).expect("the family log reads");
-        log.host_records()
-            .iter()
-            .filter_map(|record| match &record.observation {
-                appa_eventlog::HostObservation::ReviewsShown { reviews } => Some(reviews.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     async fn released(
         runtime: &crate::api::Runtime,
         root: &TrajectoryId,
@@ -311,8 +336,10 @@ builtin = "approve"
             .await
     }
 
+    /// The runtime applies the stock plan itself: the offer it applies asks no person, so its
+    /// opening records no review and nothing releases as one.
     #[tokio::test]
-    async fn a_block_the_runtime_approves_itself_returns_and_records_no_review() {
+    async fn the_offer_the_runtime_applies_itself_records_no_review() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let (runtime, root) = started(dir.path()).await;
         let decision = called(&runtime, &root, "stamped", None).await;
@@ -321,17 +348,33 @@ builtin = "approve"
             "{decision:?}"
         );
         let log = runtime.inner.log(&root).expect("the family log reads");
-        assert!(
-            log.facts()
-                .iter()
-                .any(|fact| matches!(fact, appa_engine::fact::Fact::OfferOpened { .. })),
-            "the call blocked before its plan was applied"
-        );
-        assert_eq!(shown_records(&runtime, &root), Vec::<Vec<_>>::new());
+        let accepted = log
+            .facts()
+            .iter()
+            .find_map(|fact| match fact {
+                Fact::OfferAccepted { offer, .. } => Some(*offer),
+                _ => None,
+            })
+            .expect("the runtime applied an offer");
+        let opening = log.facts().iter().find_map(|fact| match fact {
+            Fact::OfferOpened {
+                offer, review_digest, ..
+            } if *offer == accepted => Some(*review_digest),
+            _ => None,
+        });
+        assert_eq!(opening, Some(None));
+        let quoted = crate::engine::offer_id(&accepted);
+        let refused = runtime
+            .session_with_presentation(&root, &root, Default::default())
+            .expect("the root is open")
+            .release_review(&quoted, ReleaseDigest::of(b""))
+            .await;
+        assert!(matches!(refused, Err(EventError::OtherReview)), "{refused:?}");
     }
 
+    /// A block that asks two officers renders a review for each offer, and each releases.
     #[tokio::test]
-    async fn one_answer_records_all_its_reviews_in_one_record() {
+    async fn each_alternative_offers_review_releases() {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let (runtime, root) = started(dir.path()).await;
         let reviews = denied_reviews(called(&runtime, &root, "countersigned", None).await);
@@ -340,48 +383,9 @@ builtin = "approve"
             2,
             "each officer is asked through its own offer: {reviews:?}"
         );
-        let records = shown_records(&runtime, &root);
-        let [record] = records.as_slice() else {
-            panic!("one answer, one record: {records:?}");
-        };
-        assert_eq!(record.len(), 2);
         for review in &reviews {
-            released(&runtime, &root, review)
-                .await
-                .expect("each returned review releases");
+            released(&runtime, &root, review).await.expect("each review releases");
         }
-    }
-
-    /// A denial decided without its reviews recorded, as a crash between the two leaves it, is
-    /// recorded by the next answer that returns it.
-    #[tokio::test]
-    async fn a_keyed_replay_records_the_reviews_its_denial_returns() {
-        let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let (runtime, root) = started(dir.path()).await;
-        let session = runtime
-            .session_with_presentation(&root, &root, Default::default())
-            .expect("the root is open");
-        let undelivered = session
-            .on_tool_call_identified(proposed("publish"), Some("c1".to_string()), None, None)
-            .await
-            .expect("the call is decided");
-        assert!(matches!(undelivered, ToolCallDecision::Deny { .. }), "{undelivered:?}");
-        assert_eq!(shown_records(&runtime, &root), Vec::<Vec<_>>::new());
-
-        let [review] = denied_reviews(called(&runtime, &root, "publish", Some("c1")).await)
-            .try_into()
-            .expect("the replay returns the one review");
-        assert_eq!(shown_records(&runtime, &root).len(), 1);
-        let again = denied_reviews(called(&runtime, &root, "publish", Some("c1")).await);
-        assert_eq!(again, vec![review.clone()]);
-        assert_eq!(
-            shown_records(&runtime, &root).len(),
-            1,
-            "a recorded review is recorded once"
-        );
-        released(&runtime, &root, &review)
-            .await
-            .expect("the returned review releases");
     }
 
     /// The block shows the tools a narrowing limits; an execution of the same offer renders the

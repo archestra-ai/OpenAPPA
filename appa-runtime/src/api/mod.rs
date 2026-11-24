@@ -4028,53 +4028,7 @@ impl Runtime {
     /// The whole act: resolve the quoted id inside the acting trajectory's
     /// own family, claim the offer, and answer. `elicitation` is supplied
     /// rather than extracted, so the body is reachable without a live peer.
-    /// [`Runtime::executed_remedy`], with the reviews a declined remedy returns recorded as
-    /// returned, or stripped where that record does not land.
     async fn remedy(
-        &self,
-        acting: &Actor,
-        quoted: OfferId,
-        arguments: RemedyArguments,
-        elicitation: Option<&Elicitation>,
-        admission: Admission,
-        presentation: EmbeddedPresentationOptions,
-    ) -> RemedyOutcome {
-        let mut outcome = self
-            .executed_remedy(acting, quoted, arguments, elicitation, admission, presentation)
-            .await;
-        if let RemedyOutcome::Declined { presentation } = &mut outcome
-            && !self.show_reviews(&acting.root, &presentation.review.iter().collect::<Vec<_>>())
-        {
-            presentation.review.clear();
-        }
-        outcome
-    }
-
-    /// Record that one answer returns `reviews` to its host, in one host record that holds the
-    /// ones not recorded yet. `false` when that record did not land, or a review quotes no
-    /// offer the family opened alone: the answer then must not carry reviews no release could
-    /// name.
-    pub(crate) fn show_reviews(&self, root: &TrajectoryId, reviews: &[&appa_runtime_api::Review]) -> bool {
-        if reviews.is_empty() {
-            return true;
-        }
-        let recorded = self
-            .inner
-            .append_host_with(root, |log| match crate::engine::unrecorded_reviews(log, reviews) {
-                None => Err(EventError::UnknownOffer),
-                Some(unrecorded) if unrecorded.is_empty() => Ok((None, ())),
-                Some(unrecorded) => Ok((Some(HostObservation::ReviewsShown { reviews: unrecorded }), ())),
-            });
-        match recorded {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(root = %root.0, %error, "the reviews an answer returns were not recorded: they are withheld");
-                false
-            }
-        }
-    }
-
-    async fn executed_remedy(
         &self,
         acting: &Actor,
         quoted: OfferId,

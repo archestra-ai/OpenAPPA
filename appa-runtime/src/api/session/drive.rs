@@ -1012,10 +1012,13 @@ impl Session {
             {
                 return Err(EventError::ChildDispatchOpen);
             }
-            let decision = policy
+            let mut decision = policy
                 .engine()
                 .handle(&view, &self.trajectory, event, &self.presentation)
                 .map_err(EventError::from)?;
+            if let Some(facts) = decision.append.as_mut() {
+                super::release::stamp_review_digests(facts, &decision.then, &self.deployment().externals);
+            }
 
             let Some(facts) = decision.append.as_ref() else {
                 if let (Some(took), Some(_)) = (opening.took, opening.spawn) {

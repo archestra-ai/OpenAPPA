@@ -385,16 +385,6 @@ pub enum HostObservation {
         operation: ReturnOperation,
         id: ChildReturnId,
     },
-    /// One answer returned these reviews to its host: the only bytes a release of each may
-    /// name.
-    ReviewsShown { reviews: Vec<ShownReview> },
-}
-
-/// A review an answer returned: the offer it asks about, and the digest of its bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ShownReview {
-    pub offer: appa_engine::value::OfferId,
-    pub digest: appa_runtime_api::ReleaseDigest,
 }
 
 impl HostObservation {
@@ -421,8 +411,7 @@ impl HostObservation {
             | Self::LaunchMoved { .. }
             | Self::AheadReserved { .. }
             | Self::AheadSettled { .. }
-            | Self::ReturnHeld { .. }
-            | Self::ReviewsShown { .. } => None,
+            | Self::ReturnHeld { .. } => None,
         }
     }
 }

@@ -267,20 +267,34 @@ fn review(
     log: &[Fact],
     offer: crate::value::OfferId,
     body: &str,
-    shown: bool,
 ) -> Result<EngineDecision, TransitionError> {
     e.handle(
         &viewing(e, log),
         EngineEvent::Review(crate::transition::ReviewReport {
             offer,
             digest: ReleaseDigest::of(body.as_bytes()),
-            shown,
         }),
     )
 }
 
+/// What the runtime does before it appends a block: record the digest of the review it rendered
+/// on the offer's opening.
+fn rendered(log: &mut [Fact], offer: crate::value::OfferId, text: &str) {
+    for fact in log {
+        if let Fact::OfferOpened {
+            offer: opened,
+            review_digest,
+            ..
+        } = fact
+            && *opened == offer
+        {
+            *review_digest = Some(ReleaseDigest::of(text.as_bytes()));
+        }
+    }
+}
+
 #[test]
-fn a_review_is_recorded_only_as_bytes_an_answer_returned_at_its_blocks_label() {
+fn a_review_is_recorded_only_as_the_bytes_its_opening_records_at_its_blocks_label() {
     let e = engine(vec![crm_tool(), internal_read()]);
     let mut log = vec![opened(&e)];
     let at_block = viewing(&e, &log).projection().view(&traj()).current_label();
@@ -291,12 +305,17 @@ fn a_review_is_recorded_only_as_bytes_an_answer_returned_at_its_blocks_label() {
     assert_ne!(now, at_block, "the read moved the root's label past the block's");
 
     assert_eq!(
-        review(&e, &log, offer, "the review", false).map(|decision| decision.append.is_some()),
+        review(&e, &log, offer, "the review").map(|decision| decision.append.is_some()),
         Err(TransitionError::OtherReview),
-        "bytes no answer returned release nothing"
+        "an opening that records no review, as one written before the field, releases none"
+    );
+    rendered(&mut log, offer, "the review");
+    assert_eq!(
+        review(&e, &log, offer, "other bytes").map(|decision| decision.append.is_some()),
+        Err(TransitionError::OtherReview)
     );
 
-    let recorded = review(&e, &log, offer, "the review", true).expect("the review records");
+    let recorded = review(&e, &log, offer, "the review").expect("the review records");
     let at = position(&recorded);
     log.extend(appended_facts(recorded));
     let digest = ReleaseDigest::of(b"the review");
@@ -305,15 +324,21 @@ fn a_review_is_recorded_only_as_bytes_an_answer_returned_at_its_blocks_label() {
         Fact::ReviewReleased { trajectory, offer: named, digest: recorded, label }
             if *trajectory == traj() && *named == offer && *recorded == digest && *label == at_block
     ));
+    assert_eq!(e.validate_replay(&log), Ok(()));
     assert_eq!(e.released_label(&viewing(&e, &log), at, &digest), Ok(at_block));
 
-    let again = review(&e, &log, offer, "the review", false).expect("the standing review answers");
+    let again = review(&e, &log, offer, "the review").expect("the standing review answers");
     assert!(again.append.is_none(), "a repeated review appends nothing");
     assert_eq!(released(&again), ReleasedAt { position: at, digest });
 
     let mut forged = log.clone();
     if let Fact::ReviewReleased { label, .. } = &mut forged[at as usize] {
         *label = now;
+    }
+    assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ReviewMismatch));
+    let mut forged = log.clone();
+    if let Fact::ReviewReleased { digest, .. } = &mut forged[at as usize] {
+        *digest = ReleaseDigest::of(b"other bytes");
     }
     assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ReviewMismatch));
 }

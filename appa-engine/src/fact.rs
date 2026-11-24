@@ -635,6 +635,13 @@ pub enum Fact {
         basis: crate::basis::PolicyBasis,
         #[serde(default, skip_serializing_if = "crate::audience::AudienceEvidence::is_empty")]
         evidence: crate::audience::AudienceEvidence,
+        /// The digest of the review text the block rendered for this offer's people: the only
+        /// bytes a release of its review may name. The runtime vouches for it, writing it before
+        /// the block's batch is appended; the engine never sets it, and the replay validator
+        /// cannot check it, since the engine renders no text. `None` where the block rendered no
+        /// such review, or recorded none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review_digest: Option<appa_runtime_api::ReleaseDigest>,
     },
     /// The agent selected this offer, and the engine prepared what its plan promised. Terminal: an offer is accepted once and never revives.
     ///

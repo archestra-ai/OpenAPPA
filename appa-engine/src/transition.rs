@@ -257,13 +257,11 @@ pub struct AnswerReport {
     pub digest: appa_runtime_api::ReleaseDigest,
 }
 
-/// An offer's review text, by the digest of the bytes its host may show a reader. `shown` says
-/// whether the host recorded returning exactly these bytes as the offer's review.
+/// An offer's review text, by the digest of the bytes its host may show a reader.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReviewReport {
     pub offer: crate::value::OfferId,
     pub digest: appa_runtime_api::ReleaseDigest,
-    pub shown: bool,
 }
 
 /// The parent's decision on one deferred return: `trajectory` is the parent that owns it.
@@ -701,7 +699,7 @@ pub enum TransitionError {
     Plan(#[from] crate::execute::PlanError),
     #[error("no offer of this family carries that identity")]
     UnknownOffer,
-    #[error("the review names bytes no answer returned for its offer")]
+    #[error("the review names other bytes than its offer's block rendered")]
     OtherReview,
     #[error("the offer belongs to another trajectory of this family")]
     OfferElsewhere,
@@ -1463,6 +1461,7 @@ impl<'a> Sequence<'a> {
                 plan,
                 basis,
                 evidence,
+                review_digest: _,
             } => self.offer_opened(trajectory, offer, block, act, call, subject, plan, basis, evidence)?,
             Fact::OfferAccepted { trajectory, offer, .. } => self.offer_accepted(trajectory, offer)?,
             Fact::CallApprovalConsumed { trajectory, offer, .. } => self.approval_consumed(trajectory, offer)?,
@@ -1645,9 +1644,9 @@ impl<'a> Sequence<'a> {
             Fact::ReviewReleased {
                 trajectory,
                 offer,
+                digest,
                 label,
-                ..
-            } => self.review_released(trajectory, offer, label)?,
+            } => self.review_released(trajectory, offer, digest, label)?,
         }
         self.settle_advance(fact, &implied, released)?;
         self.projection.fold(fact);
@@ -2584,14 +2583,16 @@ impl<'a> Sequence<'a> {
         &self,
         trajectory: &TrajectoryId,
         offer: &crate::value::OfferId,
+        digest: &appa_runtime_api::ReleaseDigest,
         label: &Label,
     ) -> Result<(), TransitionRefusal> {
         let own_act = self
             .declared
             .as_ref()
             .is_some_and(|open| open.act == crate::basis::DecidedAct::Review(*offer));
+        let rendered = self.projection.review_digest(offer) == Some(*digest);
         match self.projection.offered_at(offer) {
-            Some((opened, held)) if own_act && &opened == trajectory && &held == label => Ok(()),
+            Some((opened, held)) if own_act && rendered && &opened == trajectory && &held == label => Ok(()),
             _ => Err(TransitionRefusal::ReviewMismatch),
         }
     }
