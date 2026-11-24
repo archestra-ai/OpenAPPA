@@ -16,6 +16,14 @@ fn observe() -> SessionSettings {
     }
 }
 
+/// What a launched start pins: it names no line variant.
+fn accepting() -> SessionSettings {
+    SessionSettings {
+        auto_apply: AutoApply::RulingsAndAccept,
+        line_variant: None,
+    }
+}
+
 fn enforce() -> SessionSettings {
     SessionSettings {
         auto_apply: AutoApply::RulingsOnly,
@@ -427,12 +435,12 @@ async fn a_launched_fork_pins_the_settings_its_start_names() {
                 launch: appa_runtime_api::LaunchToken::parse("0b6c1f5e-8f0a-4a57-9d6e-2f7c3e1a9b10").expect("a token"),
                 forked_from: Some(root()),
             }),
-            settings: observe(),
+            settings: accepting(),
         },
     )
     .await;
     assert_eq!(launched, HookDecision::Ack);
-    assert_eq!(settings_of(&runtime, &fork), observe());
+    assert_eq!(settings_of(&runtime, &fork), accepting());
     assert!(settings_of(&runtime, &root()).is_default());
 }
 
@@ -464,30 +472,35 @@ fn stored(runtime: &Runtime, root: &TrajectoryId) -> (Vec<appa_engine::fact::Fac
     (log.facts().to_vec(), log.host_records().len())
 }
 
-/// A launched start the family it would continue refuses for its line variant records
-/// nothing: a compaction aliases no host id to the family, and a resume of another
-/// conversation takes the launch from no one. Every host id resolves as it did.
+/// A launched start that names a line variant is refused before it reads or records
+/// anything, whatever its kind: it opens no root, aliases no host id, and takes the launch
+/// from no family. Without one, the same starts hand the launch along as before.
 #[tokio::test]
-async fn a_launched_start_refused_for_its_line_variant_records_nothing() {
+async fn a_launched_start_naming_a_line_variant_is_refused_and_records_nothing() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
         .expect("the deployment opens");
     assert_eq!(
-        launched(&runtime, &root(), StartKind::Startup, observe()).await,
+        launched(&runtime, &root(), StartKind::Startup, accepting()).await,
         HookDecision::Ack
     );
     let other = TrajectoryId("cc:other".to_string());
     assert_eq!(start(&runtime, &other, enforce()).await, HookDecision::Ack);
     let compacted = TrajectoryId("cc:compacted".to_string());
+    let cleared = TrajectoryId("cc:cleared".to_string());
+    let fresh = TrajectoryId("cc:fresh".to_string());
     let before = (stored(&runtime, &root()), stored(&runtime, &other));
 
-    for (host, start, refused_by) in [
-        (&compacted, StartKind::Compact, enforce()),
-        (&other, StartKind::Resume, observe()),
+    for (host, start) in [
+        (&fresh, StartKind::Startup),
+        (&root(), StartKind::Startup),
+        (&compacted, StartKind::Compact),
+        (&cleared, StartKind::Clear),
+        (&other, StartKind::Resume),
     ] {
         assert!(
             matches!(
-                launched(&runtime, host, start, refused_by).await,
+                launched(&runtime, host, start, observe()).await,
                 HookDecision::Refuse {
                     class: RefusalClass::Trajectory,
                     ..
@@ -501,14 +514,30 @@ async fn a_launched_start_refused_for_its_line_variant_records_nothing() {
             "{start:?}"
         );
     }
-    assert_eq!(runtime.alias_of(&compacted).expect("the alias reads"), None);
-    assert!(!runtime.inner.store.has_root(&compacted).expect("the store reads"));
-    // The launch still runs the family it opened: a compaction under its own line continues it.
+    for host in [&fresh, &compacted, &cleared] {
+        assert!(
+            !runtime.inner.store.has_root(host).expect("the store reads"),
+            "{host:?}"
+        );
+        assert_eq!(runtime.alias_of(host).expect("the alias reads"), None, "{host:?}");
+    }
+
     assert_eq!(
-        launched(&runtime, &compacted, StartKind::Compact, observe()).await,
+        launched(&runtime, &compacted, StartKind::Compact, accepting()).await,
         HookDecision::Ack
     );
     assert_eq!(runtime.alias_of(&compacted).expect("the alias reads"), Some(root()));
+    assert_eq!(
+        launched(&runtime, &other, StartKind::Resume, accepting()).await,
+        HookDecision::Ack
+    );
+    assert_eq!(settings_of(&runtime, &other), enforce());
+    assert_eq!(
+        launched(&runtime, &cleared, StartKind::Clear, accepting()).await,
+        HookDecision::Ack
+    );
+    assert_eq!(settings_of(&runtime, &cleared), accepting());
+    assert_eq!(settings_of(&runtime, &root()), accepting());
 }
 
 /// A host id recorded as a family's alias is that family's: a typed start under it continues
@@ -520,12 +549,13 @@ async fn a_durable_alias_is_never_shadowed_by_a_root_of_its_own() {
     let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
         .expect("the deployment opens");
     let compacted = TrajectoryId("cc:compacted".to_string());
+    assert_eq!(start(&runtime, &root(), observe()).await, HookDecision::Ack);
     assert_eq!(
-        launched(&runtime, &root(), StartKind::Startup, observe()).await,
+        launched(&runtime, &root(), StartKind::Startup, accepting()).await,
         HookDecision::Ack
     );
     assert_eq!(
-        launched(&runtime, &compacted, StartKind::Compact, observe()).await,
+        launched(&runtime, &compacted, StartKind::Compact, accepting()).await,
         HookDecision::Ack
     );
     assert_eq!(runtime.alias_of(&compacted).expect("the alias reads"), Some(root()));
