@@ -804,16 +804,6 @@ pub(crate) enum EventError {
 }
 
 impl EventError {
-    /// The engine refused an annotation it had.
-    fn annotation_refused(annotator: String, reason: String) -> Self {
-        Self::annotation(annotator, reason, None)
-    }
-
-    /// The external Annotator gave no answer.
-    fn annotation_unanswered(annotator: String, reason: &crate::external::NoAnswerReason) -> Self {
-        Self::annotation(annotator, reason.diagnostic(), Some(reason.into()))
-    }
-
     fn annotation(annotator: String, reason: String, no_answer: Option<NoAnswerClass>) -> Self {
         let next_action = if annotator == "claude-code.undeclared-tool" {
             "; this tool has no exact policy contract; run /appa-guide to write rules for this tool"
@@ -949,7 +939,11 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::OutcomeMismatch => EventError::OutcomeMismatch,
             EngineRefusal::UndeclaredTool { tool } => EventError::UndeclaredTool { tool },
             EngineRefusal::Arguments { detail } => EventError::RemedyArguments { detail },
-            EngineRefusal::Annotation { annotator, reason } => EventError::annotation_refused(annotator, reason),
+            EngineRefusal::Annotation {
+                annotator,
+                reason,
+                no_answer,
+            } => EventError::annotation(annotator, reason, no_answer),
         }
     }
 }

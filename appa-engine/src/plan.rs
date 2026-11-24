@@ -1973,6 +1973,7 @@ mod tests {
                 annotator: crate::names::AnnotatorName::new("classifier"),
                 requires: Default::default(),
                 delta_trust: None,
+                on_no_answer: None,
             }],
             sanitizers: vec![redact],
             annotators: vec![crate::registry::AnnotatorDeclaration {
@@ -2135,6 +2136,7 @@ mod tests {
                 annotator: crate::names::AnnotatorName::new("directory"),
                 requires: Default::default(),
                 delta_trust: None,
+                on_no_answer: None,
             }],
             sanitizers: vec![
                 output_sanitizer(
@@ -3323,6 +3325,7 @@ mod tests {
             annotator: crate::names::AnnotatorName::new("classifier"),
             requires: Default::default(),
             delta_trust: None,
+            on_no_answer: None,
         };
         let with = |others: Vec<ToolDeclaration>| {
             build(RegistryConfig {
