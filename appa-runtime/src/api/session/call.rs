@@ -321,7 +321,10 @@ impl Session {
     /// [`appa_runtime_api::AutoApply`], if the block has one: stock `approve` rulings, and the
     /// acceptance of a narrowing where the family allows it. Of several, the one whose most
     /// demanding step asks the least, and the first of those in offer order.
-    fn auto_applied_offer(&self, offers: &[appa_runtime_api::OfferedRemedy]) -> Result<Option<OfferId>, EventError> {
+    pub(super) fn auto_applied_offer(
+        &self,
+        offers: &[appa_runtime_api::OfferedRemedy],
+    ) -> Result<Option<OfferId>, EventError> {
         use appa_runtime_api::AutoApply;
         if offers.is_empty() {
             return Ok(None);

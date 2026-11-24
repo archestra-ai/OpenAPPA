@@ -571,7 +571,7 @@ pub enum HookEvent {
         /// The protected launch this start belongs to, when a launcher started the host.
         launch: Option<LaunchStart>,
         /// What the family pins if this start opens it. A family already open keeps its own,
-        /// and refuses a start naming another line variant.
+        /// and refuses a start naming a line variant other than the one it pinned.
         settings: SessionSettings,
     },
     Prompt {

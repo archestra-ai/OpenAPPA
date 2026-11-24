@@ -178,7 +178,40 @@ impl Session {
         let decision = self
             .report_outcome(&call, call_id.as_deref(), &o, &mut deferral)
             .await?;
-        deferred_or(deferral, outcome_decision(decision, &self.deployment().externals)?)
+        let decided = self
+            .accept_staged(outcome_decision(decision, &self.deployment().externals)?)
+            .await?;
+        deferred_or(deferral, decided)
+    }
+
+    /// Under `RulingsAndAccept`, a staged result whose block offers a plan the family lets the
+    /// runtime apply itself ([`Session::auto_applied_offer`]) is settled through the same
+    /// execution an agent's plan takes, and its admitted value delivered: the agent sees the
+    /// value, never the block. A plan that was not applied lost a race, and its block stands as
+    /// decided. An operational failure to apply it refuses the report.
+    async fn accept_staged(&self, decided: ToolResultDecision) -> Result<ToolResultDecision, EventError> {
+        let ToolResultDecision::Replace {
+            presentation: Some(presentation),
+            ..
+        } = &decided
+        else {
+            return Ok(decided);
+        };
+        let auto_apply = crate::api::pinned_settings(&self.inner.log(&self.root)?).auto_apply;
+        if auto_apply == appa_runtime_api::AutoApply::RulingsOnly {
+            return Ok(decided);
+        }
+        let Some(offer) = self.auto_applied_offer(&presentation.offers)? else {
+            return Ok(decided);
+        };
+        match self.on_remedy(offer, RemedyArguments::default(), None, None).await {
+            Ok(RemedyDecision::Returned { value }) => Ok(ToolResultDecision::Deliver { value }),
+            Err(error) if error.is_operational() => Err(error),
+            applied => {
+                tracing::debug!(trajectory = %self.trajectory.0, ?applied, "an auto-applied staged plan was not applied");
+                Ok(decided)
+            }
+        }
     }
 
     /// `deferral` receives the notice of the reported dispatch, where it is a spawn whose
@@ -354,8 +387,10 @@ impl Session {
             // The engine decided on an event this handler built from the view.
             match plan.expect("the spawn result is typed before the engine decides") {
                 SpawnPlan::Outcome => {
-                    return deferred_or(deferral, outcome_decision(decision, &self.deployment().externals)?)
-                        .map(SpawnResultDecision::Outcome);
+                    let decided = self
+                        .accept_staged(outcome_decision(decision, &self.deployment().externals)?)
+                        .await?;
+                    return deferred_or(deferral, decided).map(SpawnResultDecision::Outcome);
                 }
                 SpawnPlan::Close(refusal) => return Err(refusal),
                 SpawnPlan::Bind { child, .. } => match decision.then {

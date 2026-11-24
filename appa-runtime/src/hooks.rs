@@ -1345,7 +1345,7 @@ fn open_or_reopen(
 }
 
 /// A start that names a principal continues a session only when that session opened for it,
-/// and one that names a line variant only when the session opened under it.
+/// and one that names a line variant only when the session opened under no other one.
 fn continues_for(
     session: &Session,
     principal: Option<&ReaderId>,

@@ -325,17 +325,36 @@ async fn a_later_start_cannot_change_the_line_variant_its_family_pinned() {
         HookDecision::Ack
     );
     assert_eq!(settings_of(&runtime, &root()), observe());
+}
 
-    let unpinned = TrajectoryId("cc:unpinned".to_string());
-    assert_eq!(
-        start(&runtime, &unpinned, SessionSettings::default()).await,
-        HookDecision::Ack
+/// A family opened before line variants pinned none: its opening is stored exactly as such a
+/// family's was. A later start naming a line variant continues it without pinning anything,
+/// and the family keeps deciding under the defaults it opened with.
+#[tokio::test]
+async fn a_family_pinned_without_a_line_variant_continues_under_a_start_that_names_one() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let log = session.inner.log(&session.root).expect("the log reads");
+    let stored = serde_json::to_value(&log.facts()[0]).expect("the opening serializes");
+    let opening = stored["TrajectoryOpened"]
+        .as_object()
+        .expect("the first fact is the opening");
+    assert!(!opening.contains_key("settings"), "stored as a legacy opening");
+
+    for named in [observe(), enforce(), observe()] {
+        assert_eq!(start(&runtime, &root(), named).await, HookDecision::Ack);
+    }
+    assert!(settings_of(&runtime, &root()).is_default());
+    let decision = session
+        .on_tool_call(taint(serde_json::json!({"a": 1})), false)
+        .await
+        .expect("the call is judged");
+    assert!(
+        matches!(&decision, ToolCallDecision::Deny { offers, .. } if offers.len() == 1),
+        "the narrowing still reaches the agent: {decision:?}"
     );
-    assert!(matches!(
-        start(&runtime, &unpinned, observe()).await,
-        HookDecision::Refuse { .. }
-    ));
-    assert!(settings_of(&runtime, &unpinned).is_default());
 }
 
 /// A root fork pins the settings it was opened with, not its parent's, and a start that names
@@ -433,4 +452,116 @@ async fn a_restarted_runtime_keeps_the_pinned_settings() {
         start(&runtime, &root(), enforce()).await,
         HookDecision::Refuse { .. }
     ));
+}
+
+/// `leak` brings an insider, suspicious result. `scrub` clears its audience and leaves its
+/// trust, so a result routed through it is staged with that residual narrowing. `vet`, where
+/// registered, lifts the trust that remains.
+fn staged_config(url: &str, vet: bool) -> Config {
+    let vet = match vet {
+        true => format!(
+            "[[policy.sanitizer]]\nname = \"vet\"\non = [\"tool_output\"]\n[policy.sanitizer.permits]\n\
+             trust = {{ from = \"suspicious\", to = \"trusted\" }}\n\n[externals.sanitizers.vet]\nurl = \"{url}\"\n"
+        ),
+        false => String::new(),
+    };
+    config_from(&format!(
+        "[policy]\n{}\ncontext_control = true\n\n[[policy.tool]]\nname = \"fetch\"\n\n{vet}[externals]\ntimeout_ms = 2000\n\
+         max_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n",
+        PARTLY_CLEARED.trim_end()
+    ))
+}
+
+/// A child whose return its parent floored at `public` and `trust`: no plan accepts the
+/// insider audience `leak` would bring, so its call blocks until the agent routes the result
+/// through `scrub`, and the result is staged with the trust `scrub` leaves.
+async fn staged_in_child(runtime: &Runtime, settings: SessionSettings, trust: &str) -> ToolResultDecision {
+    let mut session = runtime
+        .create_pinned_session(root(), None, settings)
+        .expect("a fresh id opens");
+    let child_id = TrajectoryId("cc:child".to_string());
+    let child = open_child_floored(
+        &mut session,
+        fetch(serde_json::json!({})),
+        child_id.clone(),
+        crate::engine::LabelSpelling {
+            trust: Some(trust.to_string()),
+            audience: Some(vec!["public".to_string()]),
+        },
+    )
+    .await;
+    let blocked = child.on_tool_call(leak(), false).await.expect("the call is judged");
+    assert!(matches!(blocked, ToolCallDecision::Deny { .. }), "{blocked:?}");
+    sanitized_result(runtime, &child, &child_id).await
+}
+
+/// Under `RulingsAndAccept` a staged result whose block offers only the acceptance of its
+/// residual narrowing is accepted at the result: the derivation is delivered, and the
+/// acceptance is on the record. Under `RulingsOnly` the same stage reaches the agent.
+#[tokio::test]
+async fn a_staged_narrowing_is_accepted_at_the_result_only_under_rulings_and_accept() {
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    for (settings, accepted) in [(observe(), true), (SessionSettings::default(), false)] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(staged_config(&url, false), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let decided = staged_in_child(&runtime, settings.clone(), "suspicious").await;
+        let accepted_on_record = runtime
+            .audit(&root())
+            .expect("the root answers its audit")
+            .iter()
+            .any(|entry| entry.trajectory == "cc:child" && matches!(entry.event, AuditEvent::Narrowed { .. }));
+        match accepted {
+            true => {
+                assert_eq!(
+                    decided,
+                    ToolResultDecision::Deliver {
+                        value: "scrubbed".to_string()
+                    }
+                );
+                assert!(accepted_on_record);
+            }
+            false => {
+                let ToolResultDecision::Replace {
+                    presentation: Some(presentation),
+                    ..
+                } = decided
+                else {
+                    panic!("{settings:?}: the stage reaches the agent, got {decided:?}");
+                };
+                assert_eq!(presentation.offers.len(), 1);
+                assert_eq!(
+                    presentation.outcomes.map(|outcomes| outcomes.deciding()),
+                    Some(Outcome::Consent)
+                );
+                assert!(!accepted_on_record);
+            }
+        }
+    }
+}
+
+/// A staged result whose only route is another sanitizer's hop reaches the agent under
+/// `RulingsAndAccept` as under `RulingsOnly`: a hop is the agent's choice.
+#[tokio::test]
+async fn a_staged_result_whose_only_route_is_a_hop_reaches_the_agent() {
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    for settings in [observe(), SessionSettings::default()] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(staged_config(&url, true), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let decided = staged_in_child(&runtime, settings.clone(), "trusted").await;
+        let ToolResultDecision::Replace {
+            presentation: Some(presentation),
+            ..
+        } = decided
+        else {
+            panic!("{settings:?}: the stage reaches the agent, got {decided:?}");
+        };
+        assert_eq!(presentation.offers.len(), 1, "{settings:?}: the hop alone");
+        assert_eq!(
+            presentation.outcomes.map(|outcomes| outcomes.deciding()),
+            Some(Outcome::AgentChoice),
+            "{settings:?}"
+        );
+    }
 }

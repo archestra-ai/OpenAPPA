@@ -2863,8 +2863,8 @@ impl Runtime {
     }
 
     /// A repeat [`Runtime::open_root_fork`]: `fork_root` exists, which is the same root fork
-    /// only when its opening record forked this parent, and continues it only under the line
-    /// variant that opening pinned or none.
+    /// only when its opening record forked this parent, and continues it unless that opening
+    /// pinned another line variant.
     fn root_fork_already_open(
         &self,
         fork_root: &TrajectoryId,

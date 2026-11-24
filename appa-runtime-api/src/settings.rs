@@ -95,10 +95,15 @@ impl SessionSettings {
         *self == SessionSettings::default()
     }
 
-    /// Whether an event naming `named` continues a family these settings pinned: one that
-    /// names no line variant, or the pinned one.
+    /// Whether an event naming `named` continues a family these settings pinned: every event
+    /// but one naming a line variant other than the one pinned. A family pinned without one,
+    /// as every family opened before line variants was, continues under any, and keeps the
+    /// settings it pinned.
     pub fn continued_by(&self, named: Option<&LineVariant>) -> bool {
-        named.is_none_or(|named| self.line_variant.as_ref() == Some(named))
+        match (&self.line_variant, named) {
+            (Some(pinned), Some(named)) => pinned == named,
+            (None, _) | (_, None) => true,
+        }
     }
 }
 
@@ -146,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn a_family_is_continued_by_its_own_line_variant_or_none() {
+    fn a_family_is_refused_only_a_line_variant_other_than_the_one_it_pinned() {
         let observe = LineVariant::parse("observe").unwrap();
         let enforce = LineVariant::parse("enforce").unwrap();
         let pinned = SessionSettings {
@@ -156,6 +161,6 @@ mod tests {
         assert!(pinned.continued_by(None));
         assert!(pinned.continued_by(Some(&observe)));
         assert!(!pinned.continued_by(Some(&enforce)));
-        assert!(!SessionSettings::default().continued_by(Some(&observe)));
+        assert!(SessionSettings::default().continued_by(Some(&observe)));
     }
 }
