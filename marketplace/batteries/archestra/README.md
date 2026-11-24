@@ -101,6 +101,11 @@ internal = ["archestra:members"]
 Every consult carries the declared templates, and the script refuses one
 whose declaration differs from what it serves (exit status 2).
 
+The runtime refuses an answer larger than `externals.max_body_bytes`
+(65536 by default) as no answer. Set it above the serialized size of the
+largest roster you expect: each member costs its email's length plus
+about 4 bytes of JSON, so 3,000 members at 25 bytes need about 90 KB.
+
 The script reads the API base from `ARCHESTRA_BASE_URL` and its token from
 `APPA_PROVIDER_ARCHESTRA_TOKEN`, which the binding's `token_env` forwards:
 an Archestra API key allowed to read the organization's membership. It

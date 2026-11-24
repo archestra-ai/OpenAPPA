@@ -43,21 +43,26 @@ async fn archestra_source() -> String {
 
 /// A loopback `chatops` source, answering as the Archestra host does: a member as their
 /// email, an account outside the organization as `chatops:<provider>/<id>`, whose lookup
-/// finds no member, and no answer for a channel named `open`, whose roster is not closed.
+/// finds no member, and no answer for a channel whose roster is not closed. Channel `C1`
+/// holds only members under `slack-1` and also a guest under `slack-2`.
 async fn chatops_source() -> String {
+    let members = || serde_json::json!({ "members": ["alice@corp.example", "bob@corp.example"] });
+    let with_guest = || serde_json::json!({ "members": ["alice@corp.example", "chatops:slack/U-guest"] });
     let router = Router::new().route(
         "/audience",
-        post(|body: String| async move {
+        post(move |body: String| async move {
             let request: serde_json::Value = serde_json::from_str(&body).unwrap();
             let answer = match (
                 request["artifact"]["selector"].as_str(),
                 request["artifact"]["member"].as_str(),
             ) {
-                (Some(selector), None) => match selector.split_once('/').unwrap() {
-                    (_, "open") => return (axum::http::StatusCode::SERVICE_UNAVAILABLE, String::new()),
-                    (_, "all") => serde_json::json!({ "members": ["alice@corp.example", "bob@corp.example"] }),
-                    (_, "t1") => serde_json::json!({ "members": ["alice@corp.example"] }),
-                    (_, "guest") => serde_json::json!({ "members": ["alice@corp.example", "chatops:slack/U-guest"] }),
+                (Some(selector), None) => match selector {
+                    "telegram-1/open" | "jira-1/open" => {
+                        return (axum::http::StatusCode::SERVICE_UNAVAILABLE, String::new());
+                    }
+                    "slack-1/all" | "slack-1/C1" | "jira-1/all" | "teams-1/all" => members(),
+                    "slack-1/guest" | "slack-2/C1" | "jira-1/guest" | "teams-1/guest" => with_guest(),
+                    "slack-1/t1" => serde_json::json!({ "members": ["alice@corp.example"] }),
                     other => panic!("unexpected channel {other:?}"),
                 },
                 (None, Some("chatops:slack/U-guest")) => serde_json::json!({ "principal": null }),
@@ -672,7 +677,8 @@ fn recipient(recipient: &str) -> serde_json::Value {
 }
 
 /// Every sink releases the organization's content to recipients inside the organization
-/// and withholds it from anyone outside, whether named directly or seated in a channel.
+/// and withholds it from anyone outside, whether named directly or seated in a channel. A
+/// channel's roster is its binding's: one channel id reads differently under two bindings.
 #[tokio::test]
 async fn each_sink_releases_internal_content_only_to_recipients_the_organization_covers() {
     let (_dir, runtime, internal) = content_of(archestra("get_agent", serde_json::json!({ "id": "a" }))).await;
@@ -683,6 +689,8 @@ async fn each_sink_releases_internal_content_only_to_recipients_the_organization
         ("email", recipient("eve@outside.example"), WITHHELD),
         ("chatops_reply", channel("slack-1", "all"), RELEASED),
         ("chatops_reply", channel("slack-1", "guest"), WITHHELD),
+        ("chatops_reply", channel("slack-1", "C1"), RELEASED),
+        ("chatops_reply", channel("slack-2", "C1"), WITHHELD),
         ("jira_reply", channel("jira-1", "all"), RELEASED),
         ("jira_reply", channel("jira-1", "guest"), WITHHELD),
         ("agent_run_post", channel("teams-1", "all"), RELEASED),
