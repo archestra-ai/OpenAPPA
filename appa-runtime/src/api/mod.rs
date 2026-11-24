@@ -384,9 +384,15 @@ pub(crate) enum RemedyDecision {
 /// from the log. `Unacceptable` appended nothing and leaves the return pending.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SettlementDecision {
-    Accepted { value: String },
+    /// The return crossed as the record `receipt` names, as a crossed return does.
+    Accepted {
+        value: String,
+        receipt: appa_runtime_api::ReleaseReceipt,
+    },
     Discarded,
-    Unacceptable { feedback: String },
+    Unacceptable {
+        feedback: String,
+    },
 }
 
 /// Structured presentation for policy decisions offering remedies.
@@ -4087,7 +4093,7 @@ impl Runtime {
             Err(error) => Err(error),
         };
         let outcome = match settled {
-            Ok(SettlementDecision::Accepted { value }) => RemedyOutcome::Returned { value },
+            Ok(SettlementDecision::Accepted { value, .. }) => RemedyOutcome::Returned { value },
             Ok(SettlementDecision::Discarded) => RemedyOutcome::Returned {
                 value: DISCARDED_RETURN.to_string(),
             },

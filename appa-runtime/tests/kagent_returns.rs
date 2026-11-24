@@ -490,17 +490,18 @@ async fn a_spawn_result_carrying_bytes_that_never_crossed_is_withheld() {
     assert_eq!(crossings(&runtime), vec![None], "only the child's own return crossed");
 }
 
-/// The plugin holds bytes that are not what crossed, so it sends no `value`. The
-/// spawn result is then the ordinary outcome of the call.
+/// The plugin holds bytes that are not what crossed, so it sends no `value`. None of the
+/// reply's bytes cross, and the runtime's words stand in for it.
 #[tokio::test]
-async fn a_spawn_result_that_omits_the_value_is_the_plain_outcome() {
+async fn a_spawn_result_that_omits_the_value_admits_none_of_its_bytes() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let runtime = open(&dir);
     let binding = declared(&runtime, None, None).await;
     assert_eq!(answered(&runtime, child_start(&binding)).await, ack());
     assert_eq!(answered(&runtime, child_end(RETURN)).await, ack());
 
-    assert_eq!(answered(&runtime, spawn_result(None)).await, ack());
+    let replaced = answered(&runtime, spawn_result(None)).await;
+    assert_eq!(replaced["decision"], "replace_output", "{replaced}");
     assert_eq!(crossings(&runtime), vec![None], "an omitted value crosses nothing");
 }
 

@@ -897,6 +897,29 @@ async fn accepting_a_deferred_return_crosses_it_once_as_the_control_calls_result
     );
 }
 
+/// An accepted held return crossed as a record of its own, so its acceptance names that record
+/// and a sink judged on it releases, as one judged on a crossed return of the same bytes does.
+#[tokio::test]
+async fn an_accepted_held_returns_receipt_releases_to_a_sink() {
+    let Deployed { runtime, .. } = deployed(false);
+    let (_, notice) = deferred_answer(&runtime).await;
+    let accepted = session(&runtime)
+        .on_settle(&notice.accept)
+        .await
+        .expect("the parent accepts its return");
+    let crate::api::SettlementDecision::Accepted { value, receipt } = accepted else {
+        panic!("the return is accepted: {accepted:?}");
+    };
+    assert_eq!(value, "the answer");
+    assert_eq!(receipt.digest, appa_runtime_api::ReleaseDigest::of(b"the answer"));
+    assert_eq!(
+        runtime
+            .judge_release(&[receipt], "fetch", &raw(serde_json::json!({ "a": 1 })))
+            .await,
+        Ok(())
+    );
+}
+
 #[tokio::test]
 async fn discarding_a_deferred_return_crosses_nothing_and_cannot_be_undone() {
     let Deployed { runtime, .. } = deployed(false);
@@ -1978,9 +2001,16 @@ async fn a_child_under_a_floor_of_its_own_cannot_spawn_a_deciding_subagent() {
     );
 }
 
+/// A bound spawn's reply that carries no message of the child's — kagent's `result` empty
+/// beside keys nothing checked — closes with no body and admits none of its bytes, whatever
+/// the spawn declares: the harness is answered with the runtime's words in its place.
 #[tokio::test]
-async fn a_deciding_spawns_own_result_admits_nothing_where_a_plain_spawns_does() {
-    let admits = |declares: DeclaredReturn| async move {
+async fn a_bound_spawns_reply_without_a_message_admits_nothing_whatever_it_declares() {
+    let reply = serde_json::json!({"result": "", "subagent_session_id": "child-ctx", "note": "the child's bytes"});
+    for declares in [
+        DeclaredReturn::Arguments(as_spoken()),
+        DeclaredReturn::Decides(LabelSpelling::default()),
+    ] {
         let Deployed { runtime, .. } = deployed(false);
         let fork = binding(
             session(&runtime)
@@ -1991,20 +2021,29 @@ async fn a_deciding_spawns_own_result_admits_nothing_where_a_plain_spawns_does()
             .on_child_start(TrajectoryId("cc:root:child".to_string()), SpawnRef::Binding(fork))
             .expect("the fork binds and the child opens");
         let before = admitted(&runtime);
-        session(&runtime)
+        let decided = session(&runtime)
             .on_spawn_result_identified(
                 call("fetch", 1),
                 Some("toolu-1".to_string()),
-                spoken("the spawn's own words"),
+                spoken(&reply.to_string()),
                 Some(child.trajectory.clone()),
                 None,
             )
             .await
             .expect("the spawn's result is decided");
-        admitted(&runtime) - before
-    };
-    assert_eq!(admits(DeclaredReturn::Arguments(as_spoken())).await, 1);
-    assert_eq!(admits(DeclaredReturn::Decides(LabelSpelling::default())).await, 0);
+        assert_eq!(
+            decided,
+            SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+                placeholder: super::result::NO_RETURN.to_string(),
+                presentation: None,
+            })
+        );
+        assert_eq!(admitted(&runtime), before);
+        assert!(
+            runtime.open_dispatches(&root(), &root()).is_empty(),
+            "the reply closed the spawn"
+        );
+    }
 }
 
 /// [`MIDDLE`]'s `fetch` behind a `signoff` the authority at `url` rules on.

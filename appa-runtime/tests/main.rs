@@ -4,6 +4,8 @@
 //! that sets the process environment or counts what the process spawns
 //! keeps its own binary (see the package manifest), because every suite here
 //! would reach what it sets or add to what it counts.
+// Proving a spawned remedy execution `Send` walks the runtime's whole nested future.
+#![recursion_limit = "256"]
 
 mod common;
 

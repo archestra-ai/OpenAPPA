@@ -47,8 +47,15 @@ pub(super) enum SpawnPlan {
         crossing: appa_engine::value::ChildReturnId,
     },
     Withheld,
+    /// A success that carries no message: the harness's own acknowledgement, or a reply whose
+    /// message is empty. It closes as a success with no body, and none of its bytes cross.
+    Unspoken,
     Close(EventError),
 }
+
+/// What stands in for a bound spawn's reply that carries no message of the child's.
+pub(super) const NO_RETURN: &str = "[appa] this reply carries no message from the subagent; \
+                                    its return crosses only through the return check";
 
 /// Delivered when a child terminated without completing its return check.
 pub(super) const UNCHECKED_RETURN: &str = "[appa] the subagent ended outside the return check and its message is withheld; \
@@ -357,7 +364,10 @@ impl Session {
                                 SpawnPlan::Close(EventError::SpawnNotTaken)
                             }
                             (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
-                                None => SpawnPlan::Outcome,
+                                None => match &outcome {
+                                    ToolOutcome::Success { .. } => SpawnPlan::Unspoken,
+                                    _ => SpawnPlan::Outcome,
+                                },
                                 // A failure repeating the crossed return closes as the host reported it.
                                 Some(_) => match (&crossed, &outcome) {
                                     (Some(_), ToolOutcome::Failure { .. }) => SpawnPlan::Outcome,
@@ -390,6 +400,14 @@ impl Session {
                             },
                             // A withheld message still closes as the failure the host reported, in
                             // the runtime's words: none of the host's bytes cross with the close.
+                            SpawnPlan::Unspoken => EngineEvent::ToolOutcome {
+                                dispatch,
+                                outcome: ToolOutcome::Success {
+                                    body: OutcomeBody::Unavailable,
+                                },
+                                evidence,
+                                entropy: fresh_entropy(),
+                            },
                             SpawnPlan::Withheld => EngineEvent::ToolOutcome {
                                 dispatch,
                                 outcome: match &outcome {
@@ -453,6 +471,13 @@ impl Session {
                         } => SpawnResultDecision::Outcome(ToolResultDecision::Deliver { value, receipt }),
                         _ => SpawnResultDecision::Return(ChildReturnDecision::Returned { value, receipt }),
                     });
+                }
+                SpawnPlan::Unspoken => {
+                    outcome_decision(decision, &self.deployment().externals)?;
+                    return Ok(SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+                        placeholder: NO_RETURN.to_string(),
+                        presentation: None,
+                    }));
                 }
                 SpawnPlan::Withheld => {
                     outcome_decision(decision, &self.deployment().externals)?;

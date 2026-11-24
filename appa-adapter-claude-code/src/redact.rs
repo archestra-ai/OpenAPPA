@@ -103,6 +103,25 @@ pub(crate) fn restates(event: &HookEvent, text: &str, replacement: &Replacement)
     }
 }
 
+/// Whether the response `event` delivered is a spawn's that carries nothing beside the run's
+/// metadata of its known shape, no message among it: a launch acknowledgement, which holds
+/// none of the child's bytes for a replacement to stand in for.
+pub(crate) fn carries_no_message(event: &HookEvent) -> bool {
+    match event {
+        HookEvent::SpawnResult { call, outcome, .. } | HookEvent::ToolResult { call, outcome, .. } => {
+            matches!(Restatement::of(&call.tool), Restatement::Spawn)
+                && delivered(outcome).is_some_and(|response| match response {
+                    serde_json::Value::Object(fields) => fields.iter().all(|(key, field)| match key.as_str() {
+                        "content" => *field == serde_json::json!([]),
+                        key => is_run_metadata(key, field),
+                    }),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
 /// One delivered response restated in place of itself.
 pub(crate) fn restated(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
     match Restatement::of(tool) {
@@ -865,5 +884,46 @@ mod tests {
                 "{name} is not run metadata, so the reply is restated without it",
             );
         }
+    }
+
+    /// A background launch's acknowledgement holds the run's metadata alone, none of the
+    /// child's bytes, so the runtime's words standing in for a message rewrite nothing; the
+    /// same acknowledgement beside a payload is restated without it.
+    #[test]
+    fn a_launch_acknowledgement_is_kept_unless_a_payload_sits_beside_it() {
+        let launched = serde_json::json!({
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": "a2",
+            "description": "Compute 6*7",
+            "resolvedModel": "claude-opus-5",
+            "prompt": "Compute 6*7",
+            "outputFile": "/tmp/a2.md",
+            "canReadOutputFile": false,
+        });
+        let no_message = HookDecision::ReplaceOutput {
+            output: "no message".to_string(),
+            outcomes: None,
+        };
+        for kept in [launched.clone(), {
+            let mut empty = launched.clone();
+            empty["content"] = serde_json::json!([]);
+            empty
+        }] {
+            assert_eq!(render(&spawn_result(kept), &no_message), serde_json::json!({}));
+        }
+        let mut carrying = launched.clone();
+        carrying["extra"] = serde_json::json!("the child's bytes");
+        let mut replaced = launched;
+        replaced["content"] = serde_json::json!([{"type": "text", "text": "no message"}]);
+        assert_eq!(
+            render(&spawn_result(carrying), &no_message),
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "updatedToolOutput": replaced,
+                }
+            })
+        );
     }
 }

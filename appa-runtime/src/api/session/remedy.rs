@@ -162,7 +162,9 @@ impl Session {
             )
             .await?;
         match decision.then {
-            Next::PresentToModel(Presentation::Value { value, .. }) => Ok(SettlementDecision::Accepted { value }),
+            Next::PresentToModel(Presentation::Value { value, receipt }) => {
+                Ok(SettlementDecision::Accepted { value, receipt })
+            }
             Next::PresentToModel(Presentation::Discarded) => Ok(SettlementDecision::Discarded),
             Next::PresentToModel(Presentation::Declined { feedback }) => {
                 Ok(SettlementDecision::Unacceptable { feedback })
