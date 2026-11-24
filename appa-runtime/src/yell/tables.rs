@@ -903,6 +903,7 @@ static NO_ANSWER_CLASS: Table = Table {
         ("unreachable", Rule::Keep),
         ("dismissed", Rule::Keep),
         ("non_success", Rule::Table(&NON_SUCCESS)),
+        ("temporary_failure", Rule::Keep),
         ("timeout", Rule::Keep),
         ("transport", Rule::Keep),
         ("malformed", Rule::Keep),

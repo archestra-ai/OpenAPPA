@@ -49,6 +49,11 @@ pub enum NoAnswerReason {
         status: u16,
         detail: Option<String>,
     },
+    /// A command exited with [`crate::consult_process::TEMPORARY_FAILURE_EXIT`]: what it asked
+    /// failed for now, so asking again later may get an answer. `detail` as for `NonSuccess`.
+    TemporaryFailure {
+        detail: Option<String>,
+    },
     Timeout,
     Transport,
     Malformed,
@@ -69,6 +74,9 @@ impl NoAnswerReason {
                 status,
                 detail: Some(detail),
             } => format!("non_success status={status} detail={detail:?}"),
+            NoAnswerReason::TemporaryFailure { detail: Some(detail) } => {
+                format!("temporary_failure detail={detail:?}")
+            }
             other => crate::events::NoAnswerClass::from(other).to_string(),
         }
     }
@@ -1605,6 +1613,12 @@ printf '%s' '{"version":1,"answer":{"delta.trust":"trusted"}}'"#,
                     status: 7,
                     detail: None,
                 },
+            ),
+            (
+                "exit 75",
+                budget_ms(),
+                1024,
+                NoAnswerReason::TemporaryFailure { detail: None },
             ),
             ("sleep 5", 20, 1024, NoAnswerReason::Timeout),
             ("printf 'xxxxxxxx'", budget_ms(), 4, NoAnswerReason::Oversized),

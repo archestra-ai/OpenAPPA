@@ -5,7 +5,7 @@ use crate::common;
 use appa_runtime::api::{RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    HookDecision, HookEvent, OutcomeBody, ProposedCall, ReleaseReceipt, ReleaseRefusal, ToolOutcome,
+    HookDecision, HookEvent, OutcomeBody, ProposedCall, ReleaseReceipt, ReleaseRefusal, RetryHint, ToolOutcome,
 };
 use axum::{Router, routing::post};
 use common::{actor, offer_of, offers, propose, ran, raw, repo_root, serve, session_runtime};
@@ -75,25 +75,51 @@ async fn chatops_source() -> String {
     format!("{}/audience", serve(router).await)
 }
 
+/// How a suite's runtime reaches the `chatops` source.
+enum Chatops {
+    /// The loopback [`chatops_source`].
+    Loopback,
+    /// The shipped helper, run as the battery's command, over an audience API at this base.
+    ShippedHelper(String),
+}
+
 /// The shipped rules, with the battery's own `command` bindings swapped for the loopback
 /// sources: the helper has its own tests, and a root cannot rebind a battery's provider.
 /// The root adds one read per label a probe needs and one sink per requirement.
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let shipped = std::fs::read_to_string(repo_root().join("marketplace/batteries/archestra/appa.toml")).unwrap();
+    runtime_over(dir, Chatops::Loopback).await
+}
+
+async fn runtime_over(dir: &tempfile::TempDir, chatops: Chatops) -> Arc<Runtime> {
+    let battery_dir = repo_root().join("marketplace/batteries/archestra");
+    let shipped = std::fs::read_to_string(battery_dir.join("appa.toml")).unwrap();
     let mut battery: toml_edit::DocumentMut = shipped.parse().unwrap();
-    for (source, url) in [
-        ("archestra", archestra_source().await),
-        ("chatops", chatops_source().await),
-    ] {
+    let target = dir.path().join("batteries/archestra");
+    std::fs::create_dir_all(&target).unwrap();
+    let mut rebind = |source: &str, transport: (&str, toml_edit::Item)| {
         let binding = battery["externals"]["audience"][source]
             .as_table_mut()
             .expect("the battery binds its source");
         binding.remove("command");
         binding.remove("token_env");
-        binding.insert("url", toml_edit::value(url));
+        binding.insert(transport.0, transport.1);
+    };
+    rebind("archestra", ("url", toml_edit::value(archestra_source().await)));
+    match chatops {
+        Chatops::Loopback => rebind("chatops", ("url", toml_edit::value(chatops_source().await))),
+        Chatops::ShippedHelper(base) => {
+            std::fs::copy(
+                battery_dir.join("audience-source.py"),
+                target.join("audience-source.py"),
+            )
+            .unwrap();
+            let script = format!(
+                "ARCHESTRA_BASE_URL={base} APPA_PROVIDER_ARCHESTRA_TOKEN={ARCHESTRA_KEY} exec python3 audience-source.py"
+            );
+            let argv = toml_edit::Array::from_iter(["/bin/sh", "-c", script.as_str()]);
+            rebind("chatops", ("command", toml_edit::value(argv)));
+        }
     }
-    let target = dir.path().join("batteries/archestra");
-    std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join("appa.toml"), battery.to_string()).unwrap();
     let path = dir.path().join("appa.toml");
     std::fs::write(
@@ -620,8 +646,12 @@ async fn a_suspicious_session_cannot_save_a_file() {
 /// The receipt of `read`'s result in a fresh session that took the read's narrowing: content
 /// at exactly the label `read` adds.
 async fn content_of(read: ProposedCall) -> (tempfile::TempDir, Arc<Runtime>, ReleaseReceipt) {
+    content_over(Chatops::Loopback, read).await
+}
+
+async fn content_over(chatops: Chatops, read: ProposedCall) -> (tempfile::TempDir, Arc<Runtime>, ReleaseReceipt) {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = runtime(&dir).await;
+    let runtime = runtime_over(&dir, chatops).await;
     let decision = match propose(&runtime, read.clone()).await {
         HookDecision::DenyCall { feedback, .. } => {
             assert!(matches!(
@@ -795,6 +825,61 @@ async fn an_unnamed_sink_or_one_without_its_recipients_is_an_integrity_failure()
             judge(&runtime, &internal, sink, recipients.clone()).await,
             Err(ReleaseRefusal::Integrity),
             "{sink} {recipients}"
+        );
+    }
+}
+
+const ARCHESTRA_KEY: &str = "arch_fixture";
+
+/// An Archestra audience API for the shipped helper: channel `all` holds members, `busy`
+/// answers 503, and `gone` answers 404.
+async fn archestra_audience_api() -> String {
+    let router = Router::new().route("/api/openappa/audience", axum::routing::get(audience_api_answer));
+    serve(router).await
+}
+
+async fn audience_api_answer(
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<std::collections::BTreeMap<String, String>>,
+) -> (axum::http::StatusCode, String) {
+    use axum::http::StatusCode;
+    let bearer = format!("Bearer {ARCHESTRA_KEY}");
+    let authorized = headers.get("authorization").and_then(|value| value.to_str().ok()) == Some(bearer.as_str());
+    let asked = (
+        query.get("source").map(String::as_str),
+        query.get("selector").map(String::as_str),
+    );
+    match (authorized, asked) {
+        (true, (Some("chatops"), Some("slack-1/all"))) => {
+            let members = serde_json::json!({ "members": ["alice@corp.example", "bob@corp.example"] });
+            (StatusCode::OK, members.to_string())
+        }
+        (true, (Some("chatops"), Some("slack-1/busy"))) => (StatusCode::SERVICE_UNAVAILABLE, "{}".to_string()),
+        _ => (StatusCode::NOT_FOUND, "{}".to_string()),
+    }
+}
+
+/// Through the shipped helper, a roster Archestra cannot give now is a missing fact worth
+/// asking again later, and one it says does not exist is a missing fact only a repair
+/// obtains.
+#[tokio::test]
+async fn the_shipped_helper_tells_a_passing_roster_failure_from_a_lasting_one() {
+    let base = archestra_audience_api().await;
+    let (_dir, runtime, internal) = content_over(
+        Chatops::ShippedHelper(base),
+        archestra("get_agent", serde_json::json!({ "id": "a" })),
+    )
+    .await;
+    let cases = [
+        ("all", RELEASED),
+        ("busy", Err(ReleaseRefusal::MissingFact(RetryHint::Later))),
+        ("gone", Err(ReleaseRefusal::MissingFact(RetryHint::AfterRepair))),
+    ];
+    for (name, expected) in cases {
+        assert_eq!(
+            judge(&runtime, &internal, "chatops_reply", channel("slack-1", name)).await,
+            expected,
+            "{name}"
         );
     }
 }

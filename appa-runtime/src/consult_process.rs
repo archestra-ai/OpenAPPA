@@ -277,6 +277,10 @@ pub(crate) async fn finished_tail(mut tail: StderrTail) -> Option<Diagnostics> {
 /// The variable a command reads the milliseconds it has to answer from.
 pub(crate) const CONSULT_TIMEOUT_VARIABLE: &str = "APPA_CONSULT_TIMEOUT_MS";
 
+/// The exit status a command reports a failure that may pass with: `EX_TEMPFAIL` of
+/// `sysexits.h`. Any other non-zero exit is a failure asking again does not help.
+pub(crate) const TEMPORARY_FAILURE_EXIT: u16 = 75;
+
 /// `parent` without the runtime's own namespace. A consult child starts from exactly this,
 /// its environment cleared first: filtering one read of the environment, rather than
 /// removing names from the live one, leaves no gap for a variable set in between.
@@ -387,6 +391,7 @@ async fn run_command_process(
     let line = detail.as_deref().unwrap_or_default();
     tracing::warn!(code = ?status.code(), stderr = %line, "the command exited without an answer");
     match status.code().and_then(|code| u16::try_from(code).ok()) {
+        Some(TEMPORARY_FAILURE_EXIT) => Err(NoAnswerReason::TemporaryFailure { detail }),
         Some(status) => Err(NoAnswerReason::NonSuccess { status, detail }),
         // A signal or another platform-specific status establishes no useful failure
         // classification, so unlike an exit code's, its stderr line stays in logs and the

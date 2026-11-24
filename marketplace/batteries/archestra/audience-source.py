@@ -28,7 +28,9 @@ The API base comes from ARCHESTRA_BASE_URL, and credentials from
 APPA_PROVIDER_ARCHESTRA_TOKEN: an Archestra API key allowed to read the
 organization's membership. Any API error or missing answer exits
 nonzero: the runtime treats that as no answer and refuses the operation,
-so a directory hiccup never becomes a policy decision.
+so a directory hiccup never becomes a policy decision. A failure that may
+pass, a 429 or 5xx answer or no answer within the consult's budget, exits
+75 (EX_TEMPFAIL), which the runtime reports as worth retrying later.
 """
 
 import json
@@ -45,8 +47,19 @@ SERVED_TEMPLATES = {
     "archestra": ["members", "team/<team>", "user/<user>"],
     "chatops": ["<binding>/<channel>"],
 }
+BUDGET_VAR = "APPA_CONSULT_TIMEOUT_MS"
 TIMEOUT_SECONDS = 30
 MAX_MEMBERS = 5000
+TEMPORARY_FAILURE_EXIT = 75
+
+
+class TemporaryFailure(RuntimeError):
+    """A failure asking again later may not repeat."""
+
+
+def timeout_seconds():
+    budget = os.environ.get(BUDGET_VAR)
+    return TIMEOUT_SECONDS if budget is None else min(TIMEOUT_SECONDS, int(budget) / 1000)
 
 
 def audience_api(base_url, token, source):
@@ -58,10 +71,17 @@ def audience_api(base_url, token, source):
             headers={"Authorization": f"Bearer {token}"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            with urllib.request.urlopen(request, timeout=timeout_seconds()) as response:
                 return json.load(response)
         except urllib.error.HTTPError as error:
-            raise RuntimeError(f"GET {endpoint} failed: {error.code}") from error
+            failure = TemporaryFailure if error.code == 429 or error.code >= 500 else RuntimeError
+            raise failure(f"GET {endpoint} failed: {error.code}") from error
+        except TimeoutError as error:
+            raise TemporaryFailure(f"GET {endpoint} timed out") from error
+        except urllib.error.URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise TemporaryFailure(f"GET {endpoint} timed out") from error
+            raise
 
     return call
 
@@ -162,6 +182,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except TemporaryFailure as error:
+        print(f"archestra battery audience source: {error}", file=sys.stderr)
+        raise SystemExit(TEMPORARY_FAILURE_EXIT)
     except Exception as error:
         print(f"archestra battery audience source: {error}", file=sys.stderr)
         raise SystemExit(1)

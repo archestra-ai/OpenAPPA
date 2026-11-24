@@ -110,7 +110,9 @@ The script reads the API base from `ARCHESTRA_BASE_URL` and its token from
 `APPA_PROVIDER_ARCHESTRA_TOKEN`, which the binding's `token_env` forwards:
 an Archestra API key allowed to read the organization's membership. It
 sends the key as `Authorization: Bearer <key>`. An API error or a
-malformed answer exits nonzero, which the runtime treats as no answer.
+malformed answer exits nonzero, which the runtime treats as no answer. A
+429 or 5xx answer, or no answer within the consult's budget, exits 75
+(`EX_TEMPFAIL`), which the runtime reports as worth retrying later.
 
 `appa-runtime/tests/archestra_policy.rs` pins what a representative call
 of each class adds and requires, and which rule each share selects.

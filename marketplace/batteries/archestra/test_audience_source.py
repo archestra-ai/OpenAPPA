@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 import unittest
 import urllib.parse
 
@@ -12,6 +13,7 @@ import urllib.parse
 SCRIPT = Path(__file__).with_name("audience-source.py")
 TOKEN = "archestra-key"
 TEMPLATES = ["members", "team/<team>", "user/<user>"]
+STALL = "stall"
 
 
 class RecordedArchestra:
@@ -28,6 +30,9 @@ class RecordedArchestra:
                 query = tuple(sorted(urllib.parse.parse_qsl(url.query)))
                 recorded.seen.append((url.path, query, self.headers.get("Authorization")))
                 status, body = recorded.answers.get(query, (404, {"error": "not recorded"}))
+                if status == STALL:
+                    time.sleep(2)
+                    status = 200
                 if self.headers.get("Authorization") != f"Bearer {TOKEN}":
                     status, body = 401, {"error": "unauthenticated"}
                 payload = json.dumps(body).encode()
@@ -56,7 +61,7 @@ class RecordedArchestra:
         return f"http://{host}:{port}/"
 
 
-def consult(artifact, base_url, token=TOKEN, templates=TEMPLATES, name="archestra"):
+def consult(artifact, base_url, token=TOKEN, templates=TEMPLATES, name="archestra", budget_ms=None):
     request = {
         "version": 1,
         "kind": "audience",
@@ -69,6 +74,8 @@ def consult(artifact, base_url, token=TOKEN, templates=TEMPLATES, name="archestr
         env["ARCHESTRA_BASE_URL"] = base_url
     if token is not None:
         env["APPA_PROVIDER_ARCHESTRA_TOKEN"] = token
+    if budget_ms is not None:
+        env["APPA_CONSULT_TIMEOUT_MS"] = str(budget_ms)
     return subprocess.run(
         [sys.executable, str(SCRIPT)],
         input=json.dumps(request),
@@ -126,6 +133,20 @@ class SelectorTests(unittest.TestCase):
             for team in ["gone", "odd", "blank", "huge"]:
                 completed = consult({"selector": f"team/{team}"}, archestra.base_url)
                 self.assertEqual(completed.returncode, 1, team)
+                self.assertEqual(completed.stdout, "")
+
+
+    def test_a_failure_that_may_pass_exits_75(self):
+        answers = {
+            (("selector", "team/busy"), ("source", "archestra")): (429, {"error": "slow down"}),
+            (("selector", "team/down"), ("source", "archestra")): (503, {"error": "unavailable"}),
+            (("selector", "team/broken"), ("source", "archestra")): (500, {"error": "internal"}),
+            (("selector", "team/slow"), ("source", "archestra")): (STALL, {"members": []}),
+        }
+        with RecordedArchestra(answers) as archestra:
+            for team in ["busy", "down", "broken", "slow"]:
+                completed = consult({"selector": f"team/{team}"}, archestra.base_url, budget_ms=300)
+                self.assertEqual(completed.returncode, 75, team)
                 self.assertEqual(completed.stdout, "")
 
 

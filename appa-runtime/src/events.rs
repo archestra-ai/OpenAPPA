@@ -174,6 +174,7 @@ pub enum NoAnswerClass {
     NonSuccess {
         status: u16,
     },
+    TemporaryFailure,
     Timeout,
     Transport,
     Malformed,
@@ -188,6 +189,7 @@ impl std::fmt::Display for NoAnswerClass {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             NoAnswerClass::NonSuccess { status } => write!(f, "non_success status={status}"),
+            NoAnswerClass::TemporaryFailure => f.write_str("temporary_failure"),
             NoAnswerClass::Unregistered => f.write_str("unregistered"),
             NoAnswerClass::Unreachable => f.write_str("unreachable"),
             #[cfg(feature = "daemon")]
@@ -205,11 +207,15 @@ impl std::fmt::Display for NoAnswerClass {
 
 impl NoAnswerClass {
     /// Whether asking again later may get an answer: the external was unreachable, timed
-    /// out, or failed in transport, or its HTTP status was 429 or 5xx. A command's exit code
-    /// also arrives as `NonSuccess`; on Unix it is at most 255, so it never reads as transient.
+    /// out, or failed in transport, its HTTP status was 429 or 5xx, or a command exited with
+    /// the temporary-failure status. Any other command exit code also arrives as `NonSuccess`;
+    /// on Unix it is at most 255, so it never reads as transient.
     pub fn is_transient(&self) -> bool {
         match self {
-            NoAnswerClass::Unreachable | NoAnswerClass::Timeout | NoAnswerClass::Transport => true,
+            NoAnswerClass::Unreachable
+            | NoAnswerClass::Timeout
+            | NoAnswerClass::Transport
+            | NoAnswerClass::TemporaryFailure => true,
             NoAnswerClass::NonSuccess { status } => matches!(status, 429 | 500..=599),
             NoAnswerClass::Unregistered
             | NoAnswerClass::Malformed
@@ -233,6 +239,7 @@ impl From<&crate::external::NoAnswerReason> for NoAnswerClass {
             Reason::Dismissed => NoAnswerClass::Dismissed,
             // The detail is what the command said on stderr, and it is not carried.
             Reason::NonSuccess { status, .. } => NoAnswerClass::NonSuccess { status: *status },
+            Reason::TemporaryFailure { .. } => NoAnswerClass::TemporaryFailure,
             Reason::Timeout => NoAnswerClass::Timeout,
             Reason::Transport => NoAnswerClass::Transport,
             // The detail is what the external said, and it is not carried.
@@ -807,11 +814,12 @@ mod tests {
     }
 
     #[test]
-    fn only_reachability_rate_limits_and_server_errors_are_transient() {
+    fn only_reachability_rate_limits_server_errors_and_temporary_failures_are_transient() {
         let cases = [
             (NoAnswerClass::Unreachable, true),
             (NoAnswerClass::Timeout, true),
             (NoAnswerClass::Transport, true),
+            (NoAnswerClass::TemporaryFailure, true),
             (NoAnswerClass::NonSuccess { status: 429 }, true),
             (NoAnswerClass::NonSuccess { status: 500 }, true),
             (NoAnswerClass::NonSuccess { status: 503 }, true),

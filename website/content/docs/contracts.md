@@ -1609,6 +1609,8 @@ Set `command` to an array specifying the executable and arguments (e.g. `command
 
 Commands read a single JSON consult request from standard input and write a JSON response to standard output within `timeout_ms` and `max_body_bytes`. When OpenAPPA reaches the end of standard output, it closes standard input, so a command that needs the whole request must read it before it closes standard output. `APPA_CONSULT_TIMEOUT_MS` informs the process of remaining execution time (accounting for queue wait). The runtime limits concurrent local program executions to eight.
 
+A command that exits with a non-zero status gives no answer. Exit status 75 (`EX_TEMPFAIL`) reports a failure that may pass, such as a rate-limited or unavailable upstream: a fact it was asked for is missing with a hint to retry later. Any other non-zero status reports a failure that only a repair fixes.
+
 If a command requires credentials, specify `token_env` with an environment variable name prefixed with `APPA_PROVIDER_`. OpenAPPA passes that variable into the process environment while filtering out other internal `APPA_*` variables. On Windows, where variable names ignore case, the filter also ignores case.
 
 OpenAPPA does not require credential variables to be present at policy load time; the process must handle missing credentials at runtime.
