@@ -2997,6 +2997,24 @@ impl Runtime {
             .cloned())
     }
 
+    /// The feedback refusing a proposal on its own shape, judged under the family's policy:
+    /// what no state can change outranks what state decides.
+    pub(crate) fn malformed_proposal(
+        &self,
+        root: &TrajectoryId,
+        call: &ProposedCall,
+    ) -> Result<Option<String>, EventError> {
+        if call.tool == peer::SEND_MESSAGE
+            && let Err(feedback) = peer::send_arguments(call)
+        {
+            return Ok(Some(format!("[appa] {feedback}")));
+        }
+        let log = self.inner.log(root)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        Ok(policy.engine().malformed(call))
+    }
+
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         match self.try_status(id) {
             Ok(status) => Some(status),

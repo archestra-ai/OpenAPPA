@@ -1539,9 +1539,17 @@ impl WireDecision {
         let missing = |field: &str| malformed(format!("{name:?} without its {field}"));
         let required = |field: &str, value: Option<String>| value.ok_or_else(|| missing(field));
         let (held, deciding, retry) = (self.outcomes, self.deciding, self.retry);
+        let remedies = self.offers.as_ref().is_some_and(|offers| !offers.is_empty())
+            || self.review.as_ref().is_some_and(|review| !review.is_empty());
         let stated = |remedies: bool| {
             refusal_outcomes(held.clone(), deciding, retry, remedies)
                 .map_err(|problem| malformed(format!("{name:?} with {problem}")))
+        };
+        // A block or a replacement carries no offers or reviews, so outcomes stated beside them
+        // would describe remedies the decision drops.
+        let unremedied = || match (stated(false)?, remedies) {
+            (Some(_), true) => Err(malformed(format!("{name:?} with outcomes beside offers or reviews"))),
+            (outcomes, _) => Ok(outcomes),
         };
         match name {
             DecisionName::DenyCall | DecisionName::Block | DecisionName::ReplaceOutput | DecisionName::Refuse => {}
@@ -1557,8 +1565,6 @@ impl WireDecision {
             },
             DecisionName::PassControl => HookDecision::PassControl,
             DecisionName::DenyCall => {
-                let remedies = self.offers.as_ref().is_some_and(|offers| !offers.is_empty())
-                    || self.review.as_ref().is_some_and(|review| !review.is_empty());
                 let outcomes = stated(remedies)?;
                 HookDecision::DenyCall {
                     feedback: required("feedback", self.feedback)?,
@@ -1597,11 +1603,11 @@ impl WireDecision {
             }
             DecisionName::Block => HookDecision::Block {
                 reason: required("reason", self.reason)?,
-                outcomes: stated(false)?,
+                outcomes: unremedied()?,
             },
             DecisionName::ReplaceOutput => HookDecision::ReplaceOutput {
                 output: required("output", self.output)?,
-                outcomes: stated(false)?,
+                outcomes: unremedied()?,
             },
             DecisionName::DeliverValue => HookDecision::DeliverValue {
                 value: required("value", self.value)?,
@@ -1740,6 +1746,10 @@ mod tests {
             r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"d","outcomes":["hard_block"],"deciding":"hard_block"}"#
                 .to_string(),
             r#"{"protocol":1,"decision":"block","reason":"r","outcomes":["missing_fact"],"deciding":"missing_fact"}"#
+                .to_string(),
+            r#"{"protocol":1,"decision":"block","reason":"r","offers":[{"offer_id":"o1"}],"outcomes":["hard_block"],"deciding":"hard_block"}"#
+                .to_string(),
+            r#"{"protocol":1,"decision":"replace_output","output":"o","review":[{"offer_id":"o1","text":"approve?"}],"outcomes":["consent"],"deciding":"consent"}"#
                 .to_string(),
         ] {
             let wire: WireDecision = serde_json::from_str(&body).expect("reads");

@@ -336,6 +336,41 @@ async fn a_lost_selector_outranks_a_later_lookup_failure() {
     assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::AfterRepair)));
 }
 
+/// A selector is the operator's to read: two calls whose recipients' sources fail alike are
+/// told the same, whichever group each named.
+#[tokio::test]
+async fn a_failed_selector_reads_alike_whatever_it_named() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let router = Router::new().route(
+        "/audience",
+        post(|| async { (axum::http::StatusCode::NOT_FOUND, "missing".to_string()) }),
+    );
+    let url = format!("{}/audience", serve(router).await);
+    let send_to = "[[policy.tool]]\nname = \"send_to\"\nparameters = { type = \"object\", properties = { to = { type = \"string\" } }, required = [\"to\"] }\nrequires = { audience = { contains = [\"$to\"] } }\ndelta = {}\n\n";
+    let policy = POLICY
+        .replace(SLACK_BINDING, LOOKUP_URL_BINDINGS)
+        .replace("[externals]", &format!("{send_to}[externals]"));
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+    let mut told = Vec::new();
+    for group in ["@slack:user-group/alpha", "@slack:user-group/beta"] {
+        let decision = propose(
+            &runtime,
+            ProposedCall {
+                tool: "send_to".to_string(),
+                arguments: raw(serde_json::json!({ "to": group })),
+                cwd: None,
+            },
+        )
+        .await;
+        let HookDecision::DenyCall { feedback, outcomes, .. } = decision else {
+            panic!("the call is denied, got {decision:?}");
+        };
+        assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::AfterRepair)));
+        told.push(feedback);
+    }
+    assert_eq!(told[0], told[1]);
+}
+
 /// `send` with the reserved `blocked` mark beside its recipient check.
 const BLOCKED_SEND: &str = r#"
 [[policy.tool]]

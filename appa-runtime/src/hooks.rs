@@ -391,8 +391,25 @@ fn names_a_childs_transcript(
     let HookEvent::ToolCall { actor, call, .. } = event else {
         return None;
     };
-    let (status, decision) = match runtime.opened_among(&actor.root, names_children) {
-        Ok(Some(child)) => {
+    let named = runtime
+        .opened_among(&actor.root, names_children)
+        .and_then(|child| match child {
+            Some(child) => runtime
+                .malformed_proposal(&actor.root, call)
+                .map(|malformed| Some((child, malformed))),
+            None => Ok(None),
+        });
+    let (status, decision) = match named {
+        Ok(Some((_, Some(feedback)))) => (
+            200,
+            HookDecision::DenyCall {
+                feedback,
+                offers: Vec::new(),
+                review: Vec::new(),
+                outcomes: Some(Outcomes::Integrity),
+            },
+        ),
+        Ok(Some((child, None))) => {
             tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
             (200, denied(NAMED_TRANSCRIPT.to_string(), Outcomes::HardBlock))
         }
@@ -1062,7 +1079,7 @@ impl Dispatcher<'_> {
                 with_peer_notices(self.runtime, &actor, outcome_decision(decision, self.presentation))
             }
             Ok(decision) => outcome_decision(decision, self.presentation),
-            Err(error) => fold(error, Refusal::Block),
+            Err(error) => fold(error, Refusal::Settle),
         }
     }
 
@@ -1094,7 +1111,7 @@ impl Dispatcher<'_> {
         {
             Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision),
             Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, self.presentation),
-            Err(error) => fold(error, Refusal::Block),
+            Err(error) => fold(error, Refusal::Settle),
         }
     }
 
@@ -1468,8 +1485,12 @@ where
 enum Refusal {
     /// The call has not run: it is denied, and the feedback reaches the model.
     Deny,
-    /// The result or the return is already in hand: it is blocked out of the model's way.
+    /// The return is already in hand: it is blocked out of the model's way, and the child
+    /// may return again.
     Block,
+    /// The result is already in hand, and the host settles its dispatch on a block. A fact a
+    /// retry could still obtain is refused instead, so the dispatch stays reportable.
+    Settle,
 }
 
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
@@ -1478,7 +1499,7 @@ fn fold(error: EventError, refusal: Refusal) -> HookDecision {
         (Some(missing), _, Refusal::Block) => block(missing.detail, Outcomes::MissingFact(missing.retry)),
         (_, true, _) => refuse(error),
         (_, false, Refusal::Deny) => deny(error.to_string()),
-        (_, false, Refusal::Block) => block(error.to_string(), Outcomes::Integrity),
+        (_, false, Refusal::Block | Refusal::Settle) => block(error.to_string(), Outcomes::Integrity),
     }
 }
 
@@ -2152,9 +2173,15 @@ mod tests {
             },
         )
         .await;
-        for (call_id, deciding) in [("toolu-1", "hard_block"), ("", "integrity")] {
+        let read = r#""tool":"Read","arguments":{"file_path":"/home/u/subagents/agent-a1.jsonl"}"#;
+        let untargeted_send = r#""tool":"SendMessage","arguments":{"message":"/home/u/subagents/agent-a1.jsonl"}"#;
+        for (call_id, call, deciding) in [
+            ("toolu-1", read, "hard_block"),
+            ("", read, "integrity"),
+            ("toolu-2", untargeted_send, "integrity"),
+        ] {
             let proposal = format!(
-                r#"{{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"open","call_id":"{call_id}","tool":"Read","spawn":false,"arguments":{{"file_path":"/home/u/subagents/agent-a1.jsonl"}}}}"#
+                r#"{{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"open","call_id":"{call_id}",{call},"spawn":false}}"#
             );
             let (_, reply) = answer(&runtime, &adapter, PrincipalSource::None, proposal.as_bytes()).await;
             assert_eq!(reply["decision"], "deny_call", "{call_id:?}: {reply}");
@@ -3893,6 +3920,58 @@ mod tests {
         };
         assert_eq!(handle(&runtime, started(&root, "cc:s1:a2")).await, HookDecision::Ack);
         assert_eq!(forks(&runtime, &root), 1);
+    }
+
+    /// A host settles a result's dispatch on a block, so a result the log could not take is
+    /// refused rather than blocked, and the same report lands once the log is free.
+    #[tokio::test]
+    async fn a_contended_result_is_refused_and_stays_reportable() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let actor = Actor {
+            root: TrajectoryId("cc:s1".to_string()),
+            child: None,
+        };
+        let call = crate::api::ProposedCall {
+            tool: "host/claude-code/Bash".to_string(),
+            arguments: crate::api::raw(serde_json::json!({"command": "true"})),
+            cwd: None,
+        };
+        let proposed = HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: call.clone(),
+            call_id: Some("toolu-1".to_string()),
+            spawn: None,
+            prompt: None,
+            ruling: None,
+            declares: None,
+        };
+        assert!(matches!(
+            handle(&runtime, proposed).await,
+            HookDecision::AllowCall { .. }
+        ));
+        let reported = || HookEvent::ToolResult {
+            actor: actor.clone(),
+            call: call.clone(),
+            call_id: Some("toolu-1".to_string()),
+            outcome: ToolOutcome::Success {
+                body: appa_runtime_api::OutcomeBody::Available("ok".to_string()),
+            },
+        };
+        runtime.store().contend_next_appends(u64::MAX);
+        let contended = handle(&runtime, reported()).await;
+        runtime.store().contend_next_appends(0);
+        assert!(
+            matches!(
+                contended,
+                HookDecision::Refuse {
+                    class: appa_runtime_api::RefusalClass::Contended,
+                    ..
+                }
+            ),
+            "{contended:?}"
+        );
+        assert_eq!(handle(&runtime, reported()).await, HookDecision::Ack);
     }
 
     #[tokio::test(start_paused = true)]

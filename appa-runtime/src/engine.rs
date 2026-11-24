@@ -2899,12 +2899,13 @@ impl RuntimeEngine {
                 let policy = self.engine.return_policy_of(view, child);
                 return blocked(shape_feedback(&mismatch, policy.as_ref()), Outcomes::Integrity);
             }
+            // The declared return sanitizer's mandate does not reach this return under the
+            // policy deciding now: no answer it could give changes that.
             AudienceRound::Failed(TransitionError::SanitizerUnapplicable) => {
-                let unusable = Unobtained {
-                    detail: "the return sanitizer's derivation was not usable".to_string(),
-                    retry: RetryHint::AfterRepair,
-                };
-                return Ok(withheld.present(&unusable, self.naming));
+                return blocked(
+                    "[appa] the declared return sanitizer cannot apply to this return, so it cannot cross".to_string(),
+                    Outcomes::HardBlock,
+                );
             }
             AudienceRound::Failed(error) => return Err(child_refusal(error)),
         };
@@ -3040,6 +3041,18 @@ impl RuntimeEngine {
                 arguments: resolved.arguments().clone(),
                 cwd: cwd.map(str::to_string),
             },
+        }
+    }
+
+    /// The feedback a proposal's own arguments are denied on, as its decision would give it.
+    /// An undeclared tool is refused, not denied, so it is not this.
+    pub(crate) fn malformed(&self, call: &ProposedCall) -> Option<String> {
+        match self
+            .engine
+            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+        {
+            Ok(_) | Err(EngineError::UnknownTool(_)) => None,
+            Err(error) => Some(malformed_feedback(&error, self.naming)),
         }
     }
 
@@ -3266,7 +3279,8 @@ impl RuntimeEngine {
                 self.sanitizer_request(sanitizer, source, body, subject),
             ])))),
             SanitizerAnswer::NoAnswer(class) => Err(Box::new(
-                UnresolvedAudience::OfferStands.present(&sanitizer_unobtained(sanitizer.as_str(), class), self.naming),
+                UnresolvedAudience::OfferStands
+                    .present(&sanitizer_unobtained(sanitizer.as_str(), class, &subject), self.naming),
             )),
         }
     }
@@ -3288,21 +3302,19 @@ impl RuntimeEngine {
                 source,
                 body,
             } => {
-                if let SanitizerAnswer::NoAnswer(class) = sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
-                    return Ok(withheld
-                        .present(&sanitizer_unobtained(sanitizer.as_str(), class), self.naming)
-                        .then);
-                }
                 let tool = dispatch.and_then(|dispatch| {
                     view.views(trajectory)
                         .and_then(|views| views.dispatch_tool(dispatch).cloned())
                 });
-                Ok(Next::ResolveExternal(vec![self.sanitizer_request(
-                    &sanitizer,
-                    source,
-                    body,
-                    SanitizerSubject::Output { tool },
-                )]))
+                let subject = SanitizerSubject::Output { tool };
+                if let SanitizerAnswer::NoAnswer(class) = sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
+                    return Ok(withheld
+                        .present(&sanitizer_unobtained(sanitizer.as_str(), class, &subject), self.naming)
+                        .then);
+                }
+                Ok(Next::ResolveExternal(vec![
+                    self.sanitizer_request(&sanitizer, source, body, subject),
+                ]))
             }
         }
     }
@@ -3453,11 +3465,12 @@ impl RuntimeEngine {
         // A failed lookup ends the act before its judgment can name the selectors it needs, so
         // every selector this act asked and lost ranks beside it.
         if !failed.is_empty() {
-            failed.extend(unanswered.selectors.iter().map(|(spec, reason)| NoAnswer {
-                provider: spec.provider.clone(),
-                subject: spec.selector.clone(),
-                reason: *reason,
-            }));
+            failed.extend(
+                unanswered
+                    .selectors
+                    .iter()
+                    .map(|(spec, reason)| NoAnswer::selector(spec, *reason)),
+            );
         }
         if let Some(unobtained) = unobtained(&failed) {
             return Err(AudienceFailure::Refused(unobtained));
@@ -3484,6 +3497,13 @@ impl RuntimeEngine {
             Err(Unroutable::UnmappedChain(level)) => return Ok(AudienceConsult::Unconfigured(level)),
             // A dynamically supplied reference no source serves: an operational failure,
             // never a policy state. (A statically written one refuses at policy load.)
+            Err(Unroutable::UnknownSelector { provider, selector }) => {
+                tracing::debug!(%provider, %selector, "no template of the source serves the selector");
+                return Ok(AudienceConsult::Unresolved(Unobtained {
+                    detail: format!("no template of audience source {provider:?} serves a selector lookup"),
+                    retry: RetryHint::AfterRepair,
+                }));
+            }
             Err(unroutable) => {
                 return Ok(AudienceConsult::Unresolved(Unobtained {
                     detail: unroutable.to_string(),
@@ -3503,11 +3523,7 @@ impl RuntimeEngine {
                 continue;
             }
             if let Some(reason) = act.unanswered.selectors.get(spec) {
-                failed.push(NoAnswer {
-                    provider: spec.provider.clone(),
-                    subject: spec.selector.clone(),
-                    reason: *reason,
-                });
+                failed.push(NoAnswer::selector(spec, *reason));
                 continue;
             }
             requests.push(ExternalRequest::AudienceSource {
@@ -3648,19 +3664,43 @@ fn unresolved_audience(tool: &str, detail: &str) -> String {
     format!("[appa] {tool}: {detail}; the call was not checked")
 }
 
-/// One audience fact a consult did not obtain: the source and what it was asked for,
-/// never a member id, and the class of the failure, never the source's own words.
+/// One audience fact a consult did not obtain: the source and the kind of question it was
+/// asked, never a member id or a selector, and the class of the failure, never the source's
+/// own words.
 struct NoAnswer {
     provider: String,
-    subject: String,
+    asked: Asked,
     reason: crate::events::NoAnswerClass,
+}
+
+/// What a source was asked. The selector is for the operator's diagnostics only.
+enum Asked {
+    MemberLookup,
+    Selector(String),
+}
+
+impl Asked {
+    fn model_subject(&self) -> &'static str {
+        match self {
+            Asked::MemberLookup => "a member lookup",
+            Asked::Selector(_) => "a selector lookup",
+        }
+    }
 }
 
 impl NoAnswer {
     fn lookup(provider: &str, reason: crate::events::NoAnswerClass) -> NoAnswer {
         NoAnswer {
             provider: provider.to_string(),
-            subject: "a member lookup".to_string(),
+            asked: Asked::MemberLookup,
+            reason,
+        }
+    }
+
+    fn selector(spec: &SelectorSpec, reason: crate::events::NoAnswerClass) -> NoAnswer {
+        NoAnswer {
+            provider: spec.provider.clone(),
+            asked: Asked::Selector(spec.selector.clone()),
             reason,
         }
     }
@@ -3675,11 +3715,14 @@ fn unobtained(failed: &[NoAnswer]) -> Option<Unobtained> {
         .find(|failure| retry_hint(failure.reason) == RetryHint::AfterRepair)
         .or(failed.first())?;
     let retry = retry_hint(deciding.reason);
+    if let Asked::Selector(selector) = &deciding.asked {
+        tracing::debug!(provider = %deciding.provider, %selector, reason = %deciding.reason, "the deciding selector gave no answer");
+    }
     Some(Unobtained {
         detail: format!(
             "audience source {} gave no answer for {}: {}; {}",
             deciding.provider,
-            deciding.subject,
+            deciding.asked.model_subject(),
             no_answer_description(deciding.reason),
             next_action(retry)
         ),
@@ -3687,13 +3730,22 @@ fn unobtained(failed: &[NoAnswer]) -> Option<Unobtained> {
     })
 }
 
-/// A sanitizer's missing derivation, guided by its failure class like any other fact.
-fn sanitizer_unobtained(sanitizer: &str, reason: crate::events::NoAnswerClass) -> Unobtained {
-    let retry = retry_hint(reason);
+/// A sanitizer's missing derivation. On a call's input it is guided by its failure class
+/// like any other fact. A sanitizer of a confined value fails on what it read, so its class
+/// would carry a bit of that value: the model is told one thing for every class, and the
+/// class stays in the operator's diagnostics.
+fn sanitizer_unobtained(
+    sanitizer: &str,
+    reason: crate::events::NoAnswerClass,
+    subject: &SanitizerSubject<'_>,
+) -> Unobtained {
+    let (described, retry) = match subject {
+        SanitizerSubject::Input { .. } => (format!(": {}", no_answer_description(reason)), retry_hint(reason)),
+        SanitizerSubject::Output { .. } => (String::new(), RetryHint::AfterRepair),
+    };
     Unobtained {
         detail: format!(
-            "sanitizer {sanitizer} gave no answer: {}; {}",
-            no_answer_description(reason),
+            "sanitizer {sanitizer} gave no answer{described}; {}",
             next_action(retry)
         ),
         retry,
@@ -4174,11 +4226,25 @@ fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
 /// What the model reads in place of the raw result. An admitted value and the runtime's
 /// own words are separate presentations here, because a harness delivers the first as it
 /// crossed and spells its own tool names into the second.
-fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>, withheld: bool) -> Presentation {
-    if withheld {
-        return Presentation::ReplaceOutput {
-            placeholder: "[appa] the result is withheld".to_string(),
-        };
+fn outcome_presentation(
+    outcome: &ToolOutcome,
+    admitted: Option<ValueBody>,
+    withheld: Option<appa_engine::transition::Withheld>,
+) -> Presentation {
+    use appa_engine::transition::Withheld;
+    match withheld {
+        Some(Withheld::ByRelease) => {
+            return Presentation::ReplaceOutput {
+                placeholder: "[appa] the result is withheld".to_string(),
+            };
+        }
+        Some(Withheld::ByRevision) => {
+            return blocked_without_offers(
+                "[appa] the result is withheld: the sanitizer it was released under no longer applies".to_string(),
+                Outcomes::HardBlock,
+            );
+        }
+        None => {}
     }
     match (outcome, admitted) {
         (
@@ -7226,7 +7292,7 @@ mod tests {
                     message: "sensitive failure detail".to_string(),
                 },
                 None,
-                true,
+                Some(appa_engine::transition::Withheld::ByRelease),
             ),
             Presentation::ReplaceOutput {
                 placeholder: "[appa] the result is withheld".to_string(),

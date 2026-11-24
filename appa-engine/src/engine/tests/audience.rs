@@ -129,7 +129,7 @@ fn a_chain_only_output_sanitizer_is_offered_and_admitted_without_membership() {
         crossed.follow_up,
         FollowUp::Outcome(OutcomeFollowUp::Closed {
             admitted: Some(derived),
-            withheld: false,
+            withheld: None,
         })
     );
     let log = [log, crossed.append.expect("the derivation appends").facts().to_vec()].concat();

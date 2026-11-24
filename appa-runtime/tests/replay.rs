@@ -630,6 +630,46 @@ async fn only_a_missing_fact_leaves_a_deny_step_unjudged() {
     assert_eq!(outcomes(&reports[2]), vec![(1, &DENIED)]);
 }
 
+/// A taken output-sanitizer offer releases the read, but its live sanitizer never answers for
+/// the result: the dispatch stays open on a missing fact, so the step did not run.
+#[tokio::test]
+async fn a_result_left_on_a_missing_fact_leaves_its_step_unrun() {
+    let unreachable = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        format!("http://{}/", listener.local_addr().expect("the port has an address"))
+    };
+    let policy = "[[policy.tool]]\nname = \"mcp/files/read(path:/hr/*)\"\ndelta = { audience = [\"hr\"] }\n\n\
+         [[policy.sanitizer]]\nname = \"scrub\"\non = [\"tool_output\"]\n\n\
+         [policy.sanitizer.permits]\naudience = { from = [\"hr\"], to = [\"public\"] }\n\n\
+         [policy.deployment]\nconfined_results = [\"mcp/files/read\"]\n";
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(
+        &path,
+        format!("[policy]\nversion = 2\n{policy}{EXTERNALS}\n[externals.sanitizers.scrub]\nurl = \"{unreachable}\"\n"),
+    )
+    .expect("the fixture writes");
+    let runtime = Runtime::open_in_memory(
+        Config::load(&path).expect("the fixture validates"),
+        None,
+        Remedies::Live,
+    )
+    .expect("the deployment opens in memory");
+    let reports = run(
+        &runtime,
+        &[trace(
+            "scrubbed.appa",
+            "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect sanitizer scrub\n",
+        )],
+    )
+    .await;
+    assert!(
+        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(_)),
+        "{:?}",
+        reports[0]
+    );
+}
+
 /// `appa/do_something` asks what the trajectory allows: public before the HR read, and only
 /// HR after it. The steps that ask change nothing, so the real email after them is judged
 /// as if they had not been proposed.

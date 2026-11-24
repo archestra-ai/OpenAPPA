@@ -536,59 +536,63 @@ pub(super) fn close(
 }
 
 pub(super) fn substituting_engine(trust: Trust) -> Engine {
-    let partner = Audience::restricted([ReaderId::new("partner")]);
-    let post = post_tool;
     open_engine_at(
-        RegistryConfig {
-            recorders: Default::default(),
-            tools: {
-                let mut tools = declared(vec![
-                    post("post", vec![crate::names::TagName::new("outbound")]),
-                    post("post_untagged", vec![]),
-                    {
-                        let mut blocked = post("post_blocked", vec![crate::names::TagName::new("outbound")]);
-                        blocked.requires.attention = vec![crate::names::MarkName::new(crate::names::MarkName::BLOCKED)];
-                        blocked
-                    },
-                    restrictable_tool("ping"),
-                ]);
-                tools.push(annotated(
-                    post("post_dyn", vec![crate::names::TagName::new("outbound")]),
-                    "acl",
-                ));
-                tools
-            },
-            annotators: vec![annotator("acl")],
-            authorities: vec![crate::authority::Authority {
-                except: Vec::new(),
-                name: AuthorityName::new("officer"),
-                mandate: crate::authority::Mandate {
-                    trust_ceiling: Some(TRUSTED),
-                    reader_ceiling: Some(DeclaredAudience::literal(partner)),
-                    ..crate::authority::Mandate::default()
-                },
-                scope: crate::authority::Scope::default(),
-                hint: None,
-            }],
-            sanitizers: vec![crate::authority::Sanitizer {
-                name: crate::names::SanitizerName::new("redact"),
-                on: crate::authority::SanitizerPoints {
-                    input: true,
-                    output: false,
-                },
-                transition: crate::authority::DeclaredTransition::Audience {
-                    from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
-                    to: DeclaredAudience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]),
-                },
-                scope: crate::authority::Scope {
-                    tags: vec![crate::names::TagName::new("outbound")],
-                },
-                hint: None,
-            }],
-            ..test_config(vec![])
-        },
+        substituting_config(),
         Label::new(trust, Audience::restricted([ReaderId::new("insider")])),
     )
+}
+
+pub(super) fn substituting_config() -> RegistryConfig {
+    let partner = Audience::restricted([ReaderId::new("partner")]);
+    let post = post_tool;
+    RegistryConfig {
+        recorders: Default::default(),
+        tools: {
+            let mut tools = declared(vec![
+                post("post", vec![crate::names::TagName::new("outbound")]),
+                post("post_untagged", vec![]),
+                {
+                    let mut blocked = post("post_blocked", vec![crate::names::TagName::new("outbound")]);
+                    blocked.requires.attention = vec![crate::names::MarkName::new(crate::names::MarkName::BLOCKED)];
+                    blocked
+                },
+                restrictable_tool("ping"),
+            ]);
+            tools.push(annotated(
+                post("post_dyn", vec![crate::names::TagName::new("outbound")]),
+                "acl",
+            ));
+            tools
+        },
+        annotators: vec![annotator("acl")],
+        authorities: vec![crate::authority::Authority {
+            except: Vec::new(),
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                trust_ceiling: Some(TRUSTED),
+                reader_ceiling: Some(DeclaredAudience::literal(partner)),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        }],
+        sanitizers: vec![crate::authority::Sanitizer {
+            name: crate::names::SanitizerName::new("redact"),
+            on: crate::authority::SanitizerPoints {
+                input: true,
+                output: false,
+            },
+            transition: crate::authority::DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
+                to: DeclaredAudience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]),
+            },
+            scope: crate::authority::Scope {
+                tags: vec![crate::names::TagName::new("outbound")],
+            },
+            hint: None,
+        }],
+        ..test_config(vec![])
+    }
 }
 
 pub(super) fn internal_log(e: &Engine) -> Vec<Fact> {

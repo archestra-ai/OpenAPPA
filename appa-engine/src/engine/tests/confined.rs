@@ -65,7 +65,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_dropped_is_withheld() {
         decision.follow_up
             == FollowUp::Outcome(OutcomeFollowUp::Closed {
                 admitted: None,
-                withheld: true,
+                withheld: Some(crate::transition::Withheld::ByRevision),
             })
     };
 
@@ -169,7 +169,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_no_longer_applies_is_withheld(
     };
     let withheld = FollowUp::Outcome(OutcomeFollowUp::Closed {
         admitted: None,
-        withheld: true,
+        withheld: Some(crate::transition::Withheld::ByRevision),
     });
     let checkpoint = appended_facts(
         first
@@ -330,7 +330,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         crossed.follow_up,
         FollowUp::Outcome(OutcomeFollowUp::Closed {
             admitted: Some(derived),
-            withheld: false,
+            withheld: None,
         })
     );
     let facts = crossed.append.expect("the derivation appends").facts().to_vec();
@@ -371,7 +371,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         .follow_up,
         FollowUp::Outcome(OutcomeFollowUp::Closed {
             admitted: Some(derived),
-            withheld: false,
+            withheld: None,
         })
     );
     assert_eq!(
@@ -1080,7 +1080,7 @@ fn a_failure_body_under_a_bound_sanitizer_closes_withheld() {
     };
     let withheld = FollowUp::Outcome(OutcomeFollowUp::Closed {
         admitted: None,
-        withheld: true,
+        withheld: Some(crate::transition::Withheld::ByRelease),
     });
 
     let closed = e.handle(&viewing(&e, &log), report()).expect("the failure closes");

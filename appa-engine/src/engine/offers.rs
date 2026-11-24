@@ -33,6 +33,8 @@ impl Engine {
         let stage = views.call_stage(&recorded.subject);
         let role = views.call_role(&recorded.subject);
         let live = match check::evaluate(&contract, &views, &call, &stage, role, &self.context(act))? {
+            // An earlier planner's offer on a block nothing lifts gathers nothing on its way out.
+            CheckOutcome::Block(raw) if raw.is_hard() => None,
             CheckOutcome::Block(raw) => {
                 require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw))?;
                 require_atoms(act, plan::plan_atoms(&self.registry, &recorded.plan))?;

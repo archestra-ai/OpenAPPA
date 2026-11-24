@@ -10,9 +10,9 @@ use appa_runtime::api::{
 use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OpenCalls, OutcomeBody, ProposedCall,
-    RefusalClass, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name,
-    is_reserved_tool_name,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes,
+    ProposedCall, RefusalClass, RetryHint, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
+    canonical_tool_name, is_reserved_tool_name,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -40,6 +40,8 @@ enum DispatchResponse {
         /// The ids of the offers `feedback` quotes, for a host that takes one
         /// without reading the text.
         offer_ids: Vec<String>,
+        #[serde(flatten)]
+        refused: Refused,
     },
     Delivered {
         content: String,
@@ -60,6 +62,8 @@ enum CheckResponse {
         /// The ids of the offers `feedback` quotes, for a host that takes one
         /// without reading the text.
         offer_ids: Vec<String>,
+        #[serde(flatten)]
+        refused: Refused,
     },
     Allowed {
         dispatched_tool: String,
@@ -74,6 +78,26 @@ enum CheckResponse {
     },
 }
 
+/// What kind of refusal a block is, as the wire spells it: what decides it, every outcome
+/// it holds, and whether asking again can obtain a missing fact. Absent on a block that
+/// states none.
+#[derive(Serialize)]
+struct Refused {
+    deciding: Option<Outcome>,
+    outcomes: Option<Vec<Outcome>>,
+    retry: Option<RetryHint>,
+}
+
+impl Refused {
+    fn of(outcomes: Option<&Outcomes>) -> Self {
+        Self {
+            deciding: outcomes.map(Outcomes::deciding),
+            outcomes: outcomes.map(|outcomes| outcomes.held().collect()),
+            retry: outcomes.and_then(Outcomes::retry),
+        }
+    }
+}
+
 /// The answer to a spawn proposal that also opened the child.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -83,6 +107,8 @@ enum SpawnResponse {
         /// The ids of the offers `feedback` quotes, for a host that takes one
         /// without reading the text.
         offer_ids: Vec<String>,
+        #[serde(flatten)]
+        refused: Refused,
     },
     Opened {
         child_id: String,
@@ -415,7 +441,16 @@ impl SessionInner {
                 }
                 Ok(Decision::Allowed { call, binding })
             }
-            HookDecision::DenyCall { feedback, offers, .. } => Ok(Decision::Blocked { feedback, offers }),
+            HookDecision::DenyCall {
+                feedback,
+                offers,
+                outcomes,
+                ..
+            } => Ok(Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
+            }),
             HookDecision::PassControl => Ok(Decision::Control {
                 reply: self.execute_remedy(child, &call),
             }),
@@ -462,9 +497,14 @@ impl SessionInner {
         call_id: Option<&str>,
     ) -> Result<String, Failure> {
         encode(match self.decide(child, tool, arguments_json, spawn, call_id)? {
-            Decision::Blocked { feedback, offers } => CheckResponse::Blocked {
+            Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
+            } => CheckResponse::Blocked {
                 feedback,
                 offer_ids: ids(offers),
+                refused: Refused::of(outcomes.as_ref()),
             },
             Decision::Control { reply } => CheckResponse::Control { reply },
             Decision::Allowed { call, binding } => CheckResponse::Allowed {
@@ -482,9 +522,14 @@ impl SessionInner {
             );
         };
         match self.decide(None, tool, arguments_json, false, None)? {
-            Decision::Blocked { feedback, offers } => encode(DispatchResponse::Blocked {
+            Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
+            } => encode(DispatchResponse::Blocked {
                 feedback,
                 offer_ids: ids(offers),
+                refused: Refused::of(outcomes.as_ref()),
             }),
             Decision::Control { reply } => encode(DispatchResponse::Control { reply }),
             Decision::Allowed { call, .. } => {
@@ -557,12 +602,25 @@ impl SessionInner {
             ToolOutcome::Failure { .. } => ("The tool call failed.".to_string(), false),
             ToolOutcome::Indeterminate => ("The tool's outcome is unknown; it may have run.".to_string(), false),
         };
-        let decision = self.event(HookEvent::ToolResult {
+        let decision = match self.event(HookEvent::ToolResult {
             actor: self.actor(child),
             call: pending.call.clone(),
             call_id: call_id.map(str::to_string),
             outcome,
-        })?;
+        }) {
+            Ok(decision) => decision,
+            // A refused report settles nothing: the call stays pending for the host to
+            // report again.
+            Err(failure) => {
+                match call_id {
+                    Some(call_id) => {
+                        self.identified.insert(call_id.to_string(), pending);
+                    }
+                    None => *self.slot(child)? = Some(pending),
+                }
+                return Err(failure);
+            }
+        };
         let (content, disposition) = match decision {
             HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted),
             HookDecision::Ack => (produced, DeliveryDisposition::Sealed),
@@ -669,16 +727,29 @@ impl SessionInner {
             return failed(format!("the child branch {} is already open in this session", child.0));
         }
         let decision = match self.decide(None, &tool, arguments_json, true, None)? {
-            Decision::Blocked { feedback, offers } => match self.declare_return(&offers, return_schema)? {
+            Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
+            } => match self.declare_return(&offers, return_schema)? {
                 Some(declared) => self.decide(None, &tool, declared.arguments.get(), true, None)?,
-                None => Decision::Blocked { feedback, offers },
+                None => Decision::Blocked {
+                    feedback,
+                    offers,
+                    outcomes,
+                },
             },
             decision => decision,
         };
         match decision {
-            Decision::Blocked { feedback, offers } => encode(SpawnResponse::Blocked {
+            Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
+            } => encode(SpawnResponse::Blocked {
                 feedback,
                 offer_ids: ids(offers),
+                refused: Refused::of(outcomes.as_ref()),
             }),
             Decision::Control { reply } => encode(SpawnResponse::Control { reply }),
             Decision::Allowed { call, binding: None } => {
@@ -850,6 +921,7 @@ enum Decision {
     Blocked {
         feedback: String,
         offers: Vec<OfferedRemedy>,
+        outcomes: Option<Outcomes>,
     },
     Allowed {
         call: ProposedCall,

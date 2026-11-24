@@ -465,10 +465,21 @@ pub enum EvidenceRequest {
 pub enum OutcomeFollowUp {
     Closed {
         admitted: Option<ValueBody>,
-        withheld: bool,
+        withheld: Option<Withheld>,
     },
     Resolve(EvidenceRequest),
     Staged(Box<Confined>),
+}
+
+/// Why a closed result stays out of its trajectory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Withheld {
+    /// As its release settled it: a plan withheld the output, or a failure's body sits
+    /// behind the output sanitizer it was released under.
+    ByRelease,
+    /// The output sanitizer its release bound is gone from this revision, or no longer
+    /// derives this result: nothing left reaches it.
+    ByRevision,
 }
 
 /// One released call: the dispatch the engine opened for it, and the canonical call to invoke.
@@ -1995,7 +2006,12 @@ impl<'a> Sequence<'a> {
                         return Ok(bundled);
                     }
                 }
-                if !menu.contains(plan) && block.is_hard() {
+                // Only a check the pinned evidence answers in full reached an earlier planner's
+                // menu: the `blocked` mark closing it here never planned anything.
+                if !menu.contains(plan)
+                    && block.is_hard()
+                    && crate::check::decides_asking(&contract, views, candidate, &stage, &context)
+                {
                     let legacy = crate::plan::hard_block_menu(self.engine.registry(), views, blocked(), &context)
                         .map_err(TransitionRefusal::from)?;
                     if legacy.contains(plan) {

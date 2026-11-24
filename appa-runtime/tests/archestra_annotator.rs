@@ -150,29 +150,46 @@ mod served {
         assert_eq!(body["kind"], "annotation");
     }
 
-    /// An endpoint that keeps failing is no answer: the hook refuses and the trajectory
-    /// records nothing.
+    /// An endpoint that keeps failing is no answer: the call is denied on a missing fact a
+    /// later try may obtain, and the trajectory records nothing.
     #[tokio::test]
-    async fn a_failing_archestra_endpoint_refuses_the_hook_and_appends_nothing() {
+    async fn a_failing_archestra_endpoint_denies_on_a_missing_fact_and_appends_nothing() {
         let (url, requests) = serve_host(StatusCode::INTERNAL_SERVER_ERROR, "boom".to_string()).await;
         let runtime = open(url).await;
         let baseline = audit_len(&runtime);
 
         let decision = propose(&runtime, fetch()).await;
-        assert!(matches!(decision, HookDecision::Refuse { .. }), "got {decision:?}");
+        let HookDecision::DenyCall { outcomes, .. } = decision else {
+            panic!("got {decision:?}");
+        };
+        assert_eq!(
+            outcomes,
+            Some(appa_runtime_api::Outcomes::MissingFact(
+                appa_runtime_api::RetryHint::Later
+            ))
+        );
         assert!(requests.lock().unwrap().len() > 1, "a 5xx is retried");
         assert_eq!(audit_len(&runtime), baseline);
     }
 
-    /// The shared mandate check reads the endpoint's answer like any model's.
+    /// The shared mandate check reads the endpoint's answer like any model's: an answer
+    /// outside it is malformed, a missing fact only a repair obtains.
     #[tokio::test]
-    async fn an_archestra_answer_outside_the_mandate_refuses_the_hook() {
+    async fn an_archestra_answer_outside_the_mandate_denies_on_a_missing_fact() {
         let (url, _) = serve_host(StatusCode::OK, annotation("no-such-rank")).await;
         let runtime = open(url).await;
         let baseline = audit_len(&runtime);
 
         let decision = propose(&runtime, fetch()).await;
-        assert!(matches!(decision, HookDecision::Refuse { .. }), "got {decision:?}");
+        let HookDecision::DenyCall { outcomes, .. } = decision else {
+            panic!("got {decision:?}");
+        };
+        assert_eq!(
+            outcomes,
+            Some(appa_runtime_api::Outcomes::MissingFact(
+                appa_runtime_api::RetryHint::AfterRepair
+            ))
+        );
         assert_eq!(audit_len(&runtime), baseline);
     }
 

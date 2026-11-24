@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_runtime_api::{
-    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, Outcome, OutcomeBody,
+    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, Outcome, OutcomeBody, Outcomes,
     ProposedCall, ToolOutcome, TrajectoryId,
 };
 use serde::Serialize;
@@ -711,6 +711,12 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
         },
     };
     match hooks::handle(runtime, event).await {
+        // A fact the result needs went unobtained: the dispatch stays open, so the step did
+        // not run.
+        HookDecision::ReplaceOutput {
+            output,
+            outcomes: Some(Outcomes::MissingFact(_)),
+        } => Err(output),
         HookDecision::Ack | HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } => Ok(()),
         HookDecision::Refuse { detail, .. } => Err(detail),
         HookDecision::Block { reason, .. } => Err(reason),

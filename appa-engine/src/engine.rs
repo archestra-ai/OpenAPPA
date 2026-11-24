@@ -22,7 +22,7 @@ use crate::transition::{
     Blocked, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision, EngineEvent, EngineView, Evidence,
     EvidenceRequest, FollowUp, ForkBinding, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody, OutcomeFollowUp,
     ProposalBatch, ProposalBatchId, Released, Sequence, Settled, SettledOutcome, SpawnMark, ToolOutcome, ToolReport,
-    TransitionError, TransitionRefusal, ValidatedFactBatch,
+    TransitionError, TransitionRefusal, ValidatedFactBatch, Withheld,
 };
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
@@ -623,6 +623,13 @@ impl Engine {
             return Ok(stale());
         }
         match &recorded.subject {
+            // An offer an earlier planner left on a call now hard-blocked consults no one: its
+            // execution is refused, and nothing it names may see the call first.
+            crate::basis::SubjectKey::Call { .. }
+                if self.hard_blocked(&views, &recorded.subject, &self.offer_call(&views, recorded)) =>
+            {
+                Ok(stale())
+            }
             crate::basis::SubjectKey::Call { .. } => match recorded.plan.hop() {
                 Some(sanitizer) => Ok(OfferConsult::Rewrite {
                     sanitizer: sanitizer.clone(),
@@ -963,6 +970,22 @@ impl Engine {
             &context,
         )
         .expect("engine test plans read no undecided symbolic audience"))
+    }
+
+    /// Whether the call a subject is about is a hard block now. A `blocked` mark decides the
+    /// check without membership, so an unanswered context tells.
+    fn hard_blocked(&self, views: &Views, subject: &crate::basis::SubjectKey, call: &ResolvedCall) -> bool {
+        let Ok(contract) = self.validated_contract(call) else {
+            return false;
+        };
+        let unanswered = Expansions::default();
+        let audience = self.registry.audience();
+        let context = MembershipContext::new(audience.within_assertions(), audience.providers(), &unanswered);
+        let (stage, role) = (views.call_stage(subject), views.call_role(subject));
+        matches!(
+            check::evaluate(&contract, views, call, &stage, role, &context),
+            Ok(CheckOutcome::Block(raw)) if raw.is_hard()
+        )
     }
 
     /// Re-check the call a subject is about against current state, at the subject's stage and

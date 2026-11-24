@@ -2916,6 +2916,39 @@ async fn a_sanitizer_with_no_answer_withholds_the_crossing_and_keeps_the_child_l
     );
 }
 
+/// A return sanitizer the deciding revision no longer registers cannot apply, and no answer
+/// changes that: the return is a hard block, and the child stays live to return again.
+#[tokio::test]
+async fn a_return_sanitizer_a_revision_dropped_is_a_hard_block() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let runtime =
+        Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let (mut session, child_id) = sanitized_child(&runtime);
+    let child = open_child_via(
+        &mut session,
+        fetch(serde_json::json!({})),
+        child_id.clone(),
+        "scrub",
+        crate::engine::LabelSpelling::default(),
+    )
+    .await;
+    runtime
+        .reload(config_from(
+            "[policy]\nversion = 2\n\n[[policy.tool]]\nname = \"fetch\"\n\n[policy.deployment]\ncontext_control = true\n",
+        ))
+        .expect("the revision loads");
+    let blocked = child
+        .on_child_end(Some("raw with pii".to_string()))
+        .await
+        .expect("the withheld return is delivered");
+    let crate::api::ChildReturnDecision::Blocked { outcomes, .. } = blocked else {
+        panic!("an unapplicable sanitizer must withhold the crossing, got {blocked:?}");
+    };
+    assert_eq!(outcomes, appa_runtime_api::Outcomes::HardBlock);
+    assert!(runtime.live(&root(), &child_id).is_ok());
+}
+
 const ATTESTED_CHILD: &str = r#"
 version = 2
 
@@ -3463,13 +3496,28 @@ async fn a_parent_that_declared_a_lower_floor_takes_the_sanitized_return_and_nar
     );
 }
 
+/// [`NARROWING`] without its sanitizer.
+const UNSANITIZED: &str = r#"
+version = 2
+
+[[policy.tool]]
+name = "leak"
+parameters = { type = "object", properties = { q = { type = "string" } } }
+delta = { audience = ["insider"] }
+
+[policy.deployment]
+confined_results = ["leak"]
+"#;
+
+/// A revision that drops the output sanitizer a dispatch was released under leaves nothing
+/// that reaches its result: the withheld result is a hard block, not an ordinary replacement.
 #[tokio::test]
-async fn a_bound_sanitizer_no_answer_withholds_and_stays_retryable() {
+async fn a_result_whose_bound_sanitizer_a_revision_dropped_is_a_hard_block() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let url = stub(serde_json::json!(42)).await;
+    let url = stub(serde_json::json!({"body": "unused"})).await;
     let runtime =
         Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
-    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
     assert!(matches!(
         session
             .on_tool_call(leak(), false)
@@ -3477,25 +3525,98 @@ async fn a_bound_sanitizer_no_answer_withholds_and_stays_retryable() {
             .expect("the block is delivered"),
         ToolCallDecision::Deny { .. },
     ));
-    let decision = run_sanitize_offer(&runtime, &mut session).await;
-    let ToolResultDecision::Replace {
-        placeholder,
-        presentation,
-    } = decision
+    let quoted = runtime
+        .minted_offers(&root(), &root())
+        .into_iter()
+        .find(|offer| {
+            matches!(
+                runtime.offer_kind(&root(), offer),
+                Some(crate::api::OfferKind::Sanitizer { .. })
+            )
+        })
+        .expect("the block surfaced a sanitize offer");
+    let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+    assert!(matches!(
+        session
+            .on_remedy(offer, RemedyArguments::default(), None, None)
+            .await
+            .expect("the offer executes"),
+        RemedyDecision::Authorized { .. }
+    ));
+    assert!(matches!(
+        session
+            .on_tool_call(leak(), false)
+            .await
+            .expect("the re-proposal resumes"),
+        ToolCallDecision::Allow { spawn: None, .. }
+    ));
+    runtime
+        .reload(config_from(&format!("[policy]\n{UNSANITIZED}")))
+        .expect("the revision loads");
+    let ToolResultDecision::Replace { presentation, .. } = session
+        .on_tool_result(
+            leak(),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("raw with pii".to_string()),
+            },
+        )
+        .await
+        .expect("the result closes")
     else {
         panic!("the raw must be withheld");
     };
-    assert!(!placeholder.contains("pii"), "the raw body never reaches the model");
     assert_eq!(
         presentation.and_then(|presentation| presentation.outcomes),
-        Some(appa_runtime_api::Outcomes::MissingFact(
+        Some(appa_runtime_api::Outcomes::HardBlock),
+    );
+}
+
+#[tokio::test]
+async fn a_bound_sanitizer_no_answer_withholds_alike_for_every_class() {
+    let malformed = stub(serde_json::json!(42)).await;
+    let unreachable = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        format!("http://{}/", listener.local_addr().expect("the port has an address"))
+    };
+    let mut seen = Vec::new();
+    for url in [malformed, unreachable] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+        assert!(matches!(
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the block is delivered"),
+            ToolCallDecision::Deny { .. },
+        ));
+        let ToolResultDecision::Replace {
+            placeholder,
+            presentation,
+        } = run_sanitize_offer(&runtime, &mut session).await
+        else {
+            panic!("the raw must be withheld");
+        };
+        assert!(
+            runtime.open_dispatches(&root(), &root()).pop().is_some(),
+            "a no-answer sanitizer leaves the dispatch open so the return may be retried",
+        );
+        seen.push((placeholder, presentation.and_then(|presentation| presentation.outcomes)));
+    }
+    let [(malformed, malformed_outcomes), (unreachable, unreachable_outcomes)] = &seen[..] else {
+        panic!("both classes were presented");
+    };
+    assert_eq!(
+        malformed_outcomes,
+        &Some(appa_runtime_api::Outcomes::MissingFact(
             appa_runtime_api::RetryHint::AfterRepair
         )),
-        "a malformed derivation is repaired, not waited out",
     );
-    assert!(
-        runtime.open_dispatches(&root(), &root()).pop().is_some(),
-        "a no-answer sanitizer leaves the dispatch open so the return may be retried",
+    assert_eq!(
+        (malformed, malformed_outcomes),
+        (unreachable, unreachable_outcomes),
+        "the failure class of a confined value's sanitizer reaches the model as nothing",
     );
 }
 

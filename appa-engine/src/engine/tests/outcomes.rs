@@ -199,7 +199,7 @@ fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
         closed.follow_up,
         FollowUp::Outcome(OutcomeFollowUp::Closed {
             admitted: Some(body.clone()),
-            withheld: false,
+            withheld: None,
         })
     );
     let facts = closed.append.expect("the close appends").facts().to_vec();
@@ -221,7 +221,7 @@ fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
         repeat.follow_up,
         FollowUp::Outcome(OutcomeFollowUp::Closed {
             admitted: Some(body),
-            withheld: false,
+            withheld: None,
         })
     );
     assert_eq!(
