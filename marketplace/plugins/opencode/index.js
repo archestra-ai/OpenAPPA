@@ -1265,6 +1265,7 @@ var REFUSAL_CLASSES = [
   "principal",
   "outstanding_call",
   "call_id_reused",
+  "return_retry_changed",
   "trajectory_ended",
   "trajectory",
   "dispatch",

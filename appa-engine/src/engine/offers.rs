@@ -613,14 +613,14 @@ impl Engine {
         // the approval that stands is released by proposing its call. A marked spawn's
         // declaration stands beside it.
         let role = views.call_role(&recorded.subject);
-        if views.approval_pending(call, declares_only, role.deferral()) {
+        if views.approval_pending(call, declares_only, role.returns()) {
             return Err(TransitionError::ApprovalPending);
         }
         // A marked spawn's plan declares the child's return policy the parent now supplies; a
         // plan for a declared spawn's other gaps carries the declaration that stands.
         let declared = match role {
             crate::check::CallRole::MarkedSpawn(class) => views
-                .declaration(call, class.deferral)
+                .declaration(call, class.returns)
                 .and_then(|(_, declaration)| declaration.return_policy.clone()),
             crate::check::CallRole::Ordinary => None,
         };

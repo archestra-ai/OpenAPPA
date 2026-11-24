@@ -179,7 +179,13 @@ pub(crate) fn compose_batch<'a>(
                 .into_iter()
                 .filter(|offer| {
                     views.approval(offer).is_some_and(|prepared| {
-                        prepared.return_policy.is_some() == marked && prepared.deferral == proposing.deferral()
+                        prepared.return_policy.is_some() == marked
+                            && prepared.returns == proposing.returns()
+                            && (proposing.spawn() == Some(crate::transition::SpawnKind::Single)
+                                || !prepared
+                                    .return_policy
+                                    .as_ref()
+                                    .is_some_and(ReturnPolicy::holds_below_floor))
                     })
                 })
                 .collect();

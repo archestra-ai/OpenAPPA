@@ -1053,7 +1053,7 @@ async fn a_deferred_spawns_reported_failure_closes_its_dispatch_as_failed() {
 }
 
 fn operation(name: &str) -> Option<appa_runtime_api::ReturnOperation> {
-    Some(appa_runtime_api::ReturnOperation(name.to_string()))
+    Some(appa_runtime_api::ReturnOperation::new(name).expect("an operation is named"))
 }
 
 fn held_records(runtime: &Runtime) -> usize {
@@ -1084,7 +1084,7 @@ fn notices(runtime: &Runtime) -> Vec<crate::api::DeferredReturnNotice> {
         .child_occurrences(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
         .expect("the family reads")
         .into_iter()
-        .map(|occurrence| occurrence.notice)
+        .map(|occurrence| occurrence.notice.expect("a live parent is told of each occurrence"))
         .collect()
 }
 
@@ -1127,12 +1127,13 @@ async fn each_return_a_background_child_makes_without_ending_is_held_at_its_own_
         occurrences(&runtime),
         vec![(0, Pending, operation("op-1")), (1, Pending, operation("op-2"))]
     );
+    let [_, latest] = notices(&runtime).try_into().expect("two occurrences");
     assert_eq!(
         runtime
             .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
             .expect("the family reads"),
-        None,
-        "a held return is not the deferral that ends the spawn's child"
+        Some(latest),
+        "the spawn's notice is the latest return awaiting the parent"
     );
     assert!(matches!(child.liveness_of(&child.trajectory), Ok(Liveness::Live)));
 }
@@ -1196,7 +1197,7 @@ async fn held_returns_settle_out_of_order_and_repeated_settlements_replay() {
 }
 
 #[tokio::test]
-async fn a_stop_retried_with_other_words_after_its_deferral_is_refused() {
+async fn a_child_ended_by_its_deferral_repeats_it_and_refuses_other_words_as_ended() {
     let Deployed { runtime, .. } = deployed(false);
     let (child, _) = deferred_answer(&runtime).await;
     assert!(matches!(
@@ -1204,16 +1205,26 @@ async fn a_stop_retried_with_other_words_after_its_deferral_is_refused() {
         Ok(ChildReturnDecision::Deferred)
     ));
     assert!(matches!(
-        child.on_child_end(Some("another answer".to_string())).await,
-        Err(EventError::ReturnRetryChanged)
+        child.on_child_return("the answer".to_string(), None).await,
+        Ok(ChildReturnDecision::Deferred)
     ));
+    for refused in [
+        child.on_child_end(Some("another answer".to_string())).await,
+        child.on_child_return("another answer".to_string(), None).await,
+        child
+            .on_child_return("the answer".to_string(), operation("op-late"))
+            .await,
+    ] {
+        assert!(matches!(refused, Err(EventError::TrajectoryEnded)), "{refused:?}");
+    }
     assert_eq!(deferred_returns(&runtime), 1);
+    assert_eq!(held_records(&runtime), 0);
 }
 
 #[tokio::test]
 async fn a_spawn_whose_parent_can_decide_records_a_floor_that_holds_what_falls_below_it() {
     let Deployed { runtime, .. } = deployed(false);
-    let decides = || DeclaredReturn::Decides(as_spoken());
+    let decides = || DeclaredReturn::Decides(LabelSpelling::default());
     assert!(matches!(
         session(&runtime)
             .on_spawn_declaring(call("fetch", 1), None, None, decides())
@@ -1233,4 +1244,490 @@ async fn a_spawn_whose_parent_can_decide_records_a_floor_that_holds_what_falls_b
             ..
         })]
     ));
+}
+
+#[tokio::test]
+async fn a_stop_in_a_held_returns_words_freezes_its_own_occurrence_and_ends_the_child() {
+    use crate::api::OccurrenceState::Pending;
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    for answered in [
+        child.on_child_return("the answer".to_string(), None).await,
+        child.on_child_end(Some("the answer".to_string())).await,
+    ] {
+        assert!(matches!(answered, Ok(ChildReturnDecision::Deferred)), "{answered:?}");
+    }
+    assert_eq!(
+        child.liveness_of(&child.trajectory).expect("the log reads"),
+        Liveness::Ended
+    );
+    assert_eq!(occurrences(&runtime), vec![(0, Pending, None), (1, Pending, None)]);
+    assert_eq!(
+        facts(&runtime, |fact| matches!(
+            fact,
+            Fact::ReturnDeferred { held: false, .. }
+        )),
+        1
+    );
+    let [_, terminal] = notices(&runtime).try_into().expect("two occurrences");
+    assert_eq!(
+        runtime
+            .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+            .expect("the family reads"),
+        Some(terminal)
+    );
+}
+
+#[tokio::test]
+async fn an_operation_no_held_return_bound_is_decided_afresh_and_binds_its_own_occurrence() {
+    use crate::api::OccurrenceState::Pending;
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    for op in ["op-1", "op-2"] {
+        let held = child.on_child_return("done".to_string(), operation(op)).await;
+        assert!(matches!(held, Ok(ChildReturnDecision::Deferred)), "{op}: {held:?}");
+    }
+    assert_eq!(
+        occurrences(&runtime),
+        vec![(0, Pending, operation("op-1")), (1, Pending, operation("op-2"))],
+        "the same words under a new operation are a new return"
+    );
+    assert!(matches!(
+        child
+            .on_child_return("done, revised".to_string(), operation("op-2"))
+            .await,
+        Err(EventError::ReturnRetryChanged)
+    ));
+    assert_eq!(
+        EventError::ReturnRetryChanged.class(),
+        appa_runtime_api::RefusalClass::ReturnRetryChanged
+    );
+    assert_eq!(held_records(&runtime), 2);
+}
+
+#[tokio::test]
+async fn a_held_returns_retry_answers_its_occurrence_after_the_child_ended() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("found".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert!(matches!(
+        child.on_child_end(Some("final".to_string())).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert_eq!(
+        child.liveness_of(&child.trajectory).expect("the log reads"),
+        Liveness::Ended
+    );
+    let before = (deferred_returns(&runtime), held_records(&runtime));
+    assert!(matches!(
+        child.on_child_return("found".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert!(matches!(
+        child
+            .on_child_return("found, revised".to_string(), operation("op-1"))
+            .await,
+        Err(EventError::ReturnRetryChanged)
+    ));
+    assert_eq!((deferred_returns(&runtime), held_records(&runtime)), before);
+}
+
+#[tokio::test]
+async fn a_crossed_keyed_return_binds_no_operation_and_its_retry_crosses_again() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    // Untainted, each return leaves the parent where it is and crosses at once.
+    for (said, op) in [("turn one", "op-1"), ("turn two", "op-2"), ("turn one", "op-1")] {
+        assert_eq!(
+            child
+                .on_child_return(said.to_string(), operation(op))
+                .await
+                .expect("the return crosses"),
+            ChildReturnDecision::Returned {
+                value: said.to_string()
+            }
+        );
+    }
+    assert_eq!((crossings(&runtime), held_records(&runtime)), (3, 0));
+}
+
+#[tokio::test]
+async fn the_answer_after_a_steer_and_an_acceptance_is_a_return_of_its_own() {
+    let Deployed { runtime, .. } = deployed(false);
+    let fork = binding(deferring(&runtime, call("fetch", 1), "toolu-1").await);
+    let child_id = TrajectoryId("cc:root:child".to_string());
+    let child = session(&runtime)
+        .on_child_start(child_id.clone(), SpawnRef::Binding(fork.clone()))
+        .expect("the fork binds and the child opens");
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("done".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    session(&runtime)
+        .on_child_start(child_id, SpawnRef::Binding(fork))
+        .expect("the parent steers its child");
+    let [first] = notices(&runtime).try_into().expect("one occurrence");
+    settling(&runtime, &parent(), &first.accept).await;
+    // The parent took the child's label, so the steered errand's answer crosses as its own return.
+    assert_eq!(
+        child
+            .on_child_return("done".to_string(), operation("op-2"))
+            .await
+            .expect("the return crosses"),
+        ChildReturnDecision::Returned {
+            value: "done".to_string()
+        }
+    );
+    assert_eq!(crossings(&runtime), 2);
+}
+
+#[tokio::test]
+async fn a_return_made_through_child_return_reads_back_as_the_notice_through_the_spawn_result() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    // An in-process subagent offers its final answer through child_return, and retries it.
+    for _ in 0..2 {
+        assert!(matches!(
+            child.on_child_return("the answer".to_string(), None).await,
+            Ok(ChildReturnDecision::Deferred)
+        ));
+    }
+    let presentation = EmbeddedPresentationOptions::default();
+    let notice = runtime
+        .deferred_return(&parent(), "toolu-1", &presentation)
+        .expect("the family reads")
+        .expect("the parent is told its subagent's answer waits for its decision");
+    let before = admitted(&runtime);
+    let decided = session(&runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            spoken("the answer"),
+            Some(child.trajectory.clone()),
+            Some("the answer".to_string()),
+        )
+        .await
+        .expect("the spawn's result is decided");
+    assert_eq!(
+        decided,
+        SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+            placeholder: notice.feedback.clone(),
+            presentation: None,
+        })
+    );
+    assert_eq!(admitted(&runtime), before);
+    assert_eq!(
+        settling(&runtime, &parent(), &notice.accept).await,
+        RemedyOutcome::Returned {
+            value: "the answer".to_string()
+        }
+    );
+    assert_eq!(
+        runtime
+            .deferred_return(&parent(), "toolu-1", &presentation)
+            .expect("the family reads"),
+        Some(notice),
+        "the spawn's result keeps the notice after the decision"
+    );
+}
+
+#[tokio::test]
+async fn a_held_return_whose_parent_ended_can_never_be_settled() {
+    use crate::api::OccurrenceState::ParentEnded;
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    let fork = binding(
+        child
+            .on_spawn_declaring(
+                call("fetch", 2),
+                Some("toolu-g".to_string()),
+                None,
+                DeclaredReturn::Deferred,
+            )
+            .await,
+    );
+    let grandchild = child
+        .on_child_start(TrajectoryId("cc:root:grandchild".to_string()), SpawnRef::Binding(fork))
+        .expect("the grandchild opens");
+    tainted(&runtime, &grandchild).await;
+    assert!(matches!(
+        grandchild.on_child_return("found".to_string(), None).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    let acting = Actor {
+        root: root(),
+        child: Some(child.trajectory.clone()),
+    };
+    let presentation = EmbeddedPresentationOptions::default();
+    let pending = runtime
+        .child_occurrences(&acting, "toolu-g", &presentation)
+        .expect("the family reads");
+    let notice = pending[0].notice.clone().expect("a live parent is told of its return");
+    assert!(matches!(
+        child.on_child_end(None).await,
+        Ok(ChildReturnDecision::NoValue)
+    ));
+    let ended = runtime
+        .child_occurrences(&acting, "toolu-g", &presentation)
+        .expect("the family reads");
+    assert_eq!(
+        ended
+            .iter()
+            .map(|occurrence| (occurrence.state, occurrence.notice.is_none()))
+            .collect::<Vec<_>>(),
+        vec![(ParentEnded, true)]
+    );
+    assert!(!matches!(
+        settling(&runtime, &acting, &notice.accept).await,
+        RemedyOutcome::Returned { .. }
+    ));
+}
+
+/// A policy whose chain names a middle rank, and a read that lowers trust to it.
+const MIDDLE: &str = r#"
+[policy]
+version = 2
+trust_chain = ["suspicious", "middle", "trusted"]
+
+[[policy.tool]]
+name = "fetch"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = {}
+
+[[policy.tool]]
+name = "middling"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = { trust = "middle" }
+"#;
+
+/// [`MIDDLE`] without its middle rank: a child at it falls to the lowest rank, and a floor at
+/// it rises to the highest.
+const NO_MIDDLE: &str = r#"
+[policy]
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[[policy.tool]]
+name = "fetch"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = {}
+
+[[policy.tool]]
+name = "middling"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = { trust = "suspicious" }
+"#;
+
+/// A child spawned under `declares`, floored at the middle rank, which read down to it; then
+/// the policy drops that rank, so whatever the child returns stands below its floor.
+async fn below_its_floor(declares: DeclaredReturn) -> (Deployed, Session) {
+    let deployed = deployed_serving(&format!("{MIDDLE}{DEPLOYMENT}"));
+    let fork = binding(
+        session(&deployed.runtime)
+            .on_spawn_declaring(call("fetch", 1), Some("toolu-1".to_string()), None, declares)
+            .await,
+    );
+    let child = session(&deployed.runtime)
+        .on_child_start(TrajectoryId("cc:root:child".to_string()), SpawnRef::Binding(fork))
+        .expect("the fork binds and the child opens");
+    let read = call("middling", 1);
+    let blocked = child
+        .on_tool_call_identified(read.clone(), Some("toolu-c1".to_string()), None, None)
+        .await
+        .expect("the child's call is judged");
+    let ToolCallDecision::Deny { offers, .. } = &blocked else {
+        panic!("the narrowing blocks the child's call: {blocked:?}");
+    };
+    let log = deployed.runtime.inner.log(&root()).expect("the log reads");
+    let narrowing = crate::engine::resolve_rendered(&log, &OfferId(offers[0].id.clone())).expect("the offer resolves");
+    assert!(matches!(
+        child.on_remedy(narrowing, RemedyArguments::default(), None, None).await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    assert!(matches!(
+        child
+            .on_tool_call_identified(read.clone(), Some("toolu-c2".to_string()), None, None)
+            .await,
+        Ok(ToolCallDecision::Allow { .. })
+    ));
+    child
+        .on_tool_result_identified(read, Some("toolu-c2".to_string()), spoken("middling"))
+        .await
+        .expect("the result is admitted");
+    deployed
+        .runtime
+        .reload(deployed.config(&format!("{NO_MIDDLE}{DEPLOYMENT}")))
+        .expect("the policy reloads");
+    (deployed, child)
+}
+
+fn middle_floor() -> LabelSpelling {
+    LabelSpelling {
+        trust: Some("middle".to_string()),
+        audience: None,
+    }
+}
+
+#[tokio::test]
+async fn a_return_below_a_deciding_spawns_floor_is_held_accepted_and_its_stop_ends_the_child() {
+    use crate::api::OccurrenceState::{Accepted, Pending};
+    let (deployed, child) = below_its_floor(DeclaredReturn::Decides(middle_floor())).await;
+    let runtime = &deployed.runtime;
+    assert!(matches!(
+        child.on_child_return("found".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert_eq!((crossings(runtime), held_records(runtime)), (0, 1));
+    let [held] = notices(runtime).try_into().expect("one occurrence");
+    assert_eq!(
+        settling(runtime, &parent(), &held.accept).await,
+        RemedyOutcome::Returned {
+            value: "found".to_string()
+        }
+    );
+    // The parent took the child's label: its stop crosses, and the child ends.
+    assert_eq!(
+        child
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect("the stop crosses"),
+        ChildReturnDecision::Returned {
+            value: "done".to_string()
+        }
+    );
+    assert_eq!(occurrences(runtime), vec![(0, Accepted, operation("op-1"))]);
+    assert_eq!(crossings(runtime), 2);
+
+    let (deployed, child) = below_its_floor(DeclaredReturn::Decides(middle_floor())).await;
+    let runtime = &deployed.runtime;
+    assert!(matches!(
+        child.on_child_end(Some("final".to_string())).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    assert_eq!(
+        child.liveness_of(&child.trajectory).expect("the log reads"),
+        Liveness::Ended
+    );
+    assert_eq!(occurrences(runtime), vec![(0, Pending, None)]);
+    assert!(
+        runtime
+            .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
+            .expect("the family reads")
+            .is_some(),
+        "the stop's deferral is the spawn's notice"
+    );
+}
+
+#[tokio::test]
+async fn a_return_below_a_plain_spawns_floor_is_refused_and_nothing_is_held() {
+    let (deployed, child) = below_its_floor(DeclaredReturn::Arguments(RemedyArguments {
+        label: Some(middle_floor()),
+        return_schema: None,
+    }))
+    .await;
+    let refused = child.on_child_return("found".to_string(), operation("op-1")).await;
+    assert!(
+        matches!(refused, Ok(ChildReturnDecision::Blocked { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(deferred_returns(&deployed.runtime), 0);
+}
+
+#[tokio::test]
+async fn a_deciding_spawn_whose_return_crossed_delivers_its_result_as_a_plain_spawn_does() {
+    let delivered = |declares: DeclaredReturn| async move {
+        let Deployed { runtime, .. } = deployed(false);
+        let fork = binding(
+            session(&runtime)
+                .on_spawn_declaring(call("fetch", 1), Some("toolu-1".to_string()), None, declares)
+                .await,
+        );
+        let child = session(&runtime)
+            .on_child_start(TrajectoryId("cc:root:child".to_string()), SpawnRef::Binding(fork))
+            .expect("the fork binds and the child opens");
+        let stopped = child
+            .on_child_end(Some("done".to_string()))
+            .await
+            .expect("the stop is judged");
+        let result = session(&runtime)
+            .on_spawn_result_identified(
+                call("fetch", 1),
+                Some("toolu-1".to_string()),
+                spoken("done"),
+                Some(child.trajectory.clone()),
+                Some("done".to_string()),
+            )
+            .await;
+        (stopped, result.map_err(|error| error.to_string()), admitted(&runtime))
+    };
+    let plain = delivered(DeclaredReturn::Arguments(as_spoken())).await;
+    assert_eq!(
+        plain.0,
+        ChildReturnDecision::Returned {
+            value: "done".to_string()
+        }
+    );
+    assert_eq!(
+        delivered(DeclaredReturn::Decides(LabelSpelling::default())).await,
+        plain
+    );
+}
+
+#[tokio::test]
+async fn a_child_under_a_floor_of_its_own_cannot_spawn_a_deciding_subagent() {
+    let Deployed { runtime, .. } = deployed(false);
+    let fork = binding(declaring(&runtime, call("fetch", 1), "toolu-1", as_spoken()).await);
+    let child = session(&runtime)
+        .on_child_start(TrajectoryId("cc:root:child".to_string()), SpawnRef::Binding(fork))
+        .expect("the fork binds and the child opens");
+    let deciding = child
+        .on_spawn_declaring(
+            call("fetch", 3),
+            Some("toolu-3".to_string()),
+            None,
+            DeclaredReturn::Decides(LabelSpelling::default()),
+        )
+        .await;
+    assert!(matches!(deciding, Ok(ToolCallDecision::Deny { .. })), "{deciding:?}");
+    assert!(
+        !fork_returns(&runtime).iter().any(ReturnPolicy::holds_below_floor),
+        "no fork holds what falls below its floor"
+    );
+}
+
+#[tokio::test]
+async fn a_deciding_spawns_own_result_admits_nothing_where_a_plain_spawns_does() {
+    let admits = |declares: DeclaredReturn| async move {
+        let Deployed { runtime, .. } = deployed(false);
+        let fork = binding(
+            session(&runtime)
+                .on_spawn_declaring(call("fetch", 1), Some("toolu-1".to_string()), None, declares)
+                .await,
+        );
+        let child = session(&runtime)
+            .on_child_start(TrajectoryId("cc:root:child".to_string()), SpawnRef::Binding(fork))
+            .expect("the fork binds and the child opens");
+        let before = admitted(&runtime);
+        session(&runtime)
+            .on_spawn_result_identified(
+                call("fetch", 1),
+                Some("toolu-1".to_string()),
+                spoken("the spawn's own words"),
+                Some(child.trajectory.clone()),
+                None,
+            )
+            .await
+            .expect("the spawn's result is decided");
+        admitted(&runtime) - before
+    };
+    assert_eq!(admits(DeclaredReturn::Arguments(as_spoken())).await, 1);
+    assert_eq!(admits(DeclaredReturn::Decides(LabelSpelling::default())).await, 0);
 }

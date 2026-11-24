@@ -10,8 +10,8 @@ type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 const REFUSAL_CLASSES = [
   'storage', 'untrusted_log', 'policy_unavailable', 'policy_moved', 'legacy_family', 'inventory_refused',
   'engine_invariant', 'contended', 'launch_deciding', 'resolution_diverged', 'annotation_refused',
-  'undeclared_tool', 'undeclared_spawn', 'peer_message', 'principal', 'outstanding_call', 'call_id_reused', 'trajectory_ended',
-  'trajectory', 'dispatch', 'remedy', 'spawn_not_taken', 'spawn',
+  'undeclared_tool', 'undeclared_spawn', 'peer_message', 'principal', 'outstanding_call', 'call_id_reused',
+  'return_retry_changed', 'trajectory_ended', 'trajectory', 'dispatch', 'remedy', 'spawn_not_taken', 'spawn',
 ] as const
 
 type RefusalClass = (typeof REFUSAL_CLASSES)[number]

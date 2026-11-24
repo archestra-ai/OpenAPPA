@@ -51,25 +51,22 @@ pub(in crate::api) fn reviews(
     reviews
 }
 
-/// The return and the decision a reference names among the deferred returns one parent owns.
+/// The return and the decision a reference names, where `owner` owns that return.
 pub(in crate::api) fn referenced_return(
-    owned: &[crate::engine::DeferredReturn],
+    context: &Decided<'_>,
+    owner: &TrajectoryId,
     reference: &ReturnReference,
 ) -> Option<(appa_engine::value::ChildReturnId, ReturnDecision)> {
-    owned.iter().find_map(|deferred| {
-        [ReturnDecision::Accept, ReturnDecision::Discard]
-            .into_iter()
-            .find(|decision| ReturnReference::of(&deferred.id, *decision) == *reference)
-            .map(|decision| (deferred.id.clone(), decision))
-    })
+    let (id, decision) = context.log.settlement(&reference.digest())?;
+    context
+        .engine()
+        .deferred_return(context.view, owner, id)
+        .map(|_| (id.clone(), decision))
 }
 
 impl Session {
     pub(in crate::api) fn owns_return(&self, reference: &ReturnReference) -> Result<bool, EventError> {
-        self.with_view(|context| {
-            let owned = context.engine().deferred_returns(context.view, &self.trajectory);
-            Ok(referenced_return(&owned, reference).is_some())
-        })
+        self.with_view(|context| Ok(referenced_return(context, &self.trajectory, reference).is_some()))
     }
 
     pub(in crate::api) fn deferred_return(
@@ -97,17 +94,23 @@ impl Session {
             let frozen = context
                 .engine()
                 .child_occurrences(context.view, &self.trajectory, &dispatch);
+            let ended = context.engine().liveness(context.view, &self.trajectory) == Liveness::Ended;
             Ok(frozen
                 .iter()
-                .map(|deferred| crate::api::ChildOccurrence {
-                    occurrence: deferred.id.occurrence(),
-                    state: match deferred.settled {
-                        None => crate::api::OccurrenceState::Pending,
-                        Some(ReturnDecision::Accept) => crate::api::OccurrenceState::Accepted,
-                        Some(ReturnDecision::Discard) => crate::api::OccurrenceState::Discarded,
-                    },
-                    operation: context.log.held_operation(&deferred.id).cloned(),
-                    notice: self.notice(context, deferred),
+                .map(|deferred| {
+                    let state = match (deferred.settled, ended) {
+                        (None, true) => crate::api::OccurrenceState::ParentEnded,
+                        (None, false) => crate::api::OccurrenceState::Pending,
+                        (Some(ReturnDecision::Accept), _) => crate::api::OccurrenceState::Accepted,
+                        (Some(ReturnDecision::Discard), _) => crate::api::OccurrenceState::Discarded,
+                    };
+                    crate::api::ChildOccurrence {
+                        occurrence: deferred.id.occurrence(),
+                        state,
+                        operation: context.log.held_operation(&deferred.id).cloned(),
+                        notice: (state != crate::api::OccurrenceState::ParentEnded)
+                            .then(|| self.notice(context, deferred)),
+                    }
                 })
                 .collect())
         })
@@ -145,8 +148,8 @@ impl Session {
         let decision = self
             .drive_with_evidence(
                 |context, _| {
-                    let owned = context.engine().deferred_returns(context.view, &trajectory);
-                    let (id, decision) = referenced_return(&owned, reference).ok_or(EventError::UnknownOffer)?;
+                    let (id, decision) =
+                        referenced_return(context, &trajectory, reference).ok_or(EventError::UnknownOffer)?;
                     Ok(EngineEvent::SettleReturn {
                         trajectory: trajectory.clone(),
                         id,

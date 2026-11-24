@@ -98,8 +98,8 @@ pub(super) struct Opening<'a> {
     invocation: Option<appa_eventlog::InvocationNonce>,
     applies: Option<&'a AheadClaim<'a>>,
     took: Option<&'a Took>,
-    /// The host's identity for a child's return without ending, which a deferral binds.
-    operation: Option<&'a ReturnOperation>,
+    /// A child's return without ending the host named by an operation.
+    keyed: Option<KeyedReturn<'a>>,
 }
 
 /// Where a spawn's proposal leaves the declaration its call or invocation durably took, as the
@@ -327,20 +327,22 @@ impl Decided<'_> {
         ahead: Option<&AheadState>,
     ) -> Result<Option<appa_eventlog::HostObservation>, EventError> {
         let trajectory = &self.session.trajectory;
-        if let Some(operation) = opening.operation
+        // A keyed return's operation is bound by the occurrence it is held at, in the same step
+        // that found it unbound; a return that crossed binds nothing.
+        if let Some(keyed) = opening.keyed
             && let Some((child, id)) = facts.iter().find_map(|fact| match fact {
-                appa_engine::fact::Fact::ReturnDeferred { trajectory, id, .. } => Some((trajectory, id)),
+                appa_engine::fact::Fact::ReturnDeferred {
+                    trajectory,
+                    id,
+                    held: true,
+                    ..
+                } => Some((trajectory, id)),
                 _ => None,
             })
         {
-            // One operation names one occurrence: a retry that read the log before the first
-            // attempt committed meets the binding here and is answered from it.
-            if self.log.held_return(child, operation).is_some() {
-                return Err(EventError::ReturnRetryChanged);
-            }
             return Ok(Some(appa_eventlog::HostObservation::ReturnHeld {
                 trajectory: child.clone(),
-                operation: operation.clone(),
+                operation: keyed.operation.clone(),
                 id: id.clone(),
             }));
         }
@@ -420,7 +422,7 @@ impl Decided<'_> {
         // application round.
         if self
             .engine()
-            .declare_ahead(self.view, trajectory, &declared.arguments, BelowFloor::Refuse)
+            .declare_ahead(self.view, trajectory, &declared.arguments, ReturnClass::Planned)
             .is_err()
         {
             return Ok(Judgment::Settled(AheadOutcome::Unfit));
@@ -683,14 +685,35 @@ impl Decided<'_> {
             .map(|binding| binding.dispatch.clone())
     }
 
+    /// What a retry of the held return `keyed` names answers: the occurrence it froze at, for
+    /// the same words, and a refusal for other words. `None` where no held return bound the
+    /// operation, which is then decided afresh.
+    fn held_retry(&self, keyed: KeyedReturn<'_>) -> Result<Option<EngineDecision>, EventError> {
+        let child = &self.session.trajectory;
+        let Some(id) = self.log.held_return(child, keyed.operation) else {
+            return Ok(None);
+        };
+        let parent = self.parent_of(child).ok_or(EventError::NotAChild)?;
+        let held = self
+            .engine()
+            .deferred_return(self.view, &parent, id)
+            .ok_or_else(|| EventError::EngineInvariant("a held operation names no deferral".to_string()))?;
+        match held.body.as_str() == keyed.value {
+            true => Ok(Some(EngineDecision::deliver(Next::PresentToModel(
+                Presentation::Deferred,
+            )))),
+            false => Err(EventError::ReturnRetryChanged),
+        }
+    }
+
     /// How the ended `child` ended: by the deferral at its stop, the one occurrence of it that
     /// is not held, or by its void return.
     pub(super) fn child_end(&self, child: &TrajectoryId) -> super::child::ChildEnd {
         let terminal = self.parent_of(child).and_then(|parent| {
             self.engine()
-                .deferred_returns(self.view, &parent)
+                .deferred_returns_by(self.view, &parent, child)
                 .into_iter()
-                .find(|deferred| deferred.id.child() == child && !deferred.held)
+                .find(|deferred| !deferred.held)
         });
         match terminal {
             Some(deferred) => super::child::ChildEnd::Deferred {
@@ -801,14 +824,14 @@ impl Session {
                 invocation,
                 applies: None,
                 took: Some(took),
-                operation: None,
+                keyed: None,
             },
             Occasion::AheadApply { claim, .. } => Opening {
                 applies: Some(claim),
                 ..Opening::default()
             },
-            Occasion::Return { operation } => Opening {
-                operation: Some(operation),
+            Occasion::Return(keyed) => Opening {
+                keyed: Some(keyed),
                 ..Opening::default()
             },
             Occasion::Report { .. } | Occasion::Remedy { .. } | Occasion::Other => Opening::default(),
@@ -895,6 +918,13 @@ impl Session {
                 view: &view,
                 log: &log,
             };
+            // A retry of a held return is known by its operation alone, whatever the child did
+            // since: it is answered before the child's liveness or its open calls are read.
+            if let Some(keyed) = opening.keyed
+                && let Some(retried) = context.held_retry(keyed)?
+            {
+                return Ok(retried);
+            }
             if entering {
                 match policy.engine().liveness(&view, &self.trajectory) {
                     Liveness::Ended => return Err(EventError::TrajectoryEnded),

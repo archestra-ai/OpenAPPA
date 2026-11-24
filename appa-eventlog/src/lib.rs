@@ -80,6 +80,7 @@ use std::time::{Duration, SystemTime};
 use appa_engine::engine::StampedBatch;
 pub use appa_engine::fact::Fact;
 use appa_engine::profile::{PolicyFileKey, PolicyRevision};
+use appa_engine::transition::ReturnDecision;
 pub use appa_engine::value::TrajectoryId;
 use appa_engine::value::{ChildReturnId, DispatchId};
 use appa_runtime_api::{
@@ -206,6 +207,55 @@ struct LogData {
     basis: u64,
     policy_file: Vec<u8>,
     host: Vec<HostRecord>,
+    /// Each held return a host operation named, both ways, as the batches decode.
+    held: HeldReturns,
+    /// Each decision on each deferred return, by the digest that names it.
+    settlements: std::collections::BTreeMap<[u8; 8], (ChildReturnId, ReturnDecision)>,
+}
+
+/// The held returns host operations named: one occurrence per operation of a child, and one
+/// operation per occurrence.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct HeldReturns {
+    by_operation: std::collections::BTreeMap<(TrajectoryId, ReturnOperation), ChildReturnId>,
+    by_id: std::collections::BTreeMap<ChildReturnId, ReturnOperation>,
+}
+
+impl HeldReturns {
+    /// The binding `observation` makes, judged against the batch it is written in: a
+    /// `ReturnHeld` names the held deferral of that batch at its occurrence, and an operation and
+    /// an occurrence no earlier binding names.
+    fn binding<'o>(
+        &self,
+        facts: &[Fact],
+        observation: Option<&'o HostObservation>,
+    ) -> Result<Option<(&'o TrajectoryId, &'o ReturnOperation, &'o ChildReturnId)>, &'static str> {
+        let Some(HostObservation::ReturnHeld {
+            trajectory,
+            operation,
+            id,
+        }) = observation
+        else {
+            return Ok(None);
+        };
+        let held = facts.iter().any(|fact| {
+            matches!(fact, Fact::ReturnDeferred { trajectory: child, id: frozen, held: true, .. }
+                if child == trajectory && frozen == id)
+        });
+        if !held {
+            return Err("a held return's operation names no held deferral of its own batch");
+        }
+        if self.by_operation.contains_key(&(trajectory.clone(), operation.clone())) || self.by_id.contains_key(id) {
+            return Err("a held return's operation, or its occurrence, is already bound");
+        }
+        Ok(Some((trajectory, operation, id)))
+    }
+
+    fn bind(&mut self, (trajectory, operation, id): (&TrajectoryId, &ReturnOperation, &ChildReturnId)) {
+        self.by_operation
+            .insert((trajectory.clone(), operation.clone()), id.clone());
+        self.by_id.insert(id.clone(), operation.clone());
+    }
 }
 
 /// One thing a harness observed or did, recorded beside the engine's facts.
@@ -530,29 +580,25 @@ impl Log {
             })
     }
 
-    /// The bound calls the host reported finished, as (trajectory, call id).
     /// The occurrence the child `trajectory`'s return under `operation` froze at, if one did.
     pub fn held_return(&self, trajectory: &TrajectoryId, operation: &ReturnOperation) -> Option<&ChildReturnId> {
-        self.data.host.iter().find_map(|record| match &record.observation {
-            HostObservation::ReturnHeld {
-                trajectory: child,
-                operation: recorded,
-                id,
-            } if child == trajectory && recorded == operation => Some(id),
-            _ => None,
-        })
+        self.data
+            .held
+            .by_operation
+            .get(&(trajectory.clone(), operation.clone()))
     }
 
     /// The host operation the return frozen at `id` was made under, if the host named one.
     pub fn held_operation(&self, id: &ChildReturnId) -> Option<&ReturnOperation> {
-        self.data.host.iter().find_map(|record| match &record.observation {
-            HostObservation::ReturnHeld {
-                operation, id: held, ..
-            } if held == id => Some(operation),
-            _ => None,
-        })
+        self.data.held.by_id.get(id)
     }
 
+    /// The deferred return and the decision a settlement digest names, whoever owns it.
+    pub fn settlement(&self, digest: &[u8; 8]) -> Option<(&ChildReturnId, ReturnDecision)> {
+        self.data.settlements.get(digest).map(|(id, decision)| (id, *decision))
+    }
+
+    /// The bound calls the host reported finished, as (trajectory, call id).
     pub fn settled_calls(&self) -> std::collections::BTreeSet<(&TrajectoryId, &str)> {
         self.data
             .host
@@ -646,7 +692,7 @@ impl From<&AppendError> for StoreErrorClass {
             AppendError::Conflict { .. } => StoreErrorClass::Conflict,
             AppendError::ReadClaimLost => StoreErrorClass::Conflict,
             AppendError::PolicyMoved { .. } => StoreErrorClass::PolicyMoved,
-            AppendError::Unstamped => StoreErrorClass::Malformed,
+            AppendError::Unstamped | AppendError::HeldReturnUnbound(_) => StoreErrorClass::Malformed,
             AppendError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             AppendError::Postgres(_) => StoreErrorClass::Storage,
@@ -749,6 +795,10 @@ pub enum AppendError {
     /// A decided batch names no revision: nothing is written. A replay refuses such a batch.
     #[error("a decided batch names no policy revision")]
     Unstamped,
+    /// A `ReturnHeld` binds nothing its batch holds, or what it binds is already bound: nothing
+    /// is written.
+    #[error("{0}")]
+    HeldReturnUnbound(&'static str),
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
     #[cfg(feature = "postgres")]
@@ -899,6 +949,11 @@ impl<'a> Batch<'a> {
         if !facts.is_empty() && stamp.is_none() {
             return Err(AppendError::Unstamped);
         }
+        based_on
+            .data
+            .held
+            .binding(facts, observation)
+            .map_err(AppendError::HeldReturnUnbound)?;
         Ok(Batch {
             bytes: encode(facts, observation),
             key: observation.and_then(HostObservation::key),
@@ -2053,6 +2108,73 @@ mod tests {
         let store = memory();
         create(&store, opening(&root())).expect("a fresh root opens");
         store
+    }
+
+    /// A held return's operation binds the held deferral its own batch records, once: neither
+    /// the operation nor the occurrence binds again, on append or on read.
+    #[test]
+    fn a_held_returns_operation_binds_the_held_deferral_of_its_own_batch_once() {
+        let store = opened();
+        let child = TrajectoryId::new("cc:root:child");
+        let id = |occurrence| ChildReturnId::new(child.clone(), occurrence);
+        let operation = |name: &str| ReturnOperation::new(name).expect("an operation is named");
+        let deferral = |occurrence, held| Fact::ReturnDeferred {
+            trajectory: child.clone(),
+            id: id(occurrence),
+            value: appa_engine::value::LabeledValue::new(appa_engine::value::ValueBody::new("x"), Label::top()),
+            held,
+        };
+        let binding = |name: &str, occurrence| HostObservation::ReturnHeld {
+            trajectory: child.clone(),
+            operation: operation(name),
+            id: id(occurrence),
+        };
+        let append = |facts: &[Fact], observation: HostObservation| {
+            let log = store.log(&root()).expect("the log reads");
+            store.append(&log, &decided(facts), Some(&observation))
+        };
+        for (facts, observation) in [
+            (vec![], binding("op-1", 0)),
+            (vec![deferral(0, false)], binding("op-1", 0)),
+            (vec![deferral(1, true)], binding("op-1", 0)),
+        ] {
+            assert!(matches!(
+                append(&facts, observation),
+                Err(AppendError::HeldReturnUnbound(_))
+            ));
+        }
+        append(&[deferral(0, true)], binding("op-1", 0)).expect("the operation binds its held return");
+        for (facts, observation) in [
+            (vec![deferral(1, true)], binding("op-1", 1)),
+            (vec![deferral(0, true)], binding("op-2", 0)),
+        ] {
+            assert!(matches!(
+                append(&facts, observation),
+                Err(AppendError::HeldReturnUnbound(_))
+            ));
+        }
+        let log = store.log(&root()).expect("the log reads");
+        assert_eq!(log.held_return(&child, &operation("op-1")), Some(&id(0)));
+        assert_eq!(log.held_operation(&id(0)), Some(&operation("op-1")));
+        assert_eq!(log.held_return(&child, &operation("op-2")), None);
+
+        {
+            let connection = store.lock();
+            connection
+                .execute(
+                    "INSERT INTO logs (root, seq, facts) VALUES (?1, ?2, ?3)",
+                    params![
+                        root().as_str(),
+                        log.basis() as i64,
+                        encode(&[], Some(&binding("op-3", 1)))
+                    ],
+                )
+                .expect("a stored binding of nothing lands");
+        }
+        assert!(matches!(
+            store.log(&root()),
+            Err(ReadError::Undecodable { seq, .. }) if seq == log.basis()
+        ));
     }
 
     #[test]

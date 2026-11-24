@@ -138,9 +138,11 @@ impl CanonicalDigest {
             Some(mark) => {
                 hasher.update([1u8]);
                 hasher.update(mark.index().to_be_bytes());
-                // Written only when set, so a batch decided before deferral existed keeps its digest.
-                if mark.deferral() {
-                    hasher.update(b"deferral");
+                // Written only when set, so a batch decided before either existed keeps its digest.
+                match mark.returns() {
+                    crate::transition::ReturnClass::Planned => {}
+                    crate::transition::ReturnClass::Deferred => hasher.update(b"deferral"),
+                    crate::transition::ReturnClass::Decides => hasher.update(b"decides"),
                 }
             }
             None => hasher.update([0u8]),
@@ -401,6 +403,23 @@ impl ChildReturnId {
 
     pub fn occurrence(&self) -> u32 {
         self.occurrence
+    }
+
+    /// The digest that names one decision on the deferred return frozen here: a function of
+    /// the return and the decision alone, so every replica and every replay spells it alike.
+    pub fn settlement_digest(&self, decision: crate::transition::ReturnDecision) -> [u8; 8] {
+        let mut hasher = Sha256::new();
+        hasher.update(b"appa/deferred-return\0");
+        hasher.update(self.child.as_str().as_bytes());
+        hasher.update([0]);
+        hasher.update(self.occurrence.to_be_bytes());
+        hasher.update([match decision {
+            crate::transition::ReturnDecision::Accept => 1,
+            crate::transition::ReturnDecision::Discard => 0,
+        }]);
+        let mut digest = [0; 8];
+        digest.copy_from_slice(&hasher.finalize()[..8]);
+        digest
     }
 }
 

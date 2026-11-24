@@ -117,9 +117,9 @@ pub(crate) struct PreparedApproval {
     pub(crate) rulings: Vec<crate::execute::AuthorityEvidence>,
     pub(crate) output: Option<crate::plan::OutputRemedy>,
     pub(crate) return_policy: Option<ReturnPolicy>,
-    /// The deferral class of the proposal this approval was made for: it covers no proposal of
-    /// the other class.
-    pub(crate) deferral: bool,
+    /// The return class of the proposal this approval was made for: it covers no proposal of
+    /// another class.
+    pub(crate) returns: crate::transition::ReturnClass,
     pub(crate) basis: crate::basis::PolicyBasis,
     /// The pinned audience evidence the approval was prepared under: its consumption
     /// releases under it.
@@ -591,12 +591,15 @@ impl Projection {
                 evidence,
             } => {
                 unspent.insert(*offer);
-                let deferral = offers.get(offer).is_some_and(|recorded| match &recorded.subject {
-                    SubjectKey::Call { batch, position, .. } => decided.get(batch).is_some_and(|decided| {
-                        crate::check::CallRole::of(decided.spawn, *position as usize).deferral()
-                    }),
-                    SubjectKey::Approval(_) | SubjectKey::ConfinedResult(_) | SubjectKey::Return(_) => false,
-                });
+                let returns = offers
+                    .get(offer)
+                    .and_then(|recorded| match &recorded.subject {
+                        SubjectKey::Call { batch, position, .. } => decided
+                            .get(batch)
+                            .map(|decided| crate::check::CallRole::of(decided.spawn, *position as usize).returns()),
+                        SubjectKey::Approval(_) | SubjectKey::ConfinedResult(_) | SubjectKey::Return(_) => None,
+                    })
+                    .unwrap_or_default();
                 approvals.insert(
                     *offer,
                     PreparedApproval {
@@ -607,7 +610,7 @@ impl Projection {
                         rulings: rulings.clone(),
                         output: output.clone(),
                         return_policy: return_policy.clone(),
-                        deferral,
+                        returns,
                         basis: *basis,
                         evidence: evidence.clone(),
                     },
@@ -801,14 +804,17 @@ impl Projection {
                     }
                 }
             }
-            // An accepted deferral crosses at the occurrence it froze at, which already counts.
+            // An accepted deferral crosses at the occurrence it froze at, which already counts
+            // and answered the errand it was made in: a steer since still stands unanswered.
             Fact::ChildReturn { id, value, .. } => {
                 child_returns.push_back(ReturnedChild {
                     id: id.clone(),
                     value: value.clone(),
                 });
-                occurred(returns_by, id);
-                resumed_since_return.remove(id.child());
+                if !deferrals.contains_key(id) {
+                    occurred(returns_by, id);
+                    resumed_since_return.remove(id.child());
+                }
                 candidates.remove(&SubjectKey::Return(id.clone()));
             }
             // Every deferral is its own occurrence, counted as it is recorded, so the next return
@@ -1326,16 +1332,21 @@ impl Views<'_> {
     pub(crate) fn declaration(
         &self,
         call: &ResolvedCall,
-        deferral: bool,
+        returns: crate::transition::ReturnClass,
     ) -> Option<(crate::value::OfferId, &PreparedApproval)> {
-        self.current_approvals_for(call, deferral)
+        self.current_approvals_for(call, returns)
             .find(|(_, approval)| approval.declares_only())
     }
 
     /// Would a new approval of this call stand beside the current ones? A call holds one current
     /// approval, and a marked spawn may hold its declaration beside it.
-    pub(crate) fn approval_pending(&self, call: &ResolvedCall, declares_only: bool, deferral: bool) -> bool {
-        self.current_approvals_for(call, deferral)
+    pub(crate) fn approval_pending(
+        &self,
+        call: &ResolvedCall,
+        declares_only: bool,
+        returns: crate::transition::ReturnClass,
+    ) -> bool {
+        self.current_approvals_for(call, returns)
             .any(|(_, standing)| standing.declares_only() == declares_only)
     }
 
@@ -1344,11 +1355,10 @@ impl Views<'_> {
     fn current_approvals_for(
         &self,
         call: &ResolvedCall,
-        deferral: bool,
+        returns: crate::transition::ReturnClass,
     ) -> impl Iterator<Item = (crate::value::OfferId, &PreparedApproval)> {
         self.approvals_for(call).filter(move |(offer, approval)| {
-            approval.deferral == deferral
-                && approval.basis == self.basis_for(&crate::basis::SubjectKey::Approval(*offer))
+            approval.returns == returns && approval.basis == self.basis_for(&crate::basis::SubjectKey::Approval(*offer))
         })
     }
 
@@ -1437,6 +1447,10 @@ impl Views<'_> {
     /// replayable return: what it says next crosses anew, at the label it stands at then.
     pub(crate) fn latest_return(&self, child: &TrajectoryId) -> Option<&LabeledValue> {
         let latest = self.latest_occurrence(child)?;
+        // A deferral's crossing, once accepted, answers the parent's settlement, not the child.
+        if self.projection.deferrals.contains_key(&latest) {
+            return None;
+        }
         self.projection
             .child_returns
             .iter()
@@ -1473,6 +1487,13 @@ impl Views<'_> {
     /// Every deferred return of the family, settled or not, in occurrence order per child.
     pub(crate) fn deferrals(&self) -> impl Iterator<Item = (&ChildReturnId, &Deferral)> {
         self.projection.deferrals.iter()
+    }
+
+    /// The deferred returns `child` froze, settled or not, in occurrence order.
+    pub(crate) fn deferrals_by(&self, child: &TrajectoryId) -> impl Iterator<Item = (&ChildReturnId, &Deferral)> {
+        self.projection
+            .deferrals
+            .range(ChildReturnId::new(child.clone(), 0)..=ChildReturnId::new(child.clone(), u32::MAX))
     }
 
     /// How many values `child` has already returned — the occurrence its next crossing mints.

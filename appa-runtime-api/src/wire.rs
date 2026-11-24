@@ -1299,17 +1299,14 @@ impl WireEvent {
             }
             EventName::ChildReturn => {
                 let (root, child) = named_child()?;
-                match (value, operation_id) {
-                    (_, Some(ReturnOperation(operation))) if operation.is_empty() => {
-                        Err(malformed("child_return carrying an empty operation_id"))
-                    }
-                    (Some(value), operation) => accepted(HookEvent::ChildReturn {
+                match value {
+                    Some(value) => accepted(HookEvent::ChildReturn {
                         root,
                         child,
                         value,
-                        operation,
+                        operation: operation_id,
                     }),
-                    (None, _) => Err(malformed("child_return without its value")),
+                    None => Err(malformed("child_return without its value")),
                 }
             }
         }
@@ -2236,19 +2233,21 @@ mod tests {
             .expect("a floor held for a deciding parent reads");
         assert_eq!(
             decides,
-            DeclaredReturn::Decides(crate::DeclaredArguments {
-                label: Some(crate::LabelSpelling {
-                    trust: Some("trusted".to_string()),
-                    audience: None,
-                }),
-                return_schema: None,
+            DeclaredReturn::Decides(crate::LabelSpelling {
+                trust: Some("trusted".to_string()),
+                audience: None,
             })
         );
         assert_eq!(
             serde_json::to_value(&decides).expect("a declaration writes"),
             serde_json::json!({ "label": { "trust": "trusted", "audience": null }, "return_schema": null, "decides": true })
         );
+        assert_eq!(
+            declared(serde_json::to_value(&decides).expect("a declaration writes")).expect("it reads back"),
+            decides
+        );
         assert!(declared(serde_json::json!({ "label": {}, "return_schema": {}, "decides": true })).is_err());
+        assert!(declared(serde_json::json!({ "label": null, "return_schema": null, "decides": true })).is_err());
         assert!(declared(serde_json::json!({ "deferred": true, "decides": true })).is_err());
         assert_eq!(
             serde_json::to_value(DeclaredReturn::Deferred).expect("a declaration writes"),
@@ -2524,7 +2523,7 @@ mod tests {
             root: root.clone(),
             child: child.clone(),
             value: r#"{"rows":3}"#.to_string(),
-            operation: Some(crate::ReturnOperation("turn-1".to_string())),
+            operation: Some(crate::ReturnOperation::new("turn-1").expect("an operation is named")),
         };
         match through(&returned) {
             HookEvent::ChildReturn {
@@ -2535,7 +2534,10 @@ mod tests {
             } => {
                 assert_eq!(back, child);
                 assert_eq!(value, r#"{"rows":3}"#);
-                assert_eq!(operation, Some(crate::ReturnOperation("turn-1".to_string())));
+                assert_eq!(
+                    operation,
+                    Some(crate::ReturnOperation::new("turn-1").expect("an operation is named"))
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -2554,6 +2556,9 @@ mod tests {
                 .into_event(&CLAUDE_CODE, PrincipalSource::None)
                 .is_err()
         );
+        let unnamed = br#"{"protocol":1,"adapter":"claude-code","event":"child_return","root_id":"s1","child_id":"a1","value":"x","operation_id":""}"#;
+        assert!(matches!(WireEvent::read(unnamed), Err(ParseRefusal::Malformed { .. })));
+        assert_eq!(ReturnOperation::new(""), Err(crate::EmptyReturnOperation));
     }
 
     /// A prompt's peer frame and title, and a session start's address, cross the wire and back

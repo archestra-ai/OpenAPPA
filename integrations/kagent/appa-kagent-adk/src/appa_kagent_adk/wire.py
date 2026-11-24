@@ -220,6 +220,7 @@ class RefusalClass(str, Enum):
     PRINCIPAL = "principal"
     OUTSTANDING_CALL = "outstanding_call"
     CALL_ID_REUSED = "call_id_reused"
+    RETURN_RETRY_CHANGED = "return_retry_changed"
     TRAJECTORY_ENDED = "trajectory_ended"
     TRAJECTORY = "trajectory"
     DISPATCH = "dispatch"

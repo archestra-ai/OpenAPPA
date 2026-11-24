@@ -237,78 +237,46 @@ impl Session {
         // a turn end closes it.
         self.close_unreported(open, "call closed as unreported at the child's end")
             .await?;
-        self.cross_return(value, ReturnKind::Stop, None).await
+        self.cross_return(value, ReturnKind::Stop, Occasion::Other).await
     }
 
     /// A return the child makes without ending, judged exactly as a stop's return: the calls
     /// it has open stay open, and a return made beside one is refused until they report. A
     /// deferral here holds the value for the parent, and the child runs on. `operation` names
-    /// this return across the host's retries: a retry with the same words answers as the
-    /// return it repeats, and one with other words is refused.
+    /// this return across the host's retries: a retry of a held return's operation with the same
+    /// words answers as that return did, one with other words is refused, and an operation no
+    /// held return bound is decided afresh. A return named by its words alone repeats the latest
+    /// held return in the same words, until the parent addresses the child again.
     pub async fn on_child_return(
         &self,
         value: String,
         operation: Option<ReturnOperation>,
     ) -> Result<ChildReturnDecision, EventError> {
-        if let Some(operation) = &operation
-            && let Some(repeated) = self.repeated_return(operation, &value)?
-        {
-            return Ok(repeated);
-        }
-        match self.child_calls()? {
-            ChildCalls::Ended(end @ ChildEnd::Deferred { .. }) => ended_child(end, Some(value)),
-            ChildCalls::Ended(ChildEnd::Void) | ChildCalls::Open(_) => {
-                match (
-                    self.cross_return(Some(value.clone()), ReturnKind::Turn, operation.as_ref())
-                        .await,
-                    &operation,
-                ) {
-                    // Another attempt of the operation committed first: answer from its record.
-                    (Err(EventError::ReturnRetryChanged), Some(operation)) => self
-                        .repeated_return(operation, &value)?
-                        .ok_or(EventError::ReturnRetryChanged),
-                    (decided, _) => decided,
+        match &operation {
+            Some(operation) => {
+                let keyed = KeyedReturn {
+                    operation,
+                    value: &value,
+                };
+                self.cross_return(Some(value.clone()), ReturnKind::KeyedTurn, Occasion::Return(keyed))
+                    .await
+            }
+            None => match self.child_calls()? {
+                ChildCalls::Ended(end @ ChildEnd::Deferred { .. }) => ended_child(end, Some(value)),
+                ChildCalls::Ended(ChildEnd::Void) | ChildCalls::Open(_) => {
+                    self.cross_return(Some(value), ReturnKind::Turn, Occasion::Other).await
                 }
-            }
+            },
         }
-    }
-
-    /// What a retry of the host's `operation` answers, where the operation already froze a
-    /// return: that return again for the same words, a refusal for other words.
-    fn repeated_return(
-        &self,
-        operation: &ReturnOperation,
-        value: &str,
-    ) -> Result<Option<ChildReturnDecision>, EventError> {
-        self.with_view(|context| {
-            let Some(id) = context.log.held_return(&self.trajectory, operation) else {
-                return Ok(None);
-            };
-            let parent = context.parent_of(&self.trajectory).ok_or(EventError::NotAChild)?;
-            let frozen = context
-                .engine()
-                .deferred_returns(context.view, &parent)
-                .into_iter()
-                .find(|deferred| deferred.id == *id)
-                .ok_or_else(|| EventError::EngineInvariant("a held operation names no deferral".to_string()))?;
-            match frozen.body.as_str() == value {
-                true => Ok(Some(ChildReturnDecision::Deferred)),
-                false => Err(EventError::ReturnRetryChanged),
-            }
-        })
     }
 
     pub(super) async fn cross_return(
         &self,
         value: Option<String>,
         kind: ReturnKind,
-        operation: Option<&ReturnOperation>,
+        occasion: Occasion<'_>,
     ) -> Result<ChildReturnDecision, EventError> {
         let child = self.trajectory.clone();
-        let occasion = match operation {
-            Some(operation) => Occasion::Return { operation },
-            None => Occasion::Other,
-        };
         let decision = self
             .drive_with_evidence(
                 |context, evidence| {
@@ -342,7 +310,8 @@ enum ChildCalls {
 }
 
 /// How an ended child ended: every later stop repeats what that end answered. A deferral at
-/// the stop keeps the words it froze, which only a retry of that stop repeats.
+/// the stop keeps the words it froze, which only a retry of that stop repeats: other words come
+/// from a child that has ended.
 pub(super) enum ChildEnd {
     Void,
     Deferred { said: String },
@@ -352,7 +321,7 @@ fn ended_child(end: ChildEnd, value: Option<String>) -> Result<ChildReturnDecisi
     match (value, end) {
         (None, _) => Ok(ChildReturnDecision::NoValue),
         (Some(value), ChildEnd::Deferred { said }) if value == said => Ok(ChildReturnDecision::Deferred),
-        (Some(_), ChildEnd::Deferred { .. }) => Err(EventError::ReturnRetryChanged),
+        (Some(_), ChildEnd::Deferred { .. }) => Err(EventError::TrajectoryEnded),
         (Some(_), ChildEnd::Void) => Ok(ChildReturnDecision::Blocked {
             feedback: ENDED_CHILD.to_string(),
             outcomes: appa_runtime_api::Outcomes::HardBlock,

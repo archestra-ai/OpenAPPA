@@ -64,6 +64,22 @@ pub struct DeferredReturn {
     pub settled: Option<crate::transition::ReturnDecision>,
 }
 
+impl DeferredReturn {
+    fn of(id: &ChildReturnId, deferral: &crate::projection::Deferral) -> DeferredReturn {
+        DeferredReturn {
+            id: id.clone(),
+            label: deferral.value.label.clone(),
+            body: deferral.value.body.clone(),
+            held: deferral.held,
+            settled: match deferral.standing {
+                crate::projection::DeferralStanding::Pending => None,
+                crate::projection::DeferralStanding::Accepted => Some(crate::transition::ReturnDecision::Accept),
+                crate::projection::DeferralStanding::Discarded => Some(crate::transition::ReturnDecision::Discard),
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForkStatus {
     Unprepared,
@@ -717,24 +733,27 @@ impl Engine {
         (0..decided.proposals.len()).any(|position| views.pending_block(&composing.subject(position)).is_some())
     }
 
-    /// Would `policy` stand as this trajectory's return declaration now? The checks a declaration
-    /// at the spawn passes, at the trajectory's current label. A runtime holds a declaration made
-    /// ahead of the spawn by them and applies it through the spawn's own declaration offer.
+    /// Would `policy` stand as this trajectory's return declaration now, for a single spawn whose
+    /// host declared `returns` on its proposal? The checks a declaration at the spawn passes, at
+    /// the trajectory's current label. A runtime holds a declaration made ahead of the spawn by
+    /// them and applies it through the spawn's own declaration offer.
     pub fn check_return_declaration(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
         policy: &ReturnPolicy,
+        returns: crate::transition::ReturnClass,
     ) -> Result<(), crate::plan::ReturnPolicyRefusal> {
         let views = view.crossed_to(self);
+        let declarer = match returns {
+            crate::transition::ReturnClass::Planned => crate::check::CallRole::Ordinary,
+            returns => crate::check::CallRole::MarkedSpawn(crate::check::SpawnClass {
+                kind: crate::transition::SpawnKind::Single,
+                returns,
+            }),
+        };
         match views.views(trajectory) {
-            Some(views) => plan::declared_return_policy(
-                &self.registry,
-                &views,
-                &policy.route(),
-                policy,
-                crate::check::CallRole::Ordinary,
-            ),
+            Some(views) => plan::declared_return_policy(&self.registry, &views, &policy.route(), policy, declarer),
             None => Err(crate::plan::ReturnPolicyRefusal::RouteMismatch),
         }
     }
@@ -777,18 +796,39 @@ impl Engine {
         views
             .deferrals()
             .filter(|(id, _)| views.parent_of(id.child()) == Some(parent))
-            .map(|(id, deferral)| DeferredReturn {
-                id: id.clone(),
-                label: deferral.value.label.clone(),
-                body: deferral.value.body.clone(),
-                held: deferral.held,
-                settled: match deferral.standing {
-                    crate::projection::DeferralStanding::Pending => None,
-                    crate::projection::DeferralStanding::Accepted => Some(crate::transition::ReturnDecision::Accept),
-                    crate::projection::DeferralStanding::Discarded => Some(crate::transition::ReturnDecision::Discard),
-                },
-            })
+            .map(|(id, deferral)| DeferredReturn::of(id, deferral))
             .collect()
+    }
+
+    /// The deferred return frozen at `id`, where `parent` owns it.
+    pub fn deferred_return(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        id: &ChildReturnId,
+    ) -> Option<DeferredReturn> {
+        let views = view.projection().view(parent);
+        match views.parent_of(id.child()) == Some(parent) {
+            true => views.deferral(id).map(|deferral| DeferredReturn::of(id, deferral)),
+            false => None,
+        }
+    }
+
+    /// The deferred returns `parent`'s child `child` froze, in occurrence order.
+    pub fn deferred_returns_by(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        child: &TrajectoryId,
+    ) -> Vec<DeferredReturn> {
+        let views = view.projection().view(parent);
+        match views.parent_of(child) == Some(parent) {
+            true => views
+                .deferrals_by(child)
+                .map(|(id, deferral)| DeferredReturn::of(id, deferral))
+                .collect(),
+            false => Vec::new(),
+        }
     }
 
     /// The value `child` crossed most recently: a stop or a spawn result repeating it replays

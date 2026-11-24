@@ -1,7 +1,7 @@
 use super::*;
 use crate::fact::BelowFloor;
 use crate::projection::DeferralStanding;
-use crate::transition::{ReturnDecision, ReturnKind, ReturnSettlement, SettlementFollowUp};
+use crate::transition::{ReturnDecision, ReturnSettlement, SettlementFollowUp};
 
 impl Engine {
     pub(super) fn decide_binding(
@@ -116,8 +116,10 @@ impl Engine {
     /// One child's return, judged against the policy its fork recorded. A void submission ends
     /// the branch. A value crosses at the child's fold, or through the fork's sanitizer: an
     /// attested body crosses in canonical form; a named sanitizer derives the submission once,
-    /// stages the derivation, and crosses it when the child returns exactly it. A return
-    /// repeating the latest crossing or deferral is a replay and appends nothing. A raw return
+    /// stages the derivation, and crosses it when the child returns exactly it. A return the
+    /// host names by its words alone, repeating the latest crossing or a deferral of its own
+    /// kind, is a replay and appends nothing; one it names by an operation is decided afresh,
+    /// the runtime having answered its retries from the operation. A raw return
     /// below the floor the parent set is held where the fork holds it, and otherwise refused:
     /// the child keeps it.
     pub(super) fn decide_child_return(
@@ -151,8 +153,11 @@ impl Engine {
             }
             ChildSubmission::Value { body } => body.clone(),
         };
+        // The words of the latest return, made again as a return of its kind, are that return
+        // again: a turn repeats a held turn, and a stop never reuses one.
         if let Some((id, _)) = views
             .latest_deferral(child)
+            .filter(|(_, deferral)| report.kind.replays_by_words() && deferral.held == report.kind.holds())
             .filter(|(_, deferral)| deferral.value.body == body)
         {
             return Ok(EngineDecision {
@@ -210,7 +215,7 @@ impl Engine {
         };
         match &policy.sanitizer {
             None => {
-                if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == body) {
+                if let Some(latest) = repeated_crossing(&views, report, &body) {
                     return Ok(replay(latest));
                 }
                 match (above_floor(&fold), policy.below_floor) {
@@ -227,7 +232,7 @@ impl Engine {
                         .validate(body.as_str())
                         .map_err(TransitionError::ReturnShapeMismatch)?,
                 );
-                if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == canonical) {
+                if let Some(latest) = repeated_crossing(&views, report, &canonical) {
                     return Ok(replay(latest));
                 }
                 let name = SanitizerName::new(SanitizerName::ATTEST_SCHEMA);
@@ -277,7 +282,7 @@ impl Engine {
                         },
                     );
                 }
-                if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == body) {
+                if let Some(latest) = repeated_crossing(&views, report, &body) {
                     return Ok(replay(latest));
                 }
                 let digest = RawResultDigest::of(body.as_str().as_bytes());
@@ -337,7 +342,7 @@ impl Engine {
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
         let child = &report.child;
-        if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == value.body) {
+        if let Some(latest) = repeated_crossing(views, report, &value.body) {
             return Ok(EngineDecision {
                 append: None,
                 follow_up: FollowUp::Child(ChildFollowUp::Merged {
@@ -385,7 +390,7 @@ impl Engine {
             trajectory: report.child.clone(),
             id: id.clone(),
             value,
-            held: report.kind == ReturnKind::Turn,
+            held: report.kind.holds(),
         }];
         Ok(EngineDecision {
             append: Some(self.decided(view, return_act(views, &report.child), facts)?),
@@ -465,6 +470,14 @@ impl Engine {
             append: Some(self.decided(view, crate::basis::DecidedAct::Settlement(id.clone()), facts)?),
             follow_up: FollowUp::Settlement(follow_up),
         })
+    }
+}
+
+/// The crossing `report` repeats, where its words may stand for the child's latest return.
+fn repeated_crossing<'v>(views: &'v Views, report: &ChildReport, body: &ValueBody) -> Option<&'v LabeledValue> {
+    match report.kind.replays_by_words() {
+        true => views.latest_return(&report.child).filter(|latest| latest.body == *body),
+        false => None,
     }
 }
 

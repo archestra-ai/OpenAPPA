@@ -266,6 +266,7 @@ const (
 	RefusalPrincipal          RefusalClass = "principal"
 	RefusalOutstandingCall    RefusalClass = "outstanding_call"
 	RefusalCallIDReused       RefusalClass = "call_id_reused"
+	RefusalReturnRetryChanged RefusalClass = "return_retry_changed"
 	RefusalTrajectoryEnded    RefusalClass = "trajectory_ended"
 	RefusalTrajectory         RefusalClass = "trajectory"
 	RefusalDispatch           RefusalClass = "dispatch"
@@ -279,7 +280,7 @@ var refusalClasses = []RefusalClass{
 	RefusalStorage, RefusalUntrustedLog, RefusalPolicyUnavailable, RefusalPolicyMoved,
 	RefusalLegacyFamily, RefusalInventoryRefused, RefusalEngineInvariant, RefusalContended, RefusalLaunchDeciding,
 	RefusalResolutionDiverged, RefusalAnnotationRefused, RefusalUndeclaredTool, RefusalUndeclaredSpawn, RefusalPeerMessage,
-	RefusalPrincipal, RefusalOutstandingCall, RefusalCallIDReused, RefusalTrajectoryEnded,
+	RefusalPrincipal, RefusalOutstandingCall, RefusalCallIDReused, RefusalReturnRetryChanged, RefusalTrajectoryEnded,
 	RefusalTrajectory, RefusalDispatch, RefusalRemedy, RefusalSpawnNotTaken, RefusalSpawn,
 }
 

@@ -92,24 +92,22 @@ impl ReturnReference {
         Some(Self(value.to_owned()))
     }
 
-    /// A function of the return and the decision alone, so every replica and every replay
-    /// spells it alike.
     pub(crate) fn of(id: &appa_engine::value::ChildReturnId, decision: ReturnDecision) -> Self {
-        use sha2::Digest as _;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(b"appa/deferred-return\0");
-        hasher.update(id.child().as_str().as_bytes());
-        hasher.update([0]);
-        hasher.update(id.occurrence().to_be_bytes());
-        hasher.update([match decision {
-            ReturnDecision::Accept => 1,
-            ReturnDecision::Discard => 0,
-        }]);
         Self(format!(
             "{}{}",
             Self::PREFIX,
-            crate::engine::hex(&hasher.finalize()[..8])
+            crate::engine::hex(&id.settlement_digest(decision))
         ))
+    }
+
+    /// The settlement digest this reference spells, which the log indexes.
+    pub(crate) fn digest(&self) -> [u8; 8] {
+        let hex = &self.0[Self::PREFIX.len()..];
+        let mut digest = [0; 8];
+        for (at, byte) in digest.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[2 * at..2 * at + 2], 16).expect("a parsed reference is lowercase hex");
+        }
+        digest
     }
 
     pub fn as_str(&self) -> &str {
@@ -144,22 +142,25 @@ pub struct DeferredReturnNotice {
 
 /// One return a spawn's child froze for its parent, held or at its stop: its occurrence among
 /// the child's returns, where the parent's decision on it stands, the host operation that made
-/// it where the host named one, and what the parent is told about it.
+/// it where the host named one, and what the parent is told about it, while the parent can
+/// still quote it: never for a return whose parent ended before deciding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildOccurrence {
     pub occurrence: u32,
     pub state: OccurrenceState,
     pub operation: Option<appa_runtime_api::ReturnOperation>,
-    pub notice: DeferredReturnNotice,
+    pub notice: Option<DeferredReturnNotice>,
 }
 
 /// A frozen return awaits the parent's decision until it accepts or discards it. A pending
-/// return never crosses, and a discarded one never will.
+/// return never crosses, and a discarded one never will. One whose parent ended before deciding
+/// can never be settled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OccurrenceState {
     Pending,
     Accepted,
     Discarded,
+    ParentEnded,
 }
 
 /// Why an externally supplied rendered offer id cannot identify an offer.
@@ -919,7 +920,8 @@ impl EventError {
             | EventError::SpawnOutstanding
             | EventError::FanOutOutstanding
             | EventError::ChildDispatchOpen => RefusalClass::OutstandingCall,
-            EventError::CallIdReused | EventError::ReturnRetryChanged => RefusalClass::CallIdReused,
+            EventError::CallIdReused => RefusalClass::CallIdReused,
+            EventError::ReturnRetryChanged => RefusalClass::ReturnRetryChanged,
             EventError::TrajectoryEnded => RefusalClass::TrajectoryEnded,
             // A start under another line variant names a family its id does not hold, as a
             // reused id does.
@@ -3834,7 +3836,7 @@ impl Runtime {
                     context.view,
                     acting_trajectory(&actor),
                     arguments,
-                    appa_engine::fact::BelowFloor::Refuse,
+                    appa_engine::transition::ReturnClass::Planned,
                 )
                 .map_err(|detail| RemedyOutcome::from(EventError::RemedyArguments { detail }))?;
             let declaration = HostObservation::AheadDeclared {

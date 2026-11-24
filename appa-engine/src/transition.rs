@@ -114,8 +114,20 @@ pub struct ProviderResult {
 pub struct SpawnMark {
     index: usize,
     kind: SpawnKind,
-    /// The host declared a deferred return on this proposal. Only a single spawn carries it.
-    deferral: bool,
+    /// What the host declared about the return on this proposal. Only a single spawn declares
+    /// anything.
+    returns: ReturnClass,
+}
+
+/// What the host declared about a spawn's return on its own proposal: nothing, so the policy's
+/// plans declare it; a deferred return; or a floor under which its parent decides what falls
+/// below it. An approval made for a proposal of one class covers no proposal of another.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ReturnClass {
+    #[default]
+    Planned,
+    Deferred,
+    Decides,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,6 +136,8 @@ struct MarkRecord {
     kind: SpawnKind,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     deferral: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    decides: bool,
 }
 
 impl From<SpawnMark> for MarkRecord {
@@ -131,7 +145,8 @@ impl From<SpawnMark> for MarkRecord {
         MarkRecord {
             index: mark.index,
             kind: mark.kind,
-            deferral: mark.deferral,
+            deferral: mark.returns == ReturnClass::Deferred,
+            decides: mark.returns == ReturnClass::Decides,
         }
     }
 }
@@ -140,12 +155,20 @@ impl TryFrom<MarkRecord> for SpawnMark {
     type Error = &'static str;
 
     fn try_from(record: MarkRecord) -> Result<SpawnMark, Self::Error> {
-        match (record.kind, record.deferral) {
-            (SpawnKind::FanOut, true) => Err("a fan-out spawn declares no deferred return"),
-            (kind, deferral) => Ok(SpawnMark {
+        let returns = match (record.deferral, record.decides) {
+            (false, false) => ReturnClass::Planned,
+            (true, false) => ReturnClass::Deferred,
+            (false, true) => ReturnClass::Decides,
+            (true, true) => return Err("a spawn declares a deferred return or a deciding parent, not both"),
+        };
+        match (record.kind, returns) {
+            (SpawnKind::FanOut, ReturnClass::Deferred | ReturnClass::Decides) => {
+                Err("a fan-out spawn declares no deferred return and no deciding parent")
+            }
+            (kind, returns) => Ok(SpawnMark {
                 index: record.index,
                 kind,
-                deferral,
+                returns,
             }),
         }
     }
@@ -165,7 +188,7 @@ impl SpawnMark {
         SpawnMark {
             index,
             kind: SpawnKind::Single,
-            deferral: false,
+            returns: ReturnClass::Planned,
         }
     }
 
@@ -174,7 +197,17 @@ impl SpawnMark {
         SpawnMark {
             index,
             kind: SpawnKind::Single,
-            deferral: true,
+            returns: ReturnClass::Deferred,
+        }
+    }
+
+    /// A single spawn whose host declared on this proposal that its parent decides on a return
+    /// below the floor.
+    pub const fn decides(index: usize) -> SpawnMark {
+        SpawnMark {
+            index,
+            kind: SpawnKind::Single,
+            returns: ReturnClass::Decides,
         }
     }
 
@@ -182,12 +215,12 @@ impl SpawnMark {
         SpawnMark {
             index,
             kind: SpawnKind::FanOut,
-            deferral: false,
+            returns: ReturnClass::Planned,
         }
     }
 
-    pub const fn deferral(self) -> bool {
-        self.deferral
+    pub const fn returns(self) -> ReturnClass {
+        self.returns
     }
 
     pub const fn index(self) -> usize {
@@ -367,11 +400,27 @@ pub struct ChildReport {
 
 /// Whether a child returns at its stop or without ending. A value either way crosses, or is
 /// deferred, alike; a deferral at the stop ends the child's errand, and one made without ending
-/// holds the value for the parent while the child runs on.
+/// holds the value for the parent while the child runs on. A return without ending is `Turn`
+/// where the host names it by its words alone, so repeating the latest held return's words is
+/// that return again, and `KeyedTurn` where the host names it by an operation of its own: the
+/// operation alone tells a retry, so its words never stand for an earlier return.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReturnKind {
     Stop,
     Turn,
+    KeyedTurn,
+}
+
+impl ReturnKind {
+    /// Does a deferral of this return leave the child running?
+    pub(crate) const fn holds(self) -> bool {
+        matches!(self, ReturnKind::Turn | ReturnKind::KeyedTurn)
+    }
+
+    /// May the same words as the latest return stand for it?
+    pub(crate) const fn replays_by_words(self) -> bool {
+        matches!(self, ReturnKind::Stop | ReturnKind::Turn)
+    }
 }
 
 /// What the child submitted: one value, or none. The crossing path is derived from the
@@ -2018,9 +2067,9 @@ impl<'a> Sequence<'a> {
                         .cloned()
                         .collect();
                 // A log an earlier planner wrote offers an undeclared spawn its bundled menu.
-                // No such log carries a deferral mark.
+                // No such log carries a deferral or a deciding mark.
                 if !menu.contains(plan)
-                    && !matches!(role, crate::check::CallRole::MarkedSpawn(class) if class.deferral)
+                    && role.returns() == ReturnClass::Planned
                     && crate::plan::Declaring::of(role, views, candidate) != crate::plan::Declaring::No
                 {
                     let bundled = crate::plan::bundled_spawn_menu(self.engine.registry(), views, blocked(), &context)
@@ -2162,7 +2211,7 @@ impl<'a> Sequence<'a> {
         // A marked spawn's declaration stands beside the approval of its other gaps.
         let offered = &recorded.plan;
         let role = views.call_role(&recorded.subject);
-        if views.approval(offer).is_some() || views.approval_pending(call, offered.declares_only(), role.deferral()) {
+        if views.approval(offer).is_some() || views.approval_pending(call, offered.declares_only(), role.returns()) {
             return Err(TransitionRefusal::ApprovalRepeated);
         }
         if views.standing_call(&recorded.subject) != Some(call)
@@ -2186,7 +2235,7 @@ impl<'a> Sequence<'a> {
             (None, Some(policy))
                 if marked
                     && views
-                        .declaration(call, role.deferral())
+                        .declaration(call, role.returns())
                         .is_some_and(|(_, declaration)| declaration.return_policy.as_ref() == Some(policy)) => {}
             (Some(step), Some(policy)) => {
                 crate::plan::declared_return_policy(self.engine.registry(), &views, step, policy, role)
@@ -2347,7 +2396,7 @@ impl<'a> Sequence<'a> {
             .filter(|(declared, approval)| {
                 declared != offer
                     && approval.declares_only()
-                    && approval.deferral == spent.deferral
+                    && approval.returns == spent.returns
                     && approval.return_policy == spent.return_policy
                     && self.stood(
                         trajectory,
@@ -3251,7 +3300,9 @@ impl<'a> Sequence<'a> {
         }
     }
 
-    /// The value a pending deferred return froze, for the parent that owns it.
+    /// The value a pending deferred return froze, for the parent that owns it. A discard is
+    /// judged by this alone: an engine before held returns let a parent that had ended discard
+    /// what its child froze, and its logs replay.
     fn pending_deferral(
         &self,
         parent: &TrajectoryId,
@@ -3260,9 +3311,6 @@ impl<'a> Sequence<'a> {
         let views = self.projection.view(parent);
         if views.parent_of(id.child()) != Some(parent) {
             return Err(TransitionRefusal::ForeignTrajectory);
-        }
-        if views.has_ended(parent) {
-            return Err(TransitionRefusal::BranchEnded);
         }
         views
             .deferral(id)
@@ -3280,6 +3328,10 @@ impl<'a> Sequence<'a> {
     ) -> Result<crate::value::LabeledValue, TransitionRefusal> {
         let frozen = self.pending_deferral(parent, id)?;
         let views = self.projection.view(parent);
+        // A pending return never crosses into a parent that has ended.
+        if views.has_ended(parent) {
+            return Err(TransitionRefusal::BranchEnded);
+        }
         let standing = views.branch_label(parent);
         if narrowing.from != standing || narrowing.to != standing.combine(&frozen.label) {
             return Err(TransitionRefusal::AcceptanceMismatch);

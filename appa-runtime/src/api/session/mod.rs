@@ -14,10 +14,9 @@ use crate::engine::{
 };
 use crate::external::ConsultOutcome;
 use appa_engine::contract::{AnnotationContext, ContextEntry};
-use appa_engine::fact::BelowFloor;
 use appa_engine::label::ReaderId;
 use appa_engine::names::ContextProviderName;
-use appa_engine::transition::{ProposalBatchId, ReturnDecision, ReturnKind, SpawnMark};
+use appa_engine::transition::{ProposalBatchId, ReturnClass, ReturnDecision, ReturnKind, SpawnMark};
 use appa_runtime_api::{DeclaredReturn, ReturnOperation};
 use std::collections::BTreeSet;
 
@@ -91,10 +90,16 @@ enum Occasion<'a> {
         claim: &'a AheadClaim<'a>,
     },
     /// A child's return without ending, under the host's identity for it.
-    Return {
-        operation: &'a ReturnOperation,
-    },
+    Return(KeyedReturn<'a>),
     Other,
+}
+
+/// A child's return without ending the host named by an operation: what a retry of the
+/// operation is answered from, and what a deferral of the return binds.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct KeyedReturn<'a> {
+    operation: &'a ReturnOperation,
+    value: &'a str,
 }
 
 /// The declaration ahead a blocked spawn took, and what its judgment reads: whether the spawn
@@ -110,7 +115,7 @@ impl<'a> Occasion<'a> {
     fn call_id(self) -> Option<&'a str> {
         match self {
             Occasion::Proposal { call_id, .. } | Occasion::Report { call_id } => call_id,
-            Occasion::Remedy { .. } | Occasion::AheadApply { .. } | Occasion::Return { .. } | Occasion::Other => None,
+            Occasion::Remedy { .. } | Occasion::AheadApply { .. } | Occasion::Return(_) | Occasion::Other => None,
         }
     }
 }

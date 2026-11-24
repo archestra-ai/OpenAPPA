@@ -1562,6 +1562,7 @@ fn a_declaration_ahead_of_the_spawn_is_held_to_the_label_and_the_own_floor() {
                 sanitizer: None,
                 below_floor: crate::fact::BelowFloor::Refuse,
             }),
+            crate::transition::ReturnClass::Planned,
         )
     };
     assert_eq!(

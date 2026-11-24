@@ -238,18 +238,20 @@ impl Session {
             }
             let fit = self.with_view(|context| {
                 // Arguments the policy does not accept here are refused by every application.
-                let fitting = |arguments: &RemedyArguments, below_floor| match context.engine().declare_ahead(
+                let fitting = |arguments: &RemedyArguments, returns| match context.engine().declare_ahead(
                     context.view,
                     &self.trajectory,
                     arguments,
-                    below_floor,
+                    returns,
                 ) {
                     Err(_) => Fit::Unfit,
                     Ok(_) => context.fitting_offer(offers, arguments),
                 };
                 Ok(match declares {
-                    DeclaredReturn::Arguments(arguments) => fitting(arguments, BelowFloor::Refuse),
-                    DeclaredReturn::Decides(arguments) => fitting(arguments, BelowFloor::Hold),
+                    DeclaredReturn::Arguments(arguments) => fitting(arguments, ReturnClass::Planned),
+                    DeclaredReturn::Decides(label) => {
+                        fitting(&crate::engine::decided_floor(label), ReturnClass::Decides)
+                    }
                     // A deferred return rides the plan that takes the return as spoken.
                     DeclaredReturn::Deferred => context.fitting_offer(offers, &RemedyArguments::default()),
                 })
@@ -409,6 +411,7 @@ impl Session {
         let spawn = *spawn;
         let mark = spawn.map(|kind| match (kind, declares) {
             (SpawnKind::Single, Some(DeclaredReturn::Deferred)) => SpawnMark::deferred(0),
+            (SpawnKind::Single, Some(DeclaredReturn::Decides(_))) => SpawnMark::decides(0),
             (SpawnKind::Single, _) => SpawnMark::at(0),
             (SpawnKind::FanOut, _) => SpawnMark::fan_out(0),
         });

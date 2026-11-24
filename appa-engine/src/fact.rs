@@ -114,6 +114,12 @@ impl ReturnPolicy {
         }
     }
 
+    /// Does a return below this policy's floor wait for the parent rather than stay refused?
+    pub fn holds_below_floor(&self) -> bool {
+        self.crossing()
+            .is_some_and(|crossing| crossing.below_floor == BelowFloor::Hold)
+    }
+
     /// The policy under the trust chain a policy crossing arrives at. A crossing return's floor
     /// is a requirement, so a rank the arriving chain lacks rises rather than drops.
     pub(crate) fn cross(&mut self, crossing: &crate::label::TrustCrossing) {

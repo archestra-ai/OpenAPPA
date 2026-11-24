@@ -83,13 +83,13 @@ pub(crate) enum CallRole {
     MarkedSpawn(SpawnClass),
 }
 
-/// What a marked spawn's proposal is: how many children it starts, and whether its host declared
-/// a deferred return on it. A return declaration made for one class covers no proposal of the
-/// other.
+/// What a marked spawn's proposal is: how many children it starts, and what its host declared
+/// about the return on it. A return declaration made for one class covers no proposal of
+/// another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SpawnClass {
     pub(crate) kind: crate::transition::SpawnKind,
-    pub(crate) deferral: bool,
+    pub(crate) returns: crate::transition::ReturnClass,
 }
 
 impl CallRole {
@@ -98,7 +98,7 @@ impl CallRole {
         match mark {
             Some(mark) if mark.index() == position => CallRole::MarkedSpawn(SpawnClass {
                 kind: mark.kind(),
-                deferral: mark.deferral(),
+                returns: mark.returns(),
             }),
             Some(_) | None => CallRole::Ordinary,
         }
@@ -112,11 +112,11 @@ impl CallRole {
         }
     }
 
-    /// Did the host declare a deferred return on this proposal?
-    pub(crate) fn deferral(self) -> bool {
+    /// What the host declared about the return on this proposal: nothing on an ordinary call.
+    pub(crate) fn returns(self) -> crate::transition::ReturnClass {
         match self {
-            CallRole::MarkedSpawn(class) => class.deferral,
-            CallRole::Ordinary => false,
+            CallRole::MarkedSpawn(class) => class.returns,
+            CallRole::Ordinary => crate::transition::ReturnClass::Planned,
         }
     }
 }

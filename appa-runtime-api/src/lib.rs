@@ -445,12 +445,54 @@ pub enum SpawnKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PromptKey(pub String);
 
-/// The host's opaque identity for one return a child makes without ending. A retry of the
-/// same operation names the same return: the same words answer as that return did, and other
-/// words are refused.
+/// The host's opaque identity for one return a child makes without ending. The guarantee is
+/// scoped to a return that is held for the parent: a retry of the operation answers as that
+/// held return did, whatever the child did since, and a retry with other words is refused. An
+/// operation no held return records is decided afresh, and never answered from another return
+/// by its words: a return that crossed binds no operation, so its retry crosses again, which
+/// moves no label the first crossing did not. Never empty.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
-#[serde(transparent)]
-pub struct ReturnOperation(pub String);
+#[serde(try_from = "String", into = "String")]
+pub struct ReturnOperation(String);
+
+/// A [`ReturnOperation`] spelled empty, which names no return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyReturnOperation;
+
+impl std::fmt::Display for EmptyReturnOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a return operation id is never empty")
+    }
+}
+
+impl std::error::Error for EmptyReturnOperation {}
+
+impl ReturnOperation {
+    pub fn new(operation: impl Into<String>) -> Result<ReturnOperation, EmptyReturnOperation> {
+        match operation.into() {
+            operation if operation.is_empty() => Err(EmptyReturnOperation),
+            operation => Ok(ReturnOperation(operation)),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ReturnOperation {
+    type Error = EmptyReturnOperation;
+
+    fn try_from(operation: String) -> Result<ReturnOperation, EmptyReturnOperation> {
+        ReturnOperation::new(operation)
+    }
+}
+
+impl From<ReturnOperation> for String {
+    fn from(operation: ReturnOperation) -> String {
+        operation.0
+    }
+}
 
 /// A person's ruling the harness obtained itself for the offer a
 /// control call quotes. A harness whose review channel is its own —
@@ -654,7 +696,8 @@ pub enum HookEvent {
         root: TrajectoryId,
         child: TrajectoryId,
         value: String,
-        /// The host's identity for this return, which its retries repeat.
+        /// The host's identity for this return, which its retries repeat. Only a held return
+        /// binds it; see [`ReturnOperation`].
         operation: Option<ReturnOperation>,
     },
     SpawnResult {
@@ -696,6 +739,8 @@ pub enum RefusalClass {
     Principal,
     OutstandingCall,
     CallIdReused,
+    /// A retry of a held return's operation carried other words than the return it repeats.
+    ReturnRetryChanged,
     TrajectoryEnded,
     Trajectory,
     Dispatch,
@@ -1020,14 +1065,14 @@ pub struct DeclaredArguments {
 /// The return a single spawn's proposal declares for its subagent: the arguments its block's
 /// declaration plan takes, or a deferred return. Only a host that itself delivers a
 /// subagent's answer to its parent declares the deferral, and only here, on the spawn's own
-/// call: no control call and no declaration made ahead spells it. `Decides` is the arguments of
-/// a floor the host declares for a parent that can decide on its subagent's answer: a return
-/// below that floor is held for the parent rather than refused. It takes no `return_schema`.
+/// call: no control call and no declaration made ahead spells it. `Decides` is the floor the
+/// host declares for a parent that can decide on its subagent's answer: a return below that
+/// floor is held for the parent rather than refused. It names its floor and takes no schema.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "DeclaredReturnRecord", into = "DeclaredReturnRecord")]
 pub enum DeclaredReturn {
     Arguments(DeclaredArguments),
-    Decides(DeclaredArguments),
+    Decides(LabelSpelling),
     Deferred,
 }
 
@@ -1057,37 +1102,39 @@ impl TryFrom<DeclaredReturnRecord> for DeclaredReturn {
                 Err("a deferred return takes no `label`, no `return_schema` and no `decides`")
             }
             DeclaredReturnRecord {
-                return_schema: Some(_),
+                label: Some(label),
+                return_schema: None,
+                deferred: false,
                 decides: true,
-                ..
-            } => Err("a return held below its floor takes no `return_schema`"),
+            } => Ok(DeclaredReturn::Decides(label)),
+            DeclaredReturnRecord { decides: true, .. } => {
+                Err("a return held below its floor names its `label` and takes no `return_schema`")
+            }
             DeclaredReturnRecord {
                 label,
                 return_schema,
                 deferred: false,
-                decides,
-            } => {
-                let arguments = DeclaredArguments { label, return_schema };
-                Ok(match decides {
-                    true => DeclaredReturn::Decides(arguments),
-                    false => DeclaredReturn::Arguments(arguments),
-                })
-            }
+                decides: false,
+            } => Ok(DeclaredReturn::Arguments(DeclaredArguments { label, return_schema })),
         }
     }
 }
 
 impl From<DeclaredReturn> for DeclaredReturnRecord {
     fn from(declared: DeclaredReturn) -> DeclaredReturnRecord {
-        let record = |DeclaredArguments { label, return_schema }, decides| DeclaredReturnRecord {
-            label,
-            return_schema,
-            deferred: false,
-            decides,
-        };
         match declared {
-            DeclaredReturn::Arguments(arguments) => record(arguments, false),
-            DeclaredReturn::Decides(arguments) => record(arguments, true),
+            DeclaredReturn::Arguments(DeclaredArguments { label, return_schema }) => DeclaredReturnRecord {
+                label,
+                return_schema,
+                deferred: false,
+                decides: false,
+            },
+            DeclaredReturn::Decides(label) => DeclaredReturnRecord {
+                label: Some(label),
+                return_schema: None,
+                deferred: false,
+                decides: true,
+            },
             DeclaredReturn::Deferred => DeclaredReturnRecord {
                 label: None,
                 return_schema: None,

@@ -3,6 +3,7 @@
 
 use appa_engine::fact::{Fact, TrajectoryOpening};
 use appa_engine::profile::{PolicyFileKey, PolicyRevision};
+use appa_engine::transition::ReturnDecision;
 use appa_engine::value::TrajectoryId;
 
 use crate::{HostObservation, HostRecord, Log, LogData, ReadError};
@@ -174,11 +175,13 @@ pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: V
         basis: 0,
         policy_file,
         host: Vec::new(),
+        held: Default::default(),
+        settlements: Default::default(),
     };
-    push(&mut data, record);
+    push(&mut data, record)?;
     for batch in batches {
         let record = decode(data.basis, &batch)?;
-        push(&mut data, record);
+        push(&mut data, record)?;
     }
     Ok(Log {
         data: std::sync::Arc::new(data),
@@ -193,14 +196,34 @@ pub(crate) fn extend(log: &mut Log, batches: Vec<Vec<u8>>) -> Result<(), ReadErr
         let data = std::sync::Arc::make_mut(&mut log.data);
         for batch in batches {
             let record = decode(data.basis, &batch)?;
-            push(data, record);
+            push(data, record)?;
         }
     }
     Ok(())
 }
 
-/// Fold one decoded batch onto `log`.
-fn push(log: &mut LogData, record: Record) {
+/// Fold one decoded batch onto `log`, refused where its host record binds a held return it does
+/// not hold.
+fn push(log: &mut LogData, record: Record) -> Result<(), ReadError> {
+    if let Some(binding) = log
+        .held
+        .binding(&record.facts, record.host.as_ref())
+        .map_err(|detail| ReadError::Undecodable {
+            seq: log.basis,
+            detail: detail.to_string(),
+        })?
+    {
+        let (trajectory, operation, id) = (binding.0.clone(), binding.1.clone(), binding.2.clone());
+        log.held.bind((&trajectory, &operation, &id));
+    }
+    for fact in &record.facts {
+        if let Fact::ReturnDeferred { id, .. } = fact {
+            for decision in [ReturnDecision::Accept, ReturnDecision::Discard] {
+                log.settlements
+                    .insert(id.settlement_digest(decision), (id.clone(), decision));
+            }
+        }
+    }
     let stamp = stamp_of(&record.facts);
     if let Some(stamp) = stamp {
         log.revisions.insert(stamp);
@@ -216,6 +239,7 @@ fn push(log: &mut LogData, record: Record) {
         });
     }
     log.basis += 1;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -316,7 +340,7 @@ mod tests {
             },
             HostObservation::ReturnHeld {
                 trajectory: TrajectoryId::new("cc:child"),
-                operation: ReturnOperation("turn:1".to_string()),
+                operation: ReturnOperation::new("turn:1").expect("an operation is named"),
                 id: ChildReturnId::new(TrajectoryId::new("cc:child"), 2),
             },
         ]

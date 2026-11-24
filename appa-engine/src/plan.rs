@@ -627,7 +627,7 @@ pub(crate) enum Declaring {
 impl Declaring {
     pub(crate) fn of(role: CallRole, views: &Views, call: &ResolvedCall) -> Declaring {
         match role {
-            CallRole::MarkedSpawn(class) if views.declaration(call, class.deferral).is_none() => {
+            CallRole::MarkedSpawn(class) if views.declaration(call, class.returns).is_none() => {
                 Declaring::Separately(class.kind)
             }
             CallRole::MarkedSpawn(_) | CallRole::Ordinary => Declaring::No,
@@ -1478,6 +1478,10 @@ pub enum ReturnPolicyRefusal {
         "a return below its floor is held only for a trajectory that stands under no floor of its own, and only when it crosses as spoken"
     )]
     HoldUnavailable,
+    #[error(
+        "a return below its floor is held exactly for the single spawn whose own proposal carries the host's declaration that its parent decides"
+    )]
+    HoldUndeclared,
 }
 
 /// Is `policy` the declaration `step` asks for, at this trajectory's label? A void return
@@ -1486,7 +1490,8 @@ pub enum ReturnPolicyRefusal {
 /// trajectory itself stands under, so a grandchild inherits the bound; an attestation needs the
 /// reserved sanitizer registered at a rank this label covers; a named sanitizer is a registered
 /// untagged output sanitizer, which is what the step offered. A deferred return is declared only
-/// for the single spawn whose own proposal carries the host's deferral.
+/// for the single spawn whose own proposal carries the host's deferral, and a crossing that holds
+/// what falls below its floor exactly for the single spawn whose proposal says its parent decides.
 pub(crate) fn declared_return_policy(
     registry: &Registry,
     views: &Views,
@@ -1494,20 +1499,27 @@ pub(crate) fn declared_return_policy(
     policy: &ReturnPolicy,
     declarer: CallRole,
 ) -> Result<(), ReturnPolicyRefusal> {
+    use crate::transition::{ReturnClass, SpawnKind};
     if policy.route() != *step {
         return Err(ReturnPolicyRefusal::RouteMismatch);
     }
-    match (policy, declarer) {
-        (ReturnPolicy::Void, _) => Ok(()),
-        (ReturnPolicy::Crossing(crossing), _) => declared_crossing(registry, views, crossing),
-        (
-            ReturnPolicy::Deferred,
-            CallRole::MarkedSpawn(crate::check::SpawnClass {
-                kind: crate::transition::SpawnKind::Single,
-                deferral: true,
-            }),
-        ) => Ok(()),
-        (ReturnPolicy::Deferred, _) => Err(ReturnPolicyRefusal::DeferralUndeclared),
+    let single = |returns| {
+        declarer
+            == CallRole::MarkedSpawn(crate::check::SpawnClass {
+                kind: SpawnKind::Single,
+                returns,
+            })
+    };
+    match policy {
+        ReturnPolicy::Void => Ok(()),
+        ReturnPolicy::Crossing(crossing) => {
+            if (crossing.below_floor == crate::fact::BelowFloor::Hold) != single(ReturnClass::Decides) {
+                return Err(ReturnPolicyRefusal::HoldUndeclared);
+            }
+            declared_crossing(registry, views, crossing)
+        }
+        ReturnPolicy::Deferred if single(ReturnClass::Deferred) => Ok(()),
+        ReturnPolicy::Deferred => Err(ReturnPolicyRefusal::DeferralUndeclared),
     }
 }
 

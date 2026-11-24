@@ -77,9 +77,9 @@ pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
     ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent, Evidence, EvidenceRequest, FollowUp,
     ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody,
-    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, ReturnDecision,
-    ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark, ToolOutcome as CoreToolOutcome, ToolReport,
-    TransitionError, TransitionRefusal, ValidatedFactBatch,
+    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, ReturnClass,
+    ReturnDecision, ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark, ToolOutcome as CoreToolOutcome,
+    ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
     ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
@@ -416,7 +416,7 @@ pub struct EngineDecision {
 }
 
 impl EngineDecision {
-    fn deliver(then: Next) -> EngineDecision {
+    pub(crate) fn deliver(then: Next) -> EngineDecision {
         EngineDecision { append: None, then }
     }
 }
@@ -2519,8 +2519,8 @@ impl RuntimeEngine {
             (appa_runtime_api::DeclaredReturn::Arguments(arguments), route) => self
                 .return_policy_of_route(views, route, arguments, BelowFloor::Refuse)
                 .map(Some),
-            (appa_runtime_api::DeclaredReturn::Decides(arguments), route) => self
-                .return_policy_of_route(views, route, arguments, BelowFloor::Hold)
+            (appa_runtime_api::DeclaredReturn::Decides(label), route) => self
+                .return_policy_of_route(views, route, &decided_floor(label), BelowFloor::Hold)
                 .map(Some),
             (appa_runtime_api::DeclaredReturn::Deferred, ReturnRoute::Raw) => Ok(Some(ReturnPolicy::Deferred)),
             (appa_runtime_api::DeclaredReturn::Deferred, ReturnRoute::Void | ReturnRoute::Sanitized(_)) => {
@@ -2531,15 +2531,20 @@ impl RuntimeEngine {
 
     /// A return declaration made ahead of the spawn: the bare floor, or the attestation when
     /// `return_schema` is passed, checked as the spawn's own declaration would be at this
-    /// trajectory's label, with what a return below the floor comes to. Answers the label it was
-    /// checked at, which the declaration stands at.
+    /// trajectory's label, for a spawn of the return class `returns`: a return below the floor of
+    /// a spawn whose parent decides is held. Answers the label it was checked at, which the
+    /// declaration stands at.
     pub(crate) fn declare_ahead(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
         arguments: &RemedyArguments,
-        below_floor: BelowFloor,
+        returns: ReturnClass,
     ) -> Result<Label, String> {
+        let below_floor = match returns {
+            ReturnClass::Decides => BelowFloor::Hold,
+            ReturnClass::Planned | ReturnClass::Deferred => BelowFloor::Refuse,
+        };
         if !self.engine.registry().profile().context_control() {
             return Err("this deployment does not control subagent context, so no return is declared".to_string());
         }
@@ -2554,7 +2559,7 @@ impl RuntimeEngine {
         };
         let policy = self.return_policy_of_route(&views, route, arguments, below_floor)?;
         self.engine
-            .check_return_declaration(view, trajectory, &policy)
+            .check_return_declaration(view, trajectory, &policy, returns)
             .map_err(|refusal| format!("this return declaration does not stand: {refusal}"))?;
         Ok(views.current_label())
     }
@@ -2786,22 +2791,39 @@ impl RuntimeEngine {
         }
     }
 
-    /// The deferred returns `parent` owns, pending and settled.
-    pub(crate) fn deferred_returns(&self, view: &EngineView, parent: &TrajectoryId) -> Vec<DeferredReturn> {
-        self.engine.deferred_returns(view, parent)
+    /// The deferred return frozen at `id`, where `parent` owns it.
+    pub(crate) fn deferred_return(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        id: &ChildReturnId,
+    ) -> Option<DeferredReturn> {
+        self.engine.deferred_return(view, parent, id)
     }
 
-    /// The deferral that ended the child `parent`'s spawn `dispatch` bound, if its answer at
-    /// its stop froze.
+    /// The deferred returns `parent`'s child `child` froze, in occurrence order.
+    pub(crate) fn deferred_returns_by(
+        &self,
+        view: &EngineView,
+        parent: &TrajectoryId,
+        child: &TrajectoryId,
+    ) -> Vec<DeferredReturn> {
+        self.engine.deferred_returns_by(view, parent, child)
+    }
+
+    /// The frozen return of the child `parent`'s spawn `dispatch` bound that its parent is told
+    /// about: the latest one awaiting its decision, held or at the stop, else the latest one,
+    /// however the parent decided on it, so the spawn's result keeps its notice.
     pub(crate) fn deferred_return_of(
         &self,
         view: &EngineView,
         parent: &TrajectoryId,
         dispatch: &EngineDispatchId,
     ) -> Option<DeferredReturn> {
-        self.child_occurrences(view, parent, dispatch)
-            .into_iter()
-            .find(|deferred| !deferred.held)
+        let mut frozen = self.child_occurrences(view, parent, dispatch);
+        let pending = frozen.iter().rposition(|deferred| deferred.settled.is_none());
+        let at = pending.or(frozen.len().checked_sub(1))?;
+        Some(frozen.swap_remove(at))
     }
 
     /// Every return the child `parent`'s spawn `dispatch` bound froze, held or at its stop, in
@@ -2812,13 +2834,10 @@ impl RuntimeEngine {
         parent: &TrajectoryId,
         dispatch: &EngineDispatchId,
     ) -> Vec<DeferredReturn> {
-        let ForkStatus::Bound(child) = self.engine.fork_status(view, &ForkId::of(dispatch)) else {
-            return Vec::new();
-        };
-        self.deferred_returns(view, parent)
-            .into_iter()
-            .filter(|deferred| *deferred.id.child() == child)
-            .collect()
+        match self.engine.fork_status(view, &ForkId::of(dispatch)) {
+            ForkStatus::Bound(child) => self.deferred_returns_by(view, parent, &child),
+            _ => Vec::new(),
+        }
     }
 
     /// Was `parent`'s spawn `dispatch` released under a deferred return?
@@ -5317,6 +5336,14 @@ fn display_plans(
 struct RenderedBlock {
     text: String,
     display: RemedyDisplay,
+}
+
+/// The arguments of the floor a spawn whose parent decides names: its label, and no schema.
+pub(crate) fn decided_floor(label: &appa_runtime_api::LabelSpelling) -> RemedyArguments {
+    RemedyArguments {
+        label: Some(label.clone()),
+        return_schema: None,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

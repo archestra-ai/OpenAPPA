@@ -2,8 +2,8 @@ use super::*;
 use crate::fact::{BelowFloor, CrossingReturn, ReturnPolicy};
 use crate::profile::{DeploymentName, PolicyRevision};
 use crate::transition::{
-    ChildFollowUp, ChildReport, ChildSubmission, EngineEvent, FollowUp, ForkBinding, ReturnDecision, ReturnKind,
-    ReturnSettlement, SettlementFollowUp, SpawnMark, TransitionError, TransitionRefusal,
+    ChildFollowUp, ChildReport, ChildSubmission, EngineEvent, FollowUp, ForkBinding, ReturnClass, ReturnDecision,
+    ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark, TransitionError, TransitionRefusal,
 };
 use crate::value::ChildReturnId;
 
@@ -300,6 +300,11 @@ fn middle_rank_engine() -> Engine {
     open_engine(cfg)
 }
 
+/// [`spawn_family_at`] for a spawn whose host declared that its parent decides.
+fn deciding_family(e: &Engine, log: &[Fact], child: &TrajectoryId, policy: ReturnPolicy) -> Vec<Fact> {
+    spawn_family_marked(e, log, &traj(), child, policy, SpawnMark::decides(0))
+}
+
 /// The child returns at its floor under revision 1, whose chain names the middle rank. Revision
 /// 2 drops that rank: the child's label falls to the lowest rank and the floor rises to the
 /// highest, so the same return stands below the floor there.
@@ -314,7 +319,15 @@ fn below_floor_return(below_floor: BelowFloor) -> Result<(EngineDecision, Vec<Fa
         below_floor,
         ..crossing
     });
-    let mut log = [root.clone(), spawn_family_at(&first, &root, &child, policy)].concat();
+    let mark = match below_floor {
+        BelowFloor::Hold => SpawnMark::decides(0),
+        BelowFloor::Refuse => SpawnMark::at(0),
+    };
+    let mut log = [
+        root.clone(),
+        spawn_family_marked(&first, &root, &traj(), &child, policy, mark),
+    ]
+    .concat();
     reads(&first, &mut log, &child, "read_middle");
     let batches = [StampedBatch {
         revision: Some(PolicyRevision::FIRST),
@@ -365,7 +378,7 @@ fn a_return_below_the_floor_is_held_only_for_a_raw_return_under_no_floor_of_the_
         })
     };
     let check = |log: &[Fact], trajectory: &TrajectoryId, policy: ReturnPolicy| {
-        e.check_return_declaration(&viewing(&e, log), trajectory, &policy)
+        e.check_return_declaration(&viewing(&e, log), trajectory, &policy, ReturnClass::Decides)
     };
     assert_eq!(check(&root, &traj(), holding(floor_crossing(&e, &root))), Ok(()));
     assert_eq!(
@@ -379,6 +392,18 @@ fn a_return_below_the_floor_is_held_only_for_a_raw_return_under_no_floor_of_the_
         ),
         Err(crate::plan::ReturnPolicyRefusal::HoldUnavailable)
     );
+    // A hold is declared exactly for the spawn whose parent decides, and that spawn holds.
+    for (policy, returns) in [
+        (holding(floor_crossing(&e, &root)), ReturnClass::Planned),
+        (holding(floor_crossing(&e, &root)), ReturnClass::Deferred),
+        (ReturnPolicy::Crossing(floor_crossing(&e, &root)), ReturnClass::Decides),
+    ] {
+        assert_eq!(
+            e.check_return_declaration(&viewing(&e, &root), &traj(), &policy, returns),
+            Err(crate::plan::ReturnPolicyRefusal::HoldUndeclared),
+            "{returns:?}"
+        );
+    }
 
     // A child under its parent's floor keeps the as-spoken return for its own children.
     let log = [root.clone(), forked_child(&e, &root, &child)].concat();
@@ -386,7 +411,15 @@ fn a_return_below_the_floor_is_held_only_for_a_raw_return_under_no_floor_of_the_
         floor: label_of(&e, &log, &child),
         ..floor_crossing(&e, &root)
     };
-    assert_eq!(check(&log, &child, ReturnPolicy::Crossing(own.clone())), Ok(()));
+    assert_eq!(
+        e.check_return_declaration(
+            &viewing(&e, &log),
+            &child,
+            &ReturnPolicy::Crossing(own.clone()),
+            ReturnClass::Planned
+        ),
+        Ok(())
+    );
     assert_eq!(
         check(&log, &child, holding(own)),
         Err(crate::plan::ReturnPolicyRefusal::HoldUnavailable)
@@ -431,4 +464,249 @@ fn logs_recorded_before_held_returns_read_and_write_back_unchanged() {
             Some(TransitionError::NoDeferredReturn)
         );
     }
+}
+
+/// [`decided`] for an event that may answer from the log: whether it appended, and its answer.
+fn answered_by(e: &Engine, log: &mut Vec<Fact>, event: impl FnOnce(&[Fact]) -> EngineEvent) -> (bool, FollowUp) {
+    let decision = e.handle(&viewing(e, log), event(log)).expect("the event decides");
+    let follow_up = decision.follow_up.clone();
+    let appended = decision.append.is_some();
+    log.extend(appended_facts(decision));
+    (appended, follow_up)
+}
+
+#[test]
+fn a_stop_in_a_held_turns_words_freezes_its_own_occurrence_and_ends_the_child() {
+    let e = open_engine(returning_registry(vec![]));
+    let child = TrajectoryId::new("child");
+    let mut log = background_turn(&e, &child, "read_suspicious", "turn one");
+    assert_eq!(
+        answered_by(&e, &mut log, |log| returned(log, &child, "turn one", ReturnKind::Stop)),
+        (true, held_at(&child, 1)),
+        "a stop never answers as a held turn"
+    );
+    assert_eq!(deferrals(&log), vec![(0, true), (1, false)]);
+    assert!(has_ended(&e, &log, &child));
+    assert_eq!(e.validate_replay(&log), Ok(()));
+}
+
+#[test]
+fn a_keyed_turn_never_answers_from_an_earlier_return_in_its_words() {
+    let e = open_engine(returning_registry(vec![]));
+    let child = TrajectoryId::new("child");
+    let mut log = background_turn(&e, &child, "read_suspicious", "turn one");
+    assert_eq!(
+        answered_by(&e, &mut log, |log| returned(
+            log,
+            &child,
+            "turn one",
+            ReturnKind::KeyedTurn
+        )),
+        (true, held_at(&child, 1))
+    );
+    assert_eq!(deferrals(&log), vec![(0, true), (1, true)]);
+    assert_eq!(e.validate_replay(&log), Ok(()));
+}
+
+#[test]
+fn the_answer_after_a_steer_is_its_own_occurrence_whatever_the_parent_decided_before() {
+    let e = open_engine(returning_registry(vec![]));
+    let child = TrajectoryId::new("child");
+    let base = background_turn(&e, &child, "read_suspicious", "done");
+    let steered = |decision: Option<ReturnDecision>| {
+        let mut log = base.clone();
+        decided(&e, &mut log, |log| {
+            EngineEvent::BindFork(ForkBinding {
+                fork: fork_in(log, &child),
+                child: child.clone(),
+            })
+        });
+        if let Some(decision) = decision {
+            decided(&e, &mut log, |_| settle(&child, 0, decision));
+        }
+        assert!(
+            !e.is_quiescent(&viewing(&e, &log)),
+            "{decision:?}: the steered errand is unanswered"
+        );
+        reads(&e, &mut log, &child, "read_suspicious_internal");
+        let answered = answered_by(&e, &mut log, |log| returned(log, &child, "done", ReturnKind::Turn));
+        assert_eq!(e.validate_replay(&log), Ok(()));
+        answered
+    };
+    for decision in [None, Some(ReturnDecision::Discard), Some(ReturnDecision::Accept)] {
+        assert_eq!(steered(decision), (true, held_at(&child, 1)), "{decision:?}");
+    }
+}
+
+#[test]
+fn returns_held_below_the_floor_settle_in_turn_and_the_child_returns_on() {
+    let first = middle_rank_engine();
+    let second = open_engine(returning_registry(vec![])).at(DeploymentName::new("default"), PolicyRevision::new(2));
+    let child = TrajectoryId::new("child");
+    let root = vec![opened(&first)];
+    let crossing = floor_crossing(&first, &root);
+    let policy = ReturnPolicy::Crossing(CrossingReturn {
+        floor: Label::new(Trust::new(1), crossing.floor.audience.clone()),
+        below_floor: BelowFloor::Hold,
+        ..crossing
+    });
+    let mut old = [root.clone(), deciding_family(&first, &root, &child, policy)].concat();
+    reads(&first, &mut old, &child, "read_middle");
+    let replayed = |new: &[Fact]| {
+        let mut batches = vec![StampedBatch {
+            revision: Some(PolicyRevision::FIRST),
+            facts: &old,
+        }];
+        if !new.is_empty() {
+            batches.push(StampedBatch {
+                revision: Some(PolicyRevision::new(2)),
+                facts: new,
+            });
+        }
+        second.replay(&traj(), &batches, &[&first])
+    };
+    let mut new: Vec<Fact> = Vec::new();
+    let mut step = |event: &dyn Fn(&[Fact]) -> EngineEvent| {
+        let view = replayed(&new).expect("the log replays");
+        let decision = second
+            .handle(&view, event(&[old.clone(), new.clone()].concat()))
+            .expect("the event decides");
+        let follow_up = decision.follow_up.clone();
+        new.extend(appended_facts(decision));
+        assert!(replayed(&new).is_ok(), "the log replays after {follow_up:?}");
+        follow_up
+    };
+    let turn = |body: &'static str, kind| move |log: &[Fact]| returned(log, &TrajectoryId::new("child"), body, kind);
+    assert_eq!(step(&turn("at the floor", ReturnKind::Turn)), held_at(&child, 0));
+    assert_eq!(step(&turn("second words", ReturnKind::Turn)), held_at(&child, 1));
+    assert!(matches!(
+        step(&|_| settle(&child, 0, ReturnDecision::Accept)),
+        FollowUp::Settlement(SettlementFollowUp::Accepted { .. })
+    ));
+    // The parent now stands at the child's label, so the child's next words narrow nothing.
+    assert_eq!(
+        step(&turn("third words", ReturnKind::Turn)),
+        FollowUp::Child(ChildFollowUp::Merged {
+            admitted: ValueBody::new("third words")
+        })
+    );
+    assert_eq!(
+        step(&|_| settle(&child, 1, ReturnDecision::Accept)),
+        FollowUp::Settlement(SettlementFollowUp::Accepted {
+            admitted: ValueBody::new("second words")
+        })
+    );
+    assert_eq!(deferrals(&new), vec![(0, true), (1, true)]);
+}
+
+#[test]
+fn a_terminal_deferral_log_counts_each_return_once_and_replays_at_every_deferral() {
+    let e = open_engine(returning_registry(vec![]));
+    let log: Vec<Fact> =
+        serde_json::from_str(include_str!("../fixtures/terminal-deferral-log.json")).expect("the stored log decodes");
+    let views = viewing(&e, &log);
+    let root = traj();
+    let parent = views.views(&root).expect("the parent is opened");
+    for child in ["discarded", "accepted"] {
+        let child = TrajectoryId::new(child);
+        assert_eq!(parent.returns_by(&child), 1, "{child:?}");
+        assert_eq!(
+            parent.latest_return(&child),
+            None,
+            "{child:?}: a deferral is no crossing to repeat"
+        );
+    }
+    for (at, _) in log
+        .iter()
+        .enumerate()
+        .filter(|(_, fact)| matches!(fact, Fact::ReturnDeferred { .. }))
+    {
+        assert_eq!(e.validate_replay(&log[..=at]), Ok(()), "through {at}");
+    }
+}
+
+/// A log recorded before returns could be held: a child under no return spawned a grandchild
+/// under a deferred one, the grandchild's stop froze, the child ended by its void return, and
+/// only then discarded the grandchild's return.
+#[test]
+fn a_return_discarded_after_its_parent_ended_under_an_earlier_engine_replays() {
+    let e = open_engine(returning_registry(vec![]));
+    let stored = include_str!("../fixtures/discard-after-parent-ended-log.json");
+    let log: Vec<Fact> = serde_json::from_str(stored).expect("a log recorded at the base commit decodes");
+    assert_eq!(
+        serde_json::to_string_pretty(&log).expect("the log serializes"),
+        stored.trim_end()
+    );
+    let child = TrajectoryId::new("child");
+    let ended_at = log
+        .iter()
+        .position(|fact| matches!(fact, Fact::Boundary { trajectory, kind: crate::fact::BoundaryKind::VoidReturn } if *trajectory == child))
+        .expect("the child ends by its void return");
+    let discarded_at = log
+        .iter()
+        .position(|fact| matches!(fact, Fact::ReturnDiscarded { .. }))
+        .expect("the grandchild's return is discarded");
+    assert!(ended_at < discarded_at, "the discard follows the parent's end");
+    assert_eq!(e.validate_replay(&log), Ok(()));
+}
+
+#[test]
+fn a_floor_held_for_a_deciding_parent_covers_no_other_proposal_and_no_fan_out_holds() {
+    let e = open_engine(returning_registry(vec![]));
+    let parent = vec![opened(&e)];
+    let declare = |mark: SpawnMark, policy: ReturnPolicy| {
+        let blocked = e
+            .handle(&viewing(&e, &parent), spawn_batch("marked", Some(mark)))
+            .expect("a marked spawn blocks with its return declarations");
+        let log = [parent.clone(), appended_facts(blocked)].concat();
+        let (offer, _) = opened_offers(&log)
+            .into_iter()
+            .find(|(_, plan)| plan.return_step() == Some(&crate::fact::ReturnRoute::Raw))
+            .expect("the bare declaration is offered");
+        let declared = e.handle(
+            &viewing(&e, &log),
+            EngineEvent::ExecuteOffer(crate::transition::OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
+                trajectory: traj(),
+                offer,
+                outcome: crate::transition::OfferOutcome::Approved(Vec::new()),
+                return_policy: Some(policy),
+                offer_nonce: nonce(),
+                audience: crate::audience::AudienceEvidence::default(),
+            }),
+        );
+        declared.map(|declared| [log, appended_facts(declared)].concat())
+    };
+    let refusing = ReturnPolicy::Crossing(floor_crossing(&e, &parent));
+    let holding = ReturnPolicy::Crossing(CrossingReturn {
+        below_floor: BelowFloor::Hold,
+        ..floor_crossing(&e, &parent)
+    });
+
+    // Only the deciding single spawn declares the hold, and it declares nothing else.
+    for mark in [SpawnMark::at(0), SpawnMark::fan_out(0)] {
+        assert!(declare(mark, holding.clone()).is_err(), "{mark:?} holds nothing");
+    }
+    assert!(declare(SpawnMark::decides(0), refusing.clone()).is_err());
+    assert!(
+        serde_json::from_value::<SpawnMark>(serde_json::json!({ "index": 0, "kind": "FanOut", "decides": true }))
+            .is_err(),
+        "no fan-out is marked as deciding"
+    );
+
+    // A plain floor never releases the deciding spawn, and a held floor never releases another.
+    let releases = |log: &[Fact], mark: SpawnMark| {
+        let decided = e
+            .handle(&viewing(&e, log), spawn_batch("again", Some(mark)))
+            .expect("the proposal decides");
+        matches!(answered(&decided), ([_], []))
+    };
+    let plain = declare(SpawnMark::at(0), refusing).expect("a plain spawn declares its floor");
+    assert!(!releases(&plain, SpawnMark::decides(0)));
+    assert!(releases(&plain, SpawnMark::at(0)));
+    let deciding = declare(SpawnMark::decides(0), holding).expect("the deciding spawn declares its hold");
+    for other in [SpawnMark::at(0), SpawnMark::fan_out(0)] {
+        assert!(!releases(&deciding, other), "{other:?}");
+    }
+    assert!(releases(&deciding, SpawnMark::decides(0)));
 }
