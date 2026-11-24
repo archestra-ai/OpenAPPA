@@ -5,7 +5,7 @@
     "": {
       "name": "appa-appencode-cli-smoke",
       "dependencies": {
-        "@opencode/cli": "2.2.7",
+        "@opencode/cli": "2.3.0",
       },
     },
   },
@@ -13,30 +13,30 @@
     "@opencode/cli",
   ],
   "packages": {
-    "@opencode/cli": ["@opencode/cli@2.2.7", "", { "optionalDependencies": { "@opencode/cli-darwin-arm64": "2.2.7", "@opencode/cli-darwin-x64": "2.2.7", "@opencode/cli-darwin-x64-baseline": "2.2.7", "@opencode/cli-linux-arm64": "2.2.7", "@opencode/cli-linux-arm64-musl": "2.2.7", "@opencode/cli-linux-x64": "2.2.7", "@opencode/cli-linux-x64-baseline": "2.2.7", "@opencode/cli-linux-x64-baseline-musl": "2.2.7", "@opencode/cli-linux-x64-musl": "2.2.7", "@opencode/cli-windows-arm64": "2.2.7", "@opencode/cli-windows-x64": "2.2.7", "@opencode/cli-windows-x64-baseline": "2.2.7" }, "os": [ "linux", "win32", "darwin", ], "cpu": [ "x64", "arm64", ], "bin": { "opencode": "bin/opencode.exe", "opencode2": "bin/opencode.exe" } }, "sha512-qsSExDfpUCqhGXBqZ8xhjg2OG9DxnsnfWl1/7vGINRWw7sxZvK9cXeW6MI8j9e+GItaYtg94zH3Eo2ng86VLCg=="],
+    "@opencode/cli": ["@opencode/cli@2.3.0", "", { "optionalDependencies": { "@opencode/cli-darwin-arm64": "2.3.0", "@opencode/cli-darwin-x64": "2.3.0", "@opencode/cli-darwin-x64-baseline": "2.3.0", "@opencode/cli-linux-arm64": "2.3.0", "@opencode/cli-linux-arm64-musl": "2.3.0", "@opencode/cli-linux-x64": "2.3.0", "@opencode/cli-linux-x64-baseline": "2.3.0", "@opencode/cli-linux-x64-baseline-musl": "2.3.0", "@opencode/cli-linux-x64-musl": "2.3.0", "@opencode/cli-windows-arm64": "2.3.0", "@opencode/cli-windows-x64": "2.3.0", "@opencode/cli-windows-x64-baseline": "2.3.0" }, "os": [ "linux", "win32", "darwin", ], "cpu": [ "x64", "arm64", ], "bin": { "opencode": "bin/opencode.exe", "opencode2": "bin/opencode.exe" } }, "sha512-Q5RV8jLJ4O8bY2O8X2hkBOkgPf6+nDB9MEkz/Q/Cc4Ojd2SwUFFzEd1LzgNGKiXiS7g/9+/X4eqhrxY60fLMOQ=="],
 
-    "@opencode/cli-darwin-arm64": ["@opencode/cli-darwin-arm64@2.2.7", "", { "os": "darwin", "cpu": "arm64" }, "sha512-KH45DjiTcsHcnVLDrAEP3kdG57olO2BndtpYi+iGc7/cBrZfUs6YYrVpsZ40lr4izTupSIxwTbvSwKHutuq5uw=="],
+    "@opencode/cli-darwin-arm64": ["@opencode/cli-darwin-arm64@2.3.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-ey2HOWX2DK2YJrKta5a+pcvIlkiCyJJsN7NjkJZPsVg9TDXpQWE1OJLWVFqjxZcWNtaMjvKYlrlCY6g8Z2Lb+A=="],
 
-    "@opencode/cli-darwin-x64": ["@opencode/cli-darwin-x64@2.2.7", "", { "os": "darwin", "cpu": "x64" }, "sha512-6+US0PhgH8BaCQzkUGey+tz1gtHlhGxnKJspnETlcWOuZWQmyaZaF3wFf3L8+9+ukQsXV191tMG+jDIZefPjrg=="],
+    "@opencode/cli-darwin-x64": ["@opencode/cli-darwin-x64@2.3.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-OARYGefjQb1xClR9lX0bTl/unxaJ2H9kpyqYuEH+59YdgantqpMdPrXXnJgwiydk3WP94CxWLXFOxSYtCxoDQQ=="],
 
-    "@opencode/cli-darwin-x64-baseline": ["@opencode/cli-darwin-x64-baseline@2.2.7", "", { "os": "darwin", "cpu": "x64" }, "sha512-2fTG/E3oEy+RM9d148d3XQ6maMOD/hK5p1NXIQKIvXtMRWRMheZ0HSpkInrWFaw73qp6Be0w1X8/BfAz9F0rdQ=="],
+    "@opencode/cli-darwin-x64-baseline": ["@opencode/cli-darwin-x64-baseline@2.3.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-23KB1N3fK4seZ5Dc7izb9UKUqv24SVnEzH2WRU+LDMoEXQJzK/mgqADyBvjYG7J4l2GlB9dZ9Lr1qOWXpXNKvQ=="],
 
-    "@opencode/cli-linux-arm64": ["@opencode/cli-linux-arm64@2.2.7", "", { "os": "linux", "cpu": "arm64" }, "sha512-AgxoB3IxewSilPpWjU6GrdyJ/dSBnjncpHoZRK7Kul96bgVSEUKuPwC8nUYjTTXgLHqM+tqImwMLOlwCulzSxw=="],
+    "@opencode/cli-linux-arm64": ["@opencode/cli-linux-arm64@2.3.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-1IF1NQFD5mdZ7NcU81UifdYAVKEDAP/J07ylbgE4ZATminS7pOn5SOXVzyOkuN1WLcDzXunkju0hw8hug48wTg=="],
 
-    "@opencode/cli-linux-arm64-musl": ["@opencode/cli-linux-arm64-musl@2.2.7", "", { "os": "linux", "cpu": "arm64" }, "sha512-bfkdZxcfuueJUy6+mduxoibp5In2stNIVJUDlyxEp6tk3N/6Pr9Lz6bjzeKCwUWsGxEvrF225jyLt4vwL+bYRQ=="],
+    "@opencode/cli-linux-arm64-musl": ["@opencode/cli-linux-arm64-musl@2.3.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-RJHOnYFNVLKg5ZVPDUBJI6noq+wkAg0+Ofndeirl/2TBmXq6qm8PF3nMkmCs4zCfwlZuzk1eiDBMgEyStY9wPA=="],
 
-    "@opencode/cli-linux-x64": ["@opencode/cli-linux-x64@2.2.7", "", { "os": "linux", "cpu": "x64" }, "sha512-wk/DPHxr4maiW+FmQp8ztoXlo/vC5qsmEIHsLNaNLZL2iaIYfhyqFRe6CRsCVxy+ib0sfK07X2IepFw7ZSKqNQ=="],
+    "@opencode/cli-linux-x64": ["@opencode/cli-linux-x64@2.3.0", "", { "os": "linux", "cpu": "x64" }, "sha512-8T3K8L6Nd4fSG5BSgofqhmIDQ1ZvzDZZ2J7bFVB9RK1d5Hjqh24IcxgbcwpgGKkdvItrayi4Rl+wrSmhl17FFg=="],
 
-    "@opencode/cli-linux-x64-baseline": ["@opencode/cli-linux-x64-baseline@2.2.7", "", { "os": "linux", "cpu": "x64" }, "sha512-1X6fFT4VWyzMxIGWK1Lg29NEr6XEOYYUXMXSPbfSmbEHdqTLDcO9DlTTaebq4uBbVw/tQpIGJw4sBBrKb9tKMA=="],
+    "@opencode/cli-linux-x64-baseline": ["@opencode/cli-linux-x64-baseline@2.3.0", "", { "os": "linux", "cpu": "x64" }, "sha512-wIMo9anUJIVlnBJlGM0lB7n+jmFMstRwjN6Lw8+s0hp+HpA94LmVMDDkTg+iQqzcsatlJaHre39v8x+jGQErRQ=="],
 
-    "@opencode/cli-linux-x64-baseline-musl": ["@opencode/cli-linux-x64-baseline-musl@2.2.7", "", { "os": "linux", "cpu": "x64" }, "sha512-8/UdXfTW/fLc+02R54/Qgg++cBWN+ZKes0ZNgvHAEybJqc6U0XOVca1DRBtcOjLs4HzX4WIIQdBw9aivM6FQmw=="],
+    "@opencode/cli-linux-x64-baseline-musl": ["@opencode/cli-linux-x64-baseline-musl@2.3.0", "", { "os": "linux", "cpu": "x64" }, "sha512-yEraTu+gstB9g44Irx253Z7xx3d8G/6VX3sH5toynsLU8K3VI4+UAFFP6r5Waao6hYy0ATiSg2uwNdbZl1ZnJw=="],
 
-    "@opencode/cli-linux-x64-musl": ["@opencode/cli-linux-x64-musl@2.2.7", "", { "os": "linux", "cpu": "x64" }, "sha512-LyE+YntGyYN87ZiILBGS3STQgzovYpOaGXi5N15IQzJymqIhVG70lJznp3tdByo4p+19irNgia94rQR8CjvsFA=="],
+    "@opencode/cli-linux-x64-musl": ["@opencode/cli-linux-x64-musl@2.3.0", "", { "os": "linux", "cpu": "x64" }, "sha512-wi9aSJOMaKgifrF4cyoE2hqIG26VtUhMvI1AFKbjItID16pcEpE0zZ2bGvL1Yb+1WgTeemWQLea/sNculu7v7A=="],
 
-    "@opencode/cli-windows-arm64": ["@opencode/cli-windows-arm64@2.2.7", "", { "os": "win32", "cpu": "arm64" }, "sha512-pU2iskqUVeY7MzP5ztc7yXXwCb8UkVzid3WEFMsrXqym1NmM6EI8meu14FT+wbtXkLEr6gFP3st8HErWzoV1OA=="],
+    "@opencode/cli-windows-arm64": ["@opencode/cli-windows-arm64@2.3.0", "", { "os": "win32", "cpu": "arm64" }, "sha512-dqOtQicdmaKxyA8fSBYysegVl0QrlHYWXy/D/ocgZvGa0bNGi+9KR6N1Za9BCkOu/q7gemroXliMS+aBREhShA=="],
 
-    "@opencode/cli-windows-x64": ["@opencode/cli-windows-x64@2.2.7", "", { "os": "win32", "cpu": "x64" }, "sha512-SnbgW2ofeGhFXMZCWZWnSbrpU4czgWr4itUFJfAsz/SonGEQXRxghnTwONk6KmZSkWD50B/X8fAGs2fgknptXg=="],
+    "@opencode/cli-windows-x64": ["@opencode/cli-windows-x64@2.3.0", "", { "os": "win32", "cpu": "x64" }, "sha512-0wnPu8aCczjN82X6qK+XmMFiheyvOnBXRsb+hkyTWaeG6WlIeN9cM6J7vKnj741juyIE7q57SmRSRVPWUmun/g=="],
 
-    "@opencode/cli-windows-x64-baseline": ["@opencode/cli-windows-x64-baseline@2.2.7", "", { "os": "win32", "cpu": "x64" }, "sha512-l4o0UQT2n8TaxV18Ir846JUW2r2XUN2z+auGUq2fQ1s08/+ycJv7qjqRE8u4nmjm/VC7zOjxhgMU2USg0404Ag=="],
+    "@opencode/cli-windows-x64-baseline": ["@opencode/cli-windows-x64-baseline@2.3.0", "", { "os": "win32", "cpu": "x64" }, "sha512-hzYhXe+NOs7xctyjiOBuwBqJLvtkh2AHJflb+2p5XMzdmLFNqlIcwtE/byzD8LsTpgmrnb6m1m7k15muOFvReQ=="],
   }
 }

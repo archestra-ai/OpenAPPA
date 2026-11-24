@@ -8,14 +8,14 @@
   },
   "trustedDependencies": ["@opencode/cli"],
   "dependencies": {
-    "@opencode/plugin": "2.2.7",
-    "@opencode/schema": "2.2.7",
-    "effect": "4.1.0"
+    "@opencode/plugin": "2.3.0",
+    "@opencode/schema": "2.3.0",
+    "effect": "4.1.4"
   },
   "devDependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.83",
-    "@opencode/cli": "2.2.7",
-    "@opencode/client": "2.2.7",
+    "@opencode/cli": "2.3.0",
+    "@opencode/client": "2.3.0",
     "@types/bun": "1.4.4",
     "typescript": "7.0.2"
   },
