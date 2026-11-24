@@ -1,5 +1,6 @@
 use super::*;
-use appa_engine::fact::{LaunchAdmission, SpawnReport};
+use appa_engine::engine::CommittedSpawnReport;
+use appa_engine::fact::{LaunchAdmission, ObservedResult, SpawnReport};
 use appa_runtime_api::AutoApply;
 
 /// Why a reported outcome named no reportable dispatch. The threat model puts
@@ -48,10 +49,26 @@ pub(super) enum SpawnPlan {
         crossing: appa_engine::value::ChildReturnId,
     },
     Withheld,
-    /// A success that carries no message of the child's, taken as the report says: the
-    /// child's launch or a reply with no return. None of the report's bytes cross.
-    Reported(SpawnReport),
+    /// A success that carries no message of the child's, taken as `report` says: the child's
+    /// launch, a reply with no return, or one a deferral answered. None of the report's bytes
+    /// cross.
+    Reported {
+        report: SpawnReport,
+        taken: Taken,
+    },
     Close(EventError),
+}
+
+/// Where a no-message report's class came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Taken {
+    /// Fixed by this report, the first: its record carries the class.
+    First,
+    /// Replayed from the class the observing record carries.
+    Recorded,
+    /// Replayed from an observation a record without a class committed, as a log written
+    /// before classes were recorded has it: the repeat carries no class either.
+    Untagged,
 }
 
 /// What a report taken as `report` closes on: the launch fields alone, or nothing. Only the
@@ -67,6 +84,11 @@ fn reported_outcome(report: &SpawnReport, fields: Option<&str>) -> ToolOutcome {
         },
     }
 }
+
+/// What answers a repeat of a report a deferral first answered: the deferral it named may
+/// have been settled since, so the repeat says only that the return awaited a decision.
+pub(super) const DEFERRED: &str = "[appa] the subagent's return awaited a decision when this reply came; \
+                                   its return crosses only through the return check";
 
 /// What stands in for a launch reply under a host that declares no launch fields.
 pub(super) const LAUNCHED: &str = "[appa] the subagent was launched; its return crosses only through the return check";
@@ -365,26 +387,61 @@ impl Session {
                         // A success with no message from the bound child is taken once: the record
                         // that first observed it fixes how, and every repeat is taken the same way,
                         // whatever the child, a deferral or the size limit did since.
-                        let recorded = match (&status, &child, &value, &outcome) {
+                        let silent = match (&status, &child, &value, &outcome) {
                             (ForkStatus::Bound(bound), Some(named), None, ToolOutcome::Success { .. })
                                 if named == bound =>
                             {
-                                context.engine().committed_spawn_report(context.view, &dispatch)
+                                Some(bound.clone())
                             }
                             _ => None,
                         };
+                        let committed = silent
+                            .as_ref()
+                            .and_then(|_| context.engine().committed_spawn_report(context.view, &dispatch));
                         let next = match (status, &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
-                            _ if recorded.is_some() => {
-                                SpawnPlan::Reported(recorded.expect("a recorded report was just matched"))
-                            }
+                            _ if committed.is_some() => match (committed.clone(), &silent) {
+                                (Some(CommittedSpawnReport::Recorded(report)), _) => SpawnPlan::Reported {
+                                    report,
+                                    taken: Taken::Recorded,
+                                },
+                                // A record written before classes were: the class follows the
+                                // observation it committed, and the repeat carries no class, so
+                                // the digest check holds its body to the one first admitted.
+                                (Some(CommittedSpawnReport::Untagged(ObservedResult::Available(_))), _) => {
+                                    match &fields {
+                                        Some(_) => SpawnPlan::Reported {
+                                            report: SpawnReport::Launch(LaunchAdmission::Fields),
+                                            taken: Taken::Untagged,
+                                        },
+                                        None => SpawnPlan::Outcome,
+                                    }
+                                }
+                                (Some(CommittedSpawnReport::Untagged(ObservedResult::Unavailable)), Some(bound)) => {
+                                    SpawnPlan::Reported {
+                                        report: match (&fields, context.engine().runs_unreturned(context.view, bound)) {
+                                            (None, true) => SpawnReport::Launch(LaunchAdmission::Undeclared),
+                                            _ => SpawnReport::NoReturn,
+                                        },
+                                        taken: Taken::Untagged,
+                                    }
+                                }
+                                _ => unreachable!("a committed report is read for a silent report alone"),
+                            },
                             (ForkStatus::Unprepared | ForkStatus::FanOut, _) => SpawnPlan::Outcome,
                             // A deferred return answers every report of its spawn with the notice,
-                            // so the report closes the dispatch as what the host says it was.
+                            // so the report closes the dispatch as what the host says it was; a
+                            // report with no message records that the deferral answered it.
                             (ForkStatus::Bound(bound), named)
                                 if deferral.is_some() && named.as_ref().is_none_or(|named| *named == bound) =>
                             {
-                                SpawnPlan::Outcome
+                                match silent {
+                                    Some(_) => SpawnPlan::Reported {
+                                        report: SpawnReport::Deferred,
+                                        taken: Taken::First,
+                                    },
+                                    None => SpawnPlan::Outcome,
+                                }
                             }
                             (ForkStatus::Prepared, Some(child)) => SpawnPlan::Bind {
                                 fork: fork.clone(),
@@ -408,12 +465,13 @@ impl Session {
                                 // stop. The size limit applies to the launch fields once that is
                                 // fixed.
                                 None => match &outcome {
-                                    ToolOutcome::Success { .. } => SpawnPlan::Reported(
-                                        match context.engine().runs_unreturned(context.view, &bound) {
+                                    ToolOutcome::Success { .. } => SpawnPlan::Reported {
+                                        report: match context.engine().runs_unreturned(context.view, &bound) {
                                             true => SpawnReport::Launch(self.launch_admission(fields.as_deref())),
                                             false => SpawnReport::NoReturn,
                                         },
-                                    ),
+                                        taken: Taken::First,
+                                    },
                                     _ => SpawnPlan::Outcome,
                                 },
                                 // A failure repeating the crossed return closes as the host reported it.
@@ -448,7 +506,16 @@ impl Session {
                             },
                             // A withheld message still closes as the failure the host reported, in
                             // the runtime's words: none of the host's bytes cross with the close.
-                            SpawnPlan::Reported(report) => EngineEvent::SpawnReported {
+                            SpawnPlan::Reported {
+                                report,
+                                taken: Taken::Untagged,
+                            } => EngineEvent::ToolOutcome {
+                                dispatch,
+                                outcome: reported_outcome(report, fields.as_deref()),
+                                evidence,
+                                entropy: fresh_entropy(),
+                            },
+                            SpawnPlan::Reported { report, .. } => EngineEvent::SpawnReported {
                                 dispatch,
                                 outcome: reported_outcome(report, fields.as_deref()),
                                 report: report.clone(),
@@ -521,7 +588,7 @@ impl Session {
                 }
                 // The admitted fields restate the reply in its place; any other answer to a launch —
                 // the size limit's, a withholding, a sanitizer's derivation — is the call's own.
-                SpawnPlan::Reported(report) => {
+                SpawnPlan::Reported { report, taken } => {
                     return Ok(match report {
                         SpawnReport::Launch(LaunchAdmission::Fields | LaunchAdmission::OverLimit { .. }) => {
                             let decided = self
@@ -546,6 +613,16 @@ impl Session {
                             SpawnResultDecision::NoReturn {
                                 output: NO_RETURN.to_string(),
                             }
+                        }
+                        SpawnReport::Deferred => {
+                            outcome_decision(decision, &self.deployment().externals)?;
+                            SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+                                placeholder: match (taken, deferral) {
+                                    (Taken::First, Some(notice)) => notice,
+                                    _ => DEFERRED.to_string(),
+                                },
+                                presentation: None,
+                            })
                         }
                     });
                 }

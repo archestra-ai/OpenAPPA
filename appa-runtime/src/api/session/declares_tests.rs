@@ -1538,6 +1538,53 @@ async fn spawn_result_saying(runtime: &Runtime, child: &Session, said: &str) -> 
         .expect("the spawn's result is decided")
 }
 
+/// A report with no message that a deferral first answered is answered the same way on every
+/// repeat: once the held return is accepted and a later stop supersedes its notice, the repeat
+/// still says only that the return awaited a decision, never that the reply has no return.
+#[tokio::test]
+async fn a_silent_report_a_deferral_answered_repeats_as_a_neutral_deferral() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    let silent = || async {
+        session(&runtime)
+            .on_spawn_result_identified(
+                call("fetch", 1),
+                Some("toolu-1".to_string()),
+                spoken(""),
+                Some(child.trajectory.clone()),
+                None,
+                SpawnLaunch::Undeclared,
+            )
+            .await
+            .expect("the spawn's result is decided")
+    };
+    assert!(
+        matches!(
+            silent().await,
+            SpawnResultDecision::Outcome(ToolResultDecision::Replace { .. })
+        ),
+        "the deferral answers the first report"
+    );
+    let [held] = notices(&runtime).try_into().expect("one occurrence");
+    settling(&runtime, &parent(), &held.accept).await;
+    assert!(matches!(
+        child.on_child_end(Some("two".to_string())).await,
+        Ok(ChildReturnDecision::Returned { .. })
+    ));
+    assert_eq!(
+        silent().await,
+        SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+            placeholder: super::result::DEFERRED.to_string(),
+            presentation: None,
+        })
+    );
+}
+
 /// A held return the parent accepted, then a stop that crosses: the spawn's result repeating
 /// the crossing delivers it, and no notice of the earlier decision stands in for it.
 #[tokio::test]
@@ -2155,6 +2202,68 @@ async fn a_launchs_size_disposition_is_fixed_by_its_first_report() {
             .expect("the child reattaches");
         assert_eq!(reported_without_a_message(&runtime, &child, kagent()).await, launched);
     }
+}
+
+/// Rewrite `db` as a log written before reports carried their class: every record keeps its
+/// observation and loses its `spawn_report`. Answers how many rows it rewrote.
+fn untag(db: &std::path::Path) -> usize {
+    fn strip(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                fields.remove("spawn_report");
+                fields.values_mut().for_each(strip);
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(strip),
+            _ => {}
+        }
+    }
+    let connection = rusqlite::Connection::open(db).expect("the log opens");
+    let rows: Vec<(String, i64, Vec<u8>)> = connection
+        .prepare("SELECT root, seq, facts FROM logs")
+        .expect("the rows read")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("the rows read")
+        .collect::<Result<_, _>>()
+        .expect("the rows read");
+    rows.into_iter()
+        .filter(|(root, seq, bytes)| {
+            let mut value: serde_json::Value = serde_json::from_slice(bytes).expect("a row is JSON");
+            let before = value.clone();
+            strip(&mut value);
+            value != before
+                && connection
+                    .execute(
+                        "UPDATE logs SET facts = ?1 WHERE root = ?2 AND seq = ?3",
+                        rusqlite::params![serde_json::to_vec(&value).expect("the row serializes"), root, seq],
+                    )
+                    .expect("the row rewrites")
+                    == 1
+        })
+        .count()
+}
+
+/// A launch a predecessor's log recorded without its class is taken by the observation that
+/// log committed: after the child returned, its identical repeat is still the launch, its
+/// fields held to the admitted ones by the digest check.
+#[tokio::test]
+async fn an_untagged_launch_repeats_as_the_observation_its_log_committed() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = reopened(dir.path(), 65536);
+    runtime.create_session(root(), None).expect("a fresh root opens");
+    let child = bound_child(&runtime, 1).await;
+    let launched = reported_without_a_message(&runtime, &child, kagent()).await;
+    assert!(
+        matches!(&launched, SpawnResultDecision::Launched { .. }),
+        "{launched:?}"
+    );
+    drop((child, runtime));
+    assert_eq!(untag(&dir.path().join("appa.db")), 1, "the close loses its class");
+    let runtime = reopened(dir.path(), 65536);
+    let child = runtime
+        .session(&root(), &TrajectoryId("cc:root:child-1".to_string()))
+        .expect("the child reattaches");
+    crossing(&child, "the answer", "op-1").await;
+    assert_eq!(reported_without_a_message(&runtime, &child, kagent()).await, launched);
 }
 
 /// A launch's first report fixes its class: once the child returned, or while a sanitizer

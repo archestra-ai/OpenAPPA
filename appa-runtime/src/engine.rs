@@ -3018,7 +3018,7 @@ impl RuntimeEngine {
         &self,
         view: &EngineView,
         dispatch: &appa_engine::value::DispatchId,
-    ) -> Option<appa_engine::fact::SpawnReport> {
+    ) -> Option<appa_engine::engine::CommittedSpawnReport> {
         self.engine.committed_spawn_report(view, dispatch)
     }
 

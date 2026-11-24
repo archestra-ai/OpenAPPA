@@ -94,6 +94,16 @@ pub enum ForkStatus {
     ParentEnded,
 }
 
+/// What the log committed for a spawn's report with no message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommittedSpawnReport {
+    /// The class the observing record fixed.
+    Recorded(crate::fact::SpawnReport),
+    /// An observation a record without a class fixed, as a log written before classes were
+    /// recorded has it: a repeat must carry the same observation.
+    Untagged(crate::fact::ObservedResult),
+}
+
 /// The pure decision core, owning its static capability: the immutable registry (which carries
 /// the validated deployment profile), the policy identity it derives, and where it decides.
 ///
@@ -869,13 +879,14 @@ impl Engine {
         view.views(child).map_or(0, |views| views.returns_by(child))
     }
 
-    /// How the runtime took `dispatch`'s report with no message, as the checkpoint or close that
+    /// How the log committed `dispatch`'s report with no message, as the checkpoint or close that
     /// first observed it fixed: a repeat of the report is taken the same way.
-    pub fn committed_spawn_report(&self, view: &EngineView, dispatch: &DispatchId) -> Option<crate::fact::SpawnReport> {
-        view.projection()
-            .view(dispatch.trajectory())
-            .spawn_report(dispatch)
-            .cloned()
+    pub fn committed_spawn_report(&self, view: &EngineView, dispatch: &DispatchId) -> Option<CommittedSpawnReport> {
+        let views = view.projection().view(dispatch.trajectory());
+        match views.spawn_report(dispatch) {
+            Some(report) => Some(CommittedSpawnReport::Recorded(report.clone())),
+            None => outcome::fixed_observation(&views, dispatch).map(CommittedSpawnReport::Untagged),
+        }
     }
 
     /// The return of the child bound to the spawn `dispatch` that a report of the spawn answers

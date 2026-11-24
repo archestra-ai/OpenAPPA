@@ -474,6 +474,7 @@ export default Plugin.define({
                 backgroundReport = { ...proposal, spawned_id: child.id,
                   outcome: { status: 'success', body: { output: task, content: task } } }
                 const acknowledged = yield* runtime('spawn_result', backgroundReport)
+                if (acknowledged.decision === 'block') throw new Error(`[appencode] ${feedback(text(acknowledged, 'reason'), tools)}`)
                 if (acknowledged.decision === 'replace_output' && acknowledged.no_return !== true
                   && acknowledged.launched !== true) {
                   throw new Error(`[appencode] ${feedback(text(acknowledged, 'output'), tools)}`)

@@ -1935,6 +1935,8 @@ ${task.state.value}`;
                   outcome: { status: "success", body: { output: task, content: task } }
                 };
                 let acknowledged = yield* runtime("spawn_result", backgroundReport);
+                if (acknowledged.decision === "block")
+                  throw Error(`[appencode] ${feedback(text(acknowledged, "reason"), tools)}`);
                 if (acknowledged.decision === "replace_output" && acknowledged.no_return !== !0 && acknowledged.launched !== !0)
                   throw Error(`[appencode] ${feedback(text(acknowledged, "output"), tools)}`);
                 if (acknowledged.decision !== "replace_output" || acknowledged.launched !== !0 || acknowledged.no_return === !0 || !namesHandle(acknowledged.output, task))

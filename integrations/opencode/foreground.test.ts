@@ -460,7 +460,9 @@ async function taskHandle(sessionID: string) {
   if (!launch || launch.type !== 'tool' || launch.state.status !== 'completed') throw new Error('No launch handle')
   const value = launch.state.content.find(part => part.type === 'text')
   if (!value || value.type !== 'text') throw new Error('No launch handle text')
-  expect(value.text).toMatch(/^[a-f0-9-]{36}$/)
+  // The handle is the launched child's session id, as the host lists the parent's children.
+  const children = (await client.session.list({ parentID: sessionID })).data.map(child => child.id)
+  expect(children).toContain(value.text)
   return value.text
 }
 
@@ -499,8 +501,8 @@ test('wire launch acknowledgment releases the parent while the background child 
     const launch = flow.find(hook => hook.event.event === 'spawn_result')!
     expect(launch.event.spawned_id).toBe(live.child.id)
     expect(launch.event.value).toBeUndefined()
-    const launched = launch.event.outcome.body.output
-    expect(launch.reply).toMatchObject({ decision: 'replace_output', launched: true, output: JSON.stringify({ content: launched, output: launched }) })
+    expect(launch.reply).toMatchObject({ decision: 'replace_output', launched: true,
+      output: JSON.stringify({ content: live.child.id, output: live.child.id }) })
     expect(flow.some(hook => hook.event.event === 'child_end')).toBe(false)
     await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:while-child-active' })
     await client.session.wait({ sessionID: live.session.id })

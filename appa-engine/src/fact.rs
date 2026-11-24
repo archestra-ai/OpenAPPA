@@ -340,6 +340,9 @@ pub enum SpawnReport {
     Launch(LaunchAdmission),
     /// The child had ended or returned: nothing of the report crossed.
     NoReturn,
+    /// The child's return awaited a decision: the report was answered with the deferral
+    /// notice, and nothing of it crossed.
+    Deferred,
 }
 
 /// What a launch admitted: the host's launch fields, or nothing, and why nothing.

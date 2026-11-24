@@ -77,31 +77,9 @@ impl Restatement {
 
 pub(crate) fn replacement(event: &HookEvent, text: &str) -> Option<Replacement> {
     match event {
-        HookEvent::SpawnResult {
-            actor,
-            call,
-            outcome,
-            child,
-            ..
-        } => {
-            let response = delivered(outcome)?;
-            Some(match (Restatement::of(&call.tool), is_launch(&response)) {
-                // A launch is restated from the runtime's facts alone: nothing of the response
-                // it stands in for is copied, and the runtime's words go beside it.
-                (Restatement::Spawn, true) => Replacement {
-                    output: launch_fields(
-                        call,
-                        &child
-                            .as_ref()
-                            .and_then(|child| appa_runtime_api::child_host_id(&actor.root, child).ok())
-                            .unwrap_or_default(),
-                    ),
-                    context: Some(text.to_string()),
-                },
-                _ => restated(&call.tool, response, text),
-            })
+        HookEvent::SpawnResult { call, outcome, .. } | HookEvent::ToolResult { call, outcome, .. } => {
+            Some(restated(&call.tool, delivered(outcome)?, text))
         }
-        HookEvent::ToolResult { call, outcome, .. } => Some(restated(&call.tool, delivered(outcome)?, text)),
         _ => None,
     }
 }
@@ -356,6 +334,8 @@ fn spawn_restates(response: &serde_json::Value, text: &str) -> bool {
 /// that is not the spawn's own shape — the bytes a refused hook still carries included —
 /// crosses nothing.
 fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
+    // A fallback holds no launch fields the runtime authorized: the child a report names and
+    // the call's description are unverified here, so the launch's shape carries neither.
     if is_launch(&response) {
         return Replacement {
             output: launch_shape("", ""),
@@ -749,15 +729,8 @@ mod tests {
         );
         assert_eq!(
             answer["hookSpecificOutput"]["updatedToolOutput"],
-            serde_json::json!({
-                "status": "async_launched",
-                "isAsync": true,
-                "agentId": "a1",
-                "description": "",
-                "prompt": "",
-                "outputFile": "",
-            }),
-            "a launch is restated from the runtime's facts alone: {answer}"
+            launch_shape("", ""),
+            "a withheld launch is its shape alone: {answer}"
         );
     }
 
@@ -956,8 +929,8 @@ mod tests {
     }
 
     /// A launch crosses the runtime's facts alone: its fields name the matched child and the
-    /// released call's description, and every answer to a launch reply, a notice's included,
-    /// restates it from those facts with nothing of the reply copied.
+    /// released call's description, and every other answer to a launch reply, a notice's
+    /// included, restates it as the launch's bare shape with nothing of the reply copied.
     #[test]
     fn a_launch_crosses_only_the_runtimes_facts() {
         let reported = serde_json::json!({
@@ -1000,7 +973,23 @@ mod tests {
             }),
             fields
         );
-        // Every fallback restates the launch from the runtime's facts, its words beside it.
+        // A fallback holds no launch fields the runtime authorized, so its launch shape names
+        // neither the child the report gave nor the call's description, however long. The
+        // event comes through the parser, which takes its child from the reported `agentId`.
+        let parsed = parse_value(&serde_json::json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": "s1",
+            "tool_name": "Agent",
+            "tool_input": {"prompt": "List the files.", "description": "d".repeat(70_000)},
+            "tool_response": {"status": "async_launched", "isAsync": true, "agentId": "other",
+                              "description": "the child's bytes", "prompt": "p", "outputFile": "/tmp/o"},
+        }))
+        .expect("the report parses")
+        .expect("the report is an event");
+        assert!(
+            matches!(&parsed, HookEvent::SpawnResult { child: Some(child), .. } if child.0.ends_with("other")),
+            "the parser names the reported child: {parsed:?}"
+        );
         for answer in [
             HookDecision::ReplaceOutput {
                 output: "[appa] past the size limit".to_string(),
@@ -1012,9 +1001,16 @@ mod tests {
             HookDecision::NoReturn {
                 output: "[appa] no return".to_string(),
             },
+            HookDecision::Block {
+                reason: "the binding does not match".to_string(),
+                outcomes: None,
+            },
         ] {
-            let rendered = render(&event, &answer);
-            assert_eq!(rendered["hookSpecificOutput"]["updatedToolOutput"], fields);
+            let rendered = render(&parsed, &answer);
+            assert_eq!(
+                rendered["hookSpecificOutput"]["updatedToolOutput"],
+                launch_shape("", "")
+            );
             assert!(rendered["hookSpecificOutput"]["additionalContext"].is_string());
         }
     }
