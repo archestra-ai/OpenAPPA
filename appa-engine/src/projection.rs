@@ -245,10 +245,10 @@ pub struct Projection {
 }
 
 /// Every record of the log a release receipt may name, by its position among the family's
-/// records: an admitted result, a crossed return, or a root's answer. No record holds a meet
-/// of its terms: crossing by rank name need not keep the order of ranks, so each label is
-/// rebuilt from the terms the record names, crossed alone. The one label a record keeps is a
-/// child's resumed seed, crossed as the live fold crosses it.
+/// records: an admitted result, a crossed return, a root's answer, or an offer's review. No
+/// record holds a meet of its terms: crossing by rank name need not keep the order of ranks, so
+/// each label is rebuilt from the terms the record names, crossed alone. The one label a record
+/// keeps is a child's resumed seed, crossed as the live fold crosses it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Released {
     /// How many records this projection folded: the position the next one lands at.
@@ -268,6 +268,11 @@ struct Released {
     spawn_closes: OrdMap<DispatchId, ChildReturnId>,
     /// The offer whose decision admitted each confined result an offer admitted.
     admitted_by: OrdMap<DispatchId, crate::value::OfferId>,
+    /// Where each offer's trajectory stood as its block opened it: the label its review
+    /// releases at.
+    offered: OrdMap<crate::value::OfferId, FoldPoint>,
+    /// The record that released each review, by its offer and bytes.
+    reviews: OrdMap<(crate::value::OfferId, appa_runtime_api::ReleaseDigest), u64>,
 }
 
 /// A trajectory's fold as it stood at one record: the resumed seed it held then and its first
@@ -317,6 +322,11 @@ enum ReleasedRecord {
         digest: appa_runtime_api::ReleaseDigest,
         at: FoldPoint,
     },
+    /// At the fold the offer's trajectory stood at as its block opened the offer.
+    Review {
+        digest: appa_runtime_api::ReleaseDigest,
+        at: FoldPoint,
+    },
 }
 
 impl Released {
@@ -335,6 +345,10 @@ impl Released {
             } => {
                 self.received
                     .insert(dispatch.clone(), FoldPoint::of(trajectory, local, resumed));
+                return;
+            }
+            Fact::OfferOpened { trajectory, offer, .. } => {
+                self.offered.insert(*offer, FoldPoint::of(trajectory, local, resumed));
                 return;
             }
             Fact::DispatchClosed {
@@ -393,6 +407,13 @@ impl Released {
                     digest: *digest,
                     at: FoldPoint::of(trajectory, local, resumed),
                 }
+            }
+            Fact::ReviewReleased { offer, digest, .. } => {
+                let Some(at) = self.offered.get(offer).cloned() else {
+                    return;
+                };
+                self.reviews.insert((*offer, *digest), position);
+                ReleasedRecord::Review { digest: *digest, at }
             }
             _ => return,
         };
@@ -578,8 +599,9 @@ impl Projection {
         }
         each_mut(&mut self.candidates, |candidate| candidate.derived.cross(crossing));
         each_mut(&mut self.released.received, |point| point.cross(crossing));
+        each_mut(&mut self.released.offered, |point| point.cross(crossing));
         each_mut(&mut self.released.records, |record| {
-            if let ReleasedRecord::Answer { at, .. } = record {
+            if let ReleasedRecord::Answer { at, .. } | ReleasedRecord::Review { at, .. } = record {
                 at.cross(crossing);
             }
         });
@@ -1059,8 +1081,8 @@ impl Projection {
                     candidates.remove(&SubjectKey::Return(ChildReturnId::new(trajectory.clone(), occurrence)));
                 }
             },
-            // Folded into `released` above, and nowhere else: an answer moves no label.
-            Fact::AnswerReleased { .. } => {}
+            // Folded into `released` above, and nowhere else: neither moves a label.
+            Fact::AnswerReleased { .. } | Fact::ReviewReleased { .. } => {}
         }
     }
 
@@ -1087,7 +1109,9 @@ impl Projection {
                     .combine(self.value_label(*value)?),
             ),
             ReleasedRecord::Return { value, body } => (digest(body), self.value_label(*value)?.clone()),
-            ReleasedRecord::Answer { digest, at } => (*digest, self.fold_at(at)),
+            ReleasedRecord::Answer { digest, at } | ReleasedRecord::Review { digest, at } => {
+                (*digest, self.fold_at(at))
+            }
         })
     }
 
@@ -1114,8 +1138,23 @@ impl Projection {
                     position,
                 })
             }
-            ReleasedRecord::Answer { .. } => None,
+            ReleasedRecord::Answer { .. } | ReleasedRecord::Review { .. } => None,
         }
+    }
+
+    /// The trajectory `offer`'s block opened it on, and the label that trajectory held there.
+    pub(crate) fn offered_at(&self, offer: &crate::value::OfferId) -> Option<(TrajectoryId, Label)> {
+        let at = self.released.offered.get(offer)?;
+        Some((at.trajectory.clone(), self.fold_at(at)))
+    }
+
+    /// The position of the record that released `offer`'s review as `digest`.
+    pub(crate) fn standing_review(
+        &self,
+        offer: &crate::value::OfferId,
+        digest: &appa_runtime_api::ReleaseDigest,
+    ) -> Option<u64> {
+        self.released.reviews.get(&(*offer, *digest)).copied()
     }
 
     /// The position of `trajectory`'s latest answer, where it holds `digest` at the fold

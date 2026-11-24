@@ -5,8 +5,8 @@ use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcomes, ParseRefusal, PeerAddress, PeerFrame,
-    PrincipalSource, PromptKey, ProposedCall, ReleaseReceipt, Ruling, SessionSettings, SessionTitle, SpawnKind,
-    SpawnLaunch, SpawnRef, StartKind, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
+    PrincipalSource, PromptKey, ProposedCall, ReleaseDigest, ReleaseReceipt, Ruling, SessionSettings, SessionTitle,
+    SpawnKind, SpawnLaunch, SpawnRef, StartKind, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
@@ -330,6 +330,15 @@ fn continued(
             value,
             operation,
         },
+        HookEvent::ReviewRelease {
+            actor: who,
+            offer,
+            digest,
+        } => HookEvent::ReviewRelease {
+            actor: actor(who),
+            offer,
+            digest,
+        },
     };
     (event, names_children.into_iter().map(id).collect())
 }
@@ -510,7 +519,8 @@ fn hook_root(event: &HookEvent) -> &TrajectoryId {
         | HookEvent::ToolCall { actor, .. }
         | HookEvent::SpawnResume { actor, .. }
         | HookEvent::ToolResult { actor, .. }
-        | HookEvent::SpawnResult { actor, .. } => &actor.root,
+        | HookEvent::SpawnResult { actor, .. }
+        | HookEvent::ReviewRelease { actor, .. } => &actor.root,
     }
 }
 
@@ -691,6 +701,7 @@ fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
         HookEvent::ChildEnd { .. } | HookEvent::ChildTurnEnd { .. } => (HookKind::ChildEnd, None),
         HookEvent::ChildReturn { .. } => (HookKind::ChildReturn, None),
         HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
+        HookEvent::ReviewRelease { .. } => (HookKind::ReviewRelease, None),
     }
 }
 
@@ -838,6 +849,7 @@ async fn dispatch_event(
             value,
             operation,
         } => dispatcher.child_return(root, child, value, operation).await,
+        HookEvent::ReviewRelease { actor, offer, digest } => dispatcher.review_release(actor, offer, digest).await,
     }
 }
 
@@ -1034,6 +1046,25 @@ impl Dispatcher<'_> {
         match released {
             Ok(receipt) => *self.receipt = Some(receipt),
             Err(error) => tracing::warn!(root = %actor.root.0, %error, "the turn's answer was not recorded"),
+        }
+    }
+
+    /// Record an offer's review, its receipt riding on the `Ack`.
+    async fn review_release(&mut self, actor: Actor, offer: String, digest: ReleaseDigest) -> HookDecision {
+        let Ok(offer) = crate::api::OfferId::parse(&offer) else {
+            return refuse(EventError::UnknownOffer);
+        };
+        let released = on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
+            let offer = offer.clone();
+            async move { session.release_review(&offer, digest).await }
+        })
+        .await;
+        match released {
+            Ok(receipt) => {
+                *self.receipt = Some(receipt);
+                HookDecision::Ack
+            }
+            Err(error) => refuse(error),
         }
     }
 

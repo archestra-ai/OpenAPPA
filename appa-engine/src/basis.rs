@@ -129,6 +129,8 @@ pub enum DecidedAct {
     Settlement(ChildReturnId),
     /// A turn's answer, named by the root that gave it.
     Answer(TrajectoryId),
+    /// An offer's review released to its host.
+    Review(OfferId),
 }
 
 /// What one decision declares it moves. `family` and `flow` move at most once in a decision;

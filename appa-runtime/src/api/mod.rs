@@ -893,6 +893,8 @@ pub(crate) enum EventError {
     OutcomeMismatch,
     #[error("no live offer with this id exists")]
     UnknownOffer,
+    #[error("the review names other bytes than its offer renders; nothing is recorded")]
+    OtherReview,
     /// The call already carries a current approval another plan recorded. Nothing is appended.
     #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
     ApprovalPending,
@@ -1043,6 +1045,7 @@ impl EventError {
             | EventError::LaunchedLineVariant => RefusalClass::Trajectory,
             EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
             EventError::UnknownOffer
+            | EventError::OtherReview
             | EventError::ApprovalPending
             | EventError::AheadMoved
             | EventError::RemedyArguments { .. } => RefusalClass::Remedy,
@@ -1102,6 +1105,7 @@ impl EventError {
             | EventError::UnknownDispatch
             | EventError::OutcomeMismatch
             | EventError::UnknownOffer
+            | EventError::OtherReview
             | EventError::ApprovalPending
             | EventError::AheadMoved
             | EventError::NotAChild
@@ -1133,6 +1137,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::Ended => EventError::TrajectoryEnded,
             EngineRefusal::DispatchClosed => EventError::UnknownDispatch,
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
+            EngineRefusal::OtherReview => EventError::OtherReview,
             EngineRefusal::ApprovalPending => EventError::ApprovalPending,
             EngineRefusal::Unbindable => EventError::BindingMismatch,
             EngineRefusal::CallIdReused => EventError::CallIdReused,

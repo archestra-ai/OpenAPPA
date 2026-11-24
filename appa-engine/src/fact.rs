@@ -744,6 +744,15 @@ pub enum Fact {
         digest: appa_runtime_api::ReleaseDigest,
         label: Label,
     },
+    /// The review text an offer shows a person, released to the host: the digest of its
+    /// bytes, at the label the offer's blocked call was judged under. Nothing crosses and no
+    /// label moves.
+    ReviewReleased {
+        trajectory: TrajectoryId,
+        offer: crate::value::OfferId,
+        digest: appa_runtime_api::ReleaseDigest,
+        label: Label,
+    },
 }
 
 impl Fact {
@@ -807,7 +816,8 @@ impl Fact {
             | Fact::ReturnAccepted { trajectory, .. }
             | Fact::ReturnDiscarded { trajectory, .. }
             | Fact::Boundary { trajectory, .. }
-            | Fact::AnswerReleased { trajectory, .. } => trajectory,
+            | Fact::AnswerReleased { trajectory, .. }
+            | Fact::ReviewReleased { trajectory, .. } => trajectory,
         }
     }
 }

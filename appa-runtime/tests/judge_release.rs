@@ -706,3 +706,94 @@ async fn the_same_answer_after_a_narrowing_is_another_record_at_the_narrower_lab
     );
     assert_eq!(judge(&runtime, &[before], "post", "eve@corp.example").await, Ok(()));
 }
+
+/// The review the root's `post` to Dave blocks on once its audience narrowed to Alice and Bob:
+/// the person `reviewer` asks may approve Dave, and no other authority may.
+async fn blocked_review(runtime: &Arc<Runtime>) -> appa_runtime_api::Review {
+    narrowed(runtime).await;
+    let to_dave = ProposedCall {
+        tool: "post".to_string(),
+        arguments: raw(serde_json::json!({ "to": "dave@corp.example" })),
+        cwd: None,
+    };
+    let HookDecision::DenyCall { review, .. } = propose(runtime, to_dave).await else {
+        panic!("the post to Dave blocks on the reviewer");
+    };
+    review
+        .into_iter()
+        .next()
+        .expect("the reviewer's offer carries its review")
+}
+
+async fn release_review(runtime: &Arc<Runtime>, offer: &str, text: &str) -> appa_runtime::api::EmbeddedHookOutcome {
+    hooks::handle_embedded(
+        runtime,
+        HookEvent::ReviewRelease {
+            actor: actor(),
+            offer: offer.to_string(),
+            digest: ReleaseDigest::of(text.as_bytes()),
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_review_is_released_only_as_the_bytes_its_offer_shows_and_again_as_its_record() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = opened(&dir).await;
+    let review = blocked_review(&runtime).await;
+
+    let other = release_review(&runtime, &review.offer, "a review this offer never showed").await;
+    assert!(
+        matches!(
+            other.decision,
+            HookDecision::Refuse {
+                class: appa_runtime_api::RefusalClass::Remedy,
+                ..
+            }
+        ),
+        "{other:?}"
+    );
+    assert_eq!(other.receipt, None);
+
+    let released = release_review(&runtime, &review.offer, &review.text).await;
+    assert_eq!(released.decision, HookDecision::Ack);
+    let receipt = released.receipt.expect("a released review carries its receipt");
+    assert_eq!(receipt.session, root());
+    assert_eq!(receipt.digest, ReleaseDigest::of(review.text.as_bytes()));
+
+    let again = release_review(&runtime, &review.offer, &review.text).await;
+    assert_eq!(
+        again.receipt,
+        Some(receipt),
+        "the same review again names the same record"
+    );
+}
+
+#[tokio::test]
+async fn a_released_review_reaches_the_readers_its_blocks_label_allows() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = opened(&dir).await;
+    let review = blocked_review(&runtime).await;
+    let receipt = release_review(&runtime, &review.offer, &review.text)
+        .await
+        .receipt
+        .expect("a released review carries its receipt");
+
+    assert_eq!(
+        judge(&runtime, std::slice::from_ref(&receipt), "post", "alice@corp.example").await,
+        Ok(())
+    );
+    assert_eq!(
+        judge(&runtime, std::slice::from_ref(&receipt), "post", "eve@corp.example").await,
+        Err(ReleaseRefusal::HardBlock)
+    );
+    let forged = ReleaseReceipt {
+        digest: ReleaseDigest::of(b"other bytes"),
+        ..receipt
+    };
+    assert_eq!(
+        judge(&runtime, &[forged], "post", "alice@corp.example").await,
+        Err(ReleaseRefusal::Integrity)
+    );
+}

@@ -20,7 +20,7 @@ fn answer(e: &Engine, log: &[Fact], body: &str) -> EngineDecision {
 
 fn released(decision: &EngineDecision) -> ReleasedAt {
     match decision.follow_up {
-        FollowUp::Answer { at } => at,
+        FollowUp::Released { at } => at,
         ref other => panic!("an answer follows up with its record, got {other:?}"),
     }
 }
@@ -260,4 +260,64 @@ fn a_gap_is_lifted_only_by_an_authority_the_judgment_admits() {
         }
     );
     assert!(matches!(judge(false), ReleaseJudgment::Withheld { .. }));
+}
+
+fn review(
+    e: &Engine,
+    log: &[Fact],
+    offer: crate::value::OfferId,
+    body: &str,
+    rendered: Option<&str>,
+) -> Result<EngineDecision, TransitionError> {
+    e.handle(
+        &viewing(e, log),
+        EngineEvent::Review(crate::transition::ReviewReport {
+            offer,
+            digest: ReleaseDigest::of(body.as_bytes()),
+            rendered: rendered.map(|text| ReleaseDigest::of(text.as_bytes())),
+        }),
+    )
+}
+
+#[test]
+fn a_review_is_recorded_only_as_its_rendered_bytes_at_its_blocks_label() {
+    let e = engine(vec![crm_tool(), internal_read()]);
+    let mut log = vec![opened(&e)];
+    let at_block = viewing(&e, &log).projection().view(&traj()).current_label();
+    log.extend(appended_facts(blocked_batch(&e, &log, "b1", nonce())));
+    let offer = opened_offers(&log)[0].0;
+    reads(&e, &mut log, &traj(), "read_internal");
+    let now = viewing(&e, &log).projection().view(&traj()).current_label();
+    assert_ne!(now, at_block, "the read moved the root's label past the block's");
+
+    assert_eq!(
+        review(&e, &log, offer, "other bytes", Some("the review")).map(|decision| decision.append.is_some()),
+        Err(TransitionError::OtherReview)
+    );
+    assert_eq!(
+        review(&e, &log, offer, "the review", None).map(|decision| decision.append.is_some()),
+        Err(TransitionError::OtherReview),
+        "an offer that renders no review releases none"
+    );
+
+    let recorded = review(&e, &log, offer, "the review", Some("the review")).expect("the review records");
+    let at = position(&recorded);
+    log.extend(appended_facts(recorded));
+    let digest = ReleaseDigest::of(b"the review");
+    assert!(matches!(
+        &log[at as usize],
+        Fact::ReviewReleased { trajectory, offer: named, digest: recorded, label }
+            if *trajectory == traj() && *named == offer && *recorded == digest && *label == at_block
+    ));
+    assert_eq!(e.released_label(&viewing(&e, &log), at, &digest), Ok(at_block));
+
+    let again = review(&e, &log, offer, "the review", None).expect("the standing review answers");
+    assert!(again.append.is_none(), "a repeated review appends nothing");
+    assert_eq!(released(&again), ReleasedAt { position: at, digest });
+
+    let mut forged = log.clone();
+    if let Fact::ReviewReleased { label, .. } = &mut forged[at as usize] {
+        *label = now;
+    }
+    assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ReviewMismatch));
 }

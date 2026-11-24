@@ -282,6 +282,32 @@ async fn a_send_does_not_fold_and_an_unstarted_child_stays_held() {
     );
 }
 
+/// The embedded dispatcher hands a host the receipt of a return the child crossed without
+/// ending, beside the `Ack` of its admission.
+#[tokio::test]
+async fn an_admitted_child_return_carries_its_receipt() {
+    let (_dir, runtime) = runtime();
+    start(&runtime).await;
+    open_child(&runtime).await;
+    let returned = hooks::handle_embedded(
+        &runtime,
+        HookEvent::ChildReturn {
+            root: family(),
+            child: child(),
+            value: "the child's findings".to_string(),
+            operation: None,
+        },
+    )
+    .await;
+    assert_eq!(returned.decision, HookDecision::Ack);
+    let receipt = returned.receipt.expect("an admitted return carries its receipt");
+    assert_eq!(receipt.session, family());
+    assert_eq!(
+        receipt.digest,
+        appa_runtime_api::ReleaseDigest::of("the child's findings".as_bytes())
+    );
+}
+
 #[tokio::test]
 async fn a_preexisting_call_is_not_resulted_as_the_read() {
     let (_dir, runtime) = runtime();

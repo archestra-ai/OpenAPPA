@@ -365,6 +365,13 @@ pub enum EngineEvent {
     Answer {
         digest: appa_runtime_api::ReleaseDigest,
     },
+    /// An offer's review, by the digest of its bytes, beside the digest of the review text the
+    /// offer renders now.
+    Review {
+        offer: OfferId,
+        digest: appa_runtime_api::ReleaseDigest,
+        rendered: Option<appa_runtime_api::ReleaseDigest>,
+    },
 }
 
 /// What `execute_remedy_plan` carries beside the offer id: the floor the child's return may
@@ -378,8 +385,8 @@ pub use appa_eventlog::LabelSpelling;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Next {
     Done,
-    /// The root's answer stands recorded where `receipt` names.
-    Answered {
+    /// The root's answer, or an offer's review, stands recorded where `receipt` names.
+    Released {
         receipt: appa_runtime_api::ReleaseReceipt,
     },
     ModelResponse {
@@ -525,6 +532,7 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::UnknownReturn => ReplayRefusalClass("unknown_return"),
             TransitionRefusal::AnswerOffRoot => ReplayRefusalClass("answer_off_root"),
             TransitionRefusal::AnswerLabelMismatch => ReplayRefusalClass("answer_label_mismatch"),
+            TransitionRefusal::ReviewMismatch => ReplayRefusalClass("review_mismatch"),
             TransitionRefusal::UnknownAuthority(..) => ReplayRefusalClass("unknown_authority"),
             TransitionRefusal::UnknownSanitizer(..) => ReplayRefusalClass("unknown_sanitizer"),
             TransitionRefusal::SanitizerUnapplicable => ReplayRefusalClass("sanitizer_unapplicable"),
@@ -641,6 +649,8 @@ pub enum EngineRefusal {
     DispatchClosed,
     #[error("the offer is not one this family carries")]
     UnknownOffer,
+    #[error("the review names other bytes than its offer renders")]
+    OtherReview,
     /// The call already carries a current approval another plan recorded.
     #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
     ApprovalPending,
@@ -677,6 +687,7 @@ impl EngineRefusal {
             EngineRefusal::Ended => ReplayRefusalClass("ended"),
             EngineRefusal::DispatchClosed => ReplayRefusalClass("dispatch_closed"),
             EngineRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
+            EngineRefusal::OtherReview => ReplayRefusalClass("other_review"),
             EngineRefusal::ApprovalPending => ReplayRefusalClass("approval_pending"),
             EngineRefusal::Unbindable => ReplayRefusalClass("unbindable"),
             EngineRefusal::CallIdReused => ReplayRefusalClass("call_id_reused"),
@@ -1696,7 +1707,8 @@ impl RuntimeEngine {
             | Fact::CallApprovalConsumed { .. }
             | Fact::CandidateConsumed { .. }
             | Fact::BasisAdvanced { .. }
-            | Fact::AnswerReleased { .. } => return Some(None),
+            | Fact::AnswerReleased { .. }
+            | Fact::ReviewReleased { .. } => return Some(None),
             Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
         };
         Some(Some(event))
@@ -1797,6 +1809,11 @@ impl RuntimeEngine {
                 decision,
             } => self.settle_return(view, parent, id, decision),
             EngineEvent::Answer { digest } => self.answer(view, trajectory, digest),
+            EngineEvent::Review {
+                offer,
+                digest,
+                rendered,
+            } => self.review(view, &offer, digest, rendered),
         }
     }
 
@@ -1812,22 +1829,46 @@ impl RuntimeEngine {
             trajectory: trajectory.clone(),
             digest,
         };
-        match self.engine.handle(view, CoreEvent::Answer(report)) {
+        self.release(view, CoreEvent::Answer(report))
+    }
+
+    /// Records an offer's review at the label its block stood at; the same review again
+    /// records nothing.
+    fn review(
+        &self,
+        view: &EngineView,
+        offer: &OfferId,
+        digest: appa_runtime_api::ReleaseDigest,
+        rendered: Option<appa_runtime_api::ReleaseDigest>,
+    ) -> Result<EngineDecision, EngineRefusal> {
+        let offer = parse_offer(offer).ok_or(EngineRefusal::UnknownOffer)?;
+        let report = appa_engine::transition::ReviewReport {
+            offer,
+            digest,
+            rendered,
+        };
+        self.release(view, CoreEvent::Review(report))
+    }
+
+    fn release(&self, view: &EngineView, event: CoreEvent) -> Result<EngineDecision, EngineRefusal> {
+        match self.engine.handle(view, event) {
             Ok(EngineDecisionCore {
                 append,
-                follow_up: FollowUp::Answer { at },
+                follow_up: FollowUp::Released { at },
             }) => Ok(EngineDecision {
                 append: append.map(ValidatedFactBatch::into_unsealed),
-                then: Next::Answered {
+                then: Next::Released {
                     receipt: receipt(view.family(), at),
                 },
             }),
             Ok(other) => Err(EngineRefusal::Invariant {
-                detail: format!("an answer produced a non-answer follow-up: {:?}", other.follow_up),
+                detail: format!("a release produced another follow-up: {:?}", other.follow_up),
             }),
             Err(TransitionError::BranchEnded) => Err(EngineRefusal::Ended),
+            Err(TransitionError::UnknownOffer) => Err(EngineRefusal::UnknownOffer),
+            Err(TransitionError::OtherReview) => Err(EngineRefusal::OtherReview),
             Err(error) => Err(EngineRefusal::Invariant {
-                detail: format!("recording an answer: {error}"),
+                detail: format!("recording a release: {error}"),
             }),
         }
     }
@@ -2320,7 +2361,6 @@ impl RuntimeEngine {
 
     /// The reviews executing this standing offer would raise, read without executing it.
     /// Empty for an offer that no longer stands or consults no authority.
-    #[cfg(feature = "daemon")]
     pub(crate) fn offer_reviews(
         &self,
         view: &EngineView,

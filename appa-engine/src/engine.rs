@@ -517,7 +517,7 @@ impl Engine {
             EngineEvent::ChildReturn(report) => Some(&report.child),
             EngineEvent::SettleReturn(settlement) => Some(&settlement.trajectory),
             EngineEvent::Answer(report) => Some(&report.trajectory),
-            EngineEvent::Outcome(_) | EngineEvent::BindFork(_) => None,
+            EngineEvent::Outcome(_) | EngineEvent::BindFork(_) | EngineEvent::Review(_) => None,
         };
         if acting.is_some_and(|trajectory| !view.projection().is_opened(trajectory)) {
             return Err(TransitionError::UnopenedTrajectory);
@@ -531,6 +531,7 @@ impl Engine {
             EngineEvent::ExecuteOffer(execution) => self.decide_offer(view, &execution, &act),
             EngineEvent::SettleReturn(settlement) => self.decide_settlement(view, &settlement),
             EngineEvent::Answer(report) => self.decide_answer(view, &report),
+            EngineEvent::Review(report) => self.decide_review(view, &report),
         }?;
         act.settle(self.registry.audience())?;
         Ok(decision)
@@ -558,9 +559,10 @@ impl Engine {
                 }
             }
             EngineEvent::ChildReturn(report) => (report.audience.clone(), AudienceEvidence::default()),
-            EngineEvent::BindFork(_) | EngineEvent::SettleReturn(_) | EngineEvent::Answer(_) => {
-                (AudienceEvidence::default(), AudienceEvidence::default())
-            }
+            EngineEvent::BindFork(_)
+            | EngineEvent::SettleReturn(_)
+            | EngineEvent::Answer(_)
+            | EngineEvent::Review(_) => (AudienceEvidence::default(), AudienceEvidence::default()),
         };
         self.act_evidence(merged, inherited, projection.principal().cloned())
     }

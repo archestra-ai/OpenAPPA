@@ -172,6 +172,14 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: Option<TrajectoryId> = child;
             let _: Option<String> = value;
         }
+        HookEvent::ReviewRelease {
+            actor: _,
+            offer,
+            digest,
+        } => {
+            let _: String = offer;
+            let _: appa_runtime_api::ReleaseDigest = digest;
+        }
     }
     match decision {
         HookDecision::Ack | HookDecision::PassControl | HookDecision::DeferReturn => {}

@@ -247,6 +247,7 @@ pub enum EngineEvent {
     ExecuteOffer(OfferExecution),
     SettleReturn(ReturnSettlement),
     Answer(AnswerReport),
+    Review(ReviewReport),
 }
 
 /// The root's final answer of a turn, by the digest of the bytes its host may deliver.
@@ -254,6 +255,16 @@ pub enum EngineEvent {
 pub struct AnswerReport {
     pub trajectory: TrajectoryId,
     pub digest: appa_runtime_api::ReleaseDigest,
+}
+
+/// An offer's review text, by the digest of the bytes its host may show a reader. `rendered`
+/// is the digest of the text the offer renders now, read by the host that renders it; `None`
+/// where the offer renders none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewReport {
+    pub offer: crate::value::OfferId,
+    pub digest: appa_runtime_api::ReleaseDigest,
+    pub rendered: Option<appa_runtime_api::ReleaseDigest>,
 }
 
 /// The parent's decision on one deferred return: `trajectory` is the parent that owns it.
@@ -623,9 +634,9 @@ pub enum FollowUp {
         position: usize,
         error: crate::engine::EngineError,
     },
-    /// The answer stands where `at` names: recorded by this decision, or by an earlier one
-    /// that recorded the same bytes at the same label.
-    Answer {
+    /// The answer or review stands where `at` names: recorded by this decision, or by an
+    /// earlier one that recorded the same bytes at the same label.
+    Released {
         at: ReleasedAt,
     },
 }
@@ -691,6 +702,8 @@ pub enum TransitionError {
     Plan(#[from] crate::execute::PlanError),
     #[error("no offer of this family carries that identity")]
     UnknownOffer,
+    #[error("the review names other bytes than its offer renders")]
+    OtherReview,
     #[error("the offer belongs to another trajectory of this family")]
     OfferElsewhere,
     #[error("the offer's policy basis has moved, so it is stale")]
@@ -1169,6 +1182,8 @@ pub enum TransitionRefusal {
     AnswerOffRoot,
     #[error("an answer record carries another label than its trajectory holds")]
     AnswerLabelMismatch,
+    #[error("a review record stands outside its own act, or off its offer's trajectory or block label")]
+    ReviewMismatch,
     #[error("no authority registered as {0}")]
     UnknownAuthority(String),
     #[error("no sanitizer registered as {0}")]
@@ -1628,6 +1643,12 @@ impl<'a> Sequence<'a> {
             }
             Fact::Boundary { trajectory, kind } => self.boundary(trajectory, kind)?,
             Fact::AnswerReleased { trajectory, label, .. } => self.answer_released(trajectory, label)?,
+            Fact::ReviewReleased {
+                trajectory,
+                offer,
+                label,
+                ..
+            } => self.review_released(trajectory, offer, label)?,
         }
         self.settle_advance(fact, &implied, released)?;
         self.projection.fold(fact);
@@ -2557,6 +2578,23 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::AnswerLabelMismatch);
         }
         Ok(())
+    }
+
+    /// A review is its offer's, under its own act, at the label the offer's block stood at.
+    fn review_released(
+        &self,
+        trajectory: &TrajectoryId,
+        offer: &crate::value::OfferId,
+        label: &Label,
+    ) -> Result<(), TransitionRefusal> {
+        let own_act = self
+            .declared
+            .as_ref()
+            .is_some_and(|open| open.act == crate::basis::DecidedAct::Review(*offer));
+        match self.projection.offered_at(offer) {
+            Some((opened, held)) if own_act && &opened == trajectory && &held == label => Ok(()),
+            _ => Err(TransitionRefusal::ReviewMismatch),
+        }
     }
 
     fn declaring(&self, act: &crate::basis::DecidedAct) -> Result<(), TransitionRefusal> {

@@ -1,12 +1,12 @@
-//! Released content: the root's answer recorded at its label, the receipts that name released
-//! records, and the judgment of a release into a sink.
+//! Released content: the root's answer recorded at its label, an offer's review recorded at its
+//! block's, the receipts that name released records, and the judgment of a release into a sink.
 
 use super::*;
 use crate::check::{CallReads, Gap};
 use crate::contract::ToolDeclaration;
 use crate::fact::EffectKind;
 use crate::label::Evaluation;
-use crate::transition::{Admitted, AnswerReport, ReleasedAt, ValidatedFactBatch};
+use crate::transition::{Admitted, AnswerReport, ReleasedAt, ReviewReport, ValidatedFactBatch};
 use appa_runtime_api::ReleaseDigest;
 
 /// The value `batch` admits as a result or a crossed return, beside the position it lands at
@@ -88,7 +88,7 @@ impl Engine {
         if let Some(position) = projection.standing_answer(trajectory, &report.digest) {
             return Ok(EngineDecision {
                 append: None,
-                follow_up: FollowUp::Answer {
+                follow_up: FollowUp::Released {
                     at: ReleasedAt {
                         position,
                         digest: report.digest,
@@ -108,12 +108,56 @@ impl Engine {
             .position(|fact| matches!(fact, Fact::AnswerReleased { .. }))
             .expect("an answer's batch holds its answer");
         Ok(EngineDecision {
-            follow_up: FollowUp::Answer {
+            follow_up: FollowUp::Released {
                 at: ReleasedAt {
                     position: projection.folded() + offset as u64,
                     digest: report.digest,
                 },
             },
+            append: Some(batch),
+        })
+    }
+
+    /// Record an offer's review at the label its blocked call was judged under. Only the bytes
+    /// the offer renders are recorded; bytes recorded already for the offer stand as recorded.
+    pub(super) fn decide_review(
+        &self,
+        view: &EngineView,
+        report: &ReviewReport,
+    ) -> Result<EngineDecision, TransitionError> {
+        let projection = view.projection();
+        let released = |position| FollowUp::Released {
+            at: ReleasedAt {
+                position,
+                digest: report.digest,
+            },
+        };
+        if let Some(position) = projection.standing_review(&report.offer, &report.digest) {
+            return Ok(EngineDecision {
+                append: None,
+                follow_up: released(position),
+            });
+        }
+        let (trajectory, label) = projection
+            .offered_at(&report.offer)
+            .ok_or(TransitionError::UnknownOffer)?;
+        if report.rendered != Some(report.digest) {
+            return Err(TransitionError::OtherReview);
+        }
+        let review = Fact::ReviewReleased {
+            trajectory,
+            offer: report.offer,
+            digest: report.digest,
+            label,
+        };
+        let batch = self.decided(view, crate::basis::DecidedAct::Review(report.offer), vec![review])?;
+        let offset = batch
+            .facts()
+            .iter()
+            .position(|fact| matches!(fact, Fact::ReviewReleased { .. }))
+            .expect("a review's batch holds its review");
+        Ok(EngineDecision {
+            follow_up: released(projection.folded() + offset as u64),
             append: Some(batch),
         })
     }

@@ -716,6 +716,14 @@ pub enum HookEvent {
         child: Option<TrajectoryId>,
         value: Option<String>,
     },
+    /// The host releases the review text the quoted offer shows a person, as the bytes
+    /// `digest` names. The runtime records it at the label of the offer's block and answers
+    /// with its receipt; bytes other than the review the offer renders are refused.
+    ReviewRelease {
+        actor: Actor,
+        offer: String,
+        digest: ReleaseDigest,
+    },
 }
 
 /// Which operational fault a [`HookDecision::Refuse`] names: a closed

@@ -51,9 +51,9 @@ use serde_json::value::RawValue;
 use crate::{
     Actor, AdapterName, AutoApply, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
     LineVariant, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes,
-    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, ReleaseReceipt, Remediable, Remedy,
-    RetryHint, ReturnOperation, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionSettings, SessionTitle,
-    SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
+    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, ReleaseDigest, ReleaseReceipt,
+    Remediable, Remedy, RetryHint, ReturnOperation, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionSettings,
+    SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -156,6 +156,7 @@ pub enum EventName {
     ChildEnd,
     ChildTurnEnd,
     ChildReturn,
+    ReviewRelease,
 }
 
 /// One optional field of the flat envelope, as a value the reading
@@ -188,10 +189,12 @@ enum Field {
     AutoApply,
     LineVariant,
     OperationId,
+    OfferId,
+    Digest,
 }
 
 impl Field {
-    const ALL: [Field; 26] = [
+    const ALL: [Field; 28] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -218,6 +221,8 @@ impl Field {
         Field::AutoApply,
         Field::LineVariant,
         Field::OperationId,
+        Field::OfferId,
+        Field::Digest,
     ];
 
     fn spelling(self) -> &'static str {
@@ -248,6 +253,8 @@ impl Field {
             Field::AutoApply => "auto_apply",
             Field::LineVariant => "line_variant",
             Field::OperationId => "operation_id",
+            Field::OfferId => "offer_id",
+            Field::Digest => "digest",
         }
     }
 }
@@ -317,6 +324,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
         EventName::ChildTurnEnd => &[Field::RootId, Field::ChildId, Field::AnsweredCallIds],
         EventName::ChildEnd => &[Field::RootId, Field::ChildId, Field::Value, Field::AnsweredCallIds],
         EventName::ChildReturn => &[Field::RootId, Field::ChildId, Field::Value, Field::OperationId],
+        EventName::ReviewRelease => &[Field::RootId, Field::ChildId, Field::OfferId, Field::Digest],
     }
 }
 
@@ -625,6 +633,12 @@ pub struct WireEvent {
     /// On a child's return without ending: the host's identity for that return.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation_id: Option<ReturnOperation>,
+    /// On a review release: the offer whose review is released.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer_id: Option<String>,
+    /// On a review release: the digest of the review bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<ReleaseDigest>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -713,6 +727,8 @@ impl WireEvent {
             auto_apply: None,
             line_variant: None,
             operation_id: None,
+            offer_id: None,
+            digest: None,
         }
     }
 
@@ -746,6 +762,8 @@ impl WireEvent {
             Field::AutoApply => self.auto_apply.is_some(),
             Field::LineVariant => self.line_variant.is_some(),
             Field::OperationId => self.operation_id.is_some(),
+            Field::OfferId => self.offer_id.is_some(),
+            Field::Digest => self.digest.is_some(),
         }
     }
 
@@ -984,6 +1002,16 @@ impl WireEvent {
                     ..Self::bare(adapter, EventName::ChildReturn)
                 }
             }
+            HookEvent::ReviewRelease { actor, offer, digest } => {
+                let (root_id, child_id) = ids(actor)?;
+                Self {
+                    root_id: Some(root_id),
+                    child_id,
+                    offer_id: Some(offer.clone()),
+                    digest: Some(*digest),
+                    ..Self::bare(adapter, EventName::ReviewRelease)
+                }
+            }
         };
         Ok(wire)
     }
@@ -1067,6 +1095,8 @@ impl WireEvent {
             auto_apply,
             line_variant,
             operation_id,
+            offer_id,
+            digest,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -1338,6 +1368,14 @@ impl WireEvent {
                     None => Err(malformed("child_return without its value")),
                 }
             }
+            EventName::ReviewRelease => match (offer_id, digest) {
+                (Some(offer), Some(digest)) => accepted(HookEvent::ReviewRelease {
+                    actor: actor()?,
+                    offer,
+                    digest,
+                }),
+                _ => Err(malformed("review_release without its offer_id and digest")),
+            },
         }
     }
 }
@@ -2458,6 +2496,33 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn a_review_release_round_trips_and_needs_its_offer_and_digest() {
+        let event = HookEvent::ReviewRelease {
+            actor: Actor {
+                root: TrajectoryId("cc:s1".into()),
+                child: None,
+            },
+            offer: "0123456789abcdef".into(),
+            digest: crate::ReleaseDigest::of(b"the review"),
+        };
+        let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).unwrap();
+        let bytes = serde_json::to_vec(&wire).unwrap();
+        let parsed = WireEvent::read(&bytes)
+            .unwrap()
+            .into_event(&CLAUDE_CODE, PrincipalSource::None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.event, event);
+        let body = serde_json::json!({"protocol":1,"adapter":"claude-code","event":"review_release","root_id":"s1","offer_id":"0123456789abcdef"});
+        assert!(
+            WireEvent::read(&serde_json::to_vec(&body).unwrap())
+                .unwrap()
+                .into_event(&CLAUDE_CODE, PrincipalSource::None)
+                .is_err()
+        );
     }
 
     #[test]

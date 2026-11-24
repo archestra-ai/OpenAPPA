@@ -14,7 +14,38 @@ impl Session {
             .drive_with_evidence(|_, _| Ok(EngineEvent::Answer { digest }), None, None, Occasion::Other)
             .await?;
         match decision.then {
-            Next::Answered { receipt } => Ok(receipt),
+            Next::Released { receipt } => Ok(receipt),
+            _ => Err(EventError::UnexpectedDecision),
+        }
+    }
+
+    /// Record the review `offer` shows a person as the bytes `digest` names, and return the
+    /// receipt of the record that stands for it. The review is rendered here as the block's
+    /// feedback renders it; other bytes are refused.
+    pub(crate) async fn release_review(
+        &self,
+        quoted: &OfferId,
+        digest: ReleaseDigest,
+    ) -> Result<ReleaseReceipt, EventError> {
+        let review = |context: &Decided<'_>, _| {
+            let offer = crate::engine::resolve_rendered(context.log, quoted).ok_or(EventError::UnknownOffer)?;
+            let pending = context
+                .offer_pursuer(&offer)
+                .map(|pursuer| context.engine().offer_reviews(context.view, &pursuer, &offer))
+                .unwrap_or_default();
+            let rendered = super::remedy::reviews(&pending, &self.deployment().externals)
+                .into_iter()
+                .next()
+                .map(|review| ReleaseDigest::of(review.text.as_bytes()));
+            Ok(EngineEvent::Review {
+                offer,
+                digest,
+                rendered,
+            })
+        };
+        let decision = self.drive_with_evidence(review, None, None, Occasion::Other).await?;
+        match decision.then {
+            Next::Released { receipt } => Ok(receipt),
             _ => Err(EventError::UnexpectedDecision),
         }
     }

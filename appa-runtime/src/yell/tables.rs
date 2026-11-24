@@ -128,6 +128,7 @@ static DECIDED_ACT: Table = Table {
         ("Binding", Rule::Table(&FORK_ID)),
         ("Offer", DIGEST),
         ("Answer", TRAJECTORY),
+        ("Review", DIGEST),
     ],
 };
 
@@ -847,6 +848,16 @@ static ANSWER_RELEASED: Table = Table {
     ],
 };
 
+static REVIEW_RELEASED: Table = Table {
+    name: "ReviewReleased",
+    entries: &[
+        ("trajectory", TRAJECTORY),
+        ("offer", DIGEST),
+        ("digest", DIGEST),
+        ("label", Rule::Table(&LABEL)),
+    ],
+};
+
 /// The outer table: `Fact` is externally tagged, so each key is a variant name. A variant
 /// added to the engine and not added here becomes `"<unclassified>"` with its name recorded,
 /// which the inventory test turns into a failure naming the variant.
@@ -882,6 +893,7 @@ pub(crate) static FACT: Table = Table {
         ("ForkOpened", Rule::Table(&FORK_OPENED)),
         ("Boundary", Rule::Table(&BOUNDARY)),
         ("AnswerReleased", Rule::Table(&ANSWER_RELEASED)),
+        ("ReviewReleased", Rule::Table(&REVIEW_RELEASED)),
     ],
 };
 
