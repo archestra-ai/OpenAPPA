@@ -1,13 +1,13 @@
 schema = 1
 name = "xmemory"
-description = "Rules for the hosted xmemory instance and admin MCP servers' 32 tools, one namespace bound to both: internal reads, writes from trusted data only, trusted admin and schema changes, reviewed schema migrations and instance deletion."
+description = "Rules for the hosted xmemory instance and admin MCP servers' 41 tools, one namespace bound to both: internal reads, writes from trusted data only, trusted admin and schema changes, reviewed schema migrations, instance deletion, membership edits, and API key creation."
 
 [battery]
 policy = "appa.toml"
 hosts = ["claude-code", "kagent"]
 namespaces = ["xmemory"]
 helpers = []
-benefit = "Rules for the 32 tools of the xmemory instance and admin servers: APPA keeps memory internal, lets only trusted data into memory, and asks a person before a schema migration or an instance deletion."
+benefit = "Rules for the 41 tools of the xmemory instance and admin servers: APPA keeps memory internal, lets only trusted data into memory, and asks a person before a schema migration, an instance deletion, a membership change, or a new API key."
 setup = [
   "Bind each xmemory server you run: `appa battery install xmemory --server <instance-server> --server <admin-server>`.",
   "If you run only one of the two servers, bind only that one.",
