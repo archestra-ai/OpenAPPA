@@ -1,79 +1,114 @@
 use super::*;
-use appa_engine::engine::Receipted;
 use appa_engine::label::Label;
-use appa_runtime_api::{ReleaseDigest, ReleaseReceipt, ReleaseRefusal, RetryHint};
+use appa_runtime_api::{ReleaseDigest, ReleaseReceipt, RetryHint};
 
-use crate::engine::ReleaseRound;
+use crate::engine::{ReleaseRound, Unreleased};
 
 impl Session {
-    /// Where this family's log records what `receipted` names.
-    pub(crate) fn receipt(&self, receipted: Receipted<'_>) -> Result<Option<ReleaseReceipt>, EventError> {
-        self.with_view(|context| Ok(context.engine().receipt(context.view, receipted)))
-    }
-
-    /// The receipt of the return this child's decision crossed into its parent.
-    pub(crate) fn return_receipt(&self, decision: &ChildReturnDecision) -> Result<Option<ReleaseReceipt>, EventError> {
-        match decision {
-            ChildReturnDecision::Returned { .. } => self.receipt(Receipted::Return {
-                child: &self.trajectory,
-            }),
-            ChildReturnDecision::Staged { .. }
-            | ChildReturnDecision::NoValue
-            | ChildReturnDecision::Deferred
-            | ChildReturnDecision::Blocked { .. } => Ok(None),
-        }
-    }
-
-    /// Record the root's final answer of a turn at the label the root holds, and return its
-    /// receipt. The same bytes at the same label as the root's latest answer record nothing.
-    pub(crate) async fn release_answer(&self, answer: &str) -> Result<Option<ReleaseReceipt>, EventError> {
+    /// Record the root's final answer of a turn at the label the root holds, and return the
+    /// receipt of the record that stands for it: the one this decision appended, or the root's
+    /// latest answer where that holds the same bytes at the same label.
+    pub(crate) async fn release_answer(&self, answer: &str) -> Result<ReleaseReceipt, EventError> {
         let digest = ReleaseDigest::of(answer.as_bytes());
-        self.drive_with_evidence(|_, _| Ok(EngineEvent::Answer { digest }), None, None, Occasion::Other)
+        let decision = self
+            .drive_with_evidence(|_, _| Ok(EngineEvent::Answer { digest }), None, None, Occasion::Other)
             .await?;
-        self.receipt(Receipted::Answer { root: &self.trajectory })
-    }
-
-    /// Judge content at `label` into `sink(arguments)` under the head registry, asking the
-    /// membership the judgment reads. Nothing is appended.
-    pub(crate) async fn judge_release(
-        &self,
-        label: &Label,
-        principal: Option<&ReaderId>,
-        sink: &str,
-        arguments: &[u8],
-    ) -> Result<(), ReleaseRefusal> {
-        let deployment = self.deployment();
-        let approves =
-            |authority: &appa_engine::names::AuthorityName| deployment.externals.is_stock_approve(authority.as_str());
-        let mut evidence = Vec::new();
-        for _ in 0..RESOLUTION_ROUNDS {
-            match deployment
-                .resident
-                .judge_release(label, sink, arguments, principal, &evidence, approves)
-            {
-                ReleaseRound::Judged(judged) => return judged,
-                ReleaseRound::Consult(requests) => {
-                    for request in requests {
-                        match self.consult(request, None, None, Occasion::Other).await {
-                            Ok(answer) => evidence.push(answer),
-                            Err(error) => return Err(missing_or_integrity(&error)),
-                        }
-                    }
-                }
-            }
+        match decision.then {
+            Next::Answered { receipt } => Ok(receipt),
+            _ => Err(EventError::UnexpectedDecision),
         }
-        Err(ReleaseRefusal::MissingFact(RetryHint::Later))
     }
 }
 
-/// A consult that failed outright: a fact not obtained where that is the failure, otherwise
-/// a deployment fault.
-fn missing_or_integrity(error: &EventError) -> ReleaseRefusal {
-    match error.missing_fact() {
-        Some(unobtained) => ReleaseRefusal::MissingFact(unobtained.retry),
-        None => {
-            tracing::warn!(%error, "a release judgment's membership consult failed");
-            ReleaseRefusal::Integrity
+/// Judge content at `label` into `sink(arguments)` under `deployment`'s registry, reading the
+/// membership the judgment needs now, each round's reads together. No consult is recorded
+/// and nothing is appended.
+pub(in crate::api) async fn judge_release(
+    deployment: &Deployment,
+    label: &Label,
+    principal: Option<&ReaderId>,
+    sink: &str,
+    arguments: &[u8],
+) -> Result<(), Unreleased> {
+    let approves =
+        |authority: &appa_engine::names::AuthorityName| deployment.externals.is_stock_approve(authority.as_str());
+    let mut evidence = Vec::new();
+    for _ in 0..RESOLUTION_ROUNDS {
+        match deployment
+            .resident
+            .judge_release(label, sink, arguments, principal, &evidence, approves)
+        {
+            ReleaseRound::Judged(judged) => return judged,
+            ReleaseRound::Consult(requests) => {
+                let asked = requests.iter().map(|request| membership(deployment, request));
+                for answered in crate::external::settle_batch(asked).await {
+                    evidence.push(answered?);
+                }
+            }
+        }
+    }
+    Err(Unreleased::Unobtained(RetryHint::Later))
+}
+
+/// One membership read a judgment asks, straight from the deployment's externals.
+async fn membership(deployment: &Deployment, request: &ExternalRequest) -> Result<ExternalEvidence, Unreleased> {
+    let consult = super::consult::membership_consult(request).ok_or(Unreleased::Unjudgeable)?;
+    let outcome = Box::pin(deployment.externals.consult(&consult, None, None)).await;
+    super::consult::membership_evidence(request, outcome).ok_or(Unreleased::Unjudgeable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use appa_engine::engine::SinkRefusal;
+
+    const SINKS: &str = r#"
+[policy]
+version = 2
+
+[[policy.annotator]]
+name = "classifier"
+
+[[policy.tool]]
+name = "audited"
+requires = { effects = { excludes = ["egress"] } }
+delta = {}
+
+[[policy.tool]]
+name = "classified"
+annotator = "classifier"
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+
+[externals.annotators.classifier]
+url = "http://127.0.0.1:9/annotate"
+"#;
+
+    #[tokio::test]
+    async fn a_sink_no_release_may_be_judged_into_is_refused_for_its_own_reason() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let path = dir.path().join("appa.toml");
+        std::fs::write(&path, SINKS).expect("the fixture writes");
+        let runtime = crate::api::Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the runtime opens");
+        let deployment = runtime.inner.deployment();
+        for (sink, why) in [
+            ("audited", SinkRefusal::HistoryRequirement),
+            ("classified", SinkRefusal::Annotated),
+            ("mail", SinkRefusal::Undeclared),
+        ] {
+            assert_eq!(
+                judge_release(&deployment, &Label::top(), None, sink, b"{}").await,
+                Err(Unreleased::Sink(why)),
+                "{sink}"
+            );
         }
     }
 }

@@ -18,7 +18,8 @@ use appa_engine::value::{HeldMessage, Provenance};
 use appa_eventlog::embedded::{DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, ReadTake};
 use appa_eventlog::{Log, StoredLabel};
 use appa_runtime_api::{
-    Actor, HookDecision, OutcomeBody, PeerDigest, PeerValueError, ProposedCall, SpawnBinding, ToolOutcome, TrajectoryId,
+    Actor, HookDecision, OutcomeBody, PeerDigest, PeerValueError, ProposedCall, ReleaseReceipt, SpawnBinding,
+    ToolOutcome, TrajectoryId,
 };
 
 use super::{EmbeddedHookOutcome, EventError, RemedyPresentation, Runtime, ToolCallDecision, ToolResultDecision};
@@ -367,7 +368,7 @@ impl Runtime {
         outcome: &EmbeddedHookOutcome,
         row: &EmbeddedRow,
     ) -> Result<(), EmbeddedPeerError> {
-        let encoded = serde_json::to_string(&StoredOutcome::try_from(&outcome.decision)?)
+        let encoded = serde_json::to_string(&StoredOutcome::try_from(outcome)?)
             .map_err(|error| EmbeddedPeerError::Storage(error.to_string()))?;
         let stored = self
             .inner
@@ -433,7 +434,9 @@ impl Runtime {
         let log = self.inner.log(&actor.root).map_err(peer_error)?;
         match prior_call(&log, recipient, call_id, message) {
             PriorCall::Foreign => return Err(refused("this call id is already a different dispatch")),
-            PriorCall::Admitted(body) => return governed_delivery(row, &body),
+            PriorCall::Admitted { body, position } => {
+                return governed_delivery(row, &body, read_receipt(&actor.root, &body, position));
+            }
             PriorCall::Open | PriorCall::Absent => {}
         }
         drop(log);
@@ -499,7 +502,7 @@ impl Runtime {
             call_id,
             message,
         );
-        let outcome = outcome_of(decided, proved)?;
+        let outcome = outcome_of(&actor.root, decided, proved)?;
         if let HookDecision::DeliverValue { value } = &outcome.decision
             && value != &body
         {
@@ -603,20 +606,43 @@ fn read_tool_fit(registry: &appa_engine::registry::Registry, call: &ProposedCall
     Ok(())
 }
 
-fn governed_delivery(row: &EmbeddedRow, admitted: &str) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
+fn governed_delivery(
+    row: &EmbeddedRow,
+    admitted: &str,
+    receipt: ReleaseReceipt,
+) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
     if row.body.as_deref() != Some(admitted) {
         return Err(refused("the admitted read is not this stored message"));
     }
-    Ok(deliver(admitted.to_string()))
+    Ok(deliver(admitted.to_string(), receipt))
 }
 
-fn outcome_of(decision: ToolResultDecision, proved: PriorCall) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
+/// The receipt of a read the record at `position` of `family`'s log admitted as `body`.
+fn read_receipt(family: &TrajectoryId, body: &str, position: u64) -> ReleaseReceipt {
+    ReleaseReceipt {
+        session: family.clone(),
+        fact_position: position,
+        digest: appa_runtime_api::ReleaseDigest::of(body.as_bytes()),
+    }
+}
+
+fn outcome_of(
+    family: &TrajectoryId,
+    decision: ToolResultDecision,
+    proved: PriorCall,
+) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
     let proved = match proved {
-        PriorCall::Admitted(body) => Some(body),
+        PriorCall::Admitted { body, position } => {
+            let receipt = read_receipt(family, &body, position);
+            Some((body, receipt))
+        }
         PriorCall::Open | PriorCall::Absent | PriorCall::Foreign => None,
     };
     match decision {
-        ToolResultDecision::Deliver { value } => Ok(deliver(proved.unwrap_or(value))),
+        ToolResultDecision::Deliver { value, receipt } => {
+            let (body, receipt) = proved.unwrap_or((value, receipt));
+            Ok(deliver(body, receipt))
+        }
         ToolResultDecision::Replace {
             placeholder,
             presentation,
@@ -628,18 +654,18 @@ fn outcome_of(decision: ToolResultDecision, proved: PriorCall) -> Result<Embedde
             presentation,
             receipt: None,
         }),
-        ToolResultDecision::Keep => {
-            let body = proved.ok_or_else(|| refused("the read was acknowledged without an admitted body"))?;
-            Ok(deliver(body))
+        ToolResultDecision::Keep { receipt } => {
+            let (body, proved) = proved.ok_or_else(|| refused("the read was acknowledged without an admitted body"))?;
+            Ok(deliver(body, receipt.unwrap_or(proved)))
         }
     }
 }
 
-fn deliver(body: String) -> EmbeddedHookOutcome {
+fn deliver(body: String, receipt: ReleaseReceipt) -> EmbeddedHookOutcome {
     EmbeddedHookOutcome {
         decision: HookDecision::DeliverValue { value: body },
         presentation: None,
-        receipt: None,
+        receipt: Some(receipt),
     }
 }
 
@@ -657,7 +683,11 @@ enum PriorCall {
     Absent,
     Foreign,
     Open,
-    Admitted(String),
+    /// Admitted as `body` by the record at `position` of the family's log.
+    Admitted {
+        body: String,
+        position: u64,
+    },
 }
 
 fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &HeldMessage) -> PriorCall {
@@ -670,7 +700,7 @@ fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &Held
     };
     let mut opened = false;
     let mut admitted = None;
-    for fact in log.facts() {
+    for (position, fact) in (0u64..).zip(log.facts()) {
         match fact {
             Fact::DispatchOpened {
                 trajectory,
@@ -688,7 +718,7 @@ fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &Held
                 value,
                 provenance: Provenance::ToolResult { dispatch: id },
             } if trajectory == recipient && id == &dispatch => {
-                admitted = Some(value.body.as_str().to_string());
+                admitted = Some((value.body.as_str().to_string(), position));
             }
             _ => {}
         }
@@ -697,7 +727,7 @@ fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &Held
         return PriorCall::Foreign;
     }
     match admitted {
-        Some(body) => PriorCall::Admitted(body),
+        Some((body, position)) => PriorCall::Admitted { body, position },
         None => PriorCall::Open,
     }
 }
@@ -763,26 +793,32 @@ fn stored_outcome(row: &EmbeddedRow) -> Result<EmbeddedHookOutcome, EmbeddedPeer
         .ok_or_else(|| refused("this peer read has no stored decision"))?;
     let stored: StoredOutcome =
         serde_json::from_str(raw).map_err(|error| EmbeddedPeerError::Storage(error.to_string()))?;
-    Ok(EmbeddedHookOutcome {
-        decision: stored.into(),
-        presentation: None,
-        receipt: None,
-    })
+    Ok(stored.into())
 }
 
 #[derive(PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum StoredOutcome {
-    Deliver { value: String },
-    Replace { output: String },
+    Deliver {
+        value: String,
+        /// The record that admitted the read; none on a read stored before receipts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        receipt: Option<ReleaseReceipt>,
+    },
+    Replace {
+        output: String,
+    },
 }
 
-impl TryFrom<&HookDecision> for StoredOutcome {
+impl TryFrom<&EmbeddedHookOutcome> for StoredOutcome {
     type Error = EmbeddedPeerError;
 
-    fn try_from(decision: &HookDecision) -> Result<Self, Self::Error> {
-        match decision {
-            HookDecision::DeliverValue { value } => Ok(Self::Deliver { value: value.clone() }),
+    fn try_from(outcome: &EmbeddedHookOutcome) -> Result<Self, Self::Error> {
+        match &outcome.decision {
+            HookDecision::DeliverValue { value } => Ok(Self::Deliver {
+                value: value.clone(),
+                receipt: outcome.receipt.clone(),
+            }),
             HookDecision::ReplaceOutput { output, .. } => Ok(Self::Replace { output: output.clone() }),
             HookDecision::Ack => Err(refused("the read was acknowledged without an admitted body")),
             HookDecision::AllowCall { .. }
@@ -798,11 +834,16 @@ impl TryFrom<&HookDecision> for StoredOutcome {
     }
 }
 
-impl From<StoredOutcome> for HookDecision {
+impl From<StoredOutcome> for EmbeddedHookOutcome {
     fn from(stored: StoredOutcome) -> Self {
-        match stored {
-            StoredOutcome::Deliver { value } => HookDecision::DeliverValue { value },
-            StoredOutcome::Replace { output } => HookDecision::ReplaceOutput { output, outcomes: None },
+        let (decision, receipt) = match stored {
+            StoredOutcome::Deliver { value, receipt } => (HookDecision::DeliverValue { value }, receipt),
+            StoredOutcome::Replace { output } => (HookDecision::ReplaceOutput { output, outcomes: None }, None),
+        };
+        EmbeddedHookOutcome {
+            decision,
+            presentation: None,
+            receipt,
         }
     }
 }

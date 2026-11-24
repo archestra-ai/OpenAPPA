@@ -331,3 +331,182 @@ async fn a_judgment_appends_nothing() {
     }
     assert_eq!(common::audit_len(&runtime), before);
 }
+
+/// The root has read the HR record (audience Alice and Bob), then runs a public tool whose
+/// result may echo what the root sent it. The result releases at the label the root sent the
+/// call under, met with the tool's own: the echo never reaches Eve.
+#[tokio::test]
+async fn a_result_released_after_a_narrowing_read_carries_the_label_its_call_was_sent_under() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = opened(&dir).await;
+    narrowed(&runtime).await;
+    let echoed = result_receipt(&runtime, "lookup", "no match for: the HR record").await;
+    assert_eq!(
+        judge(&runtime, &[echoed], "post", "eve@corp.example").await,
+        Err(ReleaseRefusal::HardBlock),
+        "a result computed from arguments the narrowed root wrote is no more public than the root"
+    );
+}
+
+const CHAIN_V1: &str = r#"
+[policy]
+version = 2
+trust_chain = ["low", "vetted", "mid", "high"]
+
+[[policy.tool]]
+name = "read_mid"
+delta = { trust = "mid" }
+
+[[policy.tool]]
+name = "read_vetted"
+delta = { trust = "vetted" }
+
+[[policy.tool]]
+name = "post"
+requires = { trust = "vetted" }
+delta = {}
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+"#;
+
+const CHAIN_V2: &str = r#"
+[policy]
+version = 2
+trust_chain = ["low", "vetted", "high"]
+
+[[policy.tool]]
+name = "read_vetted"
+delta = { trust = "vetted" }
+
+[[policy.tool]]
+name = "post"
+requires = { trust = "vetted" }
+delta = {}
+
+[externals]
+timeout_ms = 1000
+max_body_bytes = 4096
+"#;
+
+/// An answer's label is rebuilt from the terms the root's label was folded from, crossed by
+/// rank name: across a revision that drops a rank it lowers as the root's own label does.
+#[tokio::test]
+async fn an_answers_label_crosses_a_revision_as_the_roots_label_does() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, CHAIN_V1).expect("the fixture writes");
+    let runtime = Arc::new(
+        Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens"),
+    );
+    assert_eq!(
+        hooks::handle(
+            &runtime,
+            HookEvent::SessionStart {
+                root: root(),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+                settings: Default::default(),
+            }
+        )
+        .await,
+        HookDecision::Ack
+    );
+    for (tool, body) in [("read_mid", "a mid fact"), ("read_vetted", "a vetted fact")] {
+        if let HookDecision::DenyCall { feedback, .. } = propose(&runtime, call(tool)).await {
+            assert!(matches!(
+                runtime.execute_remedy(&actor(), last_offer(&feedback)).await,
+                RemedyOutcome::Authorized { .. }
+            ));
+            result_receipt(&runtime, tool, body).await;
+        } else {
+            panic!("{tool} narrows the root and is offered for acceptance");
+        }
+    }
+    let answer = turn_end(&runtime, Some("built from both facts"))
+        .await
+        .receipt
+        .expect("recorded");
+    assert_eq!(runtime.status(&root()).expect("status").trust, "vetted");
+
+    std::fs::write(&path, CHAIN_V2).expect("the fixture writes");
+    runtime
+        .reload(Config::load(&path).expect("the revision validates"))
+        .expect("the revision publishes");
+    let root_trust = runtime.status(&root()).expect("status").trust;
+    let judged = runtime
+        .judge_release(&[answer], "post", &raw(serde_json::json!({})))
+        .await;
+    assert_eq!(
+        (root_trust.as_str(), judged),
+        ("low", Err(ReleaseRefusal::HardBlock)),
+        "the root stands at the lowest rank under the head, and so does what it answered"
+    );
+}
+
+/// Components of families that act for different readers do not combine; components of
+/// families acting for one reader do.
+#[tokio::test]
+async fn components_of_two_families_combine_only_under_one_principal() {
+    use appa_runtime_api::Actor;
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(&path, POLICY).expect("the fixture writes");
+    let runtime = Arc::new(
+        Runtime::open(
+            Config::load(&path).expect("the fixture validates"),
+            dir.path().join("appa.db"),
+            None,
+        )
+        .expect("the deployment opens"),
+    );
+    let mut receipts = Vec::new();
+    for (name, principal) in [
+        ("fam-a", "alice@corp.example"),
+        ("fam-b", "bob@corp.example"),
+        ("fam-c", "alice@corp.example"),
+    ] {
+        let root = TrajectoryId(name.to_string());
+        assert_eq!(
+            hooks::handle(
+                &runtime,
+                HookEvent::SessionStart {
+                    root: root.clone(),
+                    principal: Some(principal.to_string()),
+                    address: None,
+                    title: None,
+                    launch: None,
+                    start: None,
+                    settings: Default::default(),
+                }
+            )
+            .await,
+            HookDecision::Ack
+        );
+        let ended = hooks::handle_embedded(
+            &runtime,
+            HookEvent::TurnEnd {
+                actor: Actor { root, child: None },
+                open_calls: OpenCalls::Abandon,
+                answer: Some(format!("answer of {name}")),
+            },
+        )
+        .await;
+        receipts.push(ended.receipt.expect("recorded"));
+    }
+    let [a, b, c] = receipts.try_into().expect("three receipts");
+    assert_eq!(
+        judge(&runtime, &[a.clone(), b], "post", "eve@corp.example").await,
+        Err(ReleaseRefusal::Integrity)
+    );
+    assert_eq!(judge(&runtime, &[a, c], "post", "eve@corp.example").await, Ok(()));
+}

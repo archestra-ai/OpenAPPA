@@ -1,6 +1,6 @@
 use super::*;
-use crate::engine::{ReceiptRefusal, Receipted};
-use crate::transition::AnswerReport;
+use crate::engine::ReceiptRefusal;
+use crate::transition::{AnswerReport, ReleasedAt};
 use appa_runtime_api::ReleaseDigest;
 
 fn internal() -> Label {
@@ -18,11 +18,15 @@ fn answer(e: &Engine, log: &[Fact], body: &str) -> EngineDecision {
     .expect("the root answers")
 }
 
-fn position(decision: &EngineDecision) -> u64 {
+fn released(decision: &EngineDecision) -> ReleasedAt {
     match decision.follow_up {
-        FollowUp::Answer { position } => position,
-        ref other => panic!("an answer follows up with its position, got {other:?}"),
+        FollowUp::Answer { at } => at,
+        ref other => panic!("an answer follows up with its record, got {other:?}"),
     }
+}
+
+fn position(decision: &EngineDecision) -> u64 {
+    released(decision).position
 }
 
 /// The root's answer, recorded: the log with it, and the position its receipt names.
@@ -46,10 +50,6 @@ fn a_root_answer_is_recorded_at_the_roots_label_and_its_receipt_names_it() {
     ));
     let view = viewing(&e, &log);
     assert_eq!(e.released_label(&view, at, &digest), Ok(internal()));
-    assert_eq!(
-        e.receipt_of(&view, Receipted::Answer { root: &traj() }),
-        Some((at, digest))
-    );
 }
 
 #[test]
@@ -71,7 +71,13 @@ fn the_same_answer_again_records_nothing_and_another_records_anew() {
         again.append.is_none(),
         "a retried answer with the same bytes appends nothing"
     );
-    assert_eq!(position(&again), first);
+    assert_eq!(
+        released(&again),
+        ReleasedAt {
+            position: first,
+            digest: ReleaseDigest::of(b"done")
+        }
+    );
 
     let changed = answer(&e, &log, "done, differently");
     let second = position(&changed);
@@ -85,10 +91,7 @@ fn the_same_answer_again_records_nothing_and_another_records_anew() {
         Err(ReceiptRefusal::OtherBytes),
         "the earlier bytes do not stand at the later answer's position"
     );
-    assert_eq!(
-        e.receipt_of(&view, Receipted::Answer { root: &traj() }),
-        Some((second, digest))
-    );
+    assert_eq!(released(&answer(&e, &log, "done, differently")).position, second);
 }
 
 #[test]

@@ -256,13 +256,10 @@ fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
     let closed = e
         .handle(&released_view, EngineEvent::Outcome(success()))
         .expect("the outcome closes the dispatch");
-    assert_eq!(
-        closed.follow_up,
-        FollowUp::Outcome(OutcomeFollowUp::Closed {
-            admitted: Some(body.clone()),
-            withheld: None,
-        })
-    );
+    assert!(matches!(
+        &closed.follow_up,
+        FollowUp::Outcome(OutcomeFollowUp::Closed { admitted: Some(admitted), withheld: None }) if admitted.body == body
+    ));
     let facts = closed.append.expect("the close appends").facts().to_vec();
     assert!(
         matches!(
@@ -278,13 +275,10 @@ fn a_reported_outcome_closes_once_and_repeats_answer_from_the_record() {
         .handle(&after, EngineEvent::Outcome(success()))
         .expect("a repeat of a closed report answers from the record");
     assert_eq!(repeat.append, None);
-    assert_eq!(
-        repeat.follow_up,
-        FollowUp::Outcome(OutcomeFollowUp::Closed {
-            admitted: Some(body),
-            withheld: None,
-        })
-    );
+    assert!(matches!(
+        &repeat.follow_up,
+        FollowUp::Outcome(OutcomeFollowUp::Closed { admitted: Some(admitted), withheld: None }) if admitted.body == body
+    ));
     assert_eq!(
         e.handle(
             &after,

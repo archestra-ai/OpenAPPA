@@ -798,7 +798,6 @@ async fn a_held_return_has_no_receipt_and_its_record_releases_nothing() {
         .await
         .expect("the stop is judged");
     assert!(matches!(held, ChildReturnDecision::Deferred));
-    assert_eq!(child.return_receipt(&held).expect("the family reads"), None);
 
     let log = runtime.inner.log(&root()).expect("the log reads");
     let position = |held: fn(&Fact) -> bool| log.facts().iter().position(held).expect("recorded") as u64;
@@ -836,7 +835,7 @@ async fn a_deferred_child_that_narrowed_nothing_returns_at_its_stop() {
     let child = deferred_child(&runtime).await;
     assert!(matches!(
         child.on_child_end(Some("done".to_string())).await,
-        Ok(ChildReturnDecision::Returned { value }) if value == "done"
+        Ok(ChildReturnDecision::Returned { value, .. }) if value == "done"
     ));
     assert_eq!(deferred_returns(&runtime), 0);
     assert_eq!(crossings(&runtime), 1);
@@ -1448,15 +1447,13 @@ async fn a_crossed_keyed_return_binds_no_operation_and_its_retry_crosses_again()
     let child = deferred_child(&runtime).await;
     // Untainted, each return leaves the parent where it is and crosses at once.
     for (said, op) in [("turn one", "op-1"), ("turn two", "op-2"), ("turn one", "op-1")] {
-        assert_eq!(
-            child
+        assert!(matches!(
+            &child
                 .on_child_return(said.to_string(), operation(op))
                 .await
                 .expect("the return crosses"),
-            ChildReturnDecision::Returned {
-                value: said.to_string()
-            }
-        );
+            ChildReturnDecision::Returned { value, .. } if value == said
+        ));
     }
     assert_eq!((crossings(&runtime), held_records(&runtime)), (3, 0));
 }
@@ -1487,7 +1484,7 @@ async fn the_answer_after_a_steer_and_a_decision_is_a_return_of_its_own() {
         match accept {
             true => {
                 assert!(
-                    matches!(&second, Ok(ChildReturnDecision::Returned { value }) if value == "done"),
+                    matches!(&second, Ok(ChildReturnDecision::Returned { value, .. }) if value == "done"),
                     "{second:?}"
                 );
                 assert_eq!(crossings(&runtime), 2);
@@ -1528,10 +1525,10 @@ async fn a_crossing_after_an_accepted_held_return_is_the_spawns_result() {
         ));
         let [held] = notices(runtime).try_into().expect("one occurrence");
         settling(runtime, &parent(), &held.accept).await;
-        assert!(matches!(
-            child.on_child_end(Some("two".to_string())).await,
-            Ok(ChildReturnDecision::Returned { .. })
-        ));
+        let Ok(ChildReturnDecision::Returned { receipt, .. }) = child.on_child_end(Some("two".to_string())).await
+        else {
+            panic!("the stop crosses");
+        };
         assert_eq!(
             runtime
                 .deferred_return(&parent(), "toolu-1", &EmbeddedPresentationOptions::default())
@@ -1542,7 +1539,8 @@ async fn a_crossing_after_an_accepted_held_return_is_the_spawns_result() {
         assert_eq!(
             spawn_result_saying(runtime, child, "two").await,
             SpawnResultDecision::Return(ChildReturnDecision::Returned {
-                value: "two".to_string()
+                value: "two".to_string(),
+                receipt,
             })
         );
     }
@@ -1866,15 +1864,13 @@ async fn a_return_below_a_deciding_spawns_floor_is_held_accepted_and_its_stop_en
         }
     );
     // The parent took the child's label: its stop crosses, and the child ends.
-    assert_eq!(
-        child
+    assert!(matches!(
+        &child
             .on_child_end(Some("done".to_string()))
             .await
             .expect("the stop crosses"),
-        ChildReturnDecision::Returned {
-            value: "done".to_string()
-        }
-    );
+        ChildReturnDecision::Returned { value, .. } if value == "done"
+    ));
     assert_eq!(occurrences(runtime), vec![(0, Accepted, operation("op-1"))]);
     assert_eq!(crossings(runtime), 2);
 
@@ -1938,15 +1934,22 @@ async fn a_deciding_spawn_whose_return_crossed_delivers_its_result_as_a_plain_sp
                 Some("done".to_string()),
             )
             .await;
-        (stopped, result.map_err(|error| error.to_string()), admitted(&runtime))
+        // Each log places its records apart, so the deliveries compare without their receipts;
+        // within one log the spawn result replays the stop's crossing.
+        let ChildReturnDecision::Returned { value, receipt } = stopped else {
+            panic!("the stop crosses: {stopped:?}");
+        };
+        let replayed = result.map(|decided| match decided {
+            SpawnResultDecision::Return(ChildReturnDecision::Returned {
+                value,
+                receipt: replayed,
+            }) => Some(value).filter(|_| replayed == receipt),
+            _ => None,
+        });
+        (value, replayed.map_err(|error| error.to_string()), admitted(&runtime))
     };
     let plain = delivered(DeclaredReturn::Arguments(as_spoken())).await;
-    assert_eq!(
-        plain.0,
-        ChildReturnDecision::Returned {
-            value: "done".to_string()
-        }
-    );
+    assert_eq!((plain.0.as_str(), &plain.1), ("done", &Ok(Some("done".to_string()))));
     assert_eq!(
         delivered(DeclaredReturn::Decides(LabelSpelling::default())).await,
         plain
@@ -2166,4 +2169,95 @@ async fn a_deciding_spawn_whose_floor_the_policy_does_not_spell_is_refused_and_w
         "{refused:?}"
     );
     assert_eq!((approvals(&runtime), dispatches(&runtime)), (0, 0));
+}
+
+/// Run `taint` in the root, accepting the narrowing its block offers.
+async fn tainted_root(runtime: &Runtime) {
+    let parent = session(runtime);
+    let taint = call("taint", 7);
+    let blocked = parent
+        .on_tool_call_identified(taint.clone(), Some("toolu-p1".to_string()), None, None)
+        .await
+        .expect("the root's call is judged");
+    let ToolCallDecision::Deny { offers, .. } = &blocked else {
+        panic!("the narrowing blocks the root's call: {blocked:?}");
+    };
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    let narrowing = crate::engine::resolve_rendered(&log, &OfferId(offers[0].id.clone())).expect("the offer resolves");
+    assert!(matches!(
+        parent
+            .on_remedy(narrowing, RemedyArguments::default(), None, None)
+            .await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    assert!(matches!(
+        parent
+            .on_tool_call_identified(taint.clone(), Some("toolu-p2".to_string()), None, None)
+            .await,
+        Ok(ToolCallDecision::Allow { .. })
+    ));
+    parent
+        .on_tool_result_identified(
+            taint,
+            Some("toolu-p2".to_string()),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("tainted too".to_string()),
+            },
+        )
+        .await
+        .expect("the result is admitted");
+}
+
+/// A stop replaying the child's latest crossing carries that crossing's receipt, even where the
+/// parent accepted an earlier held occurrence after it: the receipt names the occurrence the
+/// decision replayed, never the child's latest admission in log order.
+#[tokio::test]
+async fn a_replayed_return_carries_the_receipt_of_the_occurrence_it_replays() {
+    use appa_runtime_api::ReleaseDigest;
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    assert!(matches!(
+        child.on_child_return("turn one".to_string(), operation("op-1")).await,
+        Ok(ChildReturnDecision::Deferred)
+    ));
+    // The parent narrows itself to where the child stands, so the child's next return moves
+    // nothing and crosses at once.
+    tainted_root(&runtime).await;
+    let second = child
+        .on_child_return("turn two".to_string(), operation("op-2"))
+        .await
+        .expect("the return is judged");
+    let ChildReturnDecision::Returned {
+        value,
+        receipt: crossed,
+    } = second
+    else {
+        panic!("the return crosses at once: {second:?}");
+    };
+    assert_eq!(value, "turn two");
+    assert_eq!(crossed.digest, ReleaseDigest::of(b"turn two"));
+
+    // The parent now accepts the earlier held occurrence.
+    let [first] = notices(&runtime).try_into().expect("one held occurrence");
+    assert_eq!(
+        settling(&runtime, &parent(), &first.accept).await,
+        RemedyOutcome::Returned {
+            value: "turn one".to_string()
+        }
+    );
+
+    // The child stops repeating its latest return: the engine replays "turn two".
+    let stopped = child
+        .on_child_end(Some("turn two".to_string()))
+        .await
+        .expect("the stop is judged");
+    assert_eq!(
+        stopped,
+        ChildReturnDecision::Returned {
+            value: "turn two".to_string(),
+            receipt: crossed,
+        },
+        "the replay names the record that crossed the bytes it returns"
+    );
 }

@@ -36,7 +36,7 @@ mod outcome;
 mod proposals;
 mod release;
 
-pub use release::{ReceiptRefusal, Receipted, ReleaseError, ReleaseJudgment, SinkRefusal};
+pub use release::{ReceiptRefusal, ReleaseError, ReleaseJudgment, SinkRefusal};
 
 pub(crate) use compose::{ComposeRefusal, ComposingBatch, compose_batch, membership_context};
 
@@ -842,12 +842,10 @@ impl Engine {
         view.views(child).map_or(0, |views| views.returns_by(child))
     }
 
-    /// The value `child` crossed most recently: a stop or a spawn result repeating it replays
-    /// that crossing and appends nothing.
-    pub fn latest_return_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<ValueBody> {
-        view.views(child)?
-            .latest_return(child)
-            .map(|returned| returned.body.clone())
+    /// The value `child` crossed most recently, beside the record that admitted it into the
+    /// parent: a stop or a spawn result repeating it replays that crossing and appends nothing.
+    pub fn latest_return_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<crate::transition::Admitted> {
+        view.views(child)?.latest_crossing(child)
     }
 
     /// The plan one recorded offer of `trajectory` carries, for the runtime to read what the
@@ -1150,16 +1148,6 @@ impl Engine {
             .map_err(EngineError::InvalidCall)?;
         Ok(contract)
     }
-}
-
-fn crossed(facts: &[Fact]) -> ValueBody {
-    facts
-        .iter()
-        .find_map(|fact| match fact {
-            Fact::ValueAdmitted { value, .. } => Some(value.body.clone()),
-            _ => None,
-        })
-        .expect("a candidate's admission carries the value that crossed")
 }
 
 /// Strict JSON scanning, ordered-contract selection on the parsed arguments, schema validation

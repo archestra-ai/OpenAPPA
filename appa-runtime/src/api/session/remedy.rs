@@ -162,7 +162,7 @@ impl Session {
             )
             .await?;
         match decision.then {
-            Next::PresentToModel(Presentation::Value { value }) => Ok(SettlementDecision::Accepted { value }),
+            Next::PresentToModel(Presentation::Value { value, .. }) => Ok(SettlementDecision::Accepted { value }),
             Next::PresentToModel(Presentation::Discarded) => Ok(SettlementDecision::Discarded),
             Next::PresentToModel(Presentation::Declined { feedback }) => {
                 Ok(SettlementDecision::Unacceptable { feedback })
@@ -292,7 +292,9 @@ impl Session {
             Next::Approved { tool, bytes } => Ok(RemedyDecision::Authorized {
                 call: ExactCall { tool, bytes },
             }),
-            Next::PresentToModel(Presentation::Value { value }) => Ok(RemedyDecision::Returned { value }),
+            Next::PresentToModel(Presentation::Value { value, receipt }) => {
+                Ok(RemedyDecision::Returned { value, receipt })
+            }
             Next::PresentToModel(Presentation::Declined { feedback }) => Ok(RemedyDecision::Declined {
                 presentation: RemedyPresentation {
                     feedback,

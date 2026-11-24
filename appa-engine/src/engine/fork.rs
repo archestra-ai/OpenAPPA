@@ -1,7 +1,7 @@
 use super::*;
 use crate::fact::BelowFloor;
 use crate::projection::DeferralStanding;
-use crate::transition::{ReturnDecision, ReturnSettlement, SettlementFollowUp};
+use crate::transition::{Admitted, ReturnDecision, ReturnSettlement, SettlementFollowUp};
 
 impl Engine {
     pub(super) fn decide_binding(
@@ -176,11 +176,9 @@ impl Engine {
         let Some(floor) = plan::floor_of(&self.registry, &projection.view(child)) else {
             return Err(TransitionError::NotForked);
         };
-        let replay = |admitted: &LabeledValue| EngineDecision {
+        let replay = |admitted: Admitted| EngineDecision {
             append: None,
-            follow_up: FollowUp::Child(ChildFollowUp::Merged {
-                admitted: admitted.body.clone(),
-            }),
+            follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted }),
         };
         let above_floor = |label: &Label| match floor.holds(label) {
             true => Ok(()),
@@ -200,7 +198,6 @@ impl Engine {
                      value: LabeledValue,
                      derivation: ReturnDerivation|
          -> Result<EngineDecision, TransitionError> {
-            let admitted = value.body.clone();
             facts.extend(branch::crossing_facts(
                 &views,
                 next_return(&views, child),
@@ -208,9 +205,12 @@ impl Engine {
                 derivation,
                 act.pinned().clone(),
             ));
+            let batch = self.decided(view, return_act(&views, child), facts)?;
             Ok(EngineDecision {
-                append: Some(self.decided(view, return_act(&views, child), facts)?),
-                follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted }),
+                follow_up: FollowUp::Child(ChildFollowUp::Merged {
+                    admitted: release::admitted_in(view, &batch).expect("a crossing admits its value"),
+                }),
+                append: Some(batch),
             })
         };
         match &policy.sanitizer {
@@ -342,12 +342,10 @@ impl Engine {
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
         let child = &report.child;
-        if let Some(latest) = repeated_crossing(views, report, &value.body) {
+        if let Some(admitted) = repeated_crossing(views, report, &value.body) {
             return Ok(EngineDecision {
                 append: None,
-                follow_up: FollowUp::Child(ChildFollowUp::Merged {
-                    admitted: latest.body.clone(),
-                }),
+                follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted }),
             });
         }
         if let Some(floor) = plan::floor_of(&self.registry, &view.projection().view(child))
@@ -361,7 +359,6 @@ impl Engine {
         if standing.combine(&value.label) != standing {
             return self.deferral(view, views, report, value);
         }
-        let admitted = value.body.clone();
         let facts = branch::crossing_facts(
             views,
             next_return(views, child),
@@ -369,9 +366,12 @@ impl Engine {
             ReturnDerivation::Raw,
             act.pinned().clone(),
         );
+        let batch = self.decided(view, return_act(views, child), facts)?;
         Ok(EngineDecision {
-            append: Some(self.decided(view, return_act(views, child), facts)?),
-            follow_up: FollowUp::Child(ChildFollowUp::Merged { admitted }),
+            follow_up: FollowUp::Child(ChildFollowUp::Merged {
+                admitted: release::admitted_in(view, &batch).expect("a crossing admits its value"),
+            }),
+            append: Some(batch),
         })
     }
 
@@ -425,21 +425,16 @@ impl Engine {
             DeferralStanding::Discarded => return Ok(settled(SettlementFollowUp::Discarded)),
             DeferralStanding::Accepted => {
                 let admitted = views
-                    .child_return(id)
-                    .expect("an accepted deferred return crossed in the batch that accepted it")
-                    .body
-                    .clone();
+                    .crossed_return(id)
+                    .expect("an accepted deferred return crossed in the batch that accepted it");
                 return Ok(settled(SettlementFollowUp::Accepted { admitted }));
             }
         };
-        let (facts, follow_up) = match settlement.decision {
-            ReturnDecision::Discard => (
-                vec![Fact::ReturnDiscarded {
-                    trajectory: parent.clone(),
-                    id: id.clone(),
-                }],
-                SettlementFollowUp::Discarded,
-            ),
+        let facts = match settlement.decision {
+            ReturnDecision::Discard => vec![Fact::ReturnDiscarded {
+                trajectory: parent.clone(),
+                id: id.clone(),
+            }],
             ReturnDecision::Accept => {
                 let from = views.branch_label(parent);
                 let to = from.combine(&frozen.label);
@@ -450,7 +445,6 @@ impl Engine {
                         floor: floor.label().clone(),
                     });
                 }
-                let admitted = frozen.body.clone();
                 let mut facts = vec![Fact::ReturnAccepted {
                     trajectory: parent.clone(),
                     id: id.clone(),
@@ -463,20 +457,27 @@ impl Engine {
                     ReturnDerivation::Raw,
                     AudienceEvidence::default(),
                 ));
-                (facts, SettlementFollowUp::Accepted { admitted })
+                facts
             }
         };
+        let batch = self.decided(view, crate::basis::DecidedAct::Settlement(id.clone()), facts)?;
+        let follow_up = match release::admitted_in(view, &batch) {
+            Some(admitted) => SettlementFollowUp::Accepted { admitted },
+            None => SettlementFollowUp::Discarded,
+        };
         Ok(EngineDecision {
-            append: Some(self.decided(view, crate::basis::DecidedAct::Settlement(id.clone()), facts)?),
+            append: Some(batch),
             follow_up: FollowUp::Settlement(follow_up),
         })
     }
 }
 
 /// The crossing `report` repeats, where its words may stand for the child's latest return.
-fn repeated_crossing<'v>(views: &'v Views, report: &ChildReport, body: &ValueBody) -> Option<&'v LabeledValue> {
+fn repeated_crossing(views: &Views, report: &ChildReport, body: &ValueBody) -> Option<Admitted> {
     match report.kind.replays_by_words() {
-        true => views.latest_return(&report.child).filter(|latest| latest.body == *body),
+        true => views
+            .latest_crossing(&report.child)
+            .filter(|latest| latest.body == *body),
         false => None,
     }
 }

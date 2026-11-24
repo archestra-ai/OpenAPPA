@@ -326,13 +326,10 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
             }])),
         )
         .expect("the derivation admits");
-    assert_eq!(
-        crossed.follow_up,
-        FollowUp::Outcome(OutcomeFollowUp::Closed {
-            admitted: Some(derived),
-            withheld: None,
-        })
-    );
+    assert!(matches!(
+        &crossed.follow_up,
+        FollowUp::Outcome(OutcomeFollowUp::Closed { admitted: Some(admitted), withheld: None }) if admitted.body == derived
+    ));
     let facts = crossed.append.expect("the derivation appends").facts().to_vec();
     assert!(matches!(
         facts.as_slice(),
@@ -358,8 +355,8 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
 
     let settled = e.view(&traj(), whole, 4).unwrap();
     let derived = ValueBody::new("page bytes, redacted");
-    assert_eq!(
-        e.handle(
+    assert!(matches!(
+        &e.handle(
             &settled,
             EngineEvent::Outcome(report(vec![crate::transition::Evidence::Sanitizer {
                 sanitizer: crate::names::SanitizerName::new("redactor"),
@@ -369,11 +366,8 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         )
         .expect("the same report answers from the record")
         .follow_up,
-        FollowUp::Outcome(OutcomeFollowUp::Closed {
-            admitted: Some(derived),
-            withheld: None,
-        })
-    );
+        FollowUp::Outcome(OutcomeFollowUp::Closed { admitted: Some(admitted), withheld: None }) if admitted.body == derived
+    ));
     assert_eq!(
         e.handle(
             &settled,
@@ -904,12 +898,10 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
         }),
     )
     .expect("the hop runs");
-    assert_eq!(
-        offer_answer(&hopped),
-        &OfferFollowUp::Admitted {
-            value: scrubbed.clone()
-        }
-    );
+    assert!(matches!(
+        &offer_answer(&hopped),
+        OfferFollowUp::Admitted { value } if value.body == scrubbed
+    ));
     let hopped = appended_facts(hopped);
     assert!(
         hopped
@@ -935,7 +927,10 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
     );
 
     let accepted = execute_offer(&e, &log, accept, OfferOutcome::Approved(Vec::new())).expect("the acceptance runs");
-    assert_eq!(offer_answer(&accepted), &OfferFollowUp::Admitted { value: derived });
+    assert!(matches!(
+        &offer_answer(&accepted),
+        OfferFollowUp::Admitted { value } if value.body == derived
+    ));
     let accepted = appended_facts(accepted);
     assert!(
         accepted.iter().any(|fact| matches!(
@@ -974,14 +969,12 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
         crate::transition::TransitionRefusal::UnadmittedDerivation
     );
     let settled = [log, accepted].concat();
-    assert_eq!(
-        offer_answer(
+    assert!(matches!(
+        &offer_answer(
             &execute_offer(&e, &settled, accept, OfferOutcome::Approved(Vec::new())).expect("the repeat answers")
         ),
-        &OfferFollowUp::Admitted {
-            value: ValueBody::new("page bytes, redacted")
-        }
-    );
+        OfferFollowUp::Admitted { value } if value.body == ValueBody::new("page bytes, redacted")
+    ));
     assert_eq!(
         execute_offer(
             &e,

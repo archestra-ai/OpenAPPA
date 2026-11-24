@@ -1630,13 +1630,8 @@ impl WireDecision {
             }
             _ => {}
         }
-        // Only a decision that lets the host deliver something has a receipt for it.
-        match name {
-            DecisionName::Ack | DecisionName::DeliverValue | DecisionName::ChildReturn => {}
-            _ if self.receipt.is_some() => return Err(malformed(format!("{name:?} with a receipt"))),
-            _ => {}
-        }
-        Ok(match name {
+        let receipted = self.receipt.is_some();
+        let decision = match name {
             DecisionName::Ack => HookDecision::Ack,
             DecisionName::AllowCall => HookDecision::AllowCall {
                 spawn: self.spawn_binding.map(SpawnBinding),
@@ -1707,7 +1702,11 @@ impl WireDecision {
             DecisionName::Held => HookDecision::Held {
                 running: self.running.ok_or_else(|| missing("running"))?,
             },
-        })
+        };
+        match receipted && !decision.releases() {
+            true => Err(malformed(format!("{name:?} with a receipt"))),
+            false => Ok(decision),
+        }
     }
 }
 

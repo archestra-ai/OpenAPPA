@@ -6,16 +6,23 @@ use crate::check::{CallReads, Gap};
 use crate::contract::ToolDeclaration;
 use crate::fact::EffectKind;
 use crate::label::Evaluation;
-use crate::transition::AnswerReport;
+use crate::transition::{Admitted, AnswerReport, ReleasedAt, ValidatedFactBatch};
 use appa_runtime_api::ReleaseDigest;
 
-/// The released record a receipt is asked for: the value admitted for one dispatch's result,
-/// the latest return a child crossed into its parent, or the root's latest answer.
-#[derive(Clone, Copy, Debug)]
-pub enum Receipted<'a> {
-    Result(&'a DispatchId),
-    Return { child: &'a TrajectoryId },
-    Answer { root: &'a TrajectoryId },
+/// The value `batch` admits as a result or a crossed return, beside the position it lands at
+/// once appended to the log `view` replays.
+pub(super) fn admitted_in(view: &EngineView, batch: &ValidatedFactBatch) -> Option<Admitted> {
+    batch.facts().iter().enumerate().find_map(|(offset, fact)| match fact {
+        Fact::ValueAdmitted {
+            value,
+            provenance: Provenance::ToolResult { .. } | Provenance::ChildReturn { .. },
+            ..
+        } => Some(Admitted {
+            body: value.body.clone(),
+            position: view.projection().folded() + offset as u64,
+        }),
+        _ => None,
+    })
 }
 
 /// Why a receipt names no label.
@@ -80,12 +87,17 @@ impl Engine {
         let standing = projection.answer_at(trajectory).filter(|position| {
             projection
                 .released(*position)
-                .is_some_and(|(digest, recorded)| digest == report.digest && *recorded == label)
+                .is_some_and(|(digest, recorded)| digest == report.digest && recorded == label)
         });
         if let Some(position) = standing {
             return Ok(EngineDecision {
                 append: None,
-                follow_up: FollowUp::Answer { position },
+                follow_up: FollowUp::Answer {
+                    at: ReleasedAt {
+                        position,
+                        digest: report.digest,
+                    },
+                },
             });
         }
         let answer = Fact::AnswerReleased {
@@ -101,21 +113,13 @@ impl Engine {
             .expect("an answer's batch holds its answer");
         Ok(EngineDecision {
             follow_up: FollowUp::Answer {
-                position: projection.folded() + offset as u64,
+                at: ReleasedAt {
+                    position: projection.folded() + offset as u64,
+                    digest: report.digest,
+                },
             },
             append: Some(batch),
         })
-    }
-
-    /// The position and digest of the released record `receipted` names.
-    pub fn receipt_of(&self, view: &EngineView, receipted: Receipted<'_>) -> Option<(u64, ReleaseDigest)> {
-        let projection = view.projection();
-        let position = match receipted {
-            Receipted::Result(dispatch) => projection.admitted_result_at(dispatch),
-            Receipted::Return { child } => projection.crossed_return_at(child),
-            Receipted::Answer { root } => projection.answer_at(root),
-        }?;
-        projection.released(position).map(|(digest, _)| (position, digest))
     }
 
     /// The label of the released record at `position` of the family log `view` replays, under
@@ -130,7 +134,7 @@ impl Engine {
         match view.projection().released(position) {
             None => Err(ReceiptRefusal::NotReleased),
             Some((recorded, _)) if recorded != *digest => Err(ReceiptRefusal::OtherBytes),
-            Some((_, label)) => Ok(label.clone()),
+            Some((_, label)) => Ok(label),
         }
     }
 
@@ -181,7 +185,9 @@ impl Engine {
         Ok(judgment)
     }
 
-    /// Each gap covered by an authority `approves` admits, or the gaps none covers.
+    /// Each gap covered by an authority `approves` admits, or withheld at the first gap none of
+    /// them can cover. A gap whose only possible covers read membership not yet answered asks for
+    /// the first such cover's membership alone: the next round judges again with its answer.
     fn approved(
         &self,
         gaps: &[Gap],
@@ -189,41 +195,44 @@ impl Engine {
         context: &MembershipContext<'_>,
         approves: &impl Fn(&AuthorityName) -> bool,
     ) -> Result<ReleaseJudgment, ReleaseError> {
-        let (mut approved_by, mut uncovered, mut needed) = (Vec::new(), Vec::new(), Vec::new());
+        let eligible: Vec<_> = self
+            .registry
+            .authorities()
+            .iter()
+            .filter(|authority| approves(&authority.name))
+            .collect();
+        let (mut approved_by, mut unresolved) = (Vec::new(), None);
         for gap in gaps {
-            let mut cover = None;
-            for authority in self
-                .registry
-                .authorities()
+            let mut open = None;
+            let cover = eligible
                 .iter()
-                .filter(|authority| approves(&authority.name))
-            {
-                match plan::gap_cover(authority, gap, tags, context) {
-                    Evaluation::Holds => {
-                        cover = Some(authority.name.clone());
-                        break;
+                .find_map(|authority| match plan::gap_cover(authority, gap, tags, context) {
+                    Evaluation::Holds => Some(authority.name.clone()),
+                    Evaluation::Needs(ask) => {
+                        open.get_or_insert(ask.needed);
+                        None
                     }
-                    Evaluation::Needs(ask) => needed.extend(ask.needed),
-                    Evaluation::Fails => {}
+                    Evaluation::Fails => None,
+                });
+            match (cover, open) {
+                (Some(name), _) => approved_by.push(name),
+                (None, Some(needed)) => {
+                    unresolved.get_or_insert(needed);
+                }
+                (None, None) => {
+                    return Ok(ReleaseJudgment::Withheld {
+                        gaps: vec![gap.clone()],
+                    });
                 }
             }
-            match cover {
-                Some(name) => approved_by.push(name),
-                None => uncovered.push(gap.clone()),
-            }
         }
-        Ok(match (uncovered.is_empty(), needed.is_empty()) {
-            (true, _) => {
+        match unresolved {
+            Some(needed) => Err(ReleaseError::MembershipNeeded { needed }),
+            None => {
                 approved_by.sort();
                 approved_by.dedup();
-                ReleaseJudgment::Released { approved_by }
+                Ok(ReleaseJudgment::Released { approved_by })
             }
-            (false, true) => ReleaseJudgment::Withheld { gaps: uncovered },
-            (false, false) => {
-                needed.sort();
-                needed.dedup();
-                return Err(ReleaseError::MembershipNeeded { needed });
-            }
-        })
+        }
     }
 }

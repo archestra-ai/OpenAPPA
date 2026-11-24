@@ -275,7 +275,7 @@ pub enum ReturnDecision {
 /// whatever a repeat asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettlementFollowUp {
-    Accepted { admitted: ValueBody },
+    Accepted { admitted: Admitted },
     Discarded,
 }
 
@@ -353,7 +353,7 @@ pub enum OfferFollowUp {
     Invalidated,
     Staged(Box<Confined>),
     Substituted { block: Box<Blocked> },
-    Admitted { value: ValueBody },
+    Admitted { value: Admitted },
 }
 
 /// One confined result and the ways to move it. Not a [`Blocked`]: no call is
@@ -451,7 +451,7 @@ pub enum ChildSubmission {
 /// the child's errand ended unless the return was made without ending.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildFollowUp {
-    Merged { admitted: ValueBody },
+    Merged { admitted: Admitted },
     Staged { derived: ValueBody },
     Deferred { id: ChildReturnId },
     Ended,
@@ -537,7 +537,7 @@ pub enum EvidenceRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OutcomeFollowUp {
     Closed {
-        admitted: Option<ValueBody>,
+        admitted: Option<Admitted>,
         withheld: Option<Withheld>,
     },
     Resolve(EvidenceRequest),
@@ -617,11 +617,37 @@ pub enum FollowUp {
         position: usize,
         error: crate::engine::EngineError,
     },
-    /// The answer stands at `position` of the family log: recorded by this decision, or by an
-    /// earlier one that recorded the same bytes at the same label.
+    /// The answer stands where `at` names: recorded by this decision, or by an earlier one
+    /// that recorded the same bytes at the same label.
     Answer {
-        position: u64,
+        at: ReleasedAt,
     },
+}
+
+/// One released record of the family log: its position among the family's records, and the
+/// digest of the bytes it stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReleasedAt {
+    pub position: u64,
+    pub digest: appa_runtime_api::ReleaseDigest,
+}
+
+/// A value a decision lets its host deliver, beside the record of the family log that admitted
+/// it: the one this decision appended, or the one it replays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Admitted {
+    pub body: ValueBody,
+    pub position: u64,
+}
+
+impl Admitted {
+    /// The record that admitted this value, digesting exactly these bytes.
+    pub fn released(&self) -> ReleasedAt {
+        ReleasedAt {
+            position: self.position,
+            digest: appa_runtime_api::ReleaseDigest::of(self.body.as_str().as_bytes()),
+        }
+    }
 }
 
 /// Why the boundary refused an event outright. A policy block is a decision, not an error: this

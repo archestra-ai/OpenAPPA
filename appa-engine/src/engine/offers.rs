@@ -157,9 +157,10 @@ impl Engine {
         )
         .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
         facts.extend(admitted);
-        let value = crossed(&facts);
+        let batch = self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?;
+        let value = release::admitted_in(view, &batch).expect("an accepted confined result admits its value");
         Ok(EngineDecision {
-            append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
+            append: Some(batch),
             follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value }),
         })
     }
@@ -254,9 +255,10 @@ impl Engine {
         )
         .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
         facts.extend(admitted);
-        let value = crossed(&facts);
+        let batch = self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?;
+        let value = release::admitted_in(view, &batch).expect("an accepted confined result admits its value");
         Ok(EngineDecision {
-            append: Some(self.decided(view, crate::basis::DecidedAct::Offer(execution.offer), facts)?),
+            append: Some(batch),
             follow_up: FollowUp::Offer(OfferFollowUp::Admitted { value }),
         })
     }
@@ -515,8 +517,8 @@ impl Engine {
     }
 
     fn confined_repeat(&self, views: &Views, dispatch: &DispatchId) -> OfferFollowUp {
-        if let Some(value) = views.admitted_body(dispatch) {
-            return OfferFollowUp::Admitted { value: value.clone() };
+        if let Some(value) = views.admitted_result(dispatch) {
+            return OfferFollowUp::Admitted { value };
         }
         let subject = crate::basis::SubjectKey::ConfinedResult(dispatch.clone());
         match (views.candidate(&subject), views.pending_block(&subject)) {

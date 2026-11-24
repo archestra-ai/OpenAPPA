@@ -246,8 +246,8 @@ mod tests {
         assert!(!views.has_ended(&child()));
         assert_eq!(views.returns_by(&child()), 1);
         assert_eq!(
-            views.latest_return(&child()).map(|value| value.body.as_str()),
-            Some("secret")
+            views.latest_crossing(&child()).map(|value| value.body),
+            Some(ValueBody::new("secret"))
         );
     }
 

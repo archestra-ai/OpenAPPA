@@ -48,7 +48,7 @@ impl Engine {
         let closed = || EngineDecision {
             append: None,
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
-                admitted: views.admitted_body(dispatch).cloned(),
+                admitted: views.admitted_result(dispatch),
                 withheld,
             }),
         };
@@ -227,13 +227,13 @@ impl Engine {
             &act.pinned(),
         )
         .map_err(admission_refusal)?;
-        let admitted = batch.iter().find_map(|fact| match fact {
-            Fact::ValueAdmitted { value, .. } => Some(value.body.clone()),
-            _ => None,
-        });
+        let batch = self.decided(view, crate::basis::DecidedAct::Outcome(dispatch.clone()), batch)?;
         Ok(EngineDecision {
-            append: Some(self.decided(view, crate::basis::DecidedAct::Outcome(dispatch.clone()), batch)?),
-            follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed { admitted, withheld }),
+            follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
+                admitted: release::admitted_in(view, &batch),
+                withheld,
+            }),
+            append: Some(batch),
         })
     }
 

@@ -409,8 +409,8 @@ async fn identified_calls_run_in_parallel_and_report_after_restart_in_any_order(
     let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db, None).expect("the deployment reopens");
     let session = runtime.session(&root(), &root()).expect("the session reattaches");
     for (call_id, body) in [("toolu-2", "second"), ("toolu-1", "first")] {
-        assert_eq!(
-            session
+        assert!(matches!(
+            &session
                 .on_tool_result_identified(
                     call.clone(),
                     Some(call_id.to_string()),
@@ -420,8 +420,8 @@ async fn identified_calls_run_in_parallel_and_report_after_restart_in_any_order(
                 )
                 .await
                 .expect("the identified result is correlated"),
-            ToolResultDecision::Keep,
-        );
+            ToolResultDecision::Keep { .. }
+        ));
     }
     assert!(runtime.open_dispatches(&root(), &root()).is_empty());
 }
@@ -506,8 +506,8 @@ async fn a_wide_parallel_fan_out_reports_every_call() {
     assert_eq!(runtime.open_dispatches(&root(), &root()).len(), ids.len());
 
     for call_id in ids {
-        assert_eq!(
-            session
+        assert!(matches!(
+            &session
                 .on_tool_result_identified(
                     call.clone(),
                     Some(call_id.to_string()),
@@ -517,8 +517,8 @@ async fn a_wide_parallel_fan_out_reports_every_call() {
                 )
                 .await
                 .expect("the identified result is correlated"),
-            ToolResultDecision::Keep,
-        );
+            ToolResultDecision::Keep { .. }
+        ));
     }
     assert!(runtime.open_dispatches(&root(), &root()).is_empty());
 }
@@ -543,8 +543,8 @@ async fn three_identified_calls_report_results_while_siblings_remain_open() {
     assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 3);
 
     for (call_id, body) in [("toolu-2", "second"), ("toolu-3", "third"), ("toolu-1", "first")] {
-        assert_eq!(
-            session
+        assert!(matches!(
+            &session
                 .on_tool_result_identified(
                     call.clone(),
                     Some(call_id.to_string()),
@@ -554,8 +554,8 @@ async fn three_identified_calls_report_results_while_siblings_remain_open() {
                 )
                 .await
                 .expect("an identified result closes only its own dispatch"),
-            ToolResultDecision::Keep,
-        );
+            ToolResultDecision::Keep { .. }
+        ));
     }
     assert!(runtime.open_dispatches(&root(), &root()).is_empty());
 }
@@ -713,7 +713,7 @@ async fn a_success_admits_the_raw_result_and_closes() {
         )
         .await
         .expect("the result is admitted");
-    assert_eq!(kept, ToolResultDecision::Keep);
+    assert!(matches!(&kept, ToolResultDecision::Keep { .. }));
     assert!(
         runtime.open_dispatches(&root(), &root()).pop().is_none(),
         "the admitted result closed the dispatch",
@@ -795,12 +795,10 @@ async fn the_success_checkpoint_commits_once_across_a_lost_admission() {
         .on_tool_result(leak(), outcome())
         .await
         .expect("the re-reported outcome admits");
-    assert_eq!(
-        replaced,
-        ToolResultDecision::Deliver {
-            value: "scrubbed".to_string()
-        },
-    );
+    assert!(matches!(
+        &replaced,
+        ToolResultDecision::Deliver { value, .. } if value == "scrubbed"
+    ));
     let log = runtime.log_facts(&root());
     assert_eq!(
         runtime.log_basis(&root()),
@@ -843,7 +841,7 @@ async fn a_failure_closes_with_no_effects_and_an_indeterminate_leaves_the_reserv
         )
         .await
         .expect("the failure closes");
-    assert_eq!(kept, ToolResultDecision::Keep);
+    assert!(matches!(&kept, ToolResultDecision::Keep { .. }));
     assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
 
     session
@@ -854,7 +852,7 @@ async fn a_failure_closes_with_no_effects_and_an_indeterminate_leaves_the_reserv
         .on_tool_result(fetch(serde_json::json!({"a": 1})), ToolOutcome::Indeterminate)
         .await
         .expect("the indeterminate closes");
-    assert_eq!(kept, ToolResultDecision::Keep);
+    assert!(matches!(&kept, ToolResultDecision::Keep { .. }));
 }
 
 #[tokio::test]
@@ -1550,12 +1548,10 @@ async fn a_child_is_forked_and_a_clean_return_crosses() {
         .on_child_end(Some("all done".to_string()))
         .await
         .expect("the clean return crosses");
-    assert_eq!(
-        returned,
-        crate::api::ChildReturnDecision::Returned {
-            value: "all done".to_string()
-        },
-    );
+    assert!(matches!(
+        &returned,
+        crate::api::ChildReturnDecision::Returned { value, .. } if value == "all done"
+    ));
     assert!(
         runtime.live(&root(), &TrajectoryId("cc:child".to_string())).is_ok(),
         "a return leaves the child live"
@@ -1646,11 +1642,11 @@ async fn a_child_returns_crossing_narrows_the_parent_and_charges_its_sink() {
         .on_child_end(Some("summary of untrusted data".to_string()))
         .await
         .expect("the return crosses");
-    assert_eq!(
-        returned,
-        crate::api::ChildReturnDecision::Returned {
-            value: "summary of untrusted data".to_string()
-        },
+    assert!(
+        matches!(
+            &returned,
+            crate::api::ChildReturnDecision::Returned { value, .. } if value == "summary of untrusted data"
+        ),
         "a return within the declared floor crosses as spoken"
     );
     assert!(
@@ -1831,7 +1827,7 @@ async fn an_authority_approval_authorizes_the_exact_call() {
         )
         .await
         .expect("the result is admitted");
-    assert_eq!(kept, ToolResultDecision::Keep);
+    assert!(matches!(&kept, ToolResultDecision::Keep { .. }));
 
     assert!(matches!(
         session.on_remedy(offer, RemedyArguments::default(), None, None).await,
@@ -2356,8 +2352,8 @@ async fn an_input_substitution_approves_the_replaced_call_and_the_proposal_of_it
     ));
     assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
 
-    assert_eq!(
-        session
+    assert!(matches!(
+        &session
             .on_tool_result(
                 replaced.clone(),
                 ToolOutcome::Success {
@@ -2366,8 +2362,8 @@ async fn an_input_substitution_approves_the_replaced_call_and_the_proposal_of_it
             )
             .await
             .expect("the outcome is reported"),
-        ToolResultDecision::Keep,
-    );
+        ToolResultDecision::Keep { .. }
+    ));
     assert!(runtime.open_dispatches(&root(), &root()).is_empty());
 
     // The derivation is spent. Proposing the same bytes again is an ordinary proposal
@@ -2939,12 +2935,10 @@ async fn a_sanitized_child_return_is_staged_and_crosses_when_the_child_echoes_it
         .on_child_end(Some("scrubbed".to_string()))
         .await
         .expect("the echo crosses");
-    assert_eq!(
-        returned,
-        crate::api::ChildReturnDecision::Returned {
-            value: "scrubbed".to_string()
-        },
-    );
+    assert!(matches!(
+        &returned,
+        crate::api::ChildReturnDecision::Returned { value, .. } if value == "scrubbed"
+    ));
     assert!(
         runtime.live(&root(), &child_id).is_ok(),
         "a return leaves the child live"
@@ -2981,12 +2975,12 @@ async fn a_duplicate_sanitized_return_replays_the_sanitized_crossing() {
         .on_child_end(Some("scrubbed".to_string()))
         .await
         .expect("the duplicate replays the recorded crossing");
-    assert_eq!(
-        replayed,
-        crate::api::ChildReturnDecision::Returned {
-            value: "scrubbed".to_string()
-        },
-        "the sanitizer is not consulted again; the recorded crossing answers",
+    assert!(
+        matches!(
+            &replayed,
+            crate::api::ChildReturnDecision::Returned { value, .. } if value == "scrubbed"
+        ),
+        "the sanitizer is not consulted again; the recorded crossing answers"
     );
     assert_eq!(runtime.log_basis(&root()), before, "the replay appended nothing");
 }
@@ -3244,12 +3238,12 @@ async fn a_bound_sanitizer_derivation_replaces_the_raw() {
         ToolCallDecision::Deny { .. },
     ));
     let decision = run_sanitize_offer(&runtime, &mut session).await;
-    assert_eq!(
-        decision,
-        ToolResultDecision::Deliver {
-            value: "scrubbed".to_string()
-        },
-        "the derivation is admitted and the raw is withheld",
+    assert!(
+        matches!(
+            &decision,
+            ToolResultDecision::Deliver { value, .. } if value == "scrubbed"
+        ),
+        "the derivation is admitted and the raw is withheld"
     );
     assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
 }
@@ -3548,8 +3542,8 @@ async fn narrowed_child(runtime: &Runtime, session: &mut Session, floor: crate::
             .expect("the accepted narrowing releases the call"),
         ToolCallDecision::Allow { spawn: None, .. }
     ));
-    assert_eq!(
-        child
+    assert!(matches!(
+        &child
             .on_tool_result(
                 browse,
                 ToolOutcome::Success {
@@ -3558,8 +3552,8 @@ async fn narrowed_child(runtime: &Runtime, session: &mut Session, floor: crate::
             )
             .await
             .expect("the result admits into the child"),
-        ToolResultDecision::Keep,
-    );
+        ToolResultDecision::Keep { .. }
+    ));
     child
 }
 
@@ -3586,12 +3580,10 @@ async fn a_parent_that_declared_a_lower_floor_takes_the_sanitized_return_and_nar
         .on_child_end(Some("scrubbed".to_string()))
         .await
         .expect("the echo crosses");
-    assert_eq!(
-        returned,
-        crate::api::ChildReturnDecision::Returned {
-            value: "scrubbed".to_string()
-        },
-    );
+    assert!(matches!(
+        &returned,
+        crate::api::ChildReturnDecision::Returned { value, .. } if value == "scrubbed"
+    ));
     assert_eq!(
         runtime.status(&root()).expect("the root answers").trust,
         "suspicious",
@@ -3736,7 +3728,7 @@ async fn a_result_left_on_a_missing_derivation_is_abandoned_once_and_replays_its
         .on_tool_result_identified(leak(), id(), ToolOutcome::Indeterminate)
         .await
         .expect("the abandon closes the dispatch");
-    assert_eq!(abandoned, ToolResultDecision::Keep);
+    assert!(matches!(&abandoned, ToolResultDecision::Keep { .. }));
     assert!(runtime.open_dispatches(&root(), &root()).is_empty());
     drop(session);
     drop(runtime);
@@ -3901,7 +3893,10 @@ async fn admit_success(runtime: &Runtime, session: &mut Session, call: ProposedC
         )
         .await
         .expect("the result is admitted");
-    assert_eq!(kept, ToolResultDecision::Keep, "the fixture result must actually admit");
+    assert!(
+        matches!(&kept, ToolResultDecision::Keep { .. }),
+        "the fixture result must actually admit"
+    );
 }
 
 #[test]
@@ -4102,7 +4097,10 @@ async fn taint_in(runtime: &Runtime, family: &TrajectoryId, session: &mut Sessio
         )
         .await
         .expect("the result is admitted");
-    assert_eq!(kept, ToolResultDecision::Keep, "the taint must actually admit");
+    assert!(
+        matches!(&kept, ToolResultDecision::Keep { .. }),
+        "the taint must actually admit"
+    );
 }
 
 /// Is `call` released? A release is reported back at once as a success, so the family
@@ -4244,9 +4242,8 @@ async fn a_parents_open_call_survives_its_root_forks_turn() {
         )
         .await
         .expect("the parent's result is still reportable");
-    assert_eq!(
-        kept,
-        ToolResultDecision::Keep,
+    assert!(
+        matches!(&kept, ToolResultDecision::Keep { .. }),
         "a fork's turn end closes nothing of its parent's"
     );
 }
@@ -4723,13 +4720,13 @@ async fn a_fan_out_binds_each_child_its_prompt_names_until_its_call_settles() {
     let c1 = session
         .on_child_start(child("c1"), SpawnRef::FanOut(prompt("p1")))
         .expect("a child bound before the notice starts again on its own fork");
-    assert_eq!(
-        c1.on_child_return("{\"rows\":3}".to_string(), None)
-            .await
-            .expect("the return is judged"),
-        ChildReturnDecision::Returned {
-            value: "{\"rows\":3}".to_string()
-        },
+    assert!(
+        matches!(
+            &c1.on_child_return("{\"rows\":3}".to_string(), None)
+                .await
+                .expect("the return is judged"),
+            ChildReturnDecision::Returned { value, .. } if value == "{\"rows\":3}"
+        ),
         "a child bound before the notice still returns across its fork"
     );
 }
@@ -5247,7 +5244,10 @@ async fn an_indeterminate_spawn_result_closes_the_spawn_and_leaves_the_child_liv
         )
         .await
         .expect("an indeterminate result is an ordinary close");
-    assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+    assert!(matches!(
+        &decision,
+        SpawnResultDecision::Outcome(ToolResultDecision::Keep { .. })
+    ));
     assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
     assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
 }
@@ -5322,7 +5322,7 @@ async fn a_launch_acknowledgement_closes_the_spawn_and_the_child_returns_on_its_
         )
         .await
         .expect("the launch acknowledgement is an ordinary result");
-    assert_eq!(decision, ToolResultDecision::Keep);
+    assert!(matches!(&decision, ToolResultDecision::Keep { .. }));
     assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
     assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child stays live");
 
@@ -5334,12 +5334,10 @@ async fn a_launch_acknowledgement_closes_the_spawn_and_the_child_returns_on_its_
         .on_child_end(Some("done".to_string()))
         .await
         .expect("the child's end crosses");
-    assert_eq!(
-        returned,
-        ChildReturnDecision::Returned {
-            value: "done".to_string()
-        }
-    );
+    assert!(matches!(
+        &returned,
+        ChildReturnDecision::Returned { value, .. } if value == "done"
+    ));
     assert!(
         runtime.live(&root(), &child("c1")).is_ok(),
         "a return leaves the child live"
@@ -5356,7 +5354,7 @@ async fn a_spawn_result_for_a_returned_child_replays_its_return_and_withholds_an
     let first = session
         .on_child_start(child("c1"), SpawnRef::InFlight)
         .expect("the child opens");
-    first
+    let crossed = first
         .on_child_end(Some("all done".to_string()))
         .await
         .expect("the child's own end crosses");
@@ -5374,9 +5372,8 @@ async fn a_spawn_result_for_a_returned_child_replays_its_return_and_withholds_an
         .expect("the same message replays");
     assert_eq!(
         decision,
-        SpawnResultDecision::Return(ChildReturnDecision::Returned {
-            value: "all done".to_string()
-        }),
+        SpawnResultDecision::Return(crossed),
+        "the replay carries the receipt of the crossing it repeats"
     );
     assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
     let facts = runtime.log_facts(&root());
@@ -5459,7 +5456,10 @@ async fn failed_spawn_result_saying(said: &str) -> (SpawnResultDecision, Vec<app
 #[tokio::test]
 async fn a_failed_spawn_result_naming_its_returned_child_closes_the_spawn_as_failed() {
     let (decision, closes) = failed_spawn_result_saying("all done").await;
-    assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+    assert!(matches!(
+        &decision,
+        SpawnResultDecision::Outcome(ToolResultDecision::Keep { .. })
+    ));
     assert!(
         matches!(closes.as_slice(), [appa_engine::fact::CloseOutcome::Failure]),
         "got {closes:?}"
@@ -5545,7 +5545,10 @@ async fn a_spawn_result_naming_an_unstarted_child_binds_it_and_closes_the_spawn(
         )
         .await
         .expect("the spawn result binds the child and closes");
-    assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+    assert!(matches!(
+        &decision,
+        SpawnResultDecision::Outcome(ToolResultDecision::Keep { .. })
+    ));
     assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
     assert!(opened(&runtime, &child("c1")), "the spawn result opened the child");
     assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child is live");
@@ -5581,7 +5584,10 @@ async fn a_spawn_result_on_an_unforked_call_is_an_ordinary_outcome() {
         )
         .await
         .expect("the ordinary result is admitted");
-    assert_eq!(decision, SpawnResultDecision::Outcome(ToolResultDecision::Keep));
+    assert!(matches!(
+        &decision,
+        SpawnResultDecision::Outcome(ToolResultDecision::Keep { .. })
+    ));
     assert!(!dispatch_open(&runtime, &root()));
 
     let error = session
@@ -5653,12 +5659,10 @@ async fn a_childs_end_closes_its_unreported_call_and_returns() {
         .on_child_end(Some("done".to_string()))
         .await
         .expect("the end closes the call and crosses");
-    assert_eq!(
-        decision,
-        ChildReturnDecision::Returned {
-            value: "done".to_string()
-        }
-    );
+    assert!(matches!(
+        &decision,
+        ChildReturnDecision::Returned { value, .. } if value == "done"
+    ));
     assert!(
         runtime.log_facts(&root()).iter().any(|fact| matches!(
             fact,
@@ -5701,24 +5705,20 @@ async fn a_second_end_of_a_returned_child_replays_the_same_value_and_crosses_ano
         .on_child_end(Some("done".to_string()))
         .await
         .expect("the same end answers again");
-    assert_eq!(
-        decision,
-        ChildReturnDecision::Returned {
-            value: "done".to_string()
-        }
-    );
+    assert!(matches!(
+        &decision,
+        ChildReturnDecision::Returned { value, .. } if value == "done"
+    ));
     assert_eq!(runtime.log_basis(&root()), before, "the replay appended nothing");
 
     let decision = child_session
         .on_child_end(Some("something else".to_string()))
         .await
         .expect("a different return crosses on its own");
-    assert_eq!(
-        decision,
-        ChildReturnDecision::Returned {
-            value: "something else".to_string()
-        }
-    );
+    assert!(matches!(
+        &decision,
+        ChildReturnDecision::Returned { value, .. } if value == "something else"
+    ));
     assert_ne!(runtime.log_basis(&root()), before, "the second crossing appended");
 
     assert_eq!(
@@ -5906,12 +5906,10 @@ async fn a_turn_end_leaves_a_running_subagents_spawn_open_for_its_return() {
         )
         .await
         .expect("the spawn's result is reported after the turn");
-    assert_eq!(
-        decision,
-        SpawnResultDecision::Return(ChildReturnDecision::Returned {
-            value: "all done".to_string()
-        }),
-    );
+    assert!(matches!(
+        &decision,
+        SpawnResultDecision::Return(ChildReturnDecision::Returned { value, .. }) if value == "all done"
+    ));
     assert!(
         runtime.open_dispatches(&root(), &root()).len() == 1,
         "the spawn closed; the parent's own call is still open"
@@ -5940,8 +5938,8 @@ async fn a_call_without_an_id_runs_beside_a_running_subagents_spawn() {
             .expect("the call releases beside the spawn"),
         ToolCallDecision::Allow { spawn: None, .. }
     ));
-    assert_eq!(
-        session
+    assert!(matches!(
+        &session
             .on_tool_result(
                 fetch(serde_json::json!({"a": 2})),
                 ToolOutcome::Success {
@@ -5950,8 +5948,8 @@ async fn a_call_without_an_id_runs_beside_a_running_subagents_spawn() {
             )
             .await
             .expect("the report names the call, not the spawn"),
-        ToolResultDecision::Keep
-    );
+        ToolResultDecision::Keep { .. }
+    ));
     assert_eq!(
         runtime.open_dispatches(&root(), &root()).len(),
         1,
@@ -5962,8 +5960,8 @@ async fn a_call_without_an_id_runs_beside_a_running_subagents_spawn() {
         .on_child_end(Some("all done".to_string()))
         .await
         .expect("the subagent's return crosses");
-    assert_eq!(
-        session
+    assert!(matches!(
+        &session
             .on_spawn_result_identified(
                 fetch(serde_json::json!({"a": 1})),
                 Some("spawn-1".to_string()),
@@ -5973,10 +5971,8 @@ async fn a_call_without_an_id_runs_beside_a_running_subagents_spawn() {
             )
             .await
             .expect("the spawn's result replays"),
-        SpawnResultDecision::Return(ChildReturnDecision::Returned {
-            value: "all done".to_string()
-        }),
-    );
+        SpawnResultDecision::Return(ChildReturnDecision::Returned { value, .. }) if value == "all done"
+    ));
 }
 
 /// A resume names its spawn by the call alone, with no call id. It still reaches an
@@ -6064,8 +6060,8 @@ async fn a_report_without_an_id_skips_an_identified_spawn_whose_child_ended() {
         ChildReturnDecision::NoValue
     );
 
-    assert_eq!(
-        session
+    assert!(matches!(
+        &session
             .on_tool_result(
                 fetch(serde_json::json!({"a": 2})),
                 ToolOutcome::Success {
@@ -6074,8 +6070,8 @@ async fn a_report_without_an_id_skips_an_identified_spawn_whose_child_ended() {
             )
             .await
             .expect("the report names the call, not the spawn"),
-        ToolResultDecision::Keep
-    );
+        ToolResultDecision::Keep { .. }
+    ));
     session
         .on_spawn_result_identified(
             fetch(serde_json::json!({"a": 1})),
@@ -6979,7 +6975,7 @@ async fn an_excepted_tool_stays_blocked_beside_an_approved_one() {
             .on_tool_result(bare("post"), outcome)
             .await
             .expect("the result is admitted");
-        assert_eq!(kept, ToolResultDecision::Keep);
+        assert!(matches!(&kept, ToolResultDecision::Keep { .. }));
     }
 }
 

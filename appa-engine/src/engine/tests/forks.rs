@@ -14,10 +14,10 @@ fn a_child_return_crosses_and_a_repeat_answers_from_the_record() {
     let merged = e
         .handle(&view, report(ChildSubmission::Value { body: body.clone() }))
         .expect("a non-narrowing crossing merges");
-    assert_eq!(
-        merged.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged { admitted: body.clone() })
-    );
+    assert!(matches!(
+        &merged.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == body
+    ));
     let crossed_log = [
         log.clone(),
         merged.append.expect("the crossing appends").facts().to_vec(),
@@ -29,10 +29,10 @@ fn a_child_return_crosses_and_a_repeat_answers_from_the_record() {
         .handle(&after, report(ChildSubmission::Value { body: body.clone() }))
         .expect("a repeat of the latest crossing answers from the record");
     assert_eq!(repeat.append, None);
-    assert_eq!(
-        repeat.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged { admitted: body })
-    );
+    assert!(matches!(
+        &repeat.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == body
+    ));
     let ended = e
         .handle(&after, report(ChildSubmission::Void))
         .expect("a void return ends the branch");

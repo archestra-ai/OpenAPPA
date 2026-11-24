@@ -37,6 +37,60 @@ where
     AnnotationContext::new(entries)
 }
 
+/// The consult a membership request asks: a selector's members, or one member's principal.
+/// `None` for a request that reads no membership.
+pub(in crate::api) fn membership_consult(request: &ExternalRequest) -> Option<Consult> {
+    match request {
+        ExternalRequest::AudienceSource {
+            provider,
+            selector,
+            templates,
+        } => Some(Consult::audience_selector(provider, selector, templates.clone())),
+        ExternalRequest::MemberLookup {
+            member,
+            answering,
+            templates,
+            ..
+        } => Some(Consult::member_lookup(answering, member, templates.clone())),
+        ExternalRequest::Authority { .. } | ExternalRequest::Sanitizer { .. } | ExternalRequest::Annotation { .. } => {
+            None
+        }
+    }
+}
+
+/// The evidence a membership request's consult answered with. A lookup's evidence stays keyed
+/// by the member's own provider, whichever entry answered.
+pub(in crate::api) fn membership_evidence(
+    request: &ExternalRequest,
+    outcome: ConsultOutcome,
+) -> Option<ExternalEvidence> {
+    match request {
+        ExternalRequest::AudienceSource { provider, selector, .. } => Some(ExternalEvidence::AudienceSource {
+            provider: provider.clone(),
+            selector: selector.clone(),
+            members: match outcome {
+                ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer)
+                    .map(|answer| answer.members.into_iter().map(ReaderId::new).collect())
+                    .ok_or(crate::events::NoAnswerClass::Malformed),
+                ConsultOutcome::NoAnswer(reason) => Err((&reason).into()),
+            },
+        }),
+        ExternalRequest::MemberLookup { provider, member, .. } => Some(ExternalEvidence::MemberLookup {
+            provider: provider.clone(),
+            member: member.clone(),
+            principal: match outcome {
+                ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer)
+                    .map(|answer| answer.principal.map(ReaderId::new))
+                    .ok_or(crate::events::NoAnswerClass::Malformed),
+                ConsultOutcome::NoAnswer(reason) => Err((&reason).into()),
+            },
+        }),
+        ExternalRequest::Authority { .. } | ExternalRequest::Sanitizer { .. } | ExternalRequest::Annotation { .. } => {
+            None
+        }
+    }
+}
+
 impl Session {
     /// Run one consult, timed, and note what it cost.
     ///
@@ -255,44 +309,10 @@ impl Session {
                     context,
                 }
             }
-            ExternalRequest::AudienceSource {
-                provider,
-                selector,
-                templates,
-            } => {
-                let consult = Consult::audience_selector(provider, selector, templates.clone());
-                let members = match self.timed_consult(&consult, None, None, occasion, None).await {
-                    ConsultOutcome::Answer(answer) => MembersAnswer::from_wire(&answer)
-                        .map(|answer| answer.members.into_iter().map(ReaderId::new).collect())
-                        .ok_or(crate::events::NoAnswerClass::Malformed),
-                    ConsultOutcome::NoAnswer(reason) => Err((&reason).into()),
-                };
-                ExternalEvidence::AudienceSource {
-                    provider: provider.clone(),
-                    selector: selector.clone(),
-                    members,
-                }
-            }
-            ExternalRequest::MemberLookup {
-                provider,
-                member,
-                answering,
-                templates,
-            } => {
-                // The evidence stays keyed by the member's own provider, whichever entry
-                // answered.
-                let consult = Consult::member_lookup(answering, member, templates.clone());
-                let principal = match self.timed_consult(&consult, None, None, occasion, None).await {
-                    ConsultOutcome::Answer(answer) => LookupAnswer::from_wire(&answer)
-                        .map(|answer| answer.principal.map(ReaderId::new))
-                        .ok_or(crate::events::NoAnswerClass::Malformed),
-                    ConsultOutcome::NoAnswer(reason) => Err((&reason).into()),
-                };
-                ExternalEvidence::MemberLookup {
-                    provider: provider.clone(),
-                    member: member.clone(),
-                    principal,
-                }
+            ExternalRequest::AudienceSource { .. } | ExternalRequest::MemberLookup { .. } => {
+                let consult = membership_consult(&request).expect("a membership request names its consult");
+                let outcome = self.timed_consult(&consult, None, None, occasion, None).await;
+                membership_evidence(&request, outcome).expect("a membership request answers with membership")
             }
         })
     }

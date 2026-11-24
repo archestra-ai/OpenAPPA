@@ -645,12 +645,10 @@ fn a_raw_return_crosses_at_the_fold_and_the_child_may_return_again() {
     let first = e
         .handle(&viewing(&e, &log), report_with(&log, &child, "done", vec![]))
         .expect("a return at the fold crosses");
-    assert_eq!(
-        first.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged {
-            admitted: ValueBody::new("done")
-        })
-    );
+    assert!(matches!(
+        &first.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == ValueBody::new("done")
+    ));
     let facts = appended_facts(first);
     assert!(matches!(
         declared_records(&facts),
@@ -678,12 +676,10 @@ fn a_raw_return_crosses_at_the_fold_and_the_child_may_return_again() {
         .handle(&viewing(&e, &log), report_with(&log, &child, "done", vec![]))
         .expect("a repeat of the latest crossing answers from the record");
     assert_eq!(replay.append, None);
-    assert_eq!(
-        replay.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged {
-            admitted: ValueBody::new("done")
-        })
-    );
+    assert!(matches!(
+        &replay.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == ValueBody::new("done")
+    ));
 
     let second = e
         .handle(&viewing(&e, &log), report_with(&log, &child, "more", vec![]))
@@ -870,12 +866,10 @@ fn an_attested_return_crosses_in_canonical_form_at_the_raised_rank() {
             report_with(&log, &child, "{ \"verdict\": \"allow\",  \"confidence\": 97 }", vec![]),
         )
         .expect("a conforming submission crosses");
-    assert_eq!(
-        merged.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged {
-            admitted: canonical.clone()
-        })
-    );
+    assert!(matches!(
+        &merged.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == canonical
+    ));
     let facts = appended_facts(merged);
     assert!(matches!(
         &declared_records(&facts)[0],
@@ -895,10 +889,10 @@ fn an_attested_return_crosses_in_canonical_form_at_the_raised_rank() {
         )
         .expect("a repeat of the crossing answers from the record");
     assert_eq!(replay.append, None);
-    assert_eq!(
-        replay.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged { admitted: canonical })
-    );
+    assert!(matches!(
+        &replay.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == canonical
+    ));
 }
 
 #[test]
@@ -966,12 +960,10 @@ fn a_named_sanitizer_stages_its_derivation_until_the_child_echoes_it() {
     let echoed = e
         .handle(&viewing(&e, &log), report_with(&log, &child, "clean", vec![]))
         .expect("the echo crosses the derivation");
-    assert_eq!(
-        echoed.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged {
-            admitted: ValueBody::new("clean")
-        })
-    );
+    assert!(matches!(
+        &echoed.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == ValueBody::new("clean")
+    ));
     let facts = appended_facts(echoed);
     assert!(matches!(
         &declared_records(&facts)[0],
@@ -994,12 +986,10 @@ fn a_named_sanitizer_stages_its_derivation_until_the_child_echoes_it() {
             report_with(&log, &child, "fine", derived_by("redactor", "fine", "fine")),
         )
         .expect("an unchanged derivation crosses at once");
-    assert_eq!(
-        unchanged.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged {
-            admitted: ValueBody::new("fine")
-        })
-    );
+    assert!(matches!(
+        &unchanged.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == ValueBody::new("fine")
+    ));
     let log = [log, appended_facts(unchanged)].concat();
     assert_eq!(e.validate_replay(&log), Ok(()));
     assert_eq!(

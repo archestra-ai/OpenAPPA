@@ -41,6 +41,7 @@ use remedy::*;
 use result::*;
 
 pub(crate) use child::LateOpen;
+pub(in crate::api) use release::judge_release;
 
 /// Whether a stop was taken, or held on the host call ids of calls still running at it.
 #[derive(Debug, Clone, PartialEq)]

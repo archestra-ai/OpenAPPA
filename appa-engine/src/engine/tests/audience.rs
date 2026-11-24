@@ -125,13 +125,10 @@ fn a_chain_only_output_sanitizer_is_offered_and_admitted_without_membership() {
             }])),
         )
         .expect("`self ⊇ self` derives from the chain: the derivation admits without a member list");
-    assert_eq!(
-        crossed.follow_up,
-        FollowUp::Outcome(OutcomeFollowUp::Closed {
-            admitted: Some(derived),
-            withheld: None,
-        })
-    );
+    assert!(matches!(
+        &crossed.follow_up,
+        FollowUp::Outcome(OutcomeFollowUp::Closed { admitted: Some(admitted), withheld: None }) if admitted.body == derived
+    ));
     let log = [log, crossed.append.expect("the derivation appends").facts().to_vec()].concat();
     assert_eq!(e.validate_replay(&log), Ok(()));
 }
@@ -1650,12 +1647,10 @@ mod symbolic_audiences {
                 child_report_with(&log, &child, &clean, vec![], no_answers()),
             )
             .expect("the child's echo of the derivation crosses it");
-        assert_eq!(
-            echoed.follow_up,
-            FollowUp::Child(ChildFollowUp::Merged {
-                admitted: clean.clone()
-            })
-        );
+        assert!(matches!(
+            &echoed.follow_up,
+            FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == clean
+        ));
         let facts = appended_facts(echoed);
         assert!(facts.iter().any(|fact| matches!(
             fact,
@@ -1757,12 +1752,10 @@ mod symbolic_audiences {
                 child_report_with(&log, &child, &clean, vec![], no_answers()),
             )
             .expect("the echo crosses the staged derivation without reading again");
-        assert_eq!(
-            echoed.follow_up,
-            FollowUp::Child(ChildFollowUp::Merged {
-                admitted: clean.clone()
-            })
-        );
+        assert!(matches!(
+            &echoed.follow_up,
+            FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == clean
+        ));
         let facts = appended_facts(echoed);
         assert!(
             facts.iter().any(|fact| matches!(
@@ -1773,6 +1766,66 @@ mod symbolic_audiences {
         );
         let log = [log, facts].concat();
         assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+
+    /// A release is withheld at a gap no admitted authority can cover, without reading the
+    /// membership another gap's cover would need; where every gap has a possible cover, the
+    /// judgment asks for the membership of the first one still unresolved.
+    #[test]
+    fn a_release_reads_membership_only_where_every_gap_has_a_possible_cover() {
+        use crate::engine::{ReleaseError, ReleaseJudgment};
+        let mut post = plain_tool("post");
+        post.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: Some(TRUSTED),
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    DeclaredAudience::literal(readers(&["outsider"])),
+                ))],
+            },
+            ..Requires::default()
+        };
+        let officer = crate::authority::Authority {
+            except: Vec::new(),
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                reader_ceiling: Some(grouped(&[], &["board"])),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let e = grouped_engine(
+            config(vec![post], vec![officer]),
+            &[],
+            Label::new(TRUSTED, Audience::public()),
+        );
+        let judge = |trust| {
+            e.judge_release(
+                &Label::new(trust, readers(&["insider"])),
+                ToolName::new("post"),
+                b"{}",
+                no_answers(),
+                None,
+                |_| true,
+            )
+        };
+        assert!(
+            matches!(
+                judge(SUSPICIOUS),
+                Ok(ReleaseJudgment::Withheld { ref gaps }) if matches!(gaps.as_slice(), [Gap::TrustFloor { .. }])
+            ),
+            "{:?}",
+            judge(SUSPICIOUS)
+        );
+        assert!(
+            matches!(
+                judge(TRUSTED),
+                Err(ReleaseError::MembershipNeeded { ref needed })
+                    if *needed == vec![SymbolicAtom::Group(crate::label::GroupRef::Named(GroupName::new("board")))]
+            ),
+            "{:?}",
+            judge(TRUSTED)
+        );
     }
 }
 

@@ -151,10 +151,10 @@ async fn postgres_concurrent_results_of_one_family_all_land() {
         })
         .collect();
     for task in tasks {
-        assert_eq!(
-            task.await.expect("the task joins").expect("every result lands"),
-            ToolResultDecision::Keep
-        );
+        assert!(matches!(
+            &task.await.expect("the task joins").expect("every result lands"),
+            ToolResultDecision::Keep { .. }
+        ));
     }
     assert!(runtime.open_dispatches(&root, &root).is_empty());
     forget(&store, &root);

@@ -41,7 +41,10 @@ pub(super) enum SpawnPlan {
         fork: appa_engine::value::ForkId,
         child: TrajectoryId,
     },
-    Replay,
+    /// The report repeats the child's latest crossed return, which the record `receipt` names.
+    Replay {
+        receipt: appa_runtime_api::ReleaseReceipt,
+    },
     Withheld,
     Close(EventError),
 }
@@ -55,13 +58,15 @@ pub(super) fn outcome_decision(
     externals: &crate::external::ExternalServices,
 ) -> Result<ToolResultDecision, EventError> {
     match decision.then {
-        Next::PresentToModel(Presentation::KeepOutput) => Ok(ToolResultDecision::Keep),
+        Next::PresentToModel(Presentation::KeepOutput { receipt }) => Ok(ToolResultDecision::Keep { receipt }),
         Next::PresentToModel(Presentation::ReplaceOutput { placeholder, .. }) => Ok(ToolResultDecision::Replace {
             placeholder,
             presentation: None,
         }),
         // An admitted value delivered in place of the raw output, as it crossed.
-        Next::PresentToModel(Presentation::Value { value }) => Ok(ToolResultDecision::Deliver { value }),
+        Next::PresentToModel(Presentation::Value { value, receipt }) => {
+            Ok(ToolResultDecision::Deliver { value, receipt })
+        }
         // The runtime's own words: the narrowing this result causes and the control call
         // that accepts it.
         Next::PresentToModel(Presentation::Blocked {
@@ -173,43 +178,16 @@ impl Session {
         call_id: Option<String>,
         o: ToolOutcome,
     ) -> Result<ToolResultDecision, EventError> {
-        self.on_tool_result_receipted(call, call_id, o)
-            .await
-            .map(|(decision, _)| decision)
-    }
-
-    /// [`Session::on_tool_result_identified`], with the receipt of the value it lets the host
-    /// deliver.
-    pub(crate) async fn on_tool_result_receipted(
-        &self,
-        call: ProposedCall,
-        call_id: Option<String>,
-        o: ToolOutcome,
-    ) -> Result<(ToolResultDecision, Option<appa_runtime_api::ReleaseReceipt>), EventError> {
         self.refuse_substituted_embedded_read(&call, call_id.as_deref(), &o)?;
         let o = self.cap_outcome(o);
-        let (mut deferral, mut auto_apply, mut reported) = (None, AutoApply::default(), None);
+        let (mut deferral, mut auto_apply) = (None, AutoApply::default());
         let decision = self
-            .report_outcome(
-                &call,
-                call_id.as_deref(),
-                &o,
-                &mut deferral,
-                &mut auto_apply,
-                &mut reported,
-            )
+            .report_outcome(&call, call_id.as_deref(), &o, &mut deferral, &mut auto_apply)
             .await?;
         let decided = self
             .accept_staged(outcome_decision(decision, &self.deployment().externals)?, auto_apply)
             .await?;
-        let decided = deferred_or(deferral, decided)?;
-        let receipt = match (&decided, &reported) {
-            (ToolResultDecision::Keep | ToolResultDecision::Deliver { .. }, Some(dispatch)) => {
-                self.receipt(appa_engine::engine::Receipted::Result(dispatch))?
-            }
-            _ => None,
-        };
-        Ok((decided, receipt))
+        deferred_or(deferral, decided)
     }
 
     /// Under `RulingsAndAccept`, as the snapshot that decided the result read it, a staged result whose block offers a plan the family lets the
@@ -236,7 +214,7 @@ impl Session {
             return Ok(decided);
         };
         match self.auto_apply(offer).await {
-            Ok(RemedyDecision::Returned { value }) => Ok(ToolResultDecision::Deliver { value }),
+            Ok(RemedyDecision::Returned { value, receipt }) => Ok(ToolResultDecision::Deliver { value, receipt }),
             Err(error) if error.is_operational() => Err(error),
             applied => {
                 tracing::debug!(trajectory = %self.trajectory.0, ?applied, "an auto-applied staged plan was not applied");
@@ -246,8 +224,8 @@ impl Session {
     }
 
     /// `deferral` receives the notice of the reported dispatch, where it is a spawn whose
-    /// child's answer was deferred, `auto_apply` the family's pinned setting, and `reported`
-    /// the dispatch, all as the snapshot that decided the report read them.
+    /// child's answer was deferred, and `auto_apply` the family's pinned setting, both as the
+    /// snapshot that decided the report read them.
     pub(super) async fn report_outcome(
         &self,
         call: &ProposedCall,
@@ -255,14 +233,12 @@ impl Session {
         o: &ToolOutcome,
         deferral: &mut Option<String>,
         auto_apply: &mut AutoApply,
-        reported: &mut Option<appa_engine::value::DispatchId>,
     ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
             |context, evidence| {
                 *auto_apply = crate::api::pinned_settings(context.log).auto_apply;
                 let dispatch = context.classify_report(call, call_id)?;
                 *deferral = context.deferral_notice(&dispatch);
-                *reported = Some(dispatch.clone());
                 Ok(EngineEvent::ToolOutcome {
                     dispatch,
                     outcome: o.clone(),
@@ -340,14 +316,15 @@ impl Session {
                         // A report repeating the bound child's latest crossing is that crossing,
                         // whatever the child froze before it.
                         let crossed = match (&status, &child, &value) {
-                            (ForkStatus::Bound(bound), Some(named), Some(said)) => {
-                                named == bound && context.latest_return(named).as_deref() == Some(said.as_str())
-                            }
-                            _ => false,
+                            (ForkStatus::Bound(bound), Some(named), Some(said)) if named == bound => context
+                                .latest_return(named)
+                                .filter(|(latest, _)| latest == said)
+                                .map(|(_, receipt)| receipt),
+                            _ => None,
                         };
                         deferral = match crossed {
-                            true => None,
-                            false => context.deferral_notice(&dispatch),
+                            Some(_) => None,
+                            None => context.deferral_notice(&dispatch),
                         };
                         let next = match (status, &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
@@ -378,11 +355,13 @@ impl Session {
                             (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
                                 None => SpawnPlan::Outcome,
                                 // A failure repeating the crossed return closes as the host reported it.
-                                Some(_) if crossed => match outcome {
-                                    ToolOutcome::Failure { .. } => SpawnPlan::Outcome,
-                                    _ => SpawnPlan::Replay,
+                                Some(_) => match (&crossed, &outcome) {
+                                    (Some(_), ToolOutcome::Failure { .. }) => SpawnPlan::Outcome,
+                                    (Some(receipt), _) => SpawnPlan::Replay {
+                                        receipt: receipt.clone(),
+                                    },
+                                    (None, _) => SpawnPlan::Withheld,
                                 },
-                                Some(_) => SpawnPlan::Withheld,
                             },
                             (ForkStatus::Bound(_), _) => SpawnPlan::Close(EventError::BindingMismatch),
                         };
@@ -399,7 +378,7 @@ impl Session {
                             },
                             // A withheld message still closes as the failure the host reported, in
                             // the runtime's words: none of the host's bytes cross with the close.
-                            SpawnPlan::Replay | SpawnPlan::Withheld => EngineEvent::ToolOutcome {
+                            SpawnPlan::Replay { .. } | SpawnPlan::Withheld => EngineEvent::ToolOutcome {
                                 dispatch,
                                 outcome: match &outcome {
                                     ToolOutcome::Failure { .. } => ToolOutcome::Failure {
@@ -446,10 +425,11 @@ impl Session {
                     }
                     _ => return Err(EventError::UnexpectedDecision),
                 },
-                SpawnPlan::Replay => {
+                SpawnPlan::Replay { receipt } => {
                     outcome_decision(decision, &self.deployment().externals)?;
                     return Ok(SpawnResultDecision::Return(ChildReturnDecision::Returned {
                         value: value.expect("a replay repeats a delivered message"),
+                        receipt,
                     }));
                 }
                 SpawnPlan::Withheld => {

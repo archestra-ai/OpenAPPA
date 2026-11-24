@@ -101,12 +101,10 @@ fn accepting_a_deferred_return_crosses_the_frozen_value_and_narrows_the_parent()
     let accepted = e
         .handle(&viewing(&e, &log), settle(&child, 0, ReturnDecision::Accept))
         .expect("the parent accepts the frozen value");
-    assert_eq!(
-        accepted.follow_up,
-        FollowUp::Settlement(SettlementFollowUp::Accepted {
-            admitted: ValueBody::new("the answer")
-        })
-    );
+    assert!(matches!(
+        &accepted.follow_up,
+        FollowUp::Settlement(SettlementFollowUp::Accepted { admitted }) if admitted.body == ValueBody::new("the answer")
+    ));
     let facts = appended_facts(accepted);
     let to = from.combine(&frozen);
     assert!(matches!(
@@ -134,12 +132,10 @@ fn accepting_a_deferred_return_crosses_the_frozen_value_and_narrows_the_parent()
             .handle(&viewing(&e, &log), settle(&child, 0, repeat))
             .expect("a settled return answers from the log");
         assert_eq!(again.append, None);
-        assert_eq!(
-            again.follow_up,
-            FollowUp::Settlement(SettlementFollowUp::Accepted {
-                admitted: ValueBody::new("the answer")
-            })
-        );
+        assert!(matches!(
+            &again.follow_up,
+            FollowUp::Settlement(SettlementFollowUp::Accepted { admitted }) if admitted.body == ValueBody::new("the answer")
+        ));
     }
 }
 
@@ -230,12 +226,10 @@ fn a_deferred_return_that_leaves_the_parent_where_it_is_crosses_at_the_stop() {
     let crossed = e
         .handle(&viewing(&e, &log), stop(&log, &child, "done"))
         .expect("a return that narrows nothing crosses");
-    assert_eq!(
-        crossed.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged {
-            admitted: ValueBody::new("done")
-        })
-    );
+    assert!(matches!(
+        &crossed.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == ValueBody::new("done")
+    ));
     let log = [log, appended_facts(crossed)].concat();
     assert_eq!(e.validate_replay(&log), Ok(()));
     let views = viewing(&e, &log);
@@ -285,12 +279,10 @@ fn a_deferred_return_that_crosses_at_the_stop_is_held_to_the_inherited_floor() {
     let crossed = first
         .handle(&viewing(&first, &log), stop(&log, &grandchild, "done"))
         .expect("the sanitizer leaves the floor's trust unbound");
-    assert_eq!(
-        crossed.follow_up,
-        FollowUp::Child(ChildFollowUp::Merged {
-            admitted: ValueBody::new("done")
-        })
-    );
+    assert!(matches!(
+        &crossed.follow_up,
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == ValueBody::new("done")
+    ));
     let mut restamped = appended_facts(crossed);
     let Some(Fact::BasisAdvanced { revision, .. }) = restamped.first_mut() else {
         panic!("a decided batch leads with its declaration");

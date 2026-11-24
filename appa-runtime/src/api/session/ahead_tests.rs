@@ -225,8 +225,8 @@ async fn narrow(runtime: &Runtime) {
             Ok(ToolCallDecision::Allow { spawn: None, .. })
         ));
     }
-    assert_eq!(
-        session
+    assert!(matches!(
+        &session
             .on_tool_result(
                 call("taint"),
                 ToolOutcome::Success {
@@ -235,8 +235,8 @@ async fn narrow(runtime: &Runtime) {
             )
             .await
             .expect("the result is admitted"),
-        ToolResultDecision::Keep
-    );
+        ToolResultDecision::Keep { .. }
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

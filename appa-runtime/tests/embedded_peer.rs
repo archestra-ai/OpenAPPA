@@ -609,6 +609,11 @@ async fn a_noop_arrival_returns_the_body_and_a_narrowing_read_folds_only_the_chi
         panic!("the retry delivers the stored body, got {:?}", retry.decision);
     };
     assert_eq!(retried, "secret");
+    assert!(read.receipt.is_some(), "the first read carries its release receipt");
+    assert_eq!(
+        retry.receipt, read.receipt,
+        "the retry names the record the first read admitted"
+    );
     let other = runtime
         .read_embedded_peer(
             &actor(Some(&child())),
@@ -681,6 +686,11 @@ async fn a_completed_read_replays_its_receipt_after_a_reload_refuses_the_tool() 
         value: "hello".to_string(),
     };
     assert_eq!(read.decision, delivered);
+    let released = read
+        .receipt
+        .clone()
+        .expect("a delivered read carries its release receipt");
+    assert_eq!(released.digest, appa_runtime_api::ReleaseDigest::of(b"hello"));
 
     let path = dir.path().join("narrowing.toml");
     std::fs::write(
@@ -700,6 +710,11 @@ async fn a_completed_read_replays_its_receipt_after_a_reload_refuses_the_tool() 
         .await
         .expect("the exact retry replays its receipt");
     assert_eq!(retry.decision, delivered);
+    assert_eq!(
+        retry.receipt,
+        Some(released),
+        "the replay carries the release receipt of the read it repeats"
+    );
     let changed = runtime
         .read_embedded_peer(
             &actor(None),

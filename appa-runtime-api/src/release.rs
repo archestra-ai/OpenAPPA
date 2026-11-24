@@ -55,6 +55,9 @@ impl<'de> serde::Deserialize<'de> for ReleaseDigest {
 /// Where the runtime recorded one released content component: the family log of `session`,
 /// the record at `fact_position` in it, and the digest of the bytes that record stands for.
 /// It carries no label: a release judgment reads the label from that record.
+///
+/// A receipt vouches only for the bytes its digest names. Before it releases content under a
+/// receipt, the host checks that the digest of the bytes it is about to send equals `digest`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ReleaseReceipt {
     pub session: TrajectoryId,
@@ -119,6 +122,19 @@ mod tests {
         let read: WireDecision = serde_json::from_value(acked).expect("reads");
         assert_eq!(read.receipt, Some(receipt.clone()));
         assert_eq!(read.into_decision(), Ok(HookDecision::Ack));
+
+        let noticed = HookDecision::Context {
+            text: "a peer message is held".to_string(),
+        };
+        let read: WireDecision = serde_json::from_value(
+            serde_json::to_value(WireDecision::of(&noticed).with_receipt(Some(receipt.clone()))).expect("serializes"),
+        )
+        .expect("reads");
+        assert_eq!(
+            read.into_decision(),
+            Ok(noticed),
+            "a context acknowledges what it delivers"
+        );
 
         let deferred = WireDecision::of(&HookDecision::DeferReturn).with_receipt(Some(receipt));
         assert!(deferred.into_decision().is_err());

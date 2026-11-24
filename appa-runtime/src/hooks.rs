@@ -637,13 +637,7 @@ fn handled(
     receipt: Option<ReleaseReceipt>,
     decision: HookDecision,
 ) -> Handled {
-    // A receipt stands only beside a decision that lets the host deliver what it names.
-    let receipt = receipt.filter(|_| {
-        matches!(
-            decision,
-            HookDecision::Ack | HookDecision::DeliverValue { .. } | HookDecision::ChildReturn { .. }
-        )
-    });
+    let receipt = receipt.filter(|_| decision.releases());
     let presentation = presentation.or_else(|| presentation_for(&decision));
     let (outcome, mut offers) = hook_result(&decision);
     if let Some(presentation) = &presentation {
@@ -987,26 +981,33 @@ impl Dispatcher<'_> {
         .await
         {
             Ok(Stop::Held(running)) => return HookDecision::Held { running },
-            Ok(Stop::Taken(())) => {}
+            Ok(Stop::Taken(())) => {
+                if let (None, Some(answer)) = (&actor.child, answer) {
+                    self.release_answer(&actor, answer).await;
+                }
+            }
+            // The turn's calls stand open, so its answer is not the turn's last word.
             Err(error) => {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
-            }
-        }
-        if let (None, Some(answer)) = (&actor.child, answer) {
-            let released = on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
-                let answer = answer.clone();
-                async move { session.release_answer(&answer).await }
-            })
-            .await;
-            match released {
-                Ok(receipt) => *self.receipt = receipt,
-                Err(error) => tracing::warn!(root = %actor.root.0, %error, "the turn's answer was not recorded"),
             }
         }
         if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
             tracing::warn!(root = %actor.root.0, %error, "the turn's end was not recorded");
         }
         HookDecision::Ack
+    }
+
+    /// Record the root's answer, its receipt riding on the turn end's `Ack`.
+    async fn release_answer(&mut self, actor: &Actor, answer: String) {
+        let released = on_actor(self.runtime, actor, MissingStart::Refuse, self.options, |session| {
+            let answer = answer.clone();
+            async move { session.release_answer(&answer).await }
+        })
+        .await;
+        match released {
+            Ok(receipt) => *self.receipt = Some(receipt),
+            Err(error) => tracing::warn!(root = %actor.root.0, %error, "the turn's answer was not recorded"),
+        }
     }
 
     async fn tool_call(
@@ -1167,19 +1168,17 @@ impl Dispatcher<'_> {
         let failed = matches!(outcome, ToolOutcome::Failure { .. });
         match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
             let (call, call_id, outcome) = (call.clone(), call_id.clone(), outcome.clone());
-            async move { session.on_tool_result_receipted(call, call_id, outcome).await }
+            async move { session.on_tool_result_identified(call, call_id, outcome).await }
         })
         .await
         {
             // A failed call's hook carries no context, so a notice waits for the next one.
-            Ok((decision, receipt)) if !failed => {
-                *self.receipt = receipt;
-                with_peer_notices(self.runtime, &actor, outcome_decision(decision, self.presentation))
-            }
-            Ok((decision, receipt)) => {
-                *self.receipt = receipt;
-                outcome_decision(decision, self.presentation)
-            }
+            Ok(decision) if !failed => with_peer_notices(
+                self.runtime,
+                &actor,
+                outcome_decision(decision, self.presentation, self.receipt),
+            ),
+            Ok(decision) => outcome_decision(decision, self.presentation, self.receipt),
             Err(error) => fold(error, Refusal::Settle),
         }
     }
@@ -1210,8 +1209,8 @@ impl Dispatcher<'_> {
         })
         .await
         {
-            Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision),
-            Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, self.presentation),
+            Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision, self.receipt),
+            Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, self.presentation, self.receipt),
             Err(error) => fold(error, Refusal::Settle),
         }
     }
@@ -1243,19 +1242,17 @@ impl Dispatcher<'_> {
             |session| {
                 let open_calls = open_calls.clone();
                 async move {
-                    let stop = match &open_calls {
+                    match &open_calls {
                         OpenCalls::Abandon => session.on_child_turn_end().await.map(Stop::Taken),
                         OpenCalls::Hold { answered } => session.on_child_turn_end_holding(answered).await,
-                    }?;
-                    receipted(&session, stop)
+                    }
                 }
             },
         )
         .await
         {
             Ok(Stop::Held(running)) => HookDecision::Held { running },
-            Ok(Stop::Taken((decision, receipt))) => {
-                *self.receipt = receipt;
+            Ok(Stop::Taken(decision)) => {
                 let actor = Actor {
                     root,
                     child: Some(child),
@@ -1263,7 +1260,7 @@ impl Dispatcher<'_> {
                 if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
                     tracing::warn!(%error, "the empty child turn's end was not recorded");
                 }
-                return_decision(None, decision)
+                return_decision(None, decision, self.receipt)
             }
             Err(error) => refuse(error),
         }
@@ -1290,19 +1287,17 @@ impl Dispatcher<'_> {
                 let value = value.clone();
                 let open_calls = open_calls.clone();
                 async move {
-                    let stop = match &open_calls {
+                    match &open_calls {
                         OpenCalls::Abandon => session.on_child_end(value).await.map(Stop::Taken),
                         OpenCalls::Hold { answered } => session.on_child_end_holding(value, answered).await,
-                    }?;
-                    receipted(&session, stop)
+                    }
                 }
             },
         )
         .await
         {
             Ok(Stop::Held(running)) => HookDecision::Held { running },
-            Ok(Stop::Taken((decision, receipt))) => {
-                *self.receipt = receipt;
+            Ok(Stop::Taken(decision)) => {
                 // The child is finished unless it is being asked to return something
                 // else, so what it still stands behind ends here: its vouches must not
                 // outlive its return, and its parent's turn end is not its own.
@@ -1315,7 +1310,7 @@ impl Dispatcher<'_> {
                         tracing::warn!(root = %root.0, child = %child.0, %error, "the child's end was not recorded");
                     }
                 }
-                return_decision(said, decision)
+                return_decision(said, decision, self.receipt)
             }
             Err(error) if error.is_operational() => refuse(error),
             Err(_) if is_withheld_return(said.as_deref()) => HookDecision::Ack,
@@ -1341,19 +1336,12 @@ impl Dispatcher<'_> {
             self.options,
             |session| {
                 let (value, operation) = (value.clone(), operation.clone());
-                async move {
-                    let decision = session.on_child_return(value, operation).await?;
-                    let receipt = session.return_receipt(&decision)?;
-                    Ok((decision, receipt))
-                }
+                async move { session.on_child_return(value, operation).await }
             },
         )
         .await
         {
-            Ok((decision, receipt)) => {
-                *self.receipt = receipt;
-                return_decision(said, decision)
-            }
+            Ok(decision) => return_decision(said, decision, self.receipt),
             // A retry naming a held operation with other words is the host's to correct, by its
             // class: nothing is in the model's way.
             Err(error @ EventError::ReturnRetryChanged) => refuse(error),
@@ -1362,27 +1350,24 @@ impl Dispatcher<'_> {
     }
 }
 
-/// A taken stop's return decision, beside the receipt of what it crossed.
-fn receipted(
-    session: &Session,
-    stop: Stop<ChildReturnDecision>,
-) -> Result<Stop<(ChildReturnDecision, Option<ReleaseReceipt>)>, EventError> {
-    Ok(match stop {
-        Stop::Held(running) => Stop::Held(running),
-        Stop::Taken(decision) => {
-            let receipt = session.return_receipt(&decision)?;
-            Stop::Taken((decision, receipt))
-        }
-    })
-}
-
+/// `receipt` receives the record that admitted what the decision delivers.
 fn outcome_decision(
     decision: ToolResultDecision,
     embedded_presentation: &mut Option<RemedyPresentation>,
+    receipt: &mut Option<ReleaseReceipt>,
 ) -> HookDecision {
     match decision {
-        ToolResultDecision::Keep => HookDecision::Ack,
-        ToolResultDecision::Deliver { value } => HookDecision::DeliverValue { value },
+        ToolResultDecision::Keep { receipt: admitted } => {
+            *receipt = admitted;
+            HookDecision::Ack
+        }
+        ToolResultDecision::Deliver {
+            value,
+            receipt: admitted,
+        } => {
+            *receipt = Some(admitted);
+            HookDecision::DeliverValue { value }
+        }
         ToolResultDecision::Replace {
             placeholder,
             presentation,
@@ -1417,14 +1402,26 @@ fn presentation_for(decision: &HookDecision) -> Option<RemedyPresentation> {
 
 /// A crossing as spoken answers with no opinion. What crosses otherwise — the canonical
 /// form of a shaped return, a sanitizer's derivation — goes back as the value the child
-/// must return, or the harness deliver, for it to reach the parent.
-fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookDecision {
+/// must return, or the harness deliver, for it to reach the parent. `receipt` receives the
+/// record that admitted what crossed.
+fn return_decision(
+    said: Option<String>,
+    decision: ChildReturnDecision,
+    receipt: &mut Option<ReleaseReceipt>,
+) -> HookDecision {
     match decision {
-        ChildReturnDecision::Returned { value } if said.as_deref() != Some(value.as_str()) => {
-            HookDecision::ChildReturn { value }
+        ChildReturnDecision::Returned {
+            value,
+            receipt: crossed,
+        } => {
+            *receipt = Some(crossed);
+            match said.as_deref() == Some(value.as_str()) {
+                true => HookDecision::Ack,
+                false => HookDecision::ChildReturn { value },
+            }
         }
         ChildReturnDecision::Staged { value } => HookDecision::ChildReturn { value },
-        ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => HookDecision::Ack,
+        ChildReturnDecision::NoValue => HookDecision::Ack,
         ChildReturnDecision::Deferred => HookDecision::DeferReturn,
         ChildReturnDecision::Blocked { feedback, outcomes } => block(feedback, outcomes),
     }

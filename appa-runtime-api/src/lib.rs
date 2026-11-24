@@ -1023,6 +1023,21 @@ pub enum HookDecision {
     },
 }
 
+impl HookDecision {
+    /// Whether this decision lets the host deliver what the event carried or what the
+    /// decision names, so a release receipt may stand beside it. A context decision
+    /// acknowledges its event with notices beside it.
+    pub fn releases(&self) -> bool {
+        matches!(
+            self,
+            HookDecision::Ack
+                | HookDecision::DeliverValue { .. }
+                | HookDecision::ChildReturn { .. }
+                | HookDecision::Context { .. }
+        )
+    }
+}
+
 /// One remedy a block offers: the id `execute_remedy_plan` takes and,
 /// where the plan declares a child's return, how that return crosses.
 /// `None` for a plan that declares no return.

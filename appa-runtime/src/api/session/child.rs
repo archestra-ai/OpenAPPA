@@ -14,7 +14,9 @@ pub(super) const ENDED_CHILD: &str = "[appa] this subagent ended without a retur
 
 pub(super) fn return_decision(decision: EngineDecision) -> Result<ChildReturnDecision, EventError> {
     match decision.then {
-        Next::PresentToModel(Presentation::Value { value }) => Ok(ChildReturnDecision::Returned { value }),
+        Next::PresentToModel(Presentation::Value { value, receipt }) => {
+            Ok(ChildReturnDecision::Returned { value, receipt })
+        }
         Next::PresentToModel(Presentation::Staged { value }) => Ok(ChildReturnDecision::Staged { value }),
         Next::PresentToModel(Presentation::NoValue) => Ok(ChildReturnDecision::NoValue),
         Next::PresentToModel(Presentation::Deferred) => Ok(ChildReturnDecision::Deferred),

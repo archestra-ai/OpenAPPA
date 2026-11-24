@@ -15,7 +15,7 @@ use crate::label::Label;
 use crate::names::{AuthorityName, SanitizerName};
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
-    ToolName, TrajectoryId, ValueId,
+    ToolName, TrajectoryId, ValueBody, ValueId,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,7 +23,7 @@ struct AdmittedValue {
     trajectory: TrajectoryId,
     label: Label,
     provenance: Provenance,
-    body: Option<crate::value::ValueBody>,
+    body: Option<ValueBody>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -243,8 +243,8 @@ pub struct Projection {
 }
 
 /// Every record of the log a release receipt may name, by its position among the family's
-/// records: an admitted value, or a root's answer. A value's label is read from the value, so
-/// it crosses with it; an answer carries its own.
+/// records: an admitted result, a crossed return, or a root's answer. No record holds a label:
+/// each is rebuilt from the terms the record names, so it crosses a revision as they do.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Released {
     /// How many records this projection folded: the position the next one lands at.
@@ -252,63 +252,67 @@ struct Released {
     records: OrdMap<u64, ReleasedRecord>,
     /// The record that admitted each dispatch's result.
     results: OrdMap<DispatchId, u64>,
-    /// The record that admitted each child's latest crossed return into its parent.
-    returns: OrdMap<TrajectoryId, u64>,
+    /// The record that admitted each crossed return into its parent.
+    returns: OrdMap<ChildReturnId, u64>,
     /// Each trajectory's latest answer.
     answers: OrdMap<TrajectoryId, u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ReleasedRecord {
-    digest: appa_runtime_api::ReleaseDigest,
-    label: ReleasedLabel,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum ReleasedLabel {
-    Value(ValueId),
-    Answer(Label),
+enum ReleasedRecord {
+    /// Released at the bound its dispatch received against, met with the value's own label:
+    /// what the trajectory sent the tool may come back in its result.
+    Result {
+        value: ValueId,
+        dispatch: DispatchId,
+        body: ValueBody,
+    },
+    Return {
+        value: ValueId,
+        body: ValueBody,
+    },
+    /// At the trajectory's label over its first `terms` local values, as the answer stood.
+    Answer {
+        trajectory: TrajectoryId,
+        digest: appa_runtime_api::ReleaseDigest,
+        terms: usize,
+    },
 }
 
 impl Released {
-    fn fold(&mut self, fact: &Fact, next_value: ValueId) {
+    fn fold(&mut self, fact: &Fact, next_value: ValueId, local: &OrdMap<TrajectoryId, Vector<ValueId>>) {
         let position = self.folded;
         self.folded += 1;
-        let (digest, label) = match fact {
-            Fact::ValueAdmitted { value, provenance, .. } => {
-                match provenance {
-                    Provenance::ToolResult { dispatch } => {
-                        self.results.insert(dispatch.clone(), position);
+        let record = match fact {
+            Fact::ValueAdmitted { value, provenance, .. } => match provenance {
+                Provenance::ToolResult { dispatch } => {
+                    self.results.insert(dispatch.clone(), position);
+                    ReleasedRecord::Result {
+                        value: next_value,
+                        dispatch: dispatch.clone(),
+                        body: value.body.clone(),
                     }
-                    Provenance::ChildReturn { child, .. } => {
-                        self.returns.insert(child.clone(), position);
-                    }
-                    Provenance::ProviderRun { .. } => {}
                 }
-                (
-                    appa_runtime_api::ReleaseDigest::of(value.body.as_str().as_bytes()),
-                    ReleasedLabel::Value(next_value),
-                )
-            }
-            Fact::AnswerReleased {
-                trajectory,
-                digest,
-                label,
-            } => {
+                Provenance::ChildReturn { id, .. } => {
+                    self.returns.insert(id.clone(), position);
+                    ReleasedRecord::Return {
+                        value: next_value,
+                        body: value.body.clone(),
+                    }
+                }
+                Provenance::ProviderRun { .. } => return,
+            },
+            Fact::AnswerReleased { trajectory, digest, .. } => {
                 self.answers.insert(trajectory.clone(), position);
-                (*digest, ReleasedLabel::Answer(label.clone()))
+                ReleasedRecord::Answer {
+                    trajectory: trajectory.clone(),
+                    digest: *digest,
+                    terms: local.get(trajectory).map_or(0, Vector::len),
+                }
             }
             _ => return,
         };
-        self.records.insert(position, ReleasedRecord { digest, label });
-    }
-
-    fn cross(&mut self, crossing: &crate::label::TrustCrossing) {
-        each_mut(&mut self.records, |record| {
-            if let ReleasedLabel::Answer(label) = &mut record.label {
-                label.cross_value(crossing);
-            }
-        });
+        self.records.insert(position, record);
     }
 }
 
@@ -488,7 +492,6 @@ impl Projection {
             label.cross_value(crossing);
         }
         each_mut(&mut self.candidates, |candidate| candidate.derived.cross(crossing));
-        self.released.cross(crossing);
         let trajectories: Vec<TrajectoryId> = self.local_label.keys().cloned().collect();
         for trajectory in trajectories {
             let snapshot = self
@@ -569,7 +572,7 @@ impl Projection {
             versions,
             released,
         } = self;
-        released.fold(fact, ValueId::new(values.len() as u64));
+        released.fold(fact, ValueId::new(values.len() as u64), local);
         match fact {
             Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                 trajectory,
@@ -970,14 +973,22 @@ impl Projection {
         self.value(id).map(|v| &v.label)
     }
 
-    /// The digest and the label of the released record at `position` of the family log.
-    pub(crate) fn released(&self, position: u64) -> Option<(appa_runtime_api::ReleaseDigest, &Label)> {
-        let record = self.released.records.get(&position)?;
-        let label = match &record.label {
-            ReleasedLabel::Value(id) => self.value_label(*id)?,
-            ReleasedLabel::Answer(label) => label,
-        };
-        Some((record.digest, label))
+    /// The digest of the bytes the released record at `position` stands for, and the label it
+    /// released them at, rebuilt from its terms as this projection stands.
+    pub(crate) fn released(&self, position: u64) -> Option<(appa_runtime_api::ReleaseDigest, Label)> {
+        let digest = |body: &ValueBody| appa_runtime_api::ReleaseDigest::of(body.as_str().as_bytes());
+        Some(match self.released.records.get(&position)? {
+            ReleasedRecord::Result { value, dispatch, body } => (
+                digest(body),
+                self.receiving_bounds.get(dispatch)?.combine(self.value_label(*value)?),
+            ),
+            ReleasedRecord::Return { value, body } => (digest(body), self.value_label(*value)?.clone()),
+            ReleasedRecord::Answer {
+                trajectory,
+                digest,
+                terms,
+            } => (*digest, self.fold_through(trajectory, *terms)),
+        })
     }
 
     /// The position the next folded record lands at.
@@ -985,19 +996,47 @@ impl Projection {
         self.released.folded
     }
 
-    /// The position of the record that admitted `dispatch`'s result.
-    pub(crate) fn admitted_result_at(&self, dispatch: &DispatchId) -> Option<u64> {
-        self.released.results.get(dispatch).copied()
+    /// The value admitted as `dispatch`'s result, beside the record that admitted it.
+    pub(crate) fn released_result(&self, dispatch: &DispatchId) -> Option<crate::transition::Admitted> {
+        self.admitted_at(*self.released.results.get(dispatch)?)
     }
 
-    /// The position of the record that admitted `child`'s latest crossed return.
-    pub(crate) fn crossed_return_at(&self, child: &TrajectoryId) -> Option<u64> {
-        self.released.returns.get(child).copied()
+    /// The return `id` crossed into its parent, beside the record that admitted it there.
+    pub(crate) fn released_return(&self, id: &ChildReturnId) -> Option<crate::transition::Admitted> {
+        self.admitted_at(*self.released.returns.get(id)?)
+    }
+
+    fn admitted_at(&self, position: u64) -> Option<crate::transition::Admitted> {
+        match self.released.records.get(&position)? {
+            ReleasedRecord::Result { body, .. } | ReleasedRecord::Return { body, .. } => {
+                Some(crate::transition::Admitted {
+                    body: body.clone(),
+                    position,
+                })
+            }
+            ReleasedRecord::Answer { .. } => None,
+        }
     }
 
     /// The position of `trajectory`'s latest answer.
     pub(crate) fn answer_at(&self, trajectory: &TrajectoryId) -> Option<u64> {
         self.released.answers.get(trajectory).copied()
+    }
+
+    /// `trajectory`'s fold as it stood when it had admitted its first `terms` local values.
+    fn fold_through(&self, trajectory: &TrajectoryId, terms: usize) -> Label {
+        let mut fold = self.opened_base(trajectory);
+        if let Some(seed) = self.resumed.get(trajectory) {
+            fold.fold(seed);
+        }
+        for (_, label) in self.inherited_sources(trajectory) {
+            fold.fold(label);
+        }
+        let local = self.local.get(trajectory).into_iter().flatten().take(terms);
+        for label in local.filter_map(|id| self.value_label(*id)) {
+            fold.fold(label);
+        }
+        fold
     }
 
     fn prepared_of(&self, child: &TrajectoryId) -> Option<&PreparedFork> {
@@ -1549,21 +1588,27 @@ impl Views<'_> {
             .map(|returned| &returned.value)
     }
 
-    /// The value `child` crossed at its latest return, if that return crossed: a stop repeating
-    /// it is a replay of that crossing, never a second one. A child addressed again since has no
-    /// replayable return: what it says next crosses anew, at the label it stands at then.
-    pub(crate) fn latest_return(&self, child: &TrajectoryId) -> Option<&LabeledValue> {
+    /// The value `child` crossed at its latest return, if that return crossed, beside the record
+    /// that admitted it into the parent: a stop repeating it is a replay of that crossing, never
+    /// a second one. A child addressed again since has no replayable return: what it says next
+    /// crosses anew, at the label it stands at then. A deferral's crossing, once accepted,
+    /// answers the parent's settlement, not the child.
+    pub(crate) fn latest_crossing(&self, child: &TrajectoryId) -> Option<crate::transition::Admitted> {
         let latest = self.latest_occurrence(child)?;
-        // A deferral's crossing, once accepted, answers the parent's settlement, not the child.
-        if self.projection.deferrals.contains_key(&latest) {
-            return None;
+        match self.projection.deferrals.contains_key(&latest) {
+            true => None,
+            false => self.projection.released_return(&latest),
         }
-        self.projection
-            .child_returns
-            .iter()
-            .rev()
-            .find(|returned| returned.id == latest)
-            .map(|returned| &returned.value)
+    }
+
+    /// The return `id` crossed into its parent, beside the record that admitted it there.
+    pub(crate) fn crossed_return(&self, id: &ChildReturnId) -> Option<crate::transition::Admitted> {
+        self.projection.released_return(id)
+    }
+
+    /// The value admitted as `dispatch`'s result, beside the record that admitted it.
+    pub(crate) fn admitted_result(&self, dispatch: &DispatchId) -> Option<crate::transition::Admitted> {
+        self.projection.released_result(dispatch)
     }
 
     /// The deferral `child`'s latest return froze, if it froze one: a return repeating its value

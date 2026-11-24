@@ -1533,3 +1533,55 @@ async fn a_ninth_consult_batch_is_refused_without_being_asked() {
         "four selector reads and four lookups"
     );
 }
+
+/// A release judgment reads the roster at the judgment, never a remembered one, and fails
+/// closed when the roster does not answer. It records nothing.
+#[tokio::test]
+async fn a_release_reads_membership_at_the_judgment_and_fails_closed_without_an_answer() {
+    use appa_runtime_api::{OpenCalls, ReleaseRefusal};
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let runtime = narrowed(&dir, &url).await;
+    let answer = hooks::handle_embedded(
+        &runtime,
+        HookEvent::TurnEnd {
+            actor: actor(),
+            open_calls: OpenCalls::Abandon,
+            answer: Some("the summary".to_string()),
+        },
+    )
+    .await
+    .receipt
+    .expect("a recorded answer carries its receipt");
+    let before = audit_len(&runtime);
+    let asked = source.requests().len();
+
+    source.members(Some(vec!["alice@corp.example"]));
+    let to_team = raw(serde_json::json!({ "to": "@team" }));
+    assert_eq!(
+        runtime
+            .judge_release(std::slice::from_ref(&answer), "send", &to_team)
+            .await,
+        Ok(())
+    );
+    assert_eq!(source.requests().len(), asked + 1, "the roster is read at the judgment");
+
+    source.members(Some(vec!["alice@corp.example", "eve@corp.example"]));
+    assert_eq!(
+        runtime
+            .judge_release(std::slice::from_ref(&answer), "send", &to_team)
+            .await,
+        Err(ReleaseRefusal::HardBlock),
+        "a roster that grew since is read again, not remembered"
+    );
+
+    source.members(None);
+    let unanswered = runtime
+        .judge_release(std::slice::from_ref(&answer), "send", &to_team)
+        .await;
+    assert!(
+        matches!(unanswered, Err(ReleaseRefusal::MissingFact(_))),
+        "{unanswered:?}"
+    );
+    assert_eq!(audit_len(&runtime), before);
+}

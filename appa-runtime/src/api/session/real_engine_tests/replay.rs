@@ -24,8 +24,8 @@ async fn a_closed_result_replays_its_admitted_decision() {
             .expect("the call releases"),
         ToolCallDecision::Allow { spawn: None, .. }
     ));
-    assert_eq!(
-        session
+    assert!(matches!(
+        &session
             .on_tool_result_identified(
                 call.clone(),
                 Some("toolu-1".to_string()),
@@ -35,8 +35,8 @@ async fn a_closed_result_replays_its_admitted_decision() {
             )
             .await
             .expect("the result is admitted"),
-        ToolResultDecision::Keep,
-    );
+        ToolResultDecision::Keep { .. }
+    ));
     let facts = runtime.log_facts(&root());
     let hosts = host_records(&session);
     drop(session);
@@ -46,8 +46,8 @@ async fn a_closed_result_replays_its_admitted_decision() {
     // host: the retry is answered from the record and appends nothing.
     let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), db, None).expect("the deployment reopens");
     let session = runtime.session(&root(), &root()).expect("the session reattaches");
-    assert_eq!(
-        session
+    assert!(matches!(
+        &session
             .on_tool_result_identified(
                 call,
                 Some("toolu-1".to_string()),
@@ -57,8 +57,8 @@ async fn a_closed_result_replays_its_admitted_decision() {
             )
             .await
             .expect("the repeated result is answered"),
-        ToolResultDecision::Keep,
-    );
+        ToolResultDecision::Keep { .. }
+    ));
     assert_eq!(runtime.log_facts(&root()), facts, "a replay appends no facts");
     assert_eq!(host_records(&session), hosts, "a replay writes no host records");
 }
@@ -155,8 +155,8 @@ async fn a_replayed_result_must_carry_the_recorded_outcome() {
     assert!(matches!(error, EventError::UnknownDispatch), "got {error:?}");
 
     // The forgeries changed nothing: the honest repeat is still answered.
-    assert_eq!(
-        session
+    assert!(matches!(
+        &session
             .on_tool_result_identified(
                 call,
                 Some("toolu-1".to_string()),
@@ -166,8 +166,8 @@ async fn a_replayed_result_must_carry_the_recorded_outcome() {
             )
             .await
             .expect("the recorded answer stands"),
-        ToolResultDecision::Keep,
-    );
+        ToolResultDecision::Keep { .. }
+    ));
 }
 
 #[tokio::test]
@@ -184,8 +184,8 @@ async fn failure_withheld_and_uncarried_results_replay_their_placeholders() {
         .await
         .expect("the call releases");
     for _ in 0..2 {
-        assert_eq!(
-            session
+        assert!(matches!(
+            &session
                 .on_tool_result_identified(
                     call.clone(),
                     Some("toolu-1".to_string()),
@@ -195,8 +195,8 @@ async fn failure_withheld_and_uncarried_results_replay_their_placeholders() {
                 )
                 .await
                 .expect("the failure is answered"),
-            ToolResultDecision::Keep,
-        );
+            ToolResultDecision::Keep { .. }
+        ));
     }
 
     // A result that never reached the runtime replays its not-carried placeholder.
@@ -335,16 +335,11 @@ async fn a_sanitized_result_replays_its_admitted_value() {
     let outcome = ToolOutcome::Success {
         body: OutcomeBody::Available("raw with pii".to_string()),
     };
-    let admitted = ToolResultDecision::Deliver {
-        value: "scrubbed".to_string(),
-    };
-    assert_eq!(
-        session
-            .on_tool_result_identified(leak(), Some("toolu-1".to_string()), outcome.clone())
-            .await
-            .expect("the derivation is admitted"),
-        admitted,
-    );
+    let admitted = session
+        .on_tool_result_identified(leak(), Some("toolu-1".to_string()), outcome.clone())
+        .await
+        .expect("the derivation is admitted");
+    assert!(matches!(&admitted, ToolResultDecision::Deliver { value, .. } if value == "scrubbed"));
     let facts = runtime.log_facts(&root());
     assert_eq!(
         session
@@ -352,7 +347,7 @@ async fn a_sanitized_result_replays_its_admitted_value() {
             .await
             .expect("the repeat is answered"),
         admitted,
-        "the replay delivers the admitted derivation, never the raw",
+        "the replay delivers the admitted derivation, never the raw, under the record that admitted it",
     );
     assert_eq!(runtime.log_facts(&root()), facts, "a replay appends no facts");
 }
@@ -853,7 +848,7 @@ async fn a_sibling_offer_outrun_by_an_admitted_narrowing_is_superseded() {
         )
         .await
         .expect("the result is admitted");
-    assert_eq!(kept, ToolResultDecision::Keep);
+    assert!(matches!(&kept, ToolResultDecision::Keep { .. }));
     assert_eq!(
         execute(&blocked[1]).await,
         RemedyOutcome::Refused {

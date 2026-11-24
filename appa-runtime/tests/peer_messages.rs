@@ -338,6 +338,39 @@ async fn a_notice_rides_the_next_successful_tool_result() {
     assert!(context(&answer).is_some(), "{answer}");
 }
 
+/// The notice acknowledges the result it rides on, so the result's release receipt stands
+/// beside it.
+#[tokio::test]
+async fn a_result_carrying_a_notice_keeps_its_release_receipt() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = pair(dir.path()).await;
+    narrowed(&runtime, "a", "a1").await;
+    sent(&runtime, "a", B_ADDRESS, "update", "a2").await;
+    prompt(&runtime, "b", "list files").await;
+
+    assert!(blocked(&prompt(&runtime, "b", &frame("update")).await));
+    let input = json!({ "pattern": "*.rs" });
+    let (decision, reason) = pre(&runtime, "b", "Glob", input.clone(), "b1").await;
+    assert_eq!(decision, "allow", "{reason}");
+    let result = claude_event(&json!({
+        "hook_event_name": "PostToolUse",
+        "session_id": "b",
+        "tool_name": "Glob",
+        "tool_input": input,
+        "tool_use_id": "b1",
+        "tool_response": { "stdout": "done" },
+    }))
+    .expect("the result is an event");
+    let answered = hooks::handle_embedded(&runtime, result).await;
+    assert!(
+        matches!(answered.decision, HookDecision::Context { .. }),
+        "{:?}",
+        answered.decision
+    );
+    let receipt = answered.receipt.expect("the noticed result carries its receipt");
+    assert_eq!(receipt.session, root("b"));
+}
+
 #[tokio::test]
 async fn a_frame_no_send_stands_behind_is_held_unattributed() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");

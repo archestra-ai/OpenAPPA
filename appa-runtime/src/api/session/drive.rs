@@ -714,7 +714,7 @@ impl Decided<'_> {
         self.engine().fork_status(self.view, fork)
     }
 
-    pub(super) fn latest_return(&self, child: &TrajectoryId) -> Option<String> {
+    pub(super) fn latest_return(&self, child: &TrajectoryId) -> Option<(String, appa_runtime_api::ReleaseReceipt)> {
         self.engine().latest_return(self.view, child)
     }
 

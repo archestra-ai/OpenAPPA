@@ -716,12 +716,10 @@ async fn a_staged_narrowing_is_accepted_at_the_result_only_under_rulings_and_acc
         let decided = staged_in_child(&runtime, settings.clone(), "suspicious").await;
         match accepted {
             true => {
-                assert_eq!(
-                    decided,
-                    ToolResultDecision::Deliver {
-                        value: "scrubbed".to_string()
-                    }
-                );
+                assert!(matches!(
+                    &decided,
+                    ToolResultDecision::Deliver { value, .. } if value == "scrubbed"
+                ));
                 assert_eq!(acceptances(&runtime, "cc:child"), [Some(Initiator::AutoApply)]);
             }
             false => {

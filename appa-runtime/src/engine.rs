@@ -75,11 +75,11 @@ use appa_engine::transition::Blocked as CoreBlocked;
 /// the event or passed with the read.
 pub(crate) use appa_engine::transition::EngineView;
 use appa_engine::transition::{
-    ChildFollowUp, ChildReport, ChildSubmission, EngineEvent as CoreEvent, Evidence, EvidenceRequest, FollowUp,
-    ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody as CoreOutcomeBody,
-    OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall, Released, ReturnClass,
-    ReturnDecision, ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark, ToolOutcome as CoreToolOutcome,
-    ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
+    ChildFollowUp, ChildReport, ChildSubmission, EngineDecision as EngineDecisionCore, EngineEvent as CoreEvent,
+    Evidence, EvidenceRequest, FollowUp, ForkBinding, OfferConsult, OfferExecution, OfferFollowUp, OfferOutcome,
+    OutcomeBody as CoreOutcomeBody, OutcomeFollowUp, ProposalBatch, ProposalBatchId, ProposedCall as CoreProposedCall,
+    Released, ReturnClass, ReturnDecision, ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark,
+    ToolOutcome as CoreToolOutcome, ToolReport, TransitionError, TransitionRefusal, ValidatedFactBatch,
 };
 use appa_engine::value::{
     ChildReturnId, DispatchId as EngineDispatchId, ForkId, OfferId as EngineOfferId, OfferNonce as EngineOfferNonce,
@@ -361,6 +361,10 @@ pub use appa_eventlog::LabelSpelling;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Next {
     Done,
+    /// The root's answer stands recorded where `receipt` names.
+    Answered {
+        receipt: appa_runtime_api::ReleaseReceipt,
+    },
     ModelResponse {
         invocations: Vec<ReleasedCall>,
         feedback: Vec<Feedback>,
@@ -375,15 +379,20 @@ pub enum Next {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Presentation {
-    KeepOutput,
+    /// The output as the harness has it: admitted as the record `receipt` names, unless the
+    /// call failed and nothing was admitted.
+    KeepOutput {
+        receipt: Option<appa_runtime_api::ReleaseReceipt>,
+    },
     /// The runtime's own words in place of the output: nothing here was admitted from a
     /// value, and the harness may spell the tool names it carries.
     ReplaceOutput {
         placeholder: String,
     },
-    /// A value the engine admitted, delivered as it crossed.
+    /// A value the engine admitted, delivered as it crossed, and the record that admitted it.
     Value {
         value: String,
+        receipt: appa_runtime_api::ReleaseReceipt,
     },
     /// A child's return the fork's sanitizer derived, crossing when the child returns
     /// exactly it.
@@ -1698,30 +1707,23 @@ impl RuntimeEngine {
             digest,
         };
         match self.engine.handle(view, CoreEvent::Answer(report)) {
-            Ok(decided) => Ok(EngineDecision {
-                append: decided.append.map(ValidatedFactBatch::into_unsealed),
-                then: Next::Done,
+            Ok(EngineDecisionCore {
+                append,
+                follow_up: FollowUp::Answer { at },
+            }) => Ok(EngineDecision {
+                append: append.map(ValidatedFactBatch::into_unsealed),
+                then: Next::Answered {
+                    receipt: receipt(view.family(), at),
+                },
+            }),
+            Ok(other) => Err(EngineRefusal::Invariant {
+                detail: format!("an answer produced a non-answer follow-up: {:?}", other.follow_up),
             }),
             Err(TransitionError::BranchEnded) => Err(EngineRefusal::Ended),
             Err(error) => Err(EngineRefusal::Invariant {
                 detail: format!("recording an answer: {error}"),
             }),
         }
-    }
-
-    /// Where the log records what `receipted` names, as a receipt for the family `view` replays.
-    pub(crate) fn receipt(
-        &self,
-        view: &EngineView,
-        receipted: appa_engine::engine::Receipted<'_>,
-    ) -> Option<appa_runtime_api::ReleaseReceipt> {
-        self.engine
-            .receipt_of(view, receipted)
-            .map(|(fact_position, digest)| appa_runtime_api::ReleaseReceipt {
-                session: view.family().clone(),
-                fact_position,
-                digest,
-            })
     }
 
     /// The label of the released record at `position` of the family `view` replays, crossed to
@@ -1749,12 +1751,11 @@ impl RuntimeEngine {
         approves: impl Fn(&AuthorityName) -> bool,
     ) -> ReleaseRound {
         use appa_engine::engine::{ReleaseError, ReleaseJudgment};
-        use appa_runtime_api::ReleaseRefusal;
         let act = match self.act_audience(evidence, principal) {
             Ok(act) => act,
             Err(AudienceFailure::Consult(requests)) => return ReleaseRound::Consult(requests),
             Err(AudienceFailure::Refused(unobtained)) => {
-                return ReleaseRound::Judged(Err(ReleaseRefusal::MissingFact(unobtained.retry)));
+                return ReleaseRound::Judged(Err(Unreleased::Unobtained(unobtained.retry)));
             }
         };
         let judged = self.engine.judge_release(
@@ -1767,15 +1768,16 @@ impl RuntimeEngine {
         );
         ReleaseRound::Judged(match judged {
             Ok(ReleaseJudgment::Released { .. }) => Ok(()),
-            Ok(ReleaseJudgment::Withheld { .. }) => Err(ReleaseRefusal::HardBlock),
+            Ok(ReleaseJudgment::Withheld { .. }) => Err(Unreleased::Withheld),
             Err(ReleaseError::MembershipNeeded { needed }) => match self.audience_consult(&act, needed, principal) {
                 Ok(AudienceConsult::Requests(requests)) => return ReleaseRound::Consult(requests),
-                Ok(AudienceConsult::Unresolved(unobtained)) => Err(ReleaseRefusal::MissingFact(unobtained.retry)),
-                Ok(AudienceConsult::Unconfigured(_)) | Err(_) => Err(ReleaseRefusal::Integrity),
+                Ok(AudienceConsult::Unresolved(unobtained)) => Err(Unreleased::Unobtained(unobtained.retry)),
+                Ok(AudienceConsult::Unconfigured(_)) | Err(_) => Err(Unreleased::Unjudgeable),
             },
+            Err(ReleaseError::Sink(refusal)) => Err(Unreleased::Sink(refusal)),
             Err(error) => {
-                tracing::info!(%error, "a release names a sink no release may be judged into");
-                Err(ReleaseRefusal::Integrity)
+                tracing::info!(%error, "a release could not be judged into its sink");
+                Err(Unreleased::Unjudgeable)
             }
         })
     }
@@ -2279,7 +2281,7 @@ impl RuntimeEngine {
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Outcome(OutcomeFollowUp::Closed { admitted, withheld }) => {
-                Next::PresentToModel(outcome_presentation(outcome, admitted, withheld))
+                Next::PresentToModel(outcome_presentation(view.family(), outcome, admitted, withheld))
             }
             FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => self.resolve_or_withhold(
                 view,
@@ -2463,9 +2465,9 @@ impl RuntimeEngine {
                 tool: call.tool().as_str().to_string(),
                 bytes: call.canonical_arguments().canonical_bytes().to_vec(),
             },
-            FollowUp::Offer(OfferFollowUp::Admitted { value }) => Next::PresentToModel(Presentation::Value {
-                value: value.as_str().to_string(),
-            }),
+            FollowUp::Offer(OfferFollowUp::Admitted { value }) => {
+                Next::PresentToModel(admitted_value(view.family(), &value))
+            }
             FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
             }),
@@ -2844,11 +2846,19 @@ impl RuntimeEngine {
         }
     }
 
-    /// The value `child` crossed most recently, as the harness would deliver it.
-    pub(crate) fn latest_return(&self, view: &EngineView, child: &TrajectoryId) -> Option<String> {
-        self.engine
-            .latest_return_of(view, child)
-            .map(|body| body.as_str().to_string())
+    /// The value `child` crossed most recently, as the harness would deliver it, and the
+    /// record that admitted it into the parent.
+    pub(crate) fn latest_return(
+        &self,
+        view: &EngineView,
+        child: &TrajectoryId,
+    ) -> Option<(String, appa_runtime_api::ReleaseReceipt)> {
+        self.engine.latest_return_of(view, child).map(|admitted| {
+            (
+                admitted.body.as_str().to_string(),
+                receipt(view.family(), admitted.released()),
+            )
+        })
     }
 
     fn label_text(&self, label: &Label) -> String {
@@ -3046,9 +3056,7 @@ impl RuntimeEngine {
         let append = decided.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decided.follow_up {
             FollowUp::Settlement(SettlementFollowUp::Accepted { admitted }) => {
-                Next::PresentToModel(Presentation::Value {
-                    value: admitted.as_str().to_string(),
-                })
+                Next::PresentToModel(admitted_value(view.family(), &admitted))
             }
             FollowUp::Settlement(SettlementFollowUp::Discarded) => Next::PresentToModel(Presentation::Discarded),
             other => {
@@ -3137,9 +3145,9 @@ impl RuntimeEngine {
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
-            FollowUp::Child(ChildFollowUp::Merged { admitted }) => Next::PresentToModel(Presentation::Value {
-                value: admitted.as_str().to_string(),
-            }),
+            FollowUp::Child(ChildFollowUp::Merged { admitted }) => {
+                Next::PresentToModel(admitted_value(view.family(), &admitted))
+            }
             FollowUp::Child(ChildFollowUp::Staged { derived }) => Next::PresentToModel(Presentation::Staged {
                 value: derived.as_str().to_string(),
             }),
@@ -4049,8 +4057,32 @@ impl UnresolvedAudience<'_> {
 
 /// Where one round of a release judgment ends: judged, or the membership consults it needs.
 pub(crate) enum ReleaseRound {
-    Judged(Result<(), appa_runtime_api::ReleaseRefusal>),
+    Judged(Result<(), Unreleased>),
     Consult(Vec<ExternalRequest>),
+}
+
+/// Why a release round kept content from its sink, before the host reads it as a refusal class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unreleased {
+    /// The sink is not a call a release may judge.
+    Sink(appa_engine::engine::SinkRefusal),
+    /// The sink's call does not select, validate or read membership the deployment can answer.
+    Unjudgeable,
+    /// The sink's requirements fail and no stock `approve` covers them.
+    Withheld,
+    /// A membership answer the judgment reads was not obtained.
+    Unobtained(appa_runtime_api::RetryHint),
+}
+
+impl From<Unreleased> for appa_runtime_api::ReleaseRefusal {
+    fn from(unreleased: Unreleased) -> Self {
+        use appa_runtime_api::ReleaseRefusal;
+        match unreleased {
+            Unreleased::Sink(_) | Unreleased::Unjudgeable => ReleaseRefusal::Integrity,
+            Unreleased::Withheld => ReleaseRefusal::HardBlock,
+            Unreleased::Unobtained(retry) => ReleaseRefusal::MissingFact(retry),
+        }
+    }
 }
 
 /// Where one act's audience round ends: judged, presented short of a judgment (consults
@@ -4504,12 +4536,30 @@ fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
     }
 }
 
+/// The receipt naming the record `at` of the family log `view` replays.
+fn receipt(family: &TrajectoryId, at: appa_engine::transition::ReleasedAt) -> appa_runtime_api::ReleaseReceipt {
+    appa_runtime_api::ReleaseReceipt {
+        session: family.clone(),
+        fact_position: at.position,
+        digest: at.digest,
+    }
+}
+
+/// An admitted value as the harness delivers it, beside the record that admitted it.
+fn admitted_value(family: &TrajectoryId, admitted: &appa_engine::transition::Admitted) -> Presentation {
+    Presentation::Value {
+        value: admitted.body.as_str().to_string(),
+        receipt: receipt(family, admitted.released()),
+    }
+}
+
 /// What the model reads in place of the raw result. An admitted value and the runtime's
 /// own words are separate presentations here, because a harness delivers the first as it
 /// crossed and spells its own tool names into the second.
 fn outcome_presentation(
+    family: &TrajectoryId,
     outcome: &ToolOutcome,
-    admitted: Option<ValueBody>,
+    admitted: Option<appa_engine::transition::Admitted>,
     withheld: Option<appa_engine::transition::Withheld>,
 ) -> Presentation {
     use appa_engine::transition::Withheld;
@@ -4533,10 +4583,10 @@ fn outcome_presentation(
                 body: OutcomeBody::Available(raw),
             },
             Some(value),
-        ) if value.as_str() == raw => Presentation::KeepOutput,
-        (_, Some(value)) => Presentation::Value {
-            value: value.as_str().to_string(),
+        ) if value.body.as_str() == raw => Presentation::KeepOutput {
+            receipt: Some(receipt(family, value.released())),
         },
+        (_, Some(value)) => admitted_value(family, &value),
         (
             ToolOutcome::Success {
                 body: OutcomeBody::TooLarge { limit_bytes },
@@ -4558,7 +4608,7 @@ fn outcome_presentation(
         ) => Presentation::ReplaceOutput {
             placeholder: "[appa] the tool ran, but the harness returned no output".to_string(),
         },
-        (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Presentation::KeepOutput,
+        (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Presentation::KeepOutput { receipt: None },
         (ToolOutcome::Success { .. }, None) => Presentation::ReplaceOutput {
             placeholder: "[appa] the result is withheld".to_string(),
         },
@@ -7577,6 +7627,7 @@ mod tests {
     fn withholding_replaces_failure_output_too() {
         assert_eq!(
             outcome_presentation(
+                &TrajectoryId::new("root"),
                 &ToolOutcome::Failure {
                     message: "sensitive failure detail".to_string(),
                 },

@@ -162,12 +162,10 @@ fn held_returns_settle_in_any_order_and_each_crosses_at_most_once() {
     let second = label_of(&e, &log, &child);
 
     let mut later_first = log.clone();
-    assert_eq!(
-        decided(&e, &mut later_first, |_| settle(&child, 1, ReturnDecision::Accept)),
-        FollowUp::Settlement(SettlementFollowUp::Accepted {
-            admitted: ValueBody::new("turn two")
-        })
-    );
+    assert!(matches!(
+        &decided(&e, &mut later_first, |_| settle(&child, 1, ReturnDecision::Accept)),
+        FollowUp::Settlement(SettlementFollowUp::Accepted { admitted }) if admitted.body == ValueBody::new("turn two")
+    ));
     assert_eq!(
         decided(&e, &mut later_first, |_| settle(&child, 0, ReturnDecision::Discard)),
         FollowUp::Settlement(SettlementFollowUp::Discarded)
@@ -190,12 +188,28 @@ fn held_returns_settle_in_any_order_and_each_crosses_at_most_once() {
         "the parent is lowered once, to the later turn's label"
     );
 
-    // Every repeat answers the recorded outcome and appends nothing.
+    // Every repeat answers the recorded outcome, naming the record that crossed it, and appends
+    // nothing.
+    let crossed_at = later_first
+        .iter()
+        .rposition(|fact| {
+            matches!(
+                fact,
+                Fact::ValueAdmitted {
+                    provenance: crate::value::Provenance::ChildReturn { id, .. },
+                    ..
+                } if id.occurrence() == 1
+            )
+        })
+        .expect("the accepted return crossed") as u64;
     for (occurrence, outcome) in [
         (
             1,
             SettlementFollowUp::Accepted {
-                admitted: ValueBody::new("turn two"),
+                admitted: crate::transition::Admitted {
+                    body: ValueBody::new("turn two"),
+                    position: crossed_at,
+                },
             },
         ),
         (0, SettlementFollowUp::Discarded),
@@ -610,18 +624,14 @@ fn returns_held_below_the_floor_settle_in_turn_and_the_child_returns_on() {
         FollowUp::Settlement(SettlementFollowUp::Accepted { .. })
     ));
     // The parent now stands at the child's label, so the child's next words narrow nothing.
-    assert_eq!(
-        step(&turn("third words", ReturnKind::Turn)),
-        FollowUp::Child(ChildFollowUp::Merged {
-            admitted: ValueBody::new("third words")
-        })
-    );
-    assert_eq!(
-        step(&|_| settle(&child, 1, ReturnDecision::Accept)),
-        FollowUp::Settlement(SettlementFollowUp::Accepted {
-            admitted: ValueBody::new("second words")
-        })
-    );
+    assert!(matches!(
+        &step(&turn("third words", ReturnKind::Turn)),
+        FollowUp::Child(ChildFollowUp::Merged { admitted }) if admitted.body == ValueBody::new("third words")
+    ));
+    assert!(matches!(
+        &step(&|_| settle(&child, 1, ReturnDecision::Accept)),
+        FollowUp::Settlement(SettlementFollowUp::Accepted { admitted }) if admitted.body == ValueBody::new("second words")
+    ));
     assert_eq!(deferrals(&new), vec![(0, true), (1, true)]);
 }
 
@@ -637,7 +647,7 @@ fn a_terminal_deferral_log_counts_each_return_once_and_replays_at_every_deferral
         let child = TrajectoryId::new(child);
         assert_eq!(parent.returns_by(&child), 1, "{child:?}");
         assert_eq!(
-            parent.latest_return(&child),
+            parent.latest_crossing(&child),
             None,
             "{child:?}: a deferral is no crossing to repeat"
         );

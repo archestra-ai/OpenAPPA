@@ -348,9 +348,14 @@ impl ToolCallDecision {
 /// saying the real output was not accepted or the narrowing it causes.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ToolResultDecision {
-    Keep,
+    /// The output as the harness has it, admitted as the record `receipt` names; a failed call
+    /// admitted nothing.
+    Keep {
+        receipt: Option<appa_runtime_api::ReleaseReceipt>,
+    },
     Deliver {
         value: String,
+        receipt: appa_runtime_api::ReleaseReceipt,
     },
     Replace {
         placeholder: String,
@@ -360,10 +365,19 @@ pub(crate) enum ToolResultDecision {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RemedyDecision {
-    Authorized { call: ExactCall },
-    Returned { value: String },
-    Declined { presentation: RemedyPresentation },
-    NoAnswer { feedback: String },
+    Authorized {
+        call: ExactCall,
+    },
+    Returned {
+        value: String,
+        receipt: appa_runtime_api::ReleaseReceipt,
+    },
+    Declined {
+        presentation: RemedyPresentation,
+    },
+    NoAnswer {
+        feedback: String,
+    },
 }
 
 /// How a deferred return stands after its parent's control call: decided now, or read back
@@ -439,6 +453,59 @@ pub struct EmbeddedHookOutcome {
     /// result, the crossed return, or the turn's answer. A release judgment reads its label
     /// from there.
     pub receipt: Option<appa_runtime_api::ReleaseReceipt>,
+}
+
+/// The meet of the labels of the released records `receipts` name, each read from its own
+/// family's log and crossed to `deployment`'s registry by rank name, beside the one reader
+/// every family acts for.
+fn released_label(
+    inner: &Inner,
+    deployment: &Deployment,
+    receipts: &[appa_runtime_api::ReleaseReceipt],
+) -> Result<(appa_engine::label::Label, Option<appa_engine::label::ReaderId>), appa_runtime_api::ReleaseRefusal> {
+    use appa_runtime_api::{ReleaseRefusal, RetryHint};
+    let mut families: std::collections::BTreeMap<&TrajectoryId, Vec<&appa_runtime_api::ReleaseReceipt>> =
+        std::collections::BTreeMap::new();
+    for receipt in receipts {
+        families.entry(&receipt.session).or_default().push(receipt);
+    }
+    let mut label = appa_engine::label::Label::top();
+    let mut principals = std::collections::BTreeSet::new();
+    for (root, receipts) in families {
+        let log = inner
+            .store
+            .log(root)
+            .map_err(|error| match appa_eventlog::StoreErrorClass::from(&error) {
+                appa_eventlog::StoreErrorClass::Storage => {
+                    inner.note_store_error(Some(root), crate::events::StoreOperation::Read, &error);
+                    ReleaseRefusal::MissingFact(RetryHint::Later)
+                }
+                _ => {
+                    tracing::info!(root = %root.0, %error, "a receipt names a log that does not read");
+                    ReleaseRefusal::Integrity
+                }
+            })?;
+        let policy = inner.resolve_policy(deployment, &log).map_err(|error| match error {
+            EventError::PolicyMoved { .. } => ReleaseRefusal::MissingFact(RetryHint::Later),
+            _ => ReleaseRefusal::Integrity,
+        })?;
+        let view = policy.rebuild_view(&log).map_err(|_| ReleaseRefusal::Integrity)?;
+        for receipt in receipts {
+            let component = deployment
+                .resident
+                .released_label(&view, receipt.fact_position, &receipt.digest)
+                .map_err(|refusal| {
+                    tracing::info!(root = %root.0, position = receipt.fact_position, %refusal, "a receipt names no released record");
+                    ReleaseRefusal::Integrity
+                })?;
+            label = label.combine(&component);
+        }
+        principals.insert(view.principal().cloned());
+    }
+    match principals.into_iter().collect::<Vec<_>>().as_slice() {
+        [principal] => Ok((label, principal.clone())),
+        _ => Err(ReleaseRefusal::Integrity),
+    }
 }
 
 /// Explains why a remedy call was refused execution.
@@ -613,8 +680,10 @@ struct StandingOffer<'a> {
 /// outcome and names the options by `OfferId`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ChildReturnDecision {
+    /// `value` crossed into the parent as the record `receipt` names.
     Returned {
         value: String,
+        receipt: appa_runtime_api::ReleaseReceipt,
     },
     /// The fork's sanitizer derived `value`; it crosses when the child returns exactly it.
     Staged {
@@ -3138,7 +3207,11 @@ impl Runtime {
     /// `sink(arguments)`. Each receipt is checked against the log it names, the content's
     /// label is the meet of theirs, crossed by rank name to the head registry, and the sink's
     /// contract is judged against it there: membership is read now, and a gap stands lifted
-    /// only where a stock `approve` authority covers it. Nothing is appended.
+    /// only where a stock `approve` authority covers it. One deployment snapshot verifies the
+    /// receipts and judges the sink. Nothing is appended.
+    ///
+    /// A receipt vouches for the bytes its digest names, not for whatever the host releases: the
+    /// host compares each component's digest with the bytes it is about to send before it asks.
     pub async fn judge_release(
         &self,
         receipts: &[appa_runtime_api::ReleaseReceipt],
@@ -3146,74 +3219,23 @@ impl Runtime {
         arguments: &serde_json::value::RawValue,
     ) -> Result<(), appa_runtime_api::ReleaseRefusal> {
         use appa_runtime_api::{ReleaseRefusal, RetryHint};
-        let Some(first) = receipts.first() else {
+        if receipts.is_empty() {
             return Err(ReleaseRefusal::MissingFact(RetryHint::AfterRepair));
-        };
+        }
         let deployment = self.inner.deployment();
-        let mut families: std::collections::BTreeMap<&TrajectoryId, Vec<&appa_runtime_api::ReleaseReceipt>> =
-            std::collections::BTreeMap::new();
-        for receipt in receipts {
-            families.entry(&receipt.session).or_default().push(receipt);
-        }
-        let mut label = appa_engine::label::Label::top();
-        let mut principals = std::collections::BTreeSet::new();
-        for (root, receipts) in families {
-            let (labels, principal) = self.released_labels(&deployment, root, &receipts)?;
-            principals.insert(principal);
-            label = labels.iter().fold(label, |label, component| label.combine(component));
-        }
-        let principal = match principals.into_iter().collect::<Vec<_>>().as_slice() {
-            [principal] => principal.clone(),
-            _ => return Err(ReleaseRefusal::Integrity),
-        };
-        let session = self
-            .session(&first.session, &first.session)
-            .map_err(|_| ReleaseRefusal::Integrity)?;
-        session
-            .judge_release(&label, principal.as_ref(), sink, arguments.get().as_bytes())
+        let (inner, verifying, receipts) = (Arc::clone(&self.inner), Arc::clone(&deployment), receipts.to_vec());
+        let (label, principal) = tokio::task::spawn_blocking(move || released_label(&inner, &verifying, &receipts))
             .await
-    }
-
-    /// The labels of the released records `receipts` name in `root`'s log, under the head
-    /// registry's trust chain, beside the reader that family acts for.
-    fn released_labels(
-        &self,
-        deployment: &Deployment,
-        root: &TrajectoryId,
-        receipts: &[&appa_runtime_api::ReleaseReceipt],
-    ) -> Result<(Vec<appa_engine::label::Label>, Option<appa_engine::label::ReaderId>), appa_runtime_api::ReleaseRefusal>
-    {
-        use appa_runtime_api::{ReleaseRefusal, RetryHint};
-        let log = match self.inner.store.log(root) {
-            Ok(log) => log,
-            Err(appa_eventlog::ReadError::UnknownRoot { .. }) => return Err(ReleaseRefusal::Integrity),
-            Err(error) => {
-                self.inner
-                    .note_store_error(Some(root), crate::events::StoreOperation::Read, &error);
-                return Err(ReleaseRefusal::MissingFact(RetryHint::Later));
-            }
-        };
-        let policy = self
-            .inner
-            .resolve_policy(deployment, &log)
-            .map_err(|error| match error {
-                EventError::PolicyMoved { .. } => ReleaseRefusal::MissingFact(RetryHint::Later),
-                _ => ReleaseRefusal::Integrity,
-            })?;
-        let view = policy.rebuild_view(&log).map_err(|_| ReleaseRefusal::Integrity)?;
-        let labels = receipts
-            .iter()
-            .map(|receipt| {
-                deployment
-                    .resident
-                    .released_label(&view, receipt.fact_position, &receipt.digest)
-                    .map_err(|refusal| {
-                        tracing::info!(root = %root.0, position = receipt.fact_position, %refusal, "a receipt names no released record");
-                        ReleaseRefusal::Integrity
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((labels, view.principal().cloned()))
+            .expect("verifying receipts does not panic")?;
+        session::judge_release(
+            &deployment,
+            &label,
+            principal.as_ref(),
+            sink,
+            arguments.get().as_bytes(),
+        )
+        .await
+        .map_err(ReleaseRefusal::from)
     }
 
     /// Every decision this family's log recorded, in log order.
@@ -4161,7 +4183,7 @@ impl Runtime {
         };
         match session.on_remedy(offer, arguments, elicitation, ruling).await {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
-            Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
+            Ok(RemedyDecision::Returned { value, .. }) => RemedyOutcome::Returned { value },
             Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
             Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
             Err(error) => error.into(),
