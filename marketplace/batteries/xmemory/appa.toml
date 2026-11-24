@@ -2,14 +2,16 @@
 # both. The instance server (`https://mcp.xmemory.ai`, or
 # `https://mcp.xmemory.ai/instance/<id>`) reads and writes one memory
 # instance; the admin server (`https://mcp.xmemory.ai/admin`) creates,
-# describes, and deletes instances. xmemory commit `b3aaaa6`.
+# describes, and deletes instances, edits their cluster memberships, lists
+# API keys, and creates keys for the caller.
 #
 # xmemory keeps no per-record permissions, and no tool reports who can
-# read an instance. An API key reaches only the clusters linked to it, but
-# console users reach every cluster of their organisation. So every read
-# is `internal`, the coarsest honest label: map it in the root config to
-# the organisation's members. A tool's input must be sharable with
-# `internal`, because the instance stores it and its readers see it.
+# read an instance. People and API keys reach the clusters and instances
+# their role assignments name, and a cluster's assignments cover every
+# instance in it. So every read is `internal`, the coarsest honest label:
+# map it in the root config to the organisation's members. A tool's input
+# must be sharable with `internal`, because the instance stores it and its
+# readers see it.
 #
 # Trust follows who can write the text. Memory is written by the
 # organisation's members and agents, and every write needs trusted data,
@@ -22,8 +24,10 @@
 # instance: its schema, description, and owner instructions. Owner
 # instructions reach every agent connected to the instance. Applying a
 # schema migration and deleting an instance cannot be undone and need the
-# `xmemory-review` mark. The root config supplies an authority permitting
-# both.
+# `xmemory-review` mark. Editing an instance's cluster memberships changes
+# who can read it, and a new API key's secret is returned once, as `self`.
+# Both need the mark too. The root config supplies an authority permitting
+# the mark.
 
 [policy]
 version = 2
@@ -52,6 +56,12 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/xmemory/get_setup_instructions"
+delta = { audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# The owner instructions and, when asked for, the live state a read returns.
+[[policy.tool]]
+name = "mcp/xmemory/get_context_pack"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
@@ -119,7 +129,7 @@ delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["xmemory-review"] }
 effects = ["xmemory.schema"]
 
-# --- admin reads: clusters, instances, schemas ---
+# --- admin reads: clusters, instances, memberships, schemas, keys ---
 
 [[policy.tool]]
 name = "mcp/xmemory/admin_list_clusters"
@@ -161,6 +171,13 @@ name = "mcp/xmemory/admin_get_setup_instructions"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
+# The clusters each visible instance belongs to, and the revision an edit
+# needs.
+[[policy.tool]]
+name = "mcp/xmemory/admin_list_instance_memberships"
+delta = { audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
 # An LLM writes the schema from the description; nothing is stored.
 [[policy.tool]]
 name = "mcp/xmemory/admin_generate_schema"
@@ -169,6 +186,36 @@ requires = { audience = { contains = ["internal"] } }
 
 [[policy.tool]]
 name = "mcp/xmemory/admin_enhance_schema"
+delta = { audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# Checks or converts the schema the call sends, without an LLM; nothing is
+# stored.
+[[policy.tool]]
+name = "mcp/xmemory/admin_validate_yaml_schema"
+delta = { audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/xmemory/admin_convert_json_schema"
+delta = { audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+# API keys and the roles a new key may have: names, roles, permissions,
+# and clusters, never a secret. A key with `api_key.see_org_keys` also lists
+# other people's keys.
+[[policy.tool]]
+name = "mcp/xmemory/admin_list_api_keys"
+delta = { audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/xmemory/admin_get_api_key"
+delta = { audience = ["internal"] }
+requires = { audience = { contains = ["internal"] } }
+
+[[policy.tool]]
+name = "mcp/xmemory/admin_list_mintable_roles"
 delta = { audience = ["internal"] }
 requires = { audience = { contains = ["internal"] } }
 
@@ -217,3 +264,22 @@ name = "mcp/xmemory/admin_delete_instance_by_id"
 delta = { audience = ["internal"] }
 requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["xmemory-review"] }
 effects = ["xmemory.deleted"]
+
+# --- access changes: a person reviews ---
+
+# A cluster's role assignments cover every instance in it, so adding or
+# removing a membership changes who can read the instance.
+[[policy.tool]]
+name = "mcp/xmemory/admin_edit_instance_memberships"
+delta = { audience = ["internal"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["xmemory-review"] }
+effects = ["xmemory.admin"]
+
+# Returns the new key's secret once. It is a credential for the caller
+# alone, so the result is `self`. Only a connection that sends an API key
+# itself is offered this tool.
+[[policy.tool]]
+name = "mcp/xmemory/admin_create_api_key"
+delta = { audience = ["self"] }
+requires = { trust = "trusted", audience = { contains = ["internal"] }, attention = ["xmemory-review"] }
+effects = ["xmemory.admin"]

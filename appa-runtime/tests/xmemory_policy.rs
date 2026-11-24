@@ -1,10 +1,11 @@
 //! xmemory battery: internal reads that keep their trust, trusted writes, admin and
-//! schema changes, reviewed schema migrations and instance deletion.
+//! schema changes, reviewed schema migrations, instance deletion, membership edits, and
+//! API key creation.
 use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime_api::{HookDecision, ProposedCall};
-use common::{actor, battery_runtime, members_source, offer_of, propose, ran, raw, root};
+use common::{actor, battery_runtime, offer_of, propose, ran, raw, root, serve};
 use std::sync::Arc;
 
 fn call(tool: &str, args: serde_json::Value) -> ProposedCall {
@@ -47,8 +48,26 @@ async fn accept_and_run(runtime: &Arc<Runtime>, call: ProposedCall) {
     ran(runtime, call).await;
 }
 
+/// A loopback audience source: the session acts for Alice, and the organisation is
+/// Alice and Bob, so `self` is narrower than `internal`.
+async fn people_source() -> String {
+    let router = axum::Router::new().route(
+        "/audience",
+        axum::routing::post(|body: String| async move {
+            let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let members = match request["artifact"]["selector"].as_str().unwrap() {
+                "viewer" => vec!["alice@corp.example"],
+                "members" => vec!["alice@corp.example", "bob@corp.example"],
+                other => panic!("unexpected selector {other}"),
+            };
+            serde_json::json!({ "version": 1, "answer": { "members": members } }).to_string()
+        }),
+    );
+    format!("{}/audience", serve(router).await)
+}
+
 async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
-    let source = members_source().await;
+    let source = people_source().await;
     battery_runtime(
         dir.path(),
         "xmemory",
@@ -57,6 +76,7 @@ async fn runtime(dir: &tempfile::TempDir) -> Arc<Runtime> {
 version = 2
 
 [policy.audience]
+self = ["people:viewer"]
 internal = ["people:members"]
 
 [[policy.tool]]
@@ -78,7 +98,7 @@ command = ["/bin/sh", "-c", 'cat > /dev/null; printf "%s" "{{\"version\":1,\"ans
 
 [externals.audience.people]
 url = "{source}"
-selectors = [{{ template = "members", feeds = "internal" }}]
+selectors = [{{ template = "viewer", feeds = "self" }}, {{ template = "members", feeds = "internal" }}]
 "#
         ),
     )
@@ -86,8 +106,9 @@ selectors = [{{ template = "members", feeds = "internal" }}]
 }
 
 /// A read keeps the trajectory's trust, since memory is written only from trusted data:
-/// writes, schema decisions, and metadata changes run after it. Once outside text lowers
-/// the trust, none of them runs.
+/// writes, schema decisions, and metadata changes run after it, and so they do after the
+/// context pack and the admin reads of memberships, schemas, keys, and roles. Once outside
+/// text lowers the trust, none of them runs.
 #[tokio::test]
 async fn a_read_keeps_trust_and_suspicious_data_cannot_enter_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -98,6 +119,26 @@ async fn a_read_keeps_trust_and_suspicious_data_cannot_enter_memory() {
         call("read", serde_json::json!({ "query": "Who owns the Q3 plan?" })),
     )
     .await;
+    for read in [
+        call("get_context_pack", serde_json::json!({})),
+        call(
+            "admin_list_instance_memberships",
+            serde_json::json!({ "instance_id": "1" }),
+        ),
+        call(
+            "admin_validate_yaml_schema",
+            serde_json::json!({ "schema_yaml": "xmd_version: v1\nobjects: {}\nrelations: {}\n" }),
+        ),
+        call(
+            "admin_convert_json_schema",
+            serde_json::json!({ "json_schema": { "type": "object", "properties": {} } }),
+        ),
+        call("admin_list_api_keys", serde_json::json!({})),
+        call("admin_get_api_key", serde_json::json!({ "key": "ci" })),
+        call("admin_list_mintable_roles", serde_json::json!({})),
+    ] {
+        accept_and_run(&runtime, read).await;
+    }
 
     let changes = || {
         [
@@ -145,7 +186,7 @@ async fn a_read_keeps_trust_and_suspicious_data_cannot_enter_memory() {
 
 /// From trusted data, a schema decision runs without review and keeps the trajectory
 /// trusted; writes and creating an instance run and record their effects; a schema
-/// migration and an instance deletion wait for the reviewer.
+/// migration, an instance deletion, and a membership edit wait for the reviewer.
 #[tokio::test]
 async fn writes_record_their_effects_and_admin_and_schema_changes_ask_the_authority() {
     let dir = tempfile::tempdir().unwrap();
@@ -184,6 +225,13 @@ async fn writes_record_their_effects_and_admin_and_schema_changes_ask_the_author
             serde_json::json!({ "schema_yml": "objects: {}" }),
         ),
         call("admin_delete_instance_by_id", serde_json::json!({ "instance_id": "1" })),
+        call(
+            "admin_edit_instance_memberships",
+            serde_json::json!({
+                "expected_revision": 3,
+                "additions": [{ "instance_id": "1", "cluster_id": "c2" }],
+            }),
+        ),
     ] {
         let decision = propose(&runtime, reviewed.clone()).await;
         assert!(!matches!(decision, HookDecision::AllowCall { .. }), "{}", reviewed.tool);
@@ -215,7 +263,44 @@ async fn writes_record_their_effects_and_admin_and_schema_changes_ask_the_author
             vec!["xmemory.changed"],
             vec!["xmemory.admin"],
             vec!["xmemory.schema"],
-            vec!["xmemory.deleted"]
+            vec!["xmemory.deleted"],
+            vec!["xmemory.admin"]
         ]
     );
+}
+
+/// A new API key's secret is a credential for the caller alone. Creating one waits for
+/// the reviewer and records `xmemory.admin`; its result is `self`, so a memory write after
+/// it, whose input `internal` must see, is refused with no remedy: this authority cannot
+/// widen an audience.
+#[tokio::test]
+async fn a_new_api_key_is_reviewed_and_its_secret_stays_out_of_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = runtime(&dir).await;
+
+    let create = call(
+        "admin_create_api_key",
+        serde_json::json!({ "name": "ci", "role": "Data writer", "cluster": "c1" }),
+    );
+    let decision = propose(&runtime, create.clone()).await;
+    assert!(!matches!(decision, HookDecision::AllowCall { .. }), "{decision:?}");
+    assert!(matches!(
+        runtime.execute_remedy(&actor(), offer_of(&decision)).await,
+        RemedyOutcome::Authorized { .. }
+    ));
+    assert_eq!(
+        propose(&runtime, create.clone()).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+    ran(&runtime, create).await;
+
+    let write = call("write", serde_json::json!({ "text": "The CI key belongs to Alice." }));
+    let HookDecision::DenyCall { feedback, offers, .. } = propose(&runtime, write).await else {
+        panic!("a write after a new key must be denied");
+    };
+    assert!(
+        feedback.contains(r#"the readers do not include "internal""#),
+        "{feedback}"
+    );
+    assert!(offers.is_empty(), "{offers:?}");
 }
