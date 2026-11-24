@@ -5,6 +5,7 @@ include = ["../../../marketplace/batteries/xmemory/appa.toml"]
 version = 2
 
 [policy.audience]
+self = ["replay:viewer"]
 internal = ["replay:members"]
 
 [[policy.authority]]
@@ -36,7 +37,8 @@ max_body_bytes = 1048576
 [externals.authorities.xmemory-operator]
 builtin = "hitl"
 
-# This fixed roster is only a replay fixture, never an xmemory ACL resolver.
+# This fixed roster is only a replay fixture, never an xmemory ACL resolver:
+# the session acts for Alice, and the organisation is Alice and Bob.
 [externals.audience.replay]
-command = ["python3", "-c", 'import json, sys; json.load(sys.stdin); print(json.dumps({"version": 1, "answer": {"members": ["alice@corp.example", "bob@corp.example"]}}))']
-selectors = [{ template = "members", feeds = "internal" }]
+command = ["python3", "-c", 'import json, sys; viewer = json.load(sys.stdin)["artifact"]["selector"] == "viewer"; print(json.dumps({"version": 1, "answer": {"members": ["alice@corp.example"] if viewer else ["alice@corp.example", "bob@corp.example"]}}))']
+selectors = [{ template = "viewer", feeds = "self" }, { template = "members", feeds = "internal" }]

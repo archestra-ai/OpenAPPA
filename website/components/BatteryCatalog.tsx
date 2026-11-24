@@ -105,7 +105,7 @@ const BATTERIES = [
   },
   {
     name: "xmemory",
-    description: "Rules for 32 instance and admin tools; internal reads, writes from trusted input only, reviewed schema migrations and deletions.",
+    description: "Rules for 41 instance and admin tools; internal reads, writes from trusted input only, reviewed schema migrations, deletions, membership edits and new API keys.",
     href: "/battery-xmemory",
     logo: "/images/batteries/xmemory.svg",
   },

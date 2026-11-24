@@ -1,11 +1,12 @@
 # xmemory battery
 
-Rules for the hosted [xmemory](https://xmemory.ai) MCP servers, all 32
+Rules for the hosted [xmemory](https://xmemory.ai) MCP servers, all 41
 tools: the instance server at `https://mcp.xmemory.ai` (or
-`https://mcp.xmemory.ai/instance/<id>`, 15 tools), which reads and writes
+`https://mcp.xmemory.ai/instance/<id>`, 16 tools), which reads and writes
 one memory instance, and the admin server at
-`https://mcp.xmemory.ai/admin` (17 tools), which creates, describes, and
-deletes instances. Plain TOML
+`https://mcp.xmemory.ai/admin` (25 tools), which creates, describes, and
+deletes instances. The admin server also edits instances' cluster
+memberships, lists API keys, and creates keys for the caller. Plain TOML
 rules, no helper process or provider credential. One namespace,
 `xmemory`, is bound to each server you run:
 
@@ -17,13 +18,6 @@ A deployment with one of the two servers binds only that one. The xmemory
 Claude Code plugin names each instance server `xmemory-<first 8 characters
 of the instance id>`; bind that name.
 
-## Server version
-
-xmemory commit `b3aaaa6`, the production build on 2026-09-23. The
-servers carry no version number. The instance and admin tool lists are
-the servers' `tools/list` at that build; the five schema-management
-tools are from the source at that commit.
-
 ## Rules
 
 Trust follows who can write the text. The organisation's members and
@@ -32,13 +26,14 @@ write results keep the session's trust: suspicious text cannot enter
 memory and come back trusted.
 
 *Instance reads* — `read`, `write_status`, `get_instance_id`,
-`get_instance_schema`, `get_setup_instructions`, `review_suggestions`,
+`get_instance_schema`, `get_setup_instructions`, `get_context_pack`, `review_suggestions`,
 `list_schema_migrations`, `get_schema_migration`,
 `dry_run_schema_migration`, `enhance_schema`. Results keep the session's
 trust and are restricted to `internal`. A tool's input must be sharable with `internal` too, because
 the instance stores it or its readers see it. `review_suggestions` also
 merges duplicate feedback rows that rebuild the same proposal; it changes
-no schema and no records.
+no schema and no records. `get_context_pack` returns the owner
+instructions and, when asked for, the live state that a read returns.
 
 *Writes* — `write` and `write_async`, with `text` or with
 `structured_mutations`. The input must be trusted and sharable with
@@ -63,10 +58,15 @@ return `internal` content, and record `xmemory.schema`.
 `admin_list_instances`, `admin_list_own_instances`,
 `admin_get_instance`, `admin_get_instance_by_id`,
 `admin_get_instance_schema_by_id`, `admin_get_setup_instructions`,
-`admin_generate_schema`, `admin_enhance_schema`. Instance names,
-descriptions, owner instructions, and schemas are written by the
-organisation's members, so results keep the session's trust, restricted
-to `internal`.
+`admin_list_instance_memberships`, `admin_generate_schema`,
+`admin_enhance_schema`, `admin_validate_yaml_schema`,
+`admin_convert_json_schema`, `admin_list_api_keys`, `admin_get_api_key`,
+`admin_list_mintable_roles`. Instance names, descriptions, owner
+instructions, schemas, and key names are written by the organisation's
+members, so results keep the session's trust, restricted to `internal`.
+The key tools return names, roles, permissions, and clusters, never a
+secret; with `api_key.see_org_keys`, `admin_list_api_keys` also lists
+other people's keys.
 
 *Admin writes* — `admin_create_instance` and the four
 `admin_update_instance_metadata*` and `admin_patch_instance_metadata*`
@@ -81,10 +81,20 @@ run without an authority from a trusted trajectory.
 trusted data and the `xmemory-review` mark, return the deleted instance
 as `internal` content, and record `xmemory.deleted`.
 
+*Access changes* — `admin_edit_instance_memberships` adds and removes an
+instance's cluster memberships. A cluster's role assignments cover every
+instance in it, so the change decides who can read the instance.
+`admin_create_api_key` creates a key for the caller and returns its
+secret once. Both need trusted data and the `xmemory-review` mark, and
+record `xmemory.admin`. The membership result is `internal`. The new key
+is a credential for the caller alone, so its result is `self`. After it,
+a call whose input `internal` must see does not run without an authority
+that may widen the audience. A memory write is such a call.
+
 ## Root config
 
 The battery binds no audience source and names no credential variable.
-A root config adds two things.
+A root config adds three things.
 
 It maps `internal` onto the people who may read everything the
 connection reaches: the organisation's members. For example, with the
@@ -94,6 +104,19 @@ Google Workspace battery's audience source:
 [policy.audience]
 internal = ["google-workspace:full-members"]
 ```
+
+It maps `self` onto the person the session acts for, the only reader of
+a new API key's secret:
+
+```toml
+[policy.audience]
+self = ["google-workspace:viewer"]
+```
+
+A multi-user host that passes each session's principal resolves `self`
+without it. With neither, a call after `admin_create_api_key` that needs
+an audience's members is denied, because its readers cannot be
+established.
 
 It also permits `xmemory-review`, and data below `trusted` when a
 person may approve a write from a trajectory that read untrusted text.
@@ -114,10 +137,10 @@ builtin = "hitl"
 ## Limits
 
 xmemory keeps no per-record permissions, and no tool reports who can
-read an instance. An API key reaches only the clusters linked to it, but
-a console user reaches every cluster of their organisation, and an
-xmemory API key cannot list users or other people's keys. So every read
-is `internal`, the coarsest honest label. Map `internal` in the root
+read an instance. People and API keys reach the clusters and instances
+their role assignments name. A cluster's assignments cover every instance
+in it, and no tool lists users. So every read is `internal`, the
+coarsest honest label. Map `internal` in the root
 config to the organisation's members through your organisation's
 audience sources. Per-cluster readers are not modeled.
 
@@ -138,15 +161,18 @@ Tools that a connection does not advertise still have rules. An OAuth
 connection chooses its tools on the sign-in page, and an API key session
 gets the instance tools without the schema group
 (`update_instance_schema`, `dry_run_schema_migration`,
-`list_schema_migrations`, `get_schema_migration`, `enhance_schema`). A
-tool the policy does not name is blocked.
+`list_schema_migrations`, `get_schema_migration`, `enhance_schema`).
+Only a connection that sends an API key itself is offered
+`admin_create_api_key`, and every connection lists only the tools its
+role assignments permit. A tool the policy does not name is blocked.
 
 ## Tests
 
 `appa-runtime/tests/xmemory_policy.rs` loads the battery with a fixed
 audience and checks that writes, schema decisions, and metadata changes
-run after a read, that none runs once outside text lowers the trust, and
-which effects each write records. The
+run after a read, and that none runs once outside text lowers the trust.
+It also checks which effects each write records, and that a memory write
+after a new API key is refused. The
 offline replay `examples/live-replays/xmemory/` proposes one call of
 each kind and checks each decision. The battery has no scripts.
 
