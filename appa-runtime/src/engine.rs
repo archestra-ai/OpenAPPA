@@ -1831,7 +1831,7 @@ impl RuntimeEngine {
         approves: impl Fn(&AuthorityName) -> bool,
     ) -> ReleaseRound {
         use appa_engine::engine::{ReleaseError, ReleaseJudgment};
-        let mut act = match self.act_audience(evidence, principal, LostLookup::LosesItsSources) {
+        let mut act = match self.act_audience(evidence, LostLookup::LosesItsSources) {
             Ok(act) => act,
             Err(AudienceFailure::Consult(requests)) => return ReleaseRound::Consult(requests),
             Err(AudienceFailure::Refused(unobtained)) => {
@@ -3701,7 +3701,7 @@ impl RuntimeEngine {
         unresolved: UnresolvedAudience<'_>,
         judge: impl FnOnce(&AudienceEvidence) -> Result<T, TransitionError>,
     ) -> Result<AudienceRound<T>, EngineRefusal> {
-        let act = match self.act_audience(evidence, principal, LostLookup::EndsAct) {
+        let act = match self.act_audience(evidence, LostLookup::EndsAct) {
             Ok(act) => act,
             Err(AudienceFailure::Consult(requests)) => {
                 return Ok(AudienceRound::Presented(EngineDecision::deliver(
@@ -3740,12 +3740,7 @@ impl RuntimeEngine {
     /// error. Under a redirected provider every qualified member a source reports seats
     /// through its lookup; the lookups still owed are this round's consults, asked before
     /// the act is judged.
-    fn act_audience(
-        &self,
-        evidence: &[ExternalEvidence],
-        principal: Option<&ReaderId>,
-        lost: LostLookup,
-    ) -> Result<ActAudience, AudienceFailure> {
+    fn act_audience(&self, evidence: &[ExternalEvidence], lost: LostLookup) -> Result<ActAudience, AudienceFailure> {
         let audience = self.engine.registry().audience();
         let mut payload = AudienceEvidence::default();
         let mut unanswered = Unanswered::default();
@@ -3847,7 +3842,7 @@ impl RuntimeEngine {
                 }
             }
         }
-        if let Err(refusal) = audience.expansions(&payload, principal) {
+        if let Err(refusal) = audience.admissible(&payload) {
             // The refusal's own Display can carry directory data (member ids, principals)
             // the model has not seen; the model-visible detail names only the failure class
             // and its provider/selector.

@@ -703,8 +703,19 @@ fn a_spawn_close_that_admitted_its_own_result_delivered_no_crossing() {
     );
 }
 
+/// `dispatch`'s success checkpoint, observing `observed`.
+fn checkpoint(dispatch: &DispatchId, observed: crate::fact::ObservedResult) -> Fact {
+    Fact::DispatchSucceeded {
+        trajectory: traj(),
+        dispatch: dispatch.clone(),
+        effects: crate::fact::EffectSet::default(),
+        observed,
+    }
+}
+
 /// A spawn whose success checkpoint observed a body of the report's own delivers no crossing:
-/// a live report naming the crossing is refused, and a replayed close naming it alone is forged.
+/// a live report naming the crossing is refused, and a replayed close naming it alone is
+/// forged. A checkpoint that observed no body leaves the crossing to close the spawn.
 #[test]
 fn a_spawn_checkpointed_with_its_own_body_closes_on_no_crossing() {
     let e = engine_at(vec![], Label::new(SUSPICIOUS, Audience::public()));
@@ -715,27 +726,46 @@ fn a_spawn_checkpointed_with_its_own_body_closes_on_no_crossing() {
     let (crossing, _) = e
         .spawn_return_of(&viewing(&e, &log), &dispatch)
         .expect("the open spawn answers with the child's crossing");
+
+    let unobserved = [
+        log.clone(),
+        vec![checkpoint(&dispatch, crate::fact::ObservedResult::Unavailable)],
+    ]
+    .concat();
+    assert_eq!(e.validate_replay(&unobserved), Ok(()));
     let closed = appended_facts(
-        e.handle(&viewing(&e, &log), delivering(&dispatch, &crossing))
-            .expect("the crossing closes the spawn"),
+        e.handle(&viewing(&e, &unobserved), delivering(&dispatch, &crossing))
+            .expect("a checkpoint that observed no body leaves the crossing to close the spawn"),
     );
-    let checkpoint = Fact::DispatchSucceeded {
-        trajectory: traj(),
-        dispatch: dispatch.clone(),
-        effects: crate::fact::EffectSet::default(),
-        observed: crate::fact::ObservedResult::Available(crate::value::RawResultDigest::of(b"y")),
-    };
-    let checkpointed = [log.clone(), vec![checkpoint]].concat();
-    assert_eq!(e.validate_replay(&checkpointed), Ok(()));
-    assert_eq!(e.spawn_return_of(&viewing(&e, &checkpointed), &dispatch), None);
+    assert!(
+        closed.iter().any(|fact| matches!(
+            fact,
+            Fact::DispatchClosed {
+                outcome: crate::fact::CloseOutcome::Success { crossing: Some(delivered), .. },
+                ..
+            } if *delivered == crossing
+        )),
+        "{closed:?}"
+    );
+    assert_eq!(e.validate_replay(&[unobserved, closed.clone()].concat()), Ok(()));
+
+    let observed = [
+        log,
+        vec![checkpoint(
+            &dispatch,
+            crate::fact::ObservedResult::Available(crate::value::RawResultDigest::of(b"y")),
+        )],
+    ]
+    .concat();
+    assert_eq!(e.validate_replay(&observed), Ok(()));
+    assert_eq!(e.spawn_return_of(&viewing(&e, &observed), &dispatch), None);
     assert_eq!(
-        e.handle(&viewing(&e, &checkpointed), delivering(&dispatch, &crossing))
+        e.handle(&viewing(&e, &observed), delivering(&dispatch, &crossing))
             .err(),
         Some(crate::transition::TransitionError::ObservationMismatch)
     );
-    assert_eq!(e.validate_replay(&[log, closed.clone()].concat()), Ok(()));
     assert_eq!(
-        e.validate_replay(&[checkpointed, closed].concat()),
+        e.validate_replay(&[observed, closed].concat()),
         Err(TransitionRefusal::ForgedEvidence)
     );
 }

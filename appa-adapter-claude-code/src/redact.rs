@@ -160,18 +160,18 @@ impl Shape {
 
     /// `value` rebuilt in this shape: the listed keys alone, each conformed, and every leaf
     /// this shape admits kept as it is, any other a placeholder of its shape.
-    fn conform(self, value: &serde_json::Value) -> serde_json::Value {
+    fn conform(self, value: serde_json::Value) -> serde_json::Value {
         match (self, value) {
-            (Self::Fields(known), serde_json::Value::Object(fields)) => serde_json::Value::Object(
+            (Self::Fields(known), serde_json::Value::Object(mut fields)) => serde_json::Value::Object(
                 known
                     .iter()
-                    .filter_map(|(name, shape)| Some((name.to_string(), shape.conform(fields.get(*name)?))))
+                    .filter_map(|(name, shape)| Some((name.to_string(), shape.conform(fields.remove(*name)?))))
                     .collect(),
             ),
             (Self::List(item), serde_json::Value::Array(items)) => {
-                serde_json::Value::Array(items.iter().map(|element| item.conform(element)).collect())
+                serde_json::Value::Array(items.into_iter().map(|element| item.conform(element)).collect())
             }
-            (shape, value) if shape.admits(value) => value.clone(),
+            (shape, value) if shape.admits(&value) => value,
             (Self::Text, _) => serde_json::Value::String(REDACTED.to_string()),
             (Self::Count, _) => serde_json::Value::from(0),
             (Self::Flag, _) => serde_json::Value::Bool(false),
@@ -298,8 +298,11 @@ fn spawn_replacement(response: serde_json::Value, text: &str) -> Replacement {
     let output = match response {
         serde_json::Value::Object(fields) => {
             let mut object: serde_json::Map<String, serde_json::Value> = fields
-                .iter()
-                .filter_map(|(key, field)| Some((key.clone(), spawn_metadata(key)?.conform(field))))
+                .into_iter()
+                .filter_map(|(key, field)| {
+                    let shape = spawn_metadata(&key)?;
+                    Some((key, shape.conform(field)))
+                })
                 .collect();
             object.insert("content".to_string(), text_block(text));
             serde_json::Value::Object(object)
