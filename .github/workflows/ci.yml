@@ -1311,9 +1311,10 @@ jobs:
 
   # The installer, offline-restore and native-approval rehearsal on a kind
   # cluster. It runs on a manual dispatch, every push to main and every
-  # `run-e2e`-labeled pull request that changes what it exercises,
-  # never on an unlabeled pull request. It reads no secrets, so a fork may
-  # run it. Same rule as above: no same-named placeholder job.
+  # `run-e2e`-labeled same-repository pull request that changes what it
+  # exercises, never on an unlabeled pull request or a fork (which has no
+  # access to `DOCKERHUB_DHI_TOKEN` for pulling `dhi.io` bases). Same rule as
+  # above: no same-named placeholder job.
   marketplace-kagent-acceptance:
     name: Marketplace kagent acceptance
     needs: changes
@@ -1321,8 +1322,9 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       ((needs.changes.outputs.marketplace == 'true' || needs.changes.outputs.e2e == 'true') &&
       (github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'run-e2e') ||
-      github.event.label.name == 'run-e2e'))
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      (contains(github.event.pull_request.labels.*.name, 'run-e2e') ||
+      github.event.label.name == 'run-e2e'))))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1401,12 +1403,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # All published images get an amd64 build here on every change
-  # that can break them. Publishing itself happens in release.yml.
+  # All published images get an amd64 build here on every change that can
+  # break them. Publishing itself happens in release.yml. Fork pull requests
+  # skip this job because pulling the `dhi.io` bases requires
+  # `DOCKERHUB_DHI_TOKEN`, which GitHub does not expose to forks; skipped
+  # required checks still satisfy branch protection, and pushes to main
+  # always run the build.
   kagent-images-build:
     name: kagent Images Build
     needs: changes
-    if: needs.changes.outputs.e2e == 'true'
+    if: >-
+      needs.changes.outputs.e2e == 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

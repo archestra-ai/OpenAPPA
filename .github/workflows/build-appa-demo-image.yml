@@ -1,8 +1,10 @@
 name: Build and deploy appa-demo
 
-# Dockerfile pins the demo runtime independently of main. Pull requests build
-# and test the image in a job that cannot request an OIDC token. Only a manual
-# dispatch on main builds, tests, publishes and deploys it, in a separate job.
+# Dockerfile pins the demo runtime independently of main. Same-repository pull
+# requests build and test the image in a job that cannot request an OIDC token
+# (forks skip it because `dhi.io` pulls require `DOCKERHUB_DHI_TOKEN`). Only a
+# manual dispatch on main builds, tests, publishes and deploys it, in a
+# separate job.
 #
 # The appa-demo-image-push identity trusts this file only on main (infra
 # gcp/workload_identity/ci-workflow-trust.tf).
@@ -25,7 +27,9 @@ env:
 jobs:
   test:
     name: Build and test
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
