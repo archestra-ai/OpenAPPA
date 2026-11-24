@@ -23,6 +23,8 @@ const requests: any[] = []
 const slow = new Map<string, { promise: Promise<void>; resolve: () => void }>()
 let corruptDecision: string | undefined
 let corruptValue: string | undefined
+// A valid runtime reply that stands in for the next hook of this event.
+let replacedDecision: { event: string; reply: Record<string, unknown> } | undefined
 let setupInspection: any
 let setupPolicy: string
 let setupDirectory: string
@@ -125,6 +127,11 @@ builtin = "redact-email"
     if (event) {
       const reply = await response.clone().json()
       hooks.push({ event, reply })
+      const replaced = replacedDecision
+      if (replaced && event.event === replaced.event) {
+        replacedDecision = undefined
+        return Response.json(replaced.reply)
+      }
       if (event.event === corruptDecision && (event.event !== 'tool_call' || event.tool === 'appa_subagent' && reply.decision === 'allow_call') &&
           (corruptValue === undefined || event.value?.includes(corruptValue))) {
         corruptDecision = undefined
@@ -453,12 +460,17 @@ async function slowChild(task: string) {
   return { session, child, resolve }
 }
 
-async function taskHandle(sessionID: string) {
+async function lastLaunch(sessionID: string) {
   const history = await client.session.context({ sessionID })
   const launch = history.flatMap(message => message.type === 'assistant' ? message.content : []).reverse().find(
     part => part.type === 'tool' && part.name === 'appa_subagent' && part.state.status === 'completed')
   if (!launch || launch.type !== 'tool' || launch.state.status !== 'completed') throw new Error('No launch handle')
-  const value = launch.state.content.find(part => part.type === 'text')
+  return { id: launch.id, content: launch.state.content }
+}
+
+async function taskHandle(sessionID: string) {
+  const launch = await lastLaunch(sessionID)
+  const value = launch.content.find(part => part.type === 'text')
   if (!value || value.type !== 'text') throw new Error('No launch handle text')
   // The handle is the launched child's session id, as the host lists the parent's children.
   const children = (await client.session.list({ parentID: sessionID })).data.map(child => child.id)
@@ -634,6 +646,15 @@ test('cancel can stop a waiting collector; interrupted collection leaves the chi
   expect(JSON.stringify(await taskCalls(waiting.session.id, [{ name: 'appa_collect', input: { task } }]))).toContain('Battery result: child:bg-interrupt')
 }, 45_000)
 
+test('a blocked background launch tells the parent the runtime reason and takes no ownership', async () => {
+  const reason = 'appa-test: this launch is blocked for a reason only this test gives'
+  replacedDecision = { event: 'spawn_result', reply: { protocol: 1, decision: 'block', reason } }
+  const blocked = await delegate('bg-blocked-launch')
+  expect(replacedDecision).toBeUndefined()
+  expect(JSON.stringify(blocked.history)).toContain(reason)
+  await expect(lastLaunch(blocked.session.id)).rejects.toThrow('No launch handle')
+}, 45_000)
+
 test('lost background launch and return replies fail closed; delivery retries the exact return', async () => {
   corruptDecision = 'spawn_result'
   const lost = await delegate('bg-lost-launch')
@@ -641,7 +662,13 @@ test('lost background launch and return replies fail closed; delivery retries th
   expect(corruptDecision).toBeUndefined()
   await client.session.prompt({ sessionID: lost.session.id, text: 'delegate:bg-after-lost-launch' })
   await client.session.wait({ sessionID: lost.session.id })
-  await taskHandle(lost.session.id)
+  // The recovered launch shows its own child's handle alone, as its own launch report named it.
+  const recovered = await lastLaunch(lost.session.id)
+  const acknowledged = hooks.find(hook => hook.event.root_id === lost.session.id &&
+    hook.event.event === 'spawn_result' && hook.event.call_id === recovered.id)
+  expect(acknowledged).toBeDefined()
+  expect(recovered.content).toHaveLength(1)
+  expect(recovered.content[0]).toMatchObject({ type: 'text', text: acknowledged!.event.spawned_id })
   for (const mode of ['raw', 'sanitize private']) {
     corruptDecision = 'child_end'
     corruptValue = mode === 'raw' ? 'child:bg-raw' : 'alice@corp.example'

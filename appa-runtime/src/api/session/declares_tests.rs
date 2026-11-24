@@ -1539,8 +1539,9 @@ async fn spawn_result_saying(runtime: &Runtime, child: &Session, said: &str) -> 
 }
 
 /// A report with no message that a deferral first answered is answered the same way on every
-/// repeat: once the held return is accepted and a later stop supersedes its notice, the repeat
-/// still says only that the return awaited a decision, never that the reply has no return.
+/// repeat: with the occurrence's actionable notice while it pends, and once the held return is
+/// accepted and a later stop supersedes its notice, with the neutral one that says only that
+/// the return awaited a decision, never that the reply has no return.
 #[tokio::test]
 async fn a_silent_report_a_deferral_answered_repeats_as_a_neutral_deferral() {
     let Deployed { runtime, .. } = deployed(false);
@@ -1563,14 +1564,21 @@ async fn a_silent_report_a_deferral_answered_repeats_as_a_neutral_deferral() {
             .await
             .expect("the spawn's result is decided")
     };
-    assert!(
-        matches!(
-            silent().await,
-            SpawnResultDecision::Outcome(ToolResultDecision::Replace { .. })
-        ),
-        "the deferral answers the first report"
-    );
     let [held] = notices(&runtime).try_into().expect("one occurrence");
+    let actionable = SpawnResultDecision::Outcome(ToolResultDecision::Replace {
+        placeholder: held.feedback.clone(),
+        presentation: None,
+    });
+    assert_eq!(
+        silent().await,
+        actionable,
+        "the deferral's notice answers the first report"
+    );
+    assert_eq!(
+        silent().await,
+        actionable,
+        "a repeat while the occurrence pends carries its settlement references again"
+    );
     settling(&runtime, &parent(), &held.accept).await;
     assert!(matches!(
         child.on_child_end(Some("two".to_string())).await,
@@ -2244,7 +2252,8 @@ fn untag(db: &std::path::Path) -> usize {
 
 /// A launch a predecessor's log recorded without its class is taken by the observation that
 /// log committed: after the child returned, its identical repeat is still the launch, its
-/// fields held to the admitted ones by the digest check.
+/// fields held to the admitted ones by the digest check, and a host with no launch fields to
+/// hold to them has the repeat refused.
 #[tokio::test]
 async fn an_untagged_launch_repeats_as_the_observation_its_log_committed() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -2264,6 +2273,21 @@ async fn an_untagged_launch_repeats_as_the_observation_its_log_committed() {
         .expect("the child reattaches");
     crossing(&child, "the answer", "op-1").await;
     assert_eq!(reported_without_a_message(&runtime, &child, kagent()).await, launched);
+    let reply = serde_json::json!({"result": "", "subagent_session_id": "child-ctx", "note": "the child's bytes"});
+    let unfielded = session(&runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            spoken(&reply.to_string()),
+            Some(child.trajectory.clone()),
+            None,
+            SpawnLaunch::Undeclared,
+        )
+        .await;
+    assert!(
+        matches!(unfielded, Err(EventError::OutcomeMismatch)),
+        "an admitted body no launch fields can repeat is refused, never answered: {unfielded:?}"
+    );
 }
 
 /// A launch's first report fixes its class: once the child returned, or while a sanitizer

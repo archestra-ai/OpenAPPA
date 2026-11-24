@@ -85,8 +85,8 @@ fn reported_outcome(report: &SpawnReport, fields: Option<&str>) -> ToolOutcome {
     }
 }
 
-/// What answers a repeat of a report a deferral first answered: the deferral it named may
-/// have been settled since, so the repeat says only that the return awaited a decision.
+/// What answers a repeat of a report a deferral first answered once the occurrence it named
+/// is settled or superseded: the repeat says only that the return awaited a decision.
 pub(super) const DEFERRED: &str = "[appa] the subagent's return awaited a decision when this reply came; \
                                    its return crosses only through the return check";
 
@@ -361,6 +361,8 @@ impl Session {
             // follows, so each attempt overwrites what the last one wrote.
             let mut plan: Option<SpawnPlan> = None;
             let (mut deferral, mut auto_apply) = (None, AutoApply::default());
+            // The actionable notice a report a deferral answered repeats, while its occurrence pends.
+            let mut actionable: Option<String> = None;
             let decision = self
                 .drive_with_evidence(
                     |context, evidence| {
@@ -378,12 +380,13 @@ impl Session {
                             }
                             _ => None,
                         };
-                        deferral = match crossed {
+                        let deferred = match crossed {
                             Some(_) => None,
-                            None => context
-                                .spawn_deferral(&dispatch)
-                                .map(|deferred| context.engine().deferral_notice(&deferred, &self.presentation)),
+                            None => context.spawn_deferral(&dispatch),
                         };
+                        deferral = deferred
+                            .as_ref()
+                            .map(|deferred| context.engine().deferral_notice(deferred, &self.presentation));
                         // A success with no message from the bound child is taken once: the record
                         // that first observed it fixes how, and every repeat is taken the same way,
                         // whatever the child, a deferral or the size limit did since.
@@ -405,28 +408,27 @@ impl Session {
                                     report,
                                     taken: Taken::Recorded,
                                 },
-                                // A record written before classes were: the class follows the
-                                // observation it committed, and the repeat carries no class, so
-                                // the digest check holds its body to the one first admitted.
+                                // Untagged closes come only from releases before classes were
+                                // recorded, which held no returns, deferred none and made no
+                                // launch fields. A body they admitted repeats only as the launch
+                                // fields the digest check holds to it; without such fields
+                                // nothing may answer it, so the repeat is refused.
                                 (Some(CommittedSpawnReport::Untagged(ObservedResult::Available(_))), _) => {
                                     match &fields {
                                         Some(_) => SpawnPlan::Reported {
                                             report: SpawnReport::Launch(LaunchAdmission::Fields),
                                             taken: Taken::Untagged,
                                         },
-                                        None => SpawnPlan::Outcome,
+                                        None => return Err(EventError::OutcomeMismatch),
                                     }
                                 }
-                                (Some(CommittedSpawnReport::Untagged(ObservedResult::Unavailable)), Some(bound)) => {
+                                (Some(CommittedSpawnReport::Untagged(ObservedResult::Unavailable)), _) => {
                                     SpawnPlan::Reported {
-                                        report: match (&fields, context.engine().runs_unreturned(context.view, bound)) {
-                                            (None, true) => SpawnReport::Launch(LaunchAdmission::Undeclared),
-                                            _ => SpawnReport::NoReturn,
-                                        },
+                                        report: SpawnReport::NoReturn,
                                         taken: Taken::Untagged,
                                     }
                                 }
-                                _ => unreachable!("a committed report is read for a silent report alone"),
+                                (None, _) => unreachable!("a committed report was just matched"),
                             },
                             (ForkStatus::Unprepared | ForkStatus::FanOut, _) => SpawnPlan::Outcome,
                             // A deferred return answers every report of its spawn with the notice,
@@ -435,12 +437,14 @@ impl Session {
                             (ForkStatus::Bound(bound), named)
                                 if deferral.is_some() && named.as_ref().is_none_or(|named| *named == bound) =>
                             {
-                                match silent {
-                                    Some(_) => SpawnPlan::Reported {
-                                        report: SpawnReport::Deferred,
+                                match (&silent, &deferred) {
+                                    (Some(_), Some(deferred)) => SpawnPlan::Reported {
+                                        report: SpawnReport::Deferred {
+                                            occurrence: deferred.id.clone(),
+                                        },
                                         taken: Taken::First,
                                     },
-                                    None => SpawnPlan::Outcome,
+                                    _ => SpawnPlan::Outcome,
                                 }
                             }
                             (ForkStatus::Prepared, Some(child)) => SpawnPlan::Bind {
@@ -485,6 +489,19 @@ impl Session {
                                 },
                             },
                             (ForkStatus::Bound(_), _) => SpawnPlan::Close(EventError::BindingMismatch),
+                        };
+                        // A repeat of a report a deferral answered repeats its actionable notice
+                        // while that occurrence still pends, and the neutral one once it is
+                        // settled or superseded.
+                        actionable = match &next {
+                            SpawnPlan::Reported {
+                                report: SpawnReport::Deferred { occurrence },
+                                taken: Taken::Recorded,
+                            } => deferred
+                                .as_ref()
+                                .filter(|deferred| deferred.id == *occurrence && deferred.settled.is_none())
+                                .and(deferral.clone()),
+                            _ => None,
                         };
                         let event = match &next {
                             SpawnPlan::Outcome => EngineEvent::ToolOutcome {
@@ -614,12 +631,12 @@ impl Session {
                                 output: NO_RETURN.to_string(),
                             }
                         }
-                        SpawnReport::Deferred => {
+                        SpawnReport::Deferred { .. } => {
                             outcome_decision(decision, &self.deployment().externals)?;
                             SpawnResultDecision::Outcome(ToolResultDecision::Replace {
                                 placeholder: match (taken, deferral) {
                                     (Taken::First, Some(notice)) => notice,
-                                    _ => DEFERRED.to_string(),
+                                    _ => actionable.unwrap_or_else(|| DEFERRED.to_string()),
                                 },
                                 presentation: None,
                             })

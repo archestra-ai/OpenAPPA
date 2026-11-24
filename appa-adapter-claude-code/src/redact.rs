@@ -990,28 +990,61 @@ mod tests {
             matches!(&parsed, HookEvent::SpawnResult { child: Some(child), .. } if child.0.ends_with("other")),
             "the parser names the reported child: {parsed:?}"
         );
-        for answer in [
-            HookDecision::ReplaceOutput {
-                output: "[appa] past the size limit".to_string(),
-                outcomes: None,
-            },
-            HookDecision::Launched {
-                output: "[appa] launched".to_string(),
-            },
-            HookDecision::NoReturn {
-                output: "[appa] no return".to_string(),
-            },
-            HookDecision::Block {
-                reason: "the binding does not match".to_string(),
-                outcomes: None,
-            },
-        ] {
-            let rendered = render(&parsed, &answer);
-            assert_eq!(
-                rendered["hookSpecificOutput"]["updatedToolOutput"],
-                launch_shape("", "")
-            );
-            assert!(rendered["hookSpecificOutput"]["additionalContext"].is_string());
+        let bare = serde_json::json!({
+            "status": "async_launched",
+            "isAsync": true,
+            "agentId": "",
+            "description": "",
+            "prompt": "",
+            "outputFile": "",
+        });
+        let notice = |context: &str| {
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "updatedToolOutput": bare,
+                    "additionalContext": context,
+                }
+            })
+        };
+        let cases = [
+            (
+                HookDecision::ReplaceOutput {
+                    output: "[appa] past the size limit".to_string(),
+                    outcomes: None,
+                },
+                notice("[appa] past the size limit"),
+            ),
+            (
+                HookDecision::Launched {
+                    output: "[appa] launched".to_string(),
+                },
+                notice("[appa] launched"),
+            ),
+            (
+                HookDecision::NoReturn {
+                    output: "[appa] no return".to_string(),
+                },
+                notice("[appa] no return"),
+            ),
+            (
+                HookDecision::Block {
+                    reason: "the binding does not match".to_string(),
+                    outcomes: None,
+                },
+                serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "updatedToolOutput": bare,
+                        "additionalContext": "[appa] the tool result was withheld: the binding does not match",
+                    },
+                    "decision": "block",
+                    "reason": "the binding does not match",
+                }),
+            ),
+        ];
+        for (answer, expected) in cases {
+            assert_eq!(render(&parsed, &answer), expected, "{answer:?}");
         }
     }
 }
