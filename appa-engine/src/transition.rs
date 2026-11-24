@@ -246,6 +246,14 @@ pub enum EngineEvent {
     BindFork(ForkBinding),
     ExecuteOffer(OfferExecution),
     SettleReturn(ReturnSettlement),
+    Answer(AnswerReport),
+}
+
+/// The root's final answer of a turn, by the digest of the bytes its host may deliver.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerReport {
+    pub trajectory: TrajectoryId,
+    pub digest: appa_runtime_api::ReleaseDigest,
 }
 
 /// The parent's decision on one deferred return: `trajectory` is the parent that owns it.
@@ -608,6 +616,11 @@ pub enum FollowUp {
     Malformed {
         position: usize,
         error: crate::engine::EngineError,
+    },
+    /// The answer stands at `position` of the family log: recorded by this decision, or by an
+    /// earlier one that recorded the same bytes at the same label.
+    Answer {
+        position: u64,
     },
 }
 
@@ -1120,6 +1133,10 @@ pub enum TransitionRefusal {
     ObservationMismatch,
     #[error("a record names a child return the log does not carry")]
     UnknownReturn,
+    #[error("an answer record names a trajectory other than the family root, or stands outside its own act")]
+    AnswerOffRoot,
+    #[error("an answer record carries another label than its trajectory holds")]
+    AnswerLabelMismatch,
     #[error("no authority registered as {0}")]
     UnknownAuthority(String),
     #[error("no sanitizer registered as {0}")]
@@ -1577,6 +1594,7 @@ impl<'a> Sequence<'a> {
                 self.pending_deferral(trajectory, id)?;
             }
             Fact::Boundary { trajectory, kind } => self.boundary(trajectory, kind)?,
+            Fact::AnswerReleased { trajectory, label, .. } => self.answer_released(trajectory, label)?,
         }
         self.settle_advance(fact, &implied, released)?;
         self.projection.fold(fact);
@@ -2480,6 +2498,25 @@ impl<'a> Sequence<'a> {
             return Ok(());
         }
         self.declaring(&crate::basis::DecidedAct::Outcome(dispatch.clone()))
+    }
+
+    /// An answer is the family root's, under its own act, at the label the root holds.
+    fn answer_released(&self, trajectory: &TrajectoryId, label: &Label) -> Result<(), TransitionRefusal> {
+        let own_act = self
+            .declared
+            .as_ref()
+            .is_some_and(|open| open.act == crate::basis::DecidedAct::Answer(trajectory.clone()));
+        if trajectory != &self.family || !own_act {
+            return Err(TransitionRefusal::AnswerOffRoot);
+        }
+        let views = self.projection.view(trajectory);
+        if views.has_ended(trajectory) {
+            return Err(TransitionRefusal::BranchEnded);
+        }
+        if &views.current_label() != label {
+            return Err(TransitionRefusal::AnswerLabelMismatch);
+        }
+        Ok(())
     }
 
     fn declaring(&self, act: &crate::basis::DecidedAct) -> Result<(), TransitionRefusal> {

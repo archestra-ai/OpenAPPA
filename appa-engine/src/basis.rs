@@ -127,6 +127,8 @@ pub enum DecidedAct {
     Offer(OfferId),
     /// The parent's decision on a deferred return, named by the occurrence it settles.
     Settlement(ChildReturnId),
+    /// A turn's answer, named by the root that gave it.
+    Answer(TrajectoryId),
 }
 
 /// What one decision declares it moves. `family` and `flow` move at most once in a decision;

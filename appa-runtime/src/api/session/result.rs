@@ -173,16 +173,43 @@ impl Session {
         call_id: Option<String>,
         o: ToolOutcome,
     ) -> Result<ToolResultDecision, EventError> {
+        self.on_tool_result_receipted(call, call_id, o)
+            .await
+            .map(|(decision, _)| decision)
+    }
+
+    /// [`Session::on_tool_result_identified`], with the receipt of the value it lets the host
+    /// deliver.
+    pub(crate) async fn on_tool_result_receipted(
+        &self,
+        call: ProposedCall,
+        call_id: Option<String>,
+        o: ToolOutcome,
+    ) -> Result<(ToolResultDecision, Option<appa_runtime_api::ReleaseReceipt>), EventError> {
         self.refuse_substituted_embedded_read(&call, call_id.as_deref(), &o)?;
         let o = self.cap_outcome(o);
-        let (mut deferral, mut auto_apply) = (None, AutoApply::default());
+        let (mut deferral, mut auto_apply, mut reported) = (None, AutoApply::default(), None);
         let decision = self
-            .report_outcome(&call, call_id.as_deref(), &o, &mut deferral, &mut auto_apply)
+            .report_outcome(
+                &call,
+                call_id.as_deref(),
+                &o,
+                &mut deferral,
+                &mut auto_apply,
+                &mut reported,
+            )
             .await?;
         let decided = self
             .accept_staged(outcome_decision(decision, &self.deployment().externals)?, auto_apply)
             .await?;
-        deferred_or(deferral, decided)
+        let decided = deferred_or(deferral, decided)?;
+        let receipt = match (&decided, &reported) {
+            (ToolResultDecision::Keep | ToolResultDecision::Deliver { .. }, Some(dispatch)) => {
+                self.receipt(appa_engine::engine::Receipted::Result(dispatch))?
+            }
+            _ => None,
+        };
+        Ok((decided, receipt))
     }
 
     /// Under `RulingsAndAccept`, as the snapshot that decided the result read it, a staged result whose block offers a plan the family lets the
@@ -219,8 +246,8 @@ impl Session {
     }
 
     /// `deferral` receives the notice of the reported dispatch, where it is a spawn whose
-    /// child's answer was deferred, and `auto_apply` the family's pinned setting, both as the
-    /// snapshot that decided the report read them.
+    /// child's answer was deferred, `auto_apply` the family's pinned setting, and `reported`
+    /// the dispatch, all as the snapshot that decided the report read them.
     pub(super) async fn report_outcome(
         &self,
         call: &ProposedCall,
@@ -228,12 +255,14 @@ impl Session {
         o: &ToolOutcome,
         deferral: &mut Option<String>,
         auto_apply: &mut AutoApply,
+        reported: &mut Option<appa_engine::value::DispatchId>,
     ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
             |context, evidence| {
                 *auto_apply = crate::api::pinned_settings(context.log).auto_apply;
                 let dispatch = context.classify_report(call, call_id)?;
                 *deferral = context.deferral_notice(&dispatch);
+                *reported = Some(dispatch.clone());
                 Ok(EngineEvent::ToolOutcome {
                     dispatch,
                     outcome: o.clone(),

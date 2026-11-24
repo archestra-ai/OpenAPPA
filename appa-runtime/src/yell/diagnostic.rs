@@ -1081,6 +1081,7 @@ mod tests {
             Fact::ForkPrepared { .. } => "ForkPrepared",
             Fact::ForkOpened { .. } => "ForkOpened",
             Fact::Boundary { .. } => "Boundary",
+            Fact::AnswerReleased { .. } => "AnswerReleased",
         }
     }
 
@@ -1089,7 +1090,7 @@ mod tests {
     /// the second catches a table left behind after one is removed or renamed.
     #[tokio::test]
     async fn the_inventory_names_every_fact_variant_and_no_others() {
-        const NAMES: [&str; 28] = [
+        const NAMES: [&str; 29] = [
             "TrajectoryOpened",
             "ValueAdmitted",
             "DispatchOpened",
@@ -1118,6 +1119,7 @@ mod tests {
             "ForkPrepared",
             "ForkOpened",
             "Boundary",
+            "AnswerReleased",
         ];
         let classified: Vec<&str> = tables::FACT.entries.iter().map(|(name, _)| *name).collect();
         let mut expected = NAMES.to_vec();

@@ -385,6 +385,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
         "Stop" | "StopFailure" => Ok(Some(HookEvent::TurnEnd {
             actor: event.actor(),
             open_calls: OpenCalls::Abandon,
+            answer: None,
         })),
         // Without the agent id this would name the root, whose one open
         // dispatch at this point is the `Agent` spawn still in flight.
@@ -404,6 +405,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
                     child: Some(event.child_id(agent)),
                 },
                 open_calls: OpenCalls::Abandon,
+                answer: None,
             })),
         },
         other => {
@@ -515,6 +517,7 @@ mod tests {
                 Some(HookEvent::TurnEnd {
                     actor: Actor { root: root(), child },
                     open_calls: appa_runtime_api::OpenCalls::Abandon,
+                    answer: None,
                 }),
                 "{hook} with agent_type {agent_type:?} did not cross as its actor's turn end",
             );

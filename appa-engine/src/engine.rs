@@ -34,6 +34,9 @@ mod fork;
 mod offers;
 mod outcome;
 mod proposals;
+mod release;
+
+pub use release::{ReceiptRefusal, Receipted, ReleaseError, ReleaseJudgment, SinkRefusal};
 
 pub(crate) use compose::{ComposeRefusal, ComposingBatch, compose_batch, membership_context};
 
@@ -503,6 +506,7 @@ impl Engine {
             EngineEvent::ExecuteOffer(execution) => Some(&execution.trajectory),
             EngineEvent::ChildReturn(report) => Some(&report.child),
             EngineEvent::SettleReturn(settlement) => Some(&settlement.trajectory),
+            EngineEvent::Answer(report) => Some(&report.trajectory),
             EngineEvent::Outcome(_) | EngineEvent::BindFork(_) => None,
         };
         if acting.is_some_and(|trajectory| !view.projection().is_opened(trajectory)) {
@@ -516,6 +520,7 @@ impl Engine {
             EngineEvent::BindFork(binding) => self.decide_binding(view, &binding),
             EngineEvent::ExecuteOffer(execution) => self.decide_offer(view, &execution, &act),
             EngineEvent::SettleReturn(settlement) => self.decide_settlement(view, &settlement),
+            EngineEvent::Answer(report) => self.decide_answer(view, &report),
         }?;
         act.settle(self.registry.audience())?;
         Ok(decision)
@@ -543,7 +548,7 @@ impl Engine {
                 }
             }
             EngineEvent::ChildReturn(report) => (report.audience.clone(), AudienceEvidence::default()),
-            EngineEvent::BindFork(_) | EngineEvent::SettleReturn(_) => {
+            EngineEvent::BindFork(_) | EngineEvent::SettleReturn(_) | EngineEvent::Answer(_) => {
                 (AudienceEvidence::default(), AudienceEvidence::default())
             }
         };

@@ -5,8 +5,8 @@ use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcomes, ParseRefusal, PeerAddress, PeerFrame,
-    PrincipalSource, PromptKey, ProposedCall, Ruling, SessionSettings, SessionTitle, SpawnKind, SpawnRef, StartKind,
-    ToolOutcome, TrajectoryId, WireDecision, WireEvent,
+    PrincipalSource, PromptKey, ProposedCall, ReleaseReceipt, Ruling, SessionSettings, SessionTitle, SpawnKind,
+    SpawnRef, StartKind, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
@@ -109,16 +109,23 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
             },
             deciding,
         ) => {
-            let (mut dispatch, mut shown) = (None, None);
+            let (mut dispatch, mut shown, mut receipt) = (None, None, None);
             let decision = Dispatcher {
                 runtime,
                 dispatch: &mut dispatch,
                 presentation: &mut shown,
+                receipt: &mut receipt,
                 options: &presentation,
                 call_ids,
             }
             .session_start(root, principal, settings, address, title, start, deciding);
-            handled((crate::events::HookKind::SessionStart, None), dispatch, shown, decision)
+            handled(
+                (crate::events::HookKind::SessionStart, None),
+                dispatch,
+                shown,
+                receipt,
+                decision,
+            )
         }
         (event, None) => handle_internal(runtime, event, presentation, call_ids).await,
         (_, Some(_)) => unreachable!("only a session start carries a launch"),
@@ -128,7 +135,11 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
         HookDecision::Refuse { .. } => 409,
         _ => 200,
     };
-    (status, wire(&handled.decision))
+    let answered = WireDecision::of(&handled.decision).with_receipt(handled.receipt);
+    (
+        status,
+        serde_json::to_value(answered).expect("a wire decision serializes"),
+    )
 }
 
 /// The event to dispatch, or the answer that ends the hook here. Every way a hook can end
@@ -212,9 +223,14 @@ fn continued(
             peer,
             title,
         },
-        HookEvent::TurnEnd { actor: who, open_calls } => HookEvent::TurnEnd {
+        HookEvent::TurnEnd {
+            actor: who,
+            open_calls,
+            answer,
+        } => HookEvent::TurnEnd {
             actor: actor(who),
             open_calls,
+            answer,
         },
         HookEvent::ToolCall {
             actor: who,
@@ -562,6 +578,7 @@ pub async fn handle_embedded_with_options(
     EmbeddedHookOutcome {
         decision: handled.decision,
         presentation: handled.presentation,
+        receipt: handled.receipt,
     }
 }
 
@@ -576,6 +593,8 @@ pub async fn handle_embedded_with_options(
 pub(crate) struct Handled {
     pub(crate) decision: HookDecision,
     pub(crate) presentation: Option<RemedyPresentation>,
+    /// Where the runtime recorded what the decision lets the host deliver.
+    pub(crate) receipt: Option<ReleaseReceipt>,
     pub(crate) event: crate::events::RuntimeEvent,
 }
 
@@ -595,26 +614,36 @@ pub(crate) async fn handle_internal(
     call_ids: ToolCallIds,
 ) -> Handled {
     let shape = hook_shape(&event);
-    let mut dispatch = None;
-    let mut presentation = None;
+    let (mut dispatch, mut presentation, mut receipt) = (None, None, None);
     let decision = dispatch_event(
         runtime,
         event,
-        &mut dispatch,
-        &mut presentation,
+        Outparams {
+            dispatch: &mut dispatch,
+            presentation: &mut presentation,
+            receipt: &mut receipt,
+        },
         &presentation_options,
         call_ids,
     )
     .await;
-    handled(shape, dispatch, presentation, decision)
+    handled(shape, dispatch, presentation, receipt, decision)
 }
 
 fn handled(
     (kind, tool): (crate::events::HookKind, Option<String>),
     dispatch: Option<EngineDispatchId>,
     presentation: Option<RemedyPresentation>,
+    receipt: Option<ReleaseReceipt>,
     decision: HookDecision,
 ) -> Handled {
+    // A receipt stands only beside a decision that lets the host deliver what it names.
+    let receipt = receipt.filter(|_| {
+        matches!(
+            decision,
+            HookDecision::Ack | HookDecision::DeliverValue { .. } | HookDecision::ChildReturn { .. }
+        )
+    });
     let presentation = presentation.or_else(|| presentation_for(&decision));
     let (outcome, mut offers) = hook_result(&decision);
     if let Some(presentation) = &presentation {
@@ -622,6 +651,7 @@ fn handled(
     }
     Handled {
         presentation,
+        receipt,
         event: crate::events::RuntimeEvent::Hook {
             event: kind,
             tool,
@@ -678,15 +708,15 @@ fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<Stri
 async fn dispatch_event(
     runtime: &Runtime,
     event: HookEvent,
-    dispatch: &mut Option<EngineDispatchId>,
-    presentation: &mut Option<RemedyPresentation>,
+    out: Outparams<'_>,
     presentation_options: &EmbeddedPresentationOptions,
     call_ids: ToolCallIds,
 ) -> HookDecision {
     let mut dispatcher = Dispatcher {
         runtime,
-        dispatch,
-        presentation,
+        dispatch: out.dispatch,
+        presentation: out.presentation,
+        receipt: out.receipt,
         options: presentation_options,
         call_ids,
     };
@@ -725,7 +755,11 @@ async fn dispatch_event(
             peer,
             title,
         } => dispatcher.prompt(actor, text, settles, peer, title),
-        HookEvent::TurnEnd { actor, open_calls } => dispatcher.turn_end(actor, open_calls).await,
+        HookEvent::TurnEnd {
+            actor,
+            open_calls,
+            answer,
+        } => dispatcher.turn_end(actor, open_calls, answer).await,
         HookEvent::ToolCall {
             actor,
             call,
@@ -814,8 +848,17 @@ struct Dispatcher<'a> {
     dispatch: &'a mut Option<EngineDispatchId>,
     /// What a denial or a replacement carries for an embedded harness.
     presentation: &'a mut Option<RemedyPresentation>,
+    /// Where the log records what the decision lets the host deliver.
+    receipt: &'a mut Option<ReleaseReceipt>,
     options: &'a EmbeddedPresentationOptions,
     call_ids: ToolCallIds,
+}
+
+/// What one dispatch reports beside its decision.
+struct Outparams<'a> {
+    dispatch: &'a mut Option<EngineDispatchId>,
+    presentation: &'a mut Option<RemedyPresentation>,
+    receipt: &'a mut Option<ReleaseReceipt>,
 }
 
 impl Dispatcher<'_> {
@@ -929,8 +972,9 @@ impl Dispatcher<'_> {
     /// A turn end gates nothing, so it answers `Ack` whatever happens. The refusal families
     /// both mean "do not end the turn" on this hook, which would hold the harness in a turn
     /// it has finished; a close that failed leaves the call open and the next proposal
-    /// refuses on its own.
-    async fn turn_end(&mut self, actor: Actor, open_calls: OpenCalls) -> HookDecision {
+    /// refuses on its own. The root's answer is recorded once the turn's calls are closed, and
+    /// its receipt rides on the `Ack`; an answer that was not recorded has none.
+    async fn turn_end(&mut self, actor: Actor, open_calls: OpenCalls, answer: Option<String>) -> HookDecision {
         match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
             let open_calls = open_calls.clone();
             async move {
@@ -946,6 +990,17 @@ impl Dispatcher<'_> {
             Ok(Stop::Taken(())) => {}
             Err(error) => {
                 tracing::warn!(root = %actor.root.0, %error, "the turn end closed no abandoned call");
+            }
+        }
+        if let (None, Some(answer)) = (&actor.child, answer) {
+            let released = on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
+                let answer = answer.clone();
+                async move { session.release_answer(&answer).await }
+            })
+            .await;
+            match released {
+                Ok(receipt) => *self.receipt = receipt,
+                Err(error) => tracing::warn!(root = %actor.root.0, %error, "the turn's answer was not recorded"),
             }
         }
         if let Err(error) = self.runtime.record_turn_end(&actor, EndKind::Boundary) {
@@ -1112,15 +1167,19 @@ impl Dispatcher<'_> {
         let failed = matches!(outcome, ToolOutcome::Failure { .. });
         match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
             let (call, call_id, outcome) = (call.clone(), call_id.clone(), outcome.clone());
-            async move { session.on_tool_result_identified(call, call_id, outcome).await }
+            async move { session.on_tool_result_receipted(call, call_id, outcome).await }
         })
         .await
         {
             // A failed call's hook carries no context, so a notice waits for the next one.
-            Ok(decision) if !failed => {
+            Ok((decision, receipt)) if !failed => {
+                *self.receipt = receipt;
                 with_peer_notices(self.runtime, &actor, outcome_decision(decision, self.presentation))
             }
-            Ok(decision) => outcome_decision(decision, self.presentation),
+            Ok((decision, receipt)) => {
+                *self.receipt = receipt;
+                outcome_decision(decision, self.presentation)
+            }
             Err(error) => fold(error, Refusal::Settle),
         }
     }
@@ -1184,17 +1243,19 @@ impl Dispatcher<'_> {
             |session| {
                 let open_calls = open_calls.clone();
                 async move {
-                    match &open_calls {
+                    let stop = match &open_calls {
                         OpenCalls::Abandon => session.on_child_turn_end().await.map(Stop::Taken),
                         OpenCalls::Hold { answered } => session.on_child_turn_end_holding(answered).await,
-                    }
+                    }?;
+                    receipted(&session, stop)
                 }
             },
         )
         .await
         {
             Ok(Stop::Held(running)) => HookDecision::Held { running },
-            Ok(Stop::Taken(decision)) => {
+            Ok(Stop::Taken((decision, receipt))) => {
+                *self.receipt = receipt;
                 let actor = Actor {
                     root,
                     child: Some(child),
@@ -1229,17 +1290,19 @@ impl Dispatcher<'_> {
                 let value = value.clone();
                 let open_calls = open_calls.clone();
                 async move {
-                    match &open_calls {
+                    let stop = match &open_calls {
                         OpenCalls::Abandon => session.on_child_end(value).await.map(Stop::Taken),
                         OpenCalls::Hold { answered } => session.on_child_end_holding(value, answered).await,
-                    }
+                    }?;
+                    receipted(&session, stop)
                 }
             },
         )
         .await
         {
             Ok(Stop::Held(running)) => HookDecision::Held { running },
-            Ok(Stop::Taken(decision)) => {
+            Ok(Stop::Taken((decision, receipt))) => {
+                *self.receipt = receipt;
                 // The child is finished unless it is being asked to return something
                 // else, so what it still stands behind ends here: its vouches must not
                 // outlive its return, and its parent's turn end is not its own.
@@ -1278,18 +1341,39 @@ impl Dispatcher<'_> {
             self.options,
             |session| {
                 let (value, operation) = (value.clone(), operation.clone());
-                async move { session.on_child_return(value, operation).await }
+                async move {
+                    let decision = session.on_child_return(value, operation).await?;
+                    let receipt = session.return_receipt(&decision)?;
+                    Ok((decision, receipt))
+                }
             },
         )
         .await
         {
-            Ok(decision) => return_decision(said, decision),
+            Ok((decision, receipt)) => {
+                *self.receipt = receipt;
+                return_decision(said, decision)
+            }
             // A retry naming a held operation with other words is the host's to correct, by its
             // class: nothing is in the model's way.
             Err(error @ EventError::ReturnRetryChanged) => refuse(error),
             Err(error) => fold(error, Refusal::Block),
         }
     }
+}
+
+/// A taken stop's return decision, beside the receipt of what it crossed.
+fn receipted(
+    session: &Session,
+    stop: Stop<ChildReturnDecision>,
+) -> Result<Stop<(ChildReturnDecision, Option<ReleaseReceipt>)>, EventError> {
+    Ok(match stop {
+        Stop::Held(running) => Stop::Held(running),
+        Stop::Taken(decision) => {
+            let receipt = session.return_receipt(&decision)?;
+            Stop::Taken((decision, receipt))
+        }
+    })
 }
 
 fn outcome_decision(
@@ -2352,7 +2436,8 @@ mod tests {
                 &runtime,
                 HookEvent::TurnEnd {
                     actor: actor.clone(),
-                    open_calls: appa_runtime_api::OpenCalls::Abandon
+                    open_calls: appa_runtime_api::OpenCalls::Abandon,
+                    answer: None,
                 }
             )
             .await,
@@ -2571,6 +2656,7 @@ mod tests {
             HookEvent::TurnEnd {
                 actor,
                 open_calls: held_answering(&[]),
+                answer: None,
             },
         )
         .await;
@@ -2614,6 +2700,7 @@ mod tests {
             HookEvent::TurnEnd {
                 actor: actor.clone(),
                 open_calls: held_answering(&["toolu-earlier"]),
+                answer: None,
             },
         )
         .await;
@@ -2634,6 +2721,7 @@ mod tests {
             HookEvent::TurnEnd {
                 actor,
                 open_calls: held_answering(&["toolu-sleep"]),
+                answer: None,
             },
         )
         .await;
@@ -3919,6 +4007,7 @@ mod tests {
             HookEvent::TurnEnd {
                 actor,
                 open_calls: appa_runtime_api::OpenCalls::Abandon,
+                answer: None,
             },
         )
         .await;

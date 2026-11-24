@@ -843,6 +843,7 @@ mod tests {
                         child: None,
                     },
                     open_calls: appa_runtime_api::OpenCalls::Abandon,
+                    answer: None,
                 },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "empty", "error",

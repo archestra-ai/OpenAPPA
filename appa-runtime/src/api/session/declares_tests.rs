@@ -785,6 +785,51 @@ async fn a_deferred_child_that_narrowed_is_answered_deferred_at_its_stop_and_not
     assert_eq!(crossings(&runtime), 0);
 }
 
+/// A held return crossed nothing, so it has no receipt, and its record is no released content:
+/// a receipt forged to name it does not release.
+#[tokio::test]
+async fn a_held_return_has_no_receipt_and_its_record_releases_nothing() {
+    use appa_runtime_api::{ReleaseDigest, ReleaseReceipt, ReleaseRefusal};
+    let Deployed { runtime, .. } = deployed(false);
+    let child = deferred_child(&runtime).await;
+    tainted(&runtime, &child).await;
+    let held = child
+        .on_child_end(Some("the answer".to_string()))
+        .await
+        .expect("the stop is judged");
+    assert!(matches!(held, ChildReturnDecision::Deferred));
+    assert_eq!(child.return_receipt(&held).expect("the family reads"), None);
+
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    let position = |held: fn(&Fact) -> bool| log.facts().iter().position(held).expect("recorded") as u64;
+    let deferred = position(|fact| matches!(fact, Fact::ReturnDeferred { .. }));
+    let tainted = position(|fact| {
+        matches!(
+            fact,
+            Fact::ValueAdmitted {
+                provenance: appa_engine::value::Provenance::ToolResult { .. },
+                ..
+            }
+        )
+    });
+    let sink = raw(serde_json::json!({ "a": 1 }));
+    let forged = ReleaseReceipt {
+        session: root(),
+        fact_position: deferred,
+        digest: ReleaseDigest::of(b"the answer"),
+    };
+    assert_eq!(
+        runtime.judge_release(&[forged], "fetch", &sink).await,
+        Err(ReleaseRefusal::Integrity)
+    );
+    let admitted = ReleaseReceipt {
+        session: root(),
+        fact_position: tainted,
+        digest: ReleaseDigest::of(b"tainted"),
+    };
+    assert_eq!(runtime.judge_release(&[admitted], "fetch", &sink).await, Ok(()));
+}
+
 #[tokio::test]
 async fn a_deferred_child_that_narrowed_nothing_returns_at_its_stop() {
     let Deployed { runtime, .. } = deployed(false);

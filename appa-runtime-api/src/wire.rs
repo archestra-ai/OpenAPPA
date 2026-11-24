@@ -51,9 +51,9 @@ use serde_json::value::RawValue;
 use crate::{
     Actor, AdapterName, AutoApply, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
     LineVariant, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes,
-    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, Remediable, Remedy, RetryHint,
-    ReturnOperation, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionSettings, SessionTitle, SpawnBinding,
-    SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
+    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, ReleaseReceipt, Remediable, Remedy,
+    RetryHint, ReturnOperation, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionSettings, SessionTitle,
+    SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -266,7 +266,7 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Peer,
             Field::Title,
         ],
-        EventName::TurnEnd => &[Field::RootId, Field::ChildId, Field::AnsweredCallIds],
+        EventName::TurnEnd => &[Field::RootId, Field::ChildId, Field::AnsweredCallIds, Field::Value],
         EventName::ToolCall => &[
             Field::RootId,
             Field::ChildId,
@@ -806,12 +806,17 @@ impl WireEvent {
                     ..Self::bare(adapter, EventName::Prompt)
                 }
             }
-            HookEvent::TurnEnd { actor, open_calls } => {
+            HookEvent::TurnEnd {
+                actor,
+                open_calls,
+                answer,
+            } => {
                 let (root_id, child_id) = ids(actor)?;
                 Self {
                     root_id: Some(root_id),
                     child_id,
                     answered_call_ids: answered_on_wire(open_calls),
+                    value: answer.clone(),
                     ..Self::bare(adapter, EventName::TurnEnd)
                 }
             }
@@ -1087,7 +1092,12 @@ impl WireEvent {
             let identified = (served.identify_tool)(&raw.tool)?;
             Ok((raw, identified))
         };
-        let value = value.filter(|value| !value.is_empty());
+        // A turn's answer is the bytes the host may deliver, so an empty one is an answer; any
+        // other event's empty value is none.
+        let (answer, value) = match name {
+            EventName::TurnEnd => (value, None),
+            _ => (None, value.filter(|value| !value.is_empty())),
+        };
         let prompt = prompt_id.filter(|prompt| !prompt.is_empty()).map(PromptKey);
 
         let accepted = |event: HookEvent| {
@@ -1124,6 +1134,7 @@ impl WireEvent {
             EventName::TurnEnd => accepted(HookEvent::TurnEnd {
                 actor: actor()?,
                 open_calls: open_calls_of(answered_call_ids),
+                answer,
             }),
             EventName::SpawnResume => {
                 let actor = actor()?;
@@ -1462,6 +1473,10 @@ pub struct WireDecision {
     pub deciding: Option<Outcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryHint>,
+    /// Where the runtime recorded what this decision lets the host deliver: an admitted
+    /// result, a crossed return, or a turn's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ReleaseReceipt>,
 }
 
 impl WireDecision {
@@ -1483,7 +1498,13 @@ impl WireDecision {
             outcomes: None,
             deciding: None,
             retry: None,
+            receipt: None,
         }
+    }
+
+    /// This decision with the receipt of what it lets the host deliver.
+    pub fn with_receipt(self, receipt: Option<ReleaseReceipt>) -> Self {
+        Self { receipt, ..self }
     }
 
     fn refusal(outcomes: Option<&Outcomes>, decision: DecisionName) -> Self {
@@ -1607,6 +1628,12 @@ impl WireDecision {
             _ if held.is_some() || deciding.is_some() || retry.is_some() => {
                 return Err(malformed(format!("{name:?} with refusal outcomes")));
             }
+            _ => {}
+        }
+        // Only a decision that lets the host deliver something has a receipt for it.
+        match name {
+            DecisionName::Ack | DecisionName::DeliverValue | DecisionName::ChildReturn => {}
+            _ if self.receipt.is_some() => return Err(malformed(format!("{name:?} with a receipt"))),
             _ => {}
         }
         Ok(match name {

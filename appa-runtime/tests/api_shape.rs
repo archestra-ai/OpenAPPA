@@ -78,8 +78,13 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: Option<appa_runtime_api::PeerFrame> = peer;
             let _: Option<appa_runtime_api::SessionTitle> = title;
         }
-        HookEvent::TurnEnd { actor, open_calls } => {
+        HookEvent::TurnEnd {
+            actor,
+            open_calls,
+            answer,
+        } => {
             let _: appa_runtime_api::OpenCalls = open_calls;
+            let _: Option<String> = answer;
             let Actor { root, child } = actor;
             let _: TrajectoryId = root;
             let _: Option<TrajectoryId> = child;

@@ -42,6 +42,7 @@ mod host_aliases;
 mod huggingface_policy;
 mod init_cli;
 mod input_substitution;
+mod judge_release;
 mod kagent_fixture_wire;
 mod kagent_returns;
 mod launchdarkly_policy;

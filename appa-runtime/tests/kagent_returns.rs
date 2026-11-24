@@ -118,11 +118,24 @@ async fn posted(runtime: &Runtime, event: serde_json::Value) -> (u16, serde_json
 }
 
 /// One wire event in, the answer out. The status the answer travels under is
-/// asserted here: a kagent plugin treats a non-2xx as a refusal.
+/// asserted here: a kagent plugin treats a non-2xx as a refusal. The receipt of what the
+/// answer delivers is set apart: [`receipted`] reads it.
 async fn answered(runtime: &Runtime, event: serde_json::Value) -> serde_json::Value {
-    let (status, answer) = posted(runtime, event.clone()).await;
+    receipted(runtime, event).await.0
+}
+
+/// [`answered`], beside the receipt the answer carries.
+async fn receipted(
+    runtime: &Runtime,
+    event: serde_json::Value,
+) -> (serde_json::Value, Option<appa_runtime_api::ReleaseReceipt>) {
+    let (status, mut answer) = posted(runtime, event.clone()).await;
     assert_eq!(status, 200, "the hook refused {}: {answer}", event["event"]);
-    answer
+    let receipt = answer
+        .as_object_mut()
+        .and_then(|answer| answer.remove("receipt"))
+        .map(|receipt| serde_json::from_value(receipt).expect("a receipt reads"));
+    (answer, receipt)
 }
 
 fn decision(name: &str) -> serde_json::Value {
@@ -435,7 +448,13 @@ async fn a_return_declared_as_spoken_crosses_at_the_child_end_and_the_spawn_resu
     );
     assert_eq!(answered(&runtime, child_result()).await, ack());
 
-    assert_eq!(answered(&runtime, child_end(RETURN)).await, ack(), "the return crosses");
+    let (crossed, receipt) = receipted(&runtime, child_end(RETURN)).await;
+    assert_eq!(crossed, ack(), "the return crosses");
+    assert_eq!(
+        receipt.map(|receipt| receipt.digest),
+        Some(appa_runtime_api::ReleaseDigest::of(RETURN.as_bytes())),
+        "the crossing carries the receipt of what crossed"
+    );
     assert_eq!(crossings(&runtime), vec![None], "it crossed as the child spelled it");
 
     assert_eq!(

@@ -435,6 +435,10 @@ impl Default for EmbeddedPresentationOptions {
 pub struct EmbeddedHookOutcome {
     pub decision: appa_runtime_api::HookDecision,
     pub presentation: Option<RemedyPresentation>,
+    /// Where the runtime recorded what the decision lets the host deliver: the admitted
+    /// result, the crossed return, or the turn's answer. A release judgment reads its label
+    /// from there.
+    pub receipt: Option<appa_runtime_api::ReleaseReceipt>,
 }
 
 /// Explains why a remedy call was refused execution.
@@ -3128,6 +3132,88 @@ impl Runtime {
             .engine()
             .trajectory_status(&view, id, pinned_settings(&log).clone())
             .ok_or_else(|| StatusReadError::Replay("the root has no status projection".to_string()))
+    }
+
+    /// Whether content made of the components `receipts` name may reach the sink call
+    /// `sink(arguments)`. Each receipt is checked against the log it names, the content's
+    /// label is the meet of theirs, crossed by rank name to the head registry, and the sink's
+    /// contract is judged against it there: membership is read now, and a gap stands lifted
+    /// only where a stock `approve` authority covers it. Nothing is appended.
+    pub async fn judge_release(
+        &self,
+        receipts: &[appa_runtime_api::ReleaseReceipt],
+        sink: &str,
+        arguments: &serde_json::value::RawValue,
+    ) -> Result<(), appa_runtime_api::ReleaseRefusal> {
+        use appa_runtime_api::{ReleaseRefusal, RetryHint};
+        let Some(first) = receipts.first() else {
+            return Err(ReleaseRefusal::MissingFact(RetryHint::AfterRepair));
+        };
+        let deployment = self.inner.deployment();
+        let mut families: std::collections::BTreeMap<&TrajectoryId, Vec<&appa_runtime_api::ReleaseReceipt>> =
+            std::collections::BTreeMap::new();
+        for receipt in receipts {
+            families.entry(&receipt.session).or_default().push(receipt);
+        }
+        let mut label = appa_engine::label::Label::top();
+        let mut principals = std::collections::BTreeSet::new();
+        for (root, receipts) in families {
+            let (labels, principal) = self.released_labels(&deployment, root, &receipts)?;
+            principals.insert(principal);
+            label = labels.iter().fold(label, |label, component| label.combine(component));
+        }
+        let principal = match principals.into_iter().collect::<Vec<_>>().as_slice() {
+            [principal] => principal.clone(),
+            _ => return Err(ReleaseRefusal::Integrity),
+        };
+        let session = self
+            .session(&first.session, &first.session)
+            .map_err(|_| ReleaseRefusal::Integrity)?;
+        session
+            .judge_release(&label, principal.as_ref(), sink, arguments.get().as_bytes())
+            .await
+    }
+
+    /// The labels of the released records `receipts` name in `root`'s log, under the head
+    /// registry's trust chain, beside the reader that family acts for.
+    fn released_labels(
+        &self,
+        deployment: &Deployment,
+        root: &TrajectoryId,
+        receipts: &[&appa_runtime_api::ReleaseReceipt],
+    ) -> Result<(Vec<appa_engine::label::Label>, Option<appa_engine::label::ReaderId>), appa_runtime_api::ReleaseRefusal>
+    {
+        use appa_runtime_api::{ReleaseRefusal, RetryHint};
+        let log = match self.inner.store.log(root) {
+            Ok(log) => log,
+            Err(appa_eventlog::ReadError::UnknownRoot { .. }) => return Err(ReleaseRefusal::Integrity),
+            Err(error) => {
+                self.inner
+                    .note_store_error(Some(root), crate::events::StoreOperation::Read, &error);
+                return Err(ReleaseRefusal::MissingFact(RetryHint::Later));
+            }
+        };
+        let policy = self
+            .inner
+            .resolve_policy(deployment, &log)
+            .map_err(|error| match error {
+                EventError::PolicyMoved { .. } => ReleaseRefusal::MissingFact(RetryHint::Later),
+                _ => ReleaseRefusal::Integrity,
+            })?;
+        let view = policy.rebuild_view(&log).map_err(|_| ReleaseRefusal::Integrity)?;
+        let labels = receipts
+            .iter()
+            .map(|receipt| {
+                deployment
+                    .resident
+                    .released_label(&view, receipt.fact_position, &receipt.digest)
+                    .map_err(|refusal| {
+                        tracing::info!(root = %root.0, position = receipt.fact_position, %refusal, "a receipt names no released record");
+                        ReleaseRefusal::Integrity
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((labels, view.principal().cloned()))
     }
 
     /// Every decision this family's log recorded, in log order.
@@ -7021,6 +7107,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::TurnEnd {
                 actor: parent.clone(),
                 open_calls: appa_runtime_api::OpenCalls::Abandon,
+                answer: None,
             },
         )
         .await;
@@ -7044,6 +7131,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::TurnEnd {
                 actor: child.clone(),
                 open_calls: appa_runtime_api::OpenCalls::Abandon,
+                answer: None,
             },
         )
         .await;
@@ -7096,6 +7184,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::TurnEnd {
                 actor: actor.clone(),
                 open_calls: appa_runtime_api::OpenCalls::Abandon,
+                answer: None,
             },
         )
         .await;
@@ -7151,6 +7240,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::TurnEnd {
                 actor: other,
                 open_calls: appa_runtime_api::OpenCalls::Abandon,
+                answer: None,
             },
         )
         .await;
@@ -7198,6 +7288,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::TurnEnd {
                 actor: actors[1].clone(),
                 open_calls: appa_runtime_api::OpenCalls::Abandon,
+                answer: None,
             },
         )
         .await;
@@ -7669,6 +7760,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             appa_runtime_api::HookEvent::TurnEnd {
                 actor: actor.clone(),
                 open_calls: appa_runtime_api::OpenCalls::Abandon,
+                answer: None,
             },
         )
         .await;

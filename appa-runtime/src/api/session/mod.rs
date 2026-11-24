@@ -32,6 +32,7 @@ mod call;
 mod child;
 mod consult;
 mod drive;
+mod release;
 mod remedy;
 mod result;
 

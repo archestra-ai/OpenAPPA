@@ -473,6 +473,7 @@ impl Runtime {
                             review,
                             display: Vec::new(),
                         }),
+                        receipt: None,
                     });
                 }
                 ToolCallDecision::Allow { .. } => {}
@@ -625,6 +626,7 @@ fn outcome_of(decision: ToolResultDecision, proved: PriorCall) -> Result<Embedde
                 outcomes: presentation.as_ref().and_then(|presentation| presentation.outcomes),
             },
             presentation,
+            receipt: None,
         }),
         ToolResultDecision::Keep => {
             let body = proved.ok_or_else(|| refused("the read was acknowledged without an admitted body"))?;
@@ -637,6 +639,7 @@ fn deliver(body: String) -> EmbeddedHookOutcome {
     EmbeddedHookOutcome {
         decision: HookDecision::DeliverValue { value: body },
         presentation: None,
+        receipt: None,
     }
 }
 
@@ -763,6 +766,7 @@ fn stored_outcome(row: &EmbeddedRow) -> Result<EmbeddedHookOutcome, EmbeddedPeer
     Ok(EmbeddedHookOutcome {
         decision: stored.into(),
         presentation: None,
+        receipt: None,
     })
 }
 

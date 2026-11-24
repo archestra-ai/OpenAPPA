@@ -695,6 +695,14 @@ pub enum Fact {
         trajectory: TrajectoryId,
         kind: BoundaryKind,
     },
+    /// The family root's final answer of a turn: the digest of the bytes its host may deliver,
+    /// at the root's label as it stood then. Nothing crosses and no label moves; a release
+    /// judgment reads the label from here.
+    AnswerReleased {
+        trajectory: TrajectoryId,
+        digest: appa_runtime_api::ReleaseDigest,
+        label: Label,
+    },
 }
 
 impl Fact {
@@ -757,7 +765,8 @@ impl Fact {
             | Fact::ReturnDeferred { trajectory, .. }
             | Fact::ReturnAccepted { trajectory, .. }
             | Fact::ReturnDiscarded { trajectory, .. }
-            | Fact::Boundary { trajectory, .. } => trajectory,
+            | Fact::Boundary { trajectory, .. }
+            | Fact::AnswerReleased { trajectory, .. } => trajectory,
         }
     }
 }

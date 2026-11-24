@@ -344,6 +344,10 @@ pub enum EngineEvent {
         id: ChildReturnId,
         decision: ReturnDecision,
     },
+    /// The root's final answer of a turn, by the digest of its bytes.
+    Answer {
+        digest: appa_runtime_api::ReleaseDigest,
+    },
 }
 
 /// What `execute_remedy_plan` carries beside the offer id: the floor the child's return may
@@ -493,6 +497,8 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::UnmergedCrossing => ReplayRefusalClass("unmerged_crossing"),
             TransitionRefusal::ObservationMismatch => ReplayRefusalClass("observation_mismatch"),
             TransitionRefusal::UnknownReturn => ReplayRefusalClass("unknown_return"),
+            TransitionRefusal::AnswerOffRoot => ReplayRefusalClass("answer_off_root"),
+            TransitionRefusal::AnswerLabelMismatch => ReplayRefusalClass("answer_label_mismatch"),
             TransitionRefusal::UnknownAuthority(..) => ReplayRefusalClass("unknown_authority"),
             TransitionRefusal::UnknownSanitizer(..) => ReplayRefusalClass("unknown_sanitizer"),
             TransitionRefusal::SanitizerUnapplicable => ReplayRefusalClass("sanitizer_unapplicable"),
@@ -1607,7 +1613,8 @@ impl RuntimeEngine {
             | Fact::CallApproved { .. }
             | Fact::CallApprovalConsumed { .. }
             | Fact::CandidateConsumed { .. }
-            | Fact::BasisAdvanced { .. } => return Some(None),
+            | Fact::BasisAdvanced { .. }
+            | Fact::AnswerReleased { .. } => return Some(None),
             Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
         };
         Some(Some(event))
@@ -1674,7 +1681,103 @@ impl RuntimeEngine {
                 id,
                 decision,
             } => self.settle_return(view, parent, id, decision),
+            EngineEvent::Answer { digest } => self.answer(view, trajectory, digest),
         }
+    }
+
+    /// Records the root's answer at the label the root holds; the same answer again records
+    /// nothing.
+    fn answer(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        digest: appa_runtime_api::ReleaseDigest,
+    ) -> Result<EngineDecision, EngineRefusal> {
+        let report = appa_engine::transition::AnswerReport {
+            trajectory: trajectory.clone(),
+            digest,
+        };
+        match self.engine.handle(view, CoreEvent::Answer(report)) {
+            Ok(decided) => Ok(EngineDecision {
+                append: decided.append.map(ValidatedFactBatch::into_unsealed),
+                then: Next::Done,
+            }),
+            Err(TransitionError::BranchEnded) => Err(EngineRefusal::Ended),
+            Err(error) => Err(EngineRefusal::Invariant {
+                detail: format!("recording an answer: {error}"),
+            }),
+        }
+    }
+
+    /// Where the log records what `receipted` names, as a receipt for the family `view` replays.
+    pub(crate) fn receipt(
+        &self,
+        view: &EngineView,
+        receipted: appa_engine::engine::Receipted<'_>,
+    ) -> Option<appa_runtime_api::ReleaseReceipt> {
+        self.engine
+            .receipt_of(view, receipted)
+            .map(|(fact_position, digest)| appa_runtime_api::ReleaseReceipt {
+                session: view.family().clone(),
+                fact_position,
+                digest,
+            })
+    }
+
+    /// The label of the released record at `position` of the family `view` replays, crossed to
+    /// this engine's trust chain by rank name.
+    pub(crate) fn released_label(
+        &self,
+        view: &EngineView,
+        position: u64,
+        digest: &appa_runtime_api::ReleaseDigest,
+    ) -> Result<Label, appa_engine::engine::ReceiptRefusal> {
+        self.engine.released_label(view, position, digest)
+    }
+
+    /// One round of judging content at `label` into the sink call `sink(arguments)` under this
+    /// engine's registry, with the membership answers `evidence` carries: judged, or the
+    /// membership consults the judgment still needs. Only an authority `approves` admits lifts
+    /// a gap. Nothing is recorded.
+    pub(crate) fn judge_release(
+        &self,
+        label: &Label,
+        sink: &str,
+        arguments: &[u8],
+        principal: Option<&ReaderId>,
+        evidence: &[ExternalEvidence],
+        approves: impl Fn(&AuthorityName) -> bool,
+    ) -> ReleaseRound {
+        use appa_engine::engine::{ReleaseError, ReleaseJudgment};
+        use appa_runtime_api::ReleaseRefusal;
+        let act = match self.act_audience(evidence, principal) {
+            Ok(act) => act,
+            Err(AudienceFailure::Consult(requests)) => return ReleaseRound::Consult(requests),
+            Err(AudienceFailure::Refused(unobtained)) => {
+                return ReleaseRound::Judged(Err(ReleaseRefusal::MissingFact(unobtained.retry)));
+            }
+        };
+        let judged = self.engine.judge_release(
+            label,
+            ToolName::new(sink),
+            arguments,
+            act.payload.clone(),
+            principal.cloned(),
+            approves,
+        );
+        ReleaseRound::Judged(match judged {
+            Ok(ReleaseJudgment::Released { .. }) => Ok(()),
+            Ok(ReleaseJudgment::Withheld { .. }) => Err(ReleaseRefusal::HardBlock),
+            Err(ReleaseError::MembershipNeeded { needed }) => match self.audience_consult(&act, needed, principal) {
+                Ok(AudienceConsult::Requests(requests)) => return ReleaseRound::Consult(requests),
+                Ok(AudienceConsult::Unresolved(unobtained)) => Err(ReleaseRefusal::MissingFact(unobtained.retry)),
+                Ok(AudienceConsult::Unconfigured(_)) | Err(_) => Err(ReleaseRefusal::Integrity),
+            },
+            Err(error) => {
+                tracing::info!(%error, "a release names a sink no release may be judged into");
+                Err(ReleaseRefusal::Integrity)
+            }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3942,6 +4045,12 @@ impl UnresolvedAudience<'_> {
             UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
         }
     }
+}
+
+/// Where one round of a release judgment ends: judged, or the membership consults it needs.
+pub(crate) enum ReleaseRound {
+    Judged(Result<(), appa_runtime_api::ReleaseRefusal>),
+    Consult(Vec<ExternalRequest>),
 }
 
 /// Where one act's audience round ends: judged, presented short of a judgment (consults

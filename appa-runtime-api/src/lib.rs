@@ -5,11 +5,13 @@
 pub mod inventory;
 mod launch;
 mod peer;
+mod release;
 mod settings;
 mod wire;
 
 pub use launch::{LaunchStart, LaunchToken, LaunchTokenError, StartKind};
 pub use peer::{PeerAddress, PeerDigest, PeerFrame, PeerValueError, SessionTitle};
+pub use release::{ReleaseDigest, ReleaseReceipt, ReleaseRefusal};
 pub use settings::{AutoApply, Initiator, LineVariant, LineVariantError, SessionSettings};
 
 pub use wire::{
@@ -638,7 +640,13 @@ pub enum HookEvent {
     /// still open names a call the harness never ran, except an identified
     /// spawn whose subagent is still running: a background subagent works
     /// past its parent's turn.
-    TurnEnd { actor: Actor, open_calls: OpenCalls },
+    TurnEnd {
+        actor: Actor,
+        open_calls: OpenCalls,
+        /// The root's final answer of the turn, as the bytes the host may deliver. The runtime
+        /// records it at the root's label and answers with its receipt.
+        answer: Option<String>,
+    },
     /// A child finished without output. Close a no-return child permanently;
     /// retain a child with a crossing return contract for subsequent turns.
     ChildTurnEnd {
