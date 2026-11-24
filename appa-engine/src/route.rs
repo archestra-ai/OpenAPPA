@@ -49,9 +49,11 @@ use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
-use crate::label::{Audience, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions};
+use crate::label::{
+    Audience, Evaluation, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions,
+};
 use crate::names::{AuthorityName, SanitizerName};
-use crate::plan::{self, ExecutableRemedyPlan, GapPower, RemedyStep};
+use crate::plan::{self, ExecutableRemedyPlan, GapPower, RemedyStep, RulingPower};
 use crate::projection::Views;
 use crate::registry::Registry;
 use crate::value::{CanonicalDigest, ResolvedCall, ToolName};
@@ -489,6 +491,7 @@ impl<'a> Search<'a> {
         if eval.is_hard() {
             return Ok(());
         }
+        let mut terminal = false;
         if eval.requirement_gaps.is_empty() && eval.narrowing.is_none() {
             found.push(self.found(
                 path.steps.clone(),
@@ -537,15 +540,18 @@ impl<'a> Search<'a> {
                         found.push(self.found(steps, RouteOutcome::Prefix(resume), state, &eval.requirement_gaps));
                     }
                     None => {
+                        terminal = true;
                         steps.extend(self.plan_steps(&plan));
                         found.push(self.found(steps, RouteOutcome::Complete, state, &eval.requirement_gaps));
                     }
                 }
             }
         }
-        // A terminal plan covers every gap and no ruling covers `prior` (CHK-12), so a
-        // tool that clears something exists only where no terminal plan does: the RMD-13
-        // condition on tool plans holds here by construction, at every depth.
+        // RMD-13 names tool plans only where no terminal plan stands: a ruling that waives a
+        // `prior` already covers what a preceding tool would clear.
+        if terminal {
+            return Ok(());
+        }
         for tool in self
             .registry
             .tools()
@@ -578,7 +584,8 @@ impl<'a> Search<'a> {
 
     /// Every way `tool` runs first from `state`, with `budget` preceding tools still allowed,
     /// this one included. Its own `prior` gaps recurse into the tools that clear them; any
-    /// other gap or a call-dependent contract halts the route here.
+    /// other gap, `prior` gaps authorities waive, or a call-dependent contract halts the route
+    /// here, where its own block plans the rulings.
     fn run(
         &mut self,
         tool: &ToolAnnotation,
@@ -615,7 +622,14 @@ impl<'a> Search<'a> {
             &self.has_reserved(),
             &membership,
         )?;
-        if eval.requirement_gaps.iter().any(|gap| !matches!(gap, Gap::Prior(_))) {
+        let waived = |gap: &Gap| {
+            self.registry
+                .authorities()
+                .iter()
+                .any(|authority| plan::gap_cover(authority, gap, &tool.tags, &membership) == Evaluation::Holds)
+        };
+        let call_bound = eval.requirement_gaps.iter().any(|gap| !matches!(gap, Gap::Prior(_)));
+        if call_bound || (!eval.requirement_gaps.is_empty() && eval.requirement_gaps.iter().all(waived)) {
             return halt(Halt::Block(eval.requirement_gaps));
         }
         if eval.requirement_gaps.is_empty() {
@@ -800,14 +814,15 @@ impl<'a> Search<'a> {
                     authority,
                     reader_ceiling,
                 },
-            )) => GapPower::Ruling {
-                mandate: &self
+            )) => GapPower::Ruling(RulingPower::of(
+                key,
+                &self
                     .registry
                     .authority(authority)
                     .expect("a route names only registered authorities")
                     .mandate,
-                reader_ceiling: reader_ceiling.as_ref(),
-            },
+                reader_ceiling.as_ref(),
+            )),
         }
     }
 
@@ -819,7 +834,7 @@ impl<'a> Search<'a> {
         let within = self.registry.audience().within_assertions();
         let mut strictly_less = false;
         for key in a.keys.iter().chain(b.keys.iter().filter(|key| !a.keys.contains(key))) {
-            match plan::gap_power_cmp(key, &self.power_of(a, key), &self.power_of(b, key), within) {
+            match plan::gap_power_cmp(&self.power_of(a, key), &self.power_of(b, key), within) {
                 Some(Ordering::Less) => strictly_less = true,
                 Some(Ordering::Equal) => {}
                 Some(Ordering::Greater) | None => return false,
@@ -1308,6 +1323,60 @@ mod tests {
                 contingent([tool_outcome("backup")])
             )],
             "re-planning from the realized log continues where the prefix stopped"
+        );
+    }
+
+    fn prior_waiver(name: &str, kind: &str) -> Authority {
+        authority(
+            name,
+            Mandate {
+                prior_waivers: vec![effect(kind)],
+                ..Mandate::default()
+            },
+        )
+    }
+
+    #[test]
+    fn a_ruling_that_waives_the_prior_leaves_no_preceding_call_to_plan() {
+        let registry = Deployment::of(vec![
+            emitting("review", &["reviewed"]),
+            requiring_prior(tool("deploy"), &["reviewed"]),
+        ])
+        .authorities(vec![prior_waiver("desk", "reviewed")])
+        .registry();
+        let log = vec![opened(TRUSTED, Audience::public())];
+        let deploy = call("deploy", json!({}));
+        let waived = vec![route(
+            vec![RouteStep::Authorize {
+                authority: AuthorityName::new("desk"),
+                covers: vec![prior("reviewed")],
+                call: deploy.digest(),
+            }],
+            RouteOutcome::Complete,
+            contingent([decision("desk")]),
+        )];
+
+        assert_eq!(routes(&registry, &log, &deploy, RouteDepth::ONE), waived);
+        assert_eq!(routes(&registry, &log, &deploy, depth(3)), waived);
+    }
+
+    #[test]
+    fn a_prerequisite_whose_own_prior_an_authority_waives_is_proposed_at_its_block() {
+        let registry = Deployment::of(vec![
+            requiring_prior(emitting("review", &["reviewed"]), &["inspected"]),
+            requiring_prior(tool("deploy"), &["reviewed"]),
+        ])
+        .authorities(vec![prior_waiver("desk", "inspected")])
+        .registry();
+        let log = vec![opened(TRUSTED, Audience::public())];
+
+        assert_eq!(
+            routes(&registry, &log, &call("deploy", json!({})), depth(2)),
+            vec![route(
+                vec![],
+                propose("review", vec![prior("reviewed")], Halt::Block(vec![prior("inspected")])),
+                Certainty::Guaranteed
+            )]
         );
     }
 

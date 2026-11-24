@@ -519,18 +519,22 @@ fn narrowing_impact(
             &mut needs,
         )
         .is_empty();
+        let held = |gap: &Gap, needs: &mut NeededAtoms| {
+            registry.authorities().iter().fold(false, |held, authority| {
+                held | needs.holds(gap_cover(authority, gap, &annotation.tags, &context))
+            })
+        };
         let covered = |needs: &mut NeededAtoms| {
             // Every gap and authority is read, so an undecided cover drops the variant whatever the order.
             gaps.iter().fold(true, |all, gap| {
-                let held = registry.authorities().iter().fold(false, |held, authority| {
-                    held | needs.holds(gap_cover(authority, gap, &annotation.tags, &context))
-                });
+                let held = held(gap, needs);
                 all && held
             })
         };
-        // An input hop, or another tool's call for a `prior` gap, is a route outside this
-        // one-stage view.
-        let redispatch = gaps.iter().any(|gap| matches!(gap, Gap::Prior(_)));
+        // An input hop, or another tool's call for a `prior` gap no authority waives, is a route
+        // outside this one-stage view.
+        let redispatch =
+            |needs: &mut NeededAtoms| gaps.iter().any(|gap| matches!(gap, Gap::Prior(_)) && !held(gap, needs));
         let hops = |needs: &mut NeededAtoms| {
             !input_hops(
                 registry,
@@ -546,7 +550,7 @@ fn narrowing_impact(
         };
         let standing = if settles && gaps.is_empty() {
             Some(Standing::Clear)
-        } else if redispatch || hops(&mut needs) {
+        } else if redispatch(&mut needs) || hops(&mut needs) {
             None
         } else if settles && covered(&mut needs) {
             Some(Standing::SignOff)
@@ -879,7 +883,7 @@ fn least_mandate_first(
             .find(|&index| {
                 (0..candidates.len())
                     .filter(|&other| !used[other] && other != index)
-                    .all(|other| !plan_precedes(gaps, &powers[other], &powers[index], context.within))
+                    .all(|other| !plan_precedes(&powers[other], &powers[index], context.within))
             })
             .expect("a finite strict partial order has a minimal element");
         used[next] = true;
@@ -892,10 +896,10 @@ fn least_mandate_first(
         .collect()
 }
 
-fn plan_precedes(gaps: &[Gap], a: &[GapPower<'_>], b: &[GapPower<'_>], within: &WithinAssertions) -> bool {
+fn plan_precedes(a: &[GapPower<'_>], b: &[GapPower<'_>], within: &WithinAssertions) -> bool {
     let mut strictly_less = false;
-    for ((gap, a), b) in gaps.iter().zip(a).zip(b) {
-        match gap_power_cmp(gap, a, b, within) {
+    for (a, b) in a.iter().zip(b) {
+        match gap_power_cmp(a, b, within) {
             Some(Ordering::Less) => strictly_less = true,
             Some(Ordering::Equal) => {}
             Some(Ordering::Greater) | None => return false,
@@ -907,10 +911,35 @@ fn plan_precedes(gaps: &[Gap], a: &[GapPower<'_>], b: &[GapPower<'_>], within: &
 pub(crate) enum GapPower<'a> {
     None,
     Substitution(&'a Audience),
-    Ruling {
-        mandate: &'a Mandate,
-        reader_ceiling: Option<&'a Audience>,
-    },
+    Ruling(RulingPower<'a>),
+}
+
+/// The part of an assigned authority's mandate that ranks its ruling on one gap, resolved once
+/// so that ranking compares it without re-reading the mandate.
+pub(crate) enum RulingPower<'a> {
+    Trust(crate::label::Trust),
+    Readers(&'a Audience),
+    Waivers(BTreeSet<&'a EffectKind>),
+    Attention,
+}
+
+impl<'a> RulingPower<'a> {
+    /// `reader_ceiling` is the resolved ceiling, read only for an `includes` gap.
+    pub(crate) fn of(gap: &Gap, mandate: &'a Mandate, reader_ceiling: Option<&'a Audience>) -> RulingPower<'a> {
+        match gap {
+            Gap::TrustFloor { .. } => RulingPower::Trust(
+                mandate
+                    .trust_ceiling
+                    .expect("a competent trust-floor authority declares a trust ceiling"),
+            ),
+            Gap::Includes { .. } => {
+                RulingPower::Readers(reader_ceiling.expect("a competent includes authority declares a reader ceiling"))
+            }
+            Gap::NoPrior(_) => RulingPower::Waivers(mandate.waivers.iter().collect()),
+            Gap::Prior(_) => RulingPower::Waivers(mandate.prior_waivers.iter().collect()),
+            Gap::Attention(_) => RulingPower::Attention,
+        }
+    }
 }
 
 struct RankingReads<'a> {
@@ -985,10 +1014,7 @@ fn assigned_power<'a>(
                 .as_ref(),
             _ => None,
         };
-        return GapPower::Ruling {
-            mandate,
-            reader_ceiling,
-        };
+        return GapPower::Ruling(RulingPower::of(gap, mandate, reader_ceiling));
     }
     let (Some(sanitizer), Gap::Includes { recipients }) = (candidate.hop(), gap) else {
         return GapPower::None;
@@ -1002,60 +1028,28 @@ fn assigned_power<'a>(
     }
 }
 
-pub(crate) fn gap_power_cmp(
-    gap: &Gap,
-    a: &GapPower<'_>,
-    b: &GapPower<'_>,
-    within: &WithinAssertions,
-) -> Option<Ordering> {
-    let ((a, a_readers), (b, b_readers)) = match (a, b) {
-        (GapPower::None, GapPower::None) => return Some(Ordering::Equal),
-        (GapPower::None, _) => return Some(Ordering::Less),
-        (_, GapPower::None) => return Some(Ordering::Greater),
-        (GapPower::Substitution(a), GapPower::Substitution(b)) => {
-            return inclusion_cmp(
+pub(crate) fn gap_power_cmp(a: &GapPower<'_>, b: &GapPower<'_>, within: &WithinAssertions) -> Option<Ordering> {
+    match (a, b) {
+        (GapPower::None, GapPower::None) => Some(Ordering::Equal),
+        (GapPower::None, _) => Some(Ordering::Less),
+        (_, GapPower::None) => Some(Ordering::Greater),
+        (GapPower::Substitution(a), GapPower::Substitution(b)) => inclusion_cmp(
+            a.derives_within_audience(b, within),
+            b.derives_within_audience(a, within),
+        ),
+        (GapPower::Substitution(_), GapPower::Ruling(_)) => Some(Ordering::Less),
+        (GapPower::Ruling(_), GapPower::Substitution(_)) => Some(Ordering::Greater),
+        (GapPower::Ruling(a), GapPower::Ruling(b)) => match (a, b) {
+            (RulingPower::Trust(a), RulingPower::Trust(b)) => Some(a.cmp(b)),
+            (RulingPower::Readers(a), RulingPower::Readers(b)) => inclusion_cmp(
                 a.derives_within_audience(b, within),
                 b.derives_within_audience(a, within),
-            );
-        }
-        (GapPower::Substitution(_), GapPower::Ruling { .. }) => return Some(Ordering::Less),
-        (GapPower::Ruling { .. }, GapPower::Substitution(_)) => return Some(Ordering::Greater),
-        (
-            GapPower::Ruling {
-                mandate: a,
-                reader_ceiling: a_readers,
-            },
-            GapPower::Ruling {
-                mandate: b,
-                reader_ceiling: b_readers,
-            },
-        ) => ((a, a_readers), (b, b_readers)),
-    };
-    match gap {
-        Gap::TrustFloor { .. } => {
-            let (a, b) = (a.trust_ceiling, b.trust_ceiling);
-            let a = a.expect("a competent trust-floor authority declares a trust ceiling");
-            let b = b.expect("a competent trust-floor authority declares a trust ceiling");
-            Some(a.cmp(&b))
-        }
-        Gap::Includes { .. } => {
-            let a = a_readers.expect("a competent includes authority declares a reader ceiling");
-            let b = b_readers.expect("a competent includes authority declares a reader ceiling");
-            inclusion_cmp(
-                a.derives_within_audience(b, within),
-                b.derives_within_audience(a, within),
-            )
-        }
-        Gap::NoPrior(_) => waiver_cmp(&a.waivers, &b.waivers),
-        Gap::Prior(_) => waiver_cmp(&a.prior_waivers, &b.prior_waivers),
-        Gap::Attention(_) => Some(Ordering::Equal),
+            ),
+            (RulingPower::Waivers(a), RulingPower::Waivers(b)) => inclusion_cmp(a.is_subset(b), b.is_subset(a)),
+            (RulingPower::Attention, RulingPower::Attention) => Some(Ordering::Equal),
+            _ => unreachable!("two rulings compared on one gap resolve the same power"),
+        },
     }
-}
-
-fn waiver_cmp(a: &[EffectKind], b: &[EffectKind]) -> Option<Ordering> {
-    let a: BTreeSet<&EffectKind> = a.iter().collect();
-    let b: BTreeSet<&EffectKind> = b.iter().collect();
-    inclusion_cmp(a.is_subset(&b), b.is_subset(&a))
 }
 
 pub(crate) fn inclusion_cmp(a_in_b: bool, b_in_a: bool) -> Option<Ordering> {
@@ -3501,6 +3495,43 @@ mod tests {
                 ],
             }),
             "the annotated tool, the annotated name selector and the wildcard are labeled per call, so the impact marks them unjudged"
+        );
+    }
+
+    #[test]
+    fn a_narrowing_judges_a_tool_whose_prior_an_authority_waives() {
+        let fetch = ToolAnnotation {
+            delta: Delta {
+                trust: Some(SUSPICIOUS),
+                audience: None,
+            },
+            ..plain_tool("fetch")
+        };
+        let deploy = requiring(
+            "deploy",
+            Requires {
+                label: floor(TRUSTED),
+                history: vec![HistoryRequirement::Prior(EffectKind::new("reviewed"))],
+                ..Requires::default()
+            },
+        );
+        let desk = mandated(
+            "desk",
+            Mandate {
+                prior_waivers: vec![EffectKind::new("reviewed")],
+                ..Mandate::default()
+            },
+        );
+        let registry = registry(vec![fetch, deploy], vec![desk], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        assert_eq!(
+            plan_of(&registry, &log, &call("fetch", json!({}))).narrowing_impact,
+            Some(NarrowingImpact {
+                sign_off: vec![],
+                blocked: vec![ToolName::new("deploy")],
+                recipient_checked: vec![],
+                per_call: vec![],
+            })
         );
     }
 

@@ -435,7 +435,10 @@ fn requirement_text(requirement: &Requirement) -> String {
             format!("an earlier {} action in this conversation", terminal_safe(excludes))
         }
         Requirement::Prior { contains } => {
-            format!("no earlier {} action in this conversation", terminal_safe(contains))
+            format!(
+                "a required earlier {} action not recorded in this conversation",
+                terminal_safe(contains)
+            )
         }
         Requirement::Attention { mark } => format!("attention: {}", terminal_safe(mark)),
     }
