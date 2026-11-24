@@ -15,10 +15,10 @@ impl Engine {
         if recorded.trajectory != execution.trajectory {
             return Err(TransitionError::OfferElsewhere);
         }
+        self.attending(views.attendance(), &recorded.plan, Some(execution.initiator))?;
         if let Some(end) = recorded.end.clone() {
             return self.ended_offer(&views, &recorded, &end, execution, act);
         }
-        self.attending(views.attendance(), &recorded.plan, Some(execution.initiator))?;
         if recorded.basis != views.basis_for(&recorded.subject) {
             return Err(TransitionError::StaleOffer);
         }
@@ -489,6 +489,9 @@ impl Engine {
             };
         }
         let follow_up = match (end, &execution.outcome) {
+            (OfferEnd::Accepted, OfferOutcome::Approved(_)) if views.superseded(&execution.offer) => {
+                OfferFollowUp::Invalidated
+            }
             (OfferEnd::Accepted, OfferOutcome::Approved(_)) => OfferFollowUp::Approved {
                 call: Box::new(
                     views

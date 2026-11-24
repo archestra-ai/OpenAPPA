@@ -429,7 +429,12 @@ fn planned(
         context,
     )?
     .into_iter()
-    .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
+    .filter(|plan| {
+        !plan
+            .required
+            .iter()
+            .any(|required| denied.contains(&required.authority))
+    })
     .map(RemedyPlan::Executable)
     .collect();
 
@@ -662,7 +667,12 @@ pub(crate) fn bundled_spawn_menu(
         context,
     )?
     .into_iter()
-    .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
+    .filter(|plan| {
+        !plan
+            .required
+            .iter()
+            .any(|required| denied.contains(&required.authority))
+    })
     .collect())
 }
 
@@ -670,11 +680,12 @@ pub(crate) fn bundled_spawn_menu(
 /// the family's attendance window as it stands.
 fn excluded(registry: &Registry, views: &Views, call: &ResolvedCall) -> BTreeSet<AuthorityName> {
     let denied = views.denied_authorities(&call.digest()).into_iter().flatten();
-    let unanswering = registry
-        .authorities()
-        .iter()
-        .filter(|authority| !authority.answers(views.attendance()))
-        .map(|authority| &authority.name);
+    let unanswering = match views.attendance() {
+        appa_runtime_api::Attendance::Closed => [].iter(),
+        appa_runtime_api::Attendance::Open => registry.authorities().iter(),
+    }
+    .filter(|authority| !authority.answers(views.attendance()))
+    .map(|authority| &authority.name);
     denied.chain(unanswering).cloned().collect()
 }
 

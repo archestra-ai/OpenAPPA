@@ -1865,6 +1865,11 @@ impl RuntimeEngine {
         }
     }
 
+    /// Does `authority` answer a family whose attendance window stands at `attendance`?
+    pub(crate) fn answers(&self, authority: &AuthorityName, attendance: appa_runtime_api::Attendance) -> bool {
+        self.engine.answers(authority, attendance)
+    }
+
     /// Why the family's attendance window refuses taking `offer` as it stands, if it does.
     pub(crate) fn offer_attended(
         &self,
@@ -4941,6 +4946,18 @@ fn unreleased<D: PartialEq>(proposed: &[D], released: &[D]) -> Vec<usize> {
             },
         )
         .collect()
+}
+
+/// Where the family's attendance window stands in `log`, by the latest move it records.
+pub(crate) fn recorded_attendance(log: &Log) -> appa_runtime_api::Attendance {
+    log.facts()
+        .iter()
+        .rev()
+        .find_map(|fact| match fact {
+            Fact::Attendance { state, .. } => Some(*state),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Every offer a log opened, as the model was shown them. A test reads the

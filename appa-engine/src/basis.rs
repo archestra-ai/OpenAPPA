@@ -1,6 +1,6 @@
 //! `PolicyBasis` — what makes an offer or a call approval current.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +77,71 @@ impl PolicyBasis {
                 self.flow
             },
             subject: advance.generation_of(subject, self.subject),
+        }
+    }
+}
+
+/// What a declared advance still owes while its act's records land: the same moves, each
+/// subject counted rather than listed, so settling one is a lookup.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OwedAdvance {
+    pub(crate) family: bool,
+    pub(crate) flows: BTreeSet<TrajectoryId>,
+    subjects: BTreeMap<SubjectKey, u64>,
+}
+
+impl From<&BasisAdvance> for OwedAdvance {
+    fn from(advance: &BasisAdvance) -> OwedAdvance {
+        let mut subjects = BTreeMap::new();
+        for subject in &advance.subjects {
+            *subjects.entry(subject.clone()).or_insert(0) += 1;
+        }
+        OwedAdvance {
+            family: advance.family,
+            flows: advance.flows.clone(),
+            subjects,
+        }
+    }
+}
+
+impl OwedAdvance {
+    pub(crate) fn is_empty(&self) -> bool {
+        !self.family && self.flows.is_empty() && self.subjects.is_empty()
+    }
+
+    /// Settle one owed move of `subject`; `false` where none is owed.
+    pub(crate) fn settle(&mut self, subject: &SubjectKey) -> bool {
+        match self.subjects.get_mut(subject) {
+            Some(1) => self.subjects.remove(subject).is_some(),
+            Some(owed) => {
+                *owed -= 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Where one subject's generation lands once what is still owed applies.
+    pub(crate) fn generation_of(&self, subject: &SubjectKey, from: SubjectGeneration) -> SubjectGeneration {
+        let owed = self.subjects.get(subject).copied().unwrap_or(0);
+        (0..owed).fold(from, |generation, _| generation.next())
+    }
+
+    /// Where `basis` lands once what is still owed applies.
+    pub(crate) fn basis_after(
+        &self,
+        basis: PolicyBasis,
+        trajectory: &TrajectoryId,
+        subject: &SubjectKey,
+    ) -> PolicyBasis {
+        PolicyBasis {
+            family: if self.family { basis.family.next() } else { basis.family },
+            flow: if self.flows.contains(trajectory) {
+                basis.flow.next()
+            } else {
+                basis.flow
+            },
+            subject: self.generation_of(subject, basis.subject),
         }
     }
 }

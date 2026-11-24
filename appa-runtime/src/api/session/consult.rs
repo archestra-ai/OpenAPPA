@@ -188,6 +188,20 @@ impl Session {
         outcome
     }
 
+    /// Refuse to ask `authority` once the family's attendance window, as its log stands now,
+    /// is one the authority does not answer: a window opened while an earlier consult of the
+    /// same act was waiting reaches every later one.
+    fn serves_now(&self, authority: &str) -> Result<(), EventError> {
+        let attendance = crate::engine::recorded_attendance(&self.inner.log(&self.root)?);
+        let authority = appa_engine::names::AuthorityName::new(authority);
+        match self.deployment().resident.answers(&authority, attendance) {
+            true => Ok(()),
+            false => Err(EventError::Attended(
+                appa_engine::transition::AttendedRefusal::UnattendedOnly(authority),
+            )),
+        }
+    }
+
     /// One external consult. Only an annotation failure is an error: the call cannot be
     /// judged without its annotation, no fact may be appended, and the refusal is operational
     /// — never a policy denial. Every other external keeps its no-answer evidence shape.
@@ -205,6 +219,7 @@ impl Session {
                 artifact,
                 review,
             } => {
+                self.serves_now(authority)?;
                 let consult = Consult {
                     name: authority.clone(),
                     body: ConsultBody::Authority {

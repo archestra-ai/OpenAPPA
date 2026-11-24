@@ -461,14 +461,20 @@ pub struct EmbeddedHookOutcome {
     pub receipt: Option<appa_runtime_api::ReleaseReceipt>,
 }
 
-/// The meet of the labels of the released records `receipts` name, each read from its own
-/// family's log and crossed to `deployment`'s registry by rank name, beside the one reader
-/// every family acts for.
+/// What the released records `receipts` name carry into a sink: the meet of their labels, each
+/// read from its own family's log and crossed to `deployment`'s registry by rank name, the one
+/// reader every family acts for, and whether a person attends any of the families.
+struct Released {
+    label: appa_engine::label::Label,
+    principal: Option<appa_engine::label::ReaderId>,
+    attendance: appa_runtime_api::Attendance,
+}
+
 fn released_label(
     inner: &Inner,
     deployment: &Deployment,
     receipts: &[appa_runtime_api::ReleaseReceipt],
-) -> Result<(appa_engine::label::Label, Option<appa_engine::label::ReaderId>), appa_runtime_api::ReleaseRefusal> {
+) -> Result<Released, appa_runtime_api::ReleaseRefusal> {
     use appa_runtime_api::{ReleaseRefusal, RetryHint};
     let mut families: std::collections::BTreeMap<&TrajectoryId, Vec<&appa_runtime_api::ReleaseReceipt>> =
         std::collections::BTreeMap::new();
@@ -477,6 +483,7 @@ fn released_label(
     }
     let mut label = appa_engine::label::Label::top();
     let mut principals = std::collections::BTreeSet::new();
+    let mut attendance = appa_runtime_api::Attendance::Closed;
     for (root, receipts) in families {
         let log = inner
             .store
@@ -508,9 +515,16 @@ fn released_label(
             label = label.combine(&component);
         }
         principals.insert(view.principal().cloned());
+        if view.attendance() == appa_runtime_api::Attendance::Open {
+            attendance = appa_runtime_api::Attendance::Open;
+        }
     }
     match principals.into_iter().collect::<Vec<_>>().as_slice() {
-        [principal] => Ok((label, principal.clone())),
+        [principal] => Ok(Released {
+            label,
+            principal: principal.clone(),
+            attendance,
+        }),
         _ => Err(ReleaseRefusal::Integrity),
     }
 }
@@ -3296,13 +3310,14 @@ impl Runtime {
         }
         let deployment = self.inner.deployment();
         let (inner, verifying, receipts) = (Arc::clone(&self.inner), Arc::clone(&deployment), receipts.to_vec());
-        let (label, principal) = tokio::task::spawn_blocking(move || released_label(&inner, &verifying, &receipts))
+        let released = tokio::task::spawn_blocking(move || released_label(&inner, &verifying, &receipts))
             .await
             .expect("verifying receipts does not panic")?;
         session::judge_release(
             &deployment,
-            &label,
-            principal.as_ref(),
+            &released.label,
+            released.principal.as_ref(),
+            released.attendance,
             sink,
             arguments.get().as_bytes(),
         )
@@ -4083,7 +4098,7 @@ impl Runtime {
             if host.claimed(&claimed).is_some() {
                 return Err(refused(RemedyRefusal::AlreadyExecuting));
             }
-            if let Some(refusal) = self.offer_attended_in(log, &quoted) {
+            if let Some(refusal) = self.offer_attended_in(log, &offer, &pursuer) {
                 return Err(EventError::Attended(refusal).into());
             }
             let ruling = match admission {
@@ -4291,12 +4306,18 @@ impl Runtime {
         }
     }
 
-    fn offer_attended_in(&self, log: &Log, quoted: &OfferId) -> Option<appa_engine::transition::AttendedRefusal> {
-        self.read_offer_in(log, quoted, |standing| {
-            standing
-                .engine
-                .offer_attended(standing.view, &standing.pursuer, &standing.offer)
-        })
+    /// Why the family's attendance window, as `log` stands, refuses `pursuer` taking the
+    /// already resolved `offer`, if it does.
+    fn offer_attended_in(
+        &self,
+        log: &Log,
+        offer: &OfferId,
+        pursuer: &TrajectoryId,
+    ) -> Option<appa_engine::transition::AttendedRefusal> {
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, log).ok()?;
+        let view = policy.rebuild_view(log).ok()?;
+        policy.engine().offer_attended(&view, pursuer, offer)
     }
 
     fn offer_standing_in(&self, log: &Log, quoted: &OfferId) -> OfferStanding {

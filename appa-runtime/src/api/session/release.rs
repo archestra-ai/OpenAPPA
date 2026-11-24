@@ -114,17 +114,20 @@ pub(super) fn standing_review(
 }
 
 /// Judge content at `label` into `sink(arguments)` under `deployment`'s registry, reading the
-/// membership the judgment needs now, each round's reads together. No consult is recorded
-/// and nothing is appended.
+/// membership the judgment needs now, each round's reads together. Only a stock approver that
+/// answers every family the content came from, as `attendance` stands for them, lifts a gap.
+/// No consult is recorded and nothing is appended.
 pub(in crate::api) async fn judge_release(
     deployment: &Deployment,
     label: &Label,
     principal: Option<&ReaderId>,
+    attendance: appa_runtime_api::Attendance,
     sink: &str,
     arguments: &[u8],
 ) -> Result<(), Unreleased> {
-    let approves =
-        |authority: &appa_engine::names::AuthorityName| deployment.externals.is_stock_approve(authority.as_str());
+    let approves = |authority: &appa_engine::names::AuthorityName| {
+        deployment.externals.is_stock_approve(authority.as_str()) && deployment.resident.answers(authority, attendance)
+    };
     let mut evidence = Vec::new();
     // One judgment beyond the last batch reads that batch's answers.
     for consulted in 0..=RESOLUTION_ROUNDS {
@@ -209,7 +212,15 @@ url = "http://127.0.0.1:9/annotate"
             ("mail", SinkRefusal::Undeclared),
         ] {
             assert_eq!(
-                judge_release(&deployment, &Label::top(), None, sink, b"{}").await,
+                judge_release(
+                    &deployment,
+                    &Label::top(),
+                    None,
+                    appa_runtime_api::Attendance::Closed,
+                    sink,
+                    b"{}"
+                )
+                .await,
                 Err(Unreleased::Sink(why)),
                 "{sink}"
             );

@@ -1360,7 +1360,7 @@ impl Owed {
 struct Declaration {
     act: crate::basis::DecidedAct,
     declared: crate::basis::BasisAdvance,
-    owed: crate::basis::BasisAdvance,
+    owed: crate::basis::OwedAdvance,
 }
 
 fn effect_advance(moved: bool) -> crate::basis::BasisAdvance {
@@ -2294,9 +2294,17 @@ impl<'a> Sequence<'a> {
     ) -> Result<(), TransitionRefusal> {
         let views = self.projection.view(trajectory);
         let recorded = ending_offer(&views, trajectory, offer)?;
-        self.engine
-            .attending(views.attendance(), &recorded.plan, None)
-            .map_err(TransitionRefusal::Attended)?;
+        // Only the offer the act took is held to the window: a denial also retires the
+        // siblings that name the denying authority, whatever else their plans ask.
+        let taken = self
+            .declared
+            .as_ref()
+            .is_some_and(|open| open.act == crate::basis::DecidedAct::Offer(*offer));
+        if taken {
+            self.engine
+                .attending(views.attendance(), &recorded.plan, None)
+                .map_err(TransitionRefusal::Attended)?;
+        }
         if !recorded.plan.names_authority(authority) {
             return Err(TransitionRefusal::UnbackedDenial);
         }
@@ -2421,7 +2429,7 @@ impl<'a> Sequence<'a> {
         self.declared = Some(Declaration {
             act: act.clone(),
             declared: advance.clone(),
-            owed: advance.clone(),
+            owed: advance.into(),
         });
         self.admitting = None;
         Ok(())
@@ -2456,13 +2464,9 @@ impl<'a> Sequence<'a> {
             }
         }
         for subject in &implied.subjects {
-            let position = declaration
-                .owed
-                .subjects
-                .iter()
-                .position(|owed| owed == subject)
-                .ok_or(TransitionRefusal::UndeclaredAdvance)?;
-            declaration.owed.subjects.remove(position);
+            if !declaration.owed.settle(subject) {
+                return Err(TransitionRefusal::UndeclaredAdvance);
+            }
         }
         Ok(())
     }
@@ -2496,7 +2500,7 @@ impl<'a> Sequence<'a> {
         if !open.declared.subjects.contains(subject) {
             return Err(TransitionRefusal::UndeclaredAdvance);
         }
-        if recorded.advanced_by(&open.owed, trajectory, subject) != self.projection.view(trajectory).basis_for(subject)
+        if open.owed.basis_after(*recorded, trajectory, subject) != self.projection.view(trajectory).basis_for(subject)
         {
             return Err(TransitionRefusal::StaleSpend);
         }
@@ -2545,7 +2549,7 @@ impl<'a> Sequence<'a> {
     ) -> bool {
         let now = self.projection.view(trajectory).basis_for(subject);
         match &self.declared {
-            Some(open) => recorded.advanced_by(&open.owed, trajectory, subject) == now,
+            Some(open) => open.owed.basis_after(*recorded, trajectory, subject) == now,
             None => *recorded == now,
         }
     }

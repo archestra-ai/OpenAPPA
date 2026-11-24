@@ -240,6 +240,8 @@ pub struct Projection {
     /// The approvals not yet spent: a spend is the one advance an approval's subject ever
     /// takes, so a spent approval is never current again and scans skip it.
     unspent: OrdSet<crate::value::OfferId>,
+    /// The approvals an opening attendance window superseded before any call spent them.
+    superseded: OrdSet<crate::value::OfferId>,
     attendance: appa_runtime_api::Attendance,
     versions: crate::basis::Versions,
     released: Released,
@@ -552,6 +554,7 @@ impl Projection {
             offers: Default::default(),
             approvals: Default::default(),
             unspent: Default::default(),
+            superseded: Default::default(),
             attendance: Default::default(),
             versions: crate::basis::Versions::default(),
             released: Released::default(),
@@ -695,6 +698,7 @@ impl Projection {
             offers,
             approvals,
             unspent,
+            superseded,
             attendance,
             versions,
             released,
@@ -739,7 +743,15 @@ impl Projection {
                 *opening = Some((trajectory.clone(), starting));
                 *principal = opened_for.clone();
             }
-            Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
+            Fact::BasisAdvanced { act, advance, .. } => {
+                versions.advance(advance);
+                if let crate::basis::DecidedAct::Attendance(appa_runtime_api::Attendance::Open) = act {
+                    superseded.extend(advance.subjects.iter().filter_map(|subject| match subject {
+                        SubjectKey::Approval(offer) => Some(*offer),
+                        _ => None,
+                    }));
+                }
+            }
             Fact::OfferOpened {
                 trajectory,
                 offer,
@@ -1096,7 +1108,14 @@ impl Projection {
             },
             // Folded into `released` above, and nowhere else: neither moves a label.
             Fact::AnswerReleased { .. } | Fact::ReviewReleased { .. } => {}
-            Fact::Attendance { state, .. } => *attendance = *state,
+            Fact::Attendance { state, .. } => {
+                *attendance = *state;
+                // The approvals an opening window superseded are never spent, so they leave the
+                // unspent set once it lands and no later opening declares them again.
+                if *state == appa_runtime_api::Attendance::Open {
+                    *unspent = unspent.clone().relative_complement(superseded.clone());
+                }
+            }
         }
     }
 
@@ -1449,6 +1468,11 @@ impl Views<'_> {
     /// Where the family's attendance window stands.
     pub(crate) fn attendance(&self) -> appa_runtime_api::Attendance {
         self.projection.attendance()
+    }
+
+    /// Did an opening attendance window supersede the approval `offer` prepared?
+    pub(crate) fn superseded(&self, offer: &crate::value::OfferId) -> bool {
+        self.projection.superseded.contains(offer)
     }
 
     /// The annotation an Annotator pinned to this same canonical call, in a proposal this

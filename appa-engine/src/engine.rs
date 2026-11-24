@@ -667,11 +667,7 @@ impl Engine {
 
     /// Does `authority` answer a family whose window stands at `attendance`? An authority the
     /// registry does not hold answers nothing a plan could name.
-    pub(crate) fn answers(
-        &self,
-        authority: &crate::names::AuthorityName,
-        attendance: appa_runtime_api::Attendance,
-    ) -> bool {
+    pub fn answers(&self, authority: &crate::names::AuthorityName, attendance: appa_runtime_api::Attendance) -> bool {
         self.registry
             .authority(authority)
             .is_none_or(|registered| registered.answers(attendance))
@@ -715,10 +711,10 @@ impl Engine {
         if recorded.trajectory != *trajectory {
             return Err(TransitionError::OfferElsewhere);
         }
+        self.attending(views.attendance(), &recorded.plan, None)?;
         if let Some(end) = &recorded.end {
             return Ok(OfferConsult::Replay(replay_outcome(recorded, end)));
         }
-        self.attending(views.attendance(), &recorded.plan, None)?;
         let stale = || OfferConsult::Stale {
             subject: recorded.subject.clone(),
         };
@@ -1196,11 +1192,13 @@ impl Engine {
             offers.clear();
         }
         // Nor does one the family's attendance window refuses taking.
-        offers.retain(|(offer, _)| {
-            views
-                .offer(offer)
-                .is_some_and(|open| self.attending(views.attendance(), &open.plan, None).is_ok())
-        });
+        if views.attendance() == appa_runtime_api::Attendance::Open {
+            offers.retain(|(offer, _)| {
+                views
+                    .offer(offer)
+                    .is_some_and(|open| self.attending(views.attendance(), &open.plan, None).is_ok())
+            });
+        }
         let mut block = plan::plan(
             &self.registry,
             views,
