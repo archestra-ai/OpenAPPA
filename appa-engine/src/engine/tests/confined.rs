@@ -336,7 +336,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         [
             Fact::BasisAdvanced { .. },
             Fact::DispatchClosed {
-                outcome: crate::fact::CloseOutcome::Success { effects },
+                outcome: crate::fact::CloseOutcome::Success { effects, .. },
                 ..
             },
             Fact::CandidateDerived { .. },
@@ -1167,4 +1167,54 @@ fn a_failure_body_under_a_bound_sanitizer_closes_withheld() {
 
     let again = e.handle(&viewing(&e, &log), report()).expect("the repeat answers");
     assert_eq!((again.append, again.follow_up), (None, withheld));
+}
+
+/// A confined result an offer admitted is the offer's release: the dispatch's report,
+/// repeated after it, is answered with no admission of its own.
+#[test]
+fn a_repeated_report_is_not_answered_with_the_admission_an_offer_made() {
+    let e = staged_engine();
+    let (log, dispatch, derived, staged) = staged_candidate(&e);
+    let hop = confined_of(&staged.follow_up).offers[0].0;
+    let log = [log, appended_facts(staged)].concat();
+    let hopped = execute_offer(
+        &e,
+        &log,
+        hop,
+        OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
+            sanitizer: crate::names::SanitizerName::new("scrubber"),
+            source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+            derived: ValueBody::new("page bytes, redacted, scrubbed"),
+        }),
+    )
+    .expect("the hop admits the result");
+    assert!(matches!(&offer_answer(&hopped), OfferFollowUp::Admitted { .. }));
+    let log = [log, appended_facts(hopped)].concat();
+    let repeated = e
+        .handle(
+            &viewing(&e, &log),
+            EngineEvent::Outcome(ToolReport {
+                dispatch,
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available(ValueBody::new("page bytes")),
+                },
+                evidence: vec![crate::transition::Evidence::Sanitizer {
+                    sanitizer: crate::names::SanitizerName::new("redactor"),
+                    source: crate::value::RawResultDigest::of(b"page bytes"),
+                    derived,
+                }],
+                offer_nonce: nonce(),
+                audience: crate::audience::AudienceEvidence::default(),
+            }),
+        )
+        .expect("the repeated report answers");
+    assert_eq!(repeated.append, None);
+    assert!(
+        matches!(
+            repeated.follow_up,
+            FollowUp::Outcome(OutcomeFollowUp::Closed { admitted: None, .. })
+        ),
+        "{:?}",
+        repeated.follow_up
+    );
 }

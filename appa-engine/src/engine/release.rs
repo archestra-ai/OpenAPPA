@@ -202,17 +202,16 @@ impl Engine {
             .collect();
         let (mut approved_by, mut unresolved) = (Vec::new(), None);
         for gap in gaps {
-            let mut open = Vec::new();
-            let cover = eligible
-                .iter()
-                .find_map(|authority| match plan::gap_cover(authority, gap, tags, context) {
-                    Evaluation::Holds => Some(authority.name.clone()),
-                    Evaluation::Needs(ask) => {
-                        open.push(ask.needed);
-                        None
+            let (mut cover, mut open) = (None, Vec::new());
+            for authority in &eligible {
+                match plan::gap_cover(authority, gap, tags, context) {
+                    Evaluation::Holds => {
+                        cover.get_or_insert_with(|| authority.name.clone());
                     }
-                    Evaluation::Fails => None,
-                });
+                    Evaluation::Needs(ask) => open.push(ask.needed),
+                    Evaluation::Fails => {}
+                }
+            }
             match (cover, open.is_empty()) {
                 (Some(name), _) => approved_by.push(name),
                 (None, false) => {

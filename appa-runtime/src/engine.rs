@@ -317,6 +317,14 @@ pub enum EngineEvent {
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
     },
+    /// A bound spawn's success reported with the return of its child it repeats: the close
+    /// delivers that crossing to the parent.
+    SpawnDelivered {
+        dispatch: EngineDispatchId,
+        crossing: ChildReturnId,
+        evidence: Vec<ExternalEvidence>,
+        entropy: OfferNonce,
+    },
     ExecuteOffer {
         trajectory: TrajectoryId,
         offer: OfferId,
@@ -1590,7 +1598,7 @@ impl RuntimeEngine {
             },
             Fact::DispatchClosed { outcome, .. } => AuditEvent::Closed {
                 outcome: match outcome {
-                    CloseOutcome::Success { effects } => DispatchOutcome::Ran {
+                    CloseOutcome::Success { effects, .. } => DispatchOutcome::Ran {
                         effects: effect_names(effects),
                     },
                     CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => DispatchOutcome::Failed,
@@ -1693,7 +1701,23 @@ impl RuntimeEngine {
                 outcome,
                 evidence,
                 entropy,
-            } => self.tool_outcome(view, &dispatch, &outcome, &evidence, &entropy, presentation),
+            } => self.tool_outcome(view, &dispatch, &outcome, None, &evidence, &entropy, presentation),
+            EngineEvent::SpawnDelivered {
+                dispatch,
+                crossing,
+                evidence,
+                entropy,
+            } => self.tool_outcome(
+                view,
+                &dispatch,
+                &ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+                Some(&crossing),
+                &evidence,
+                &entropy,
+                presentation,
+            ),
             EngineEvent::ExecuteOffer {
                 trajectory: owner,
                 offer,
@@ -1786,7 +1810,7 @@ impl RuntimeEngine {
         approves: impl Fn(&AuthorityName) -> bool,
     ) -> ReleaseRound {
         use appa_engine::engine::{ReleaseError, ReleaseJudgment};
-        let act = match self.act_audience(evidence, principal) {
+        let act = match self.act_audience(evidence, principal, LostLookup::LosesItsSources) {
             Ok(act) => act,
             Err(AudienceFailure::Consult(requests)) => return ReleaseRound::Consult(requests),
             Err(AudienceFailure::Refused(unobtained)) => {
@@ -1804,13 +1828,19 @@ impl RuntimeEngine {
         ReleaseRound::Judged(match judged {
             Ok(ReleaseJudgment::Released { .. }) => Ok(()),
             Ok(ReleaseJudgment::Withheld { .. }) => Err(Unreleased::Withheld),
-            // Any one alternative answered lets the judgment go on, so one that cannot be
-            // answered leaves the next to be read; the release misses a fact only when none can.
+            // Any one alternative answered lets the judgment go on, so every alternative's
+            // consults are read together; the release misses a fact only when none can be read.
             Err(ReleaseError::MembershipNeeded { alternatives }) => {
-                let mut unresolved = None;
+                let (mut batch, mut unresolved) = (Vec::new(), None);
                 for needed in alternatives {
                     match self.audience_consult(&act, needed, principal) {
-                        Ok(AudienceConsult::Requests(requests)) => return ReleaseRound::Consult(requests),
+                        Ok(AudienceConsult::Requests(requests)) => {
+                            for request in requests {
+                                if !batch.contains(&request) {
+                                    batch.push(request);
+                                }
+                            }
+                        }
                         Ok(AudienceConsult::Unresolved(unobtained)) => {
                             unresolved.get_or_insert(unobtained.retry);
                         }
@@ -1818,7 +1848,10 @@ impl RuntimeEngine {
                         Err(_) => return ReleaseRound::Judged(Err(Unreleased::Unjudgeable)),
                     }
                 }
-                Err(unresolved.map_or(Unreleased::Unjudgeable, Unreleased::Unobtained))
+                match batch.is_empty() {
+                    false => return ReleaseRound::Consult(batch),
+                    true => Err(unresolved.map_or(Unreleased::Unjudgeable, Unreleased::Unobtained)),
+                }
             }
             Err(ReleaseError::Sink(refusal)) => Err(Unreleased::Sink(refusal)),
             Err(error) => {
@@ -2283,11 +2316,13 @@ impl RuntimeEngine {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn tool_outcome(
         &self,
         view: &EngineView,
         dispatch: &EngineDispatchId,
         outcome: &ToolOutcome,
+        crossing: Option<&ChildReturnId>,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
         presentation: &EmbeddedPresentationOptions,
@@ -2299,8 +2334,11 @@ impl RuntimeEngine {
             |audience| {
                 let report = ToolReport {
                     dispatch: dispatch.clone(),
-                    outcome: match outcome {
-                        ToolOutcome::Failure { message }
+                    outcome: match (outcome, crossing) {
+                        (_, Some(crossing)) => CoreToolOutcome::Success {
+                            body: CoreOutcomeBody::Crossed(crossing.clone()),
+                        },
+                        (ToolOutcome::Failure { message }, None)
                             if view
                                 .views(dispatch.trajectory())
                                 .and_then(|views| views.dispatch_call(dispatch).cloned())
@@ -2912,20 +2950,19 @@ impl RuntimeEngine {
         }
     }
 
-    /// The value `child` crossed that a report of the spawn `dispatch` answers with, as the
-    /// harness would deliver it, and the record that admitted it into the parent.
+    /// The crossing of its bound child that a report of the spawn `dispatch` answers with.
     pub(crate) fn spawn_return(
         &self,
         view: &EngineView,
         dispatch: &appa_engine::value::DispatchId,
-        child: &TrajectoryId,
-    ) -> Option<(String, appa_runtime_api::ReleaseReceipt)> {
-        self.engine.spawn_return_of(view, dispatch, child).map(|admitted| {
-            (
-                admitted.body.as_str().to_string(),
-                receipt(view.family(), admitted.released()),
-            )
-        })
+    ) -> Option<SpawnReturn> {
+        self.engine
+            .spawn_return_of(view, dispatch)
+            .map(|(crossing, admitted)| SpawnReturn {
+                said: admitted.body.as_str().to_string(),
+                receipt: receipt(view.family(), admitted.released()),
+                crossing,
+            })
     }
 
     fn label_text(&self, label: &Label) -> String {
@@ -3641,7 +3678,7 @@ impl RuntimeEngine {
         unresolved: UnresolvedAudience<'_>,
         judge: impl FnOnce(&AudienceEvidence) -> Result<T, TransitionError>,
     ) -> Result<AudienceRound<T>, EngineRefusal> {
-        let act = match self.act_audience(evidence, principal) {
+        let act = match self.act_audience(evidence, principal, LostLookup::EndsAct) {
             Ok(act) => act,
             Err(AudienceFailure::Consult(requests)) => {
                 return Ok(AudienceRound::Presented(EngineDecision::deliver(
@@ -3684,6 +3721,7 @@ impl RuntimeEngine {
         &self,
         evidence: &[ExternalEvidence],
         principal: Option<&ReaderId>,
+        lost: LostLookup,
     ) -> Result<ActAudience, AudienceFailure> {
         let audience = self.engine.registry().audience();
         let mut payload = AudienceEvidence::default();
@@ -3751,6 +3789,33 @@ impl RuntimeEngine {
                     refusal_class(&refusal)
                 ),
             )));
+        }
+        if let LostLookup::LosesItsSources = lost {
+            for owed in audience.member_lookups_owed(&payload) {
+                let Some(reason) = unanswered.members.get(&owed.member) else {
+                    continue;
+                };
+                payload.sources.retain(|claims| {
+                    let reports = claims.provider == owed.provider
+                        && claims.members.iter().any(|member| member.as_str() == owed.member);
+                    if reports {
+                        unanswered.selectors.insert(
+                            SelectorSpec {
+                                provider: claims.provider.clone(),
+                                selector: claims.selector.clone(),
+                            },
+                            *reason,
+                        );
+                    }
+                    !reports
+                });
+            }
+            payload.lookups.retain(|lookup| {
+                payload.sources.iter().any(|claims| {
+                    claims.provider == lookup.provider
+                        && claims.members.iter().any(|member| member.as_str() == lookup.member)
+                })
+            });
         }
         let mut requests: Vec<ExternalRequest> = Vec::new();
         let mut failed: Vec<NoAnswer> = Vec::new();
@@ -4129,10 +4194,29 @@ impl UnresolvedAudience<'_> {
     }
 }
 
+/// What an act's audience does with a member lookup that produced no answer.
+#[derive(Clone, Copy)]
+enum LostLookup {
+    /// The act ends: the member may decide it.
+    EndsAct,
+    /// Every source that reports the member stands unanswered, and the act goes on without
+    /// them: a release judgment may still be decided by a cover the member is not in.
+    LosesItsSources,
+}
+
 /// Where one round of a release judgment ends: judged, or the membership consults it needs.
 pub(crate) enum ReleaseRound {
     Judged(Result<(), Unreleased>),
     Consult(Vec<ExternalRequest>),
+}
+
+/// A bound child's crossing as a report of its spawn delivers it: the message as the harness
+/// would deliver it, the receipt of the record that admitted it into the parent, and the return
+/// it crossed at.
+pub(crate) struct SpawnReturn {
+    pub(crate) said: String,
+    pub(crate) receipt: appa_runtime_api::ReleaseReceipt,
+    pub(crate) crossing: ChildReturnId,
 }
 
 /// Why a release round kept content from its sink, before the host reads it as a refusal class.

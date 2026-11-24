@@ -234,12 +234,14 @@ fn stored_closes_keep_their_bytes_beside_an_abandoned_success() {
             r#"{"Success":{"effects":["read"]}}"#.to_string(),
             CloseOutcome::Success {
                 effects: EffectSet::new([EffectKind::new("read")]).expect("one effect is a set"),
+                crossing: None,
             },
         ),
         (
             r#"{"Success":{"effects":[]}}"#.to_string(),
             CloseOutcome::Success {
                 effects: EffectSet::default(),
+                crossing: None,
             },
         ),
         (r#""Failure""#.to_string(), CloseOutcome::Failure),

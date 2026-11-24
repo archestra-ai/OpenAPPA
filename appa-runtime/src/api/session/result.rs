@@ -44,6 +44,7 @@ pub(super) enum SpawnPlan {
     /// The report repeats the child's latest crossed return, which the record `receipt` names.
     Replay {
         receipt: appa_runtime_api::ReleaseReceipt,
+        crossing: appa_engine::value::ChildReturnId,
     },
     Withheld,
     Close(EventError),
@@ -317,10 +318,9 @@ impl Session {
                         // child's latest while the dispatch is open, the one it closed on after —
                         // is that crossing, whatever the child froze before it.
                         let crossed = match (&status, &child, &value) {
-                            (ForkStatus::Bound(bound), Some(named), Some(said)) if named == bound => context
-                                .spawn_return(&dispatch, named)
-                                .filter(|(latest, _)| latest == said)
-                                .map(|(_, receipt)| receipt),
+                            (ForkStatus::Bound(bound), Some(named), Some(said)) if named == bound => {
+                                context.spawn_return(&dispatch).filter(|crossed| &crossed.said == said)
+                            }
                             _ => None,
                         };
                         // That crossing answers past a return the parent already decided on, never
@@ -363,8 +363,9 @@ impl Session {
                                 // A failure repeating the crossed return closes as the host reported it.
                                 Some(_) => match (&crossed, &outcome) {
                                     (Some(_), ToolOutcome::Failure { .. }) => SpawnPlan::Outcome,
-                                    (Some(receipt), _) => SpawnPlan::Replay {
-                                        receipt: receipt.clone(),
+                                    (Some(crossed), _) => SpawnPlan::Replay {
+                                        receipt: crossed.receipt.clone(),
+                                        crossing: crossed.crossing.clone(),
                                     },
                                     (None, _) => SpawnPlan::Withheld,
                                 },
@@ -382,9 +383,16 @@ impl Session {
                                 fork: fork.clone(),
                                 child: child.clone(),
                             },
+                            // The close delivers the crossing the report repeats, and only that.
+                            SpawnPlan::Replay { crossing, .. } => EngineEvent::SpawnDelivered {
+                                dispatch,
+                                crossing: crossing.clone(),
+                                evidence,
+                                entropy: fresh_entropy(),
+                            },
                             // A withheld message still closes as the failure the host reported, in
                             // the runtime's words: none of the host's bytes cross with the close.
-                            SpawnPlan::Replay { .. } | SpawnPlan::Withheld => EngineEvent::ToolOutcome {
+                            SpawnPlan::Withheld => EngineEvent::ToolOutcome {
                                 dispatch,
                                 outcome: match &outcome {
                                     ToolOutcome::Failure { .. } => ToolOutcome::Failure {
@@ -431,7 +439,7 @@ impl Session {
                     }
                     _ => return Err(EventError::UnexpectedDecision),
                 },
-                SpawnPlan::Replay { receipt } => {
+                SpawnPlan::Replay { receipt, .. } => {
                     outcome_decision(decision, &self.deployment().externals)?;
                     let value = value.expect("a replay repeats a delivered message");
                     // A body the report carries beside the crossed value was never checked, so

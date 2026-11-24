@@ -1833,6 +1833,62 @@ mod symbolic_audiences {
             judge(TRUSTED)
         );
     }
+
+    /// Every admitted cover of a gap reads the membership it needs, even past the one that
+    /// decides it: answers read for a later cover are requested, never pre-loaded.
+    #[test]
+    fn a_release_decided_by_its_first_cover_reads_the_answers_its_later_covers_need() {
+        use crate::engine::ReleaseJudgment;
+        let mut post = plain_tool("post");
+        post.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                    DeclaredAudience::literal(Audience::restricted([corp_reader("outsider")])),
+                ))],
+            },
+            ..Requires::default()
+        };
+        let approver = |name: &str, groups: &[&str]| crate::authority::Authority {
+            except: Vec::new(),
+            name: AuthorityName::new(name),
+            mandate: crate::authority::Mandate {
+                reader_ceiling: Some(grouped(&[], groups)),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        };
+        let e = grouped_engine(
+            config(
+                vec![post],
+                vec![
+                    approver("officer", &["board"]),
+                    approver("deputy", &["board", "officers"]),
+                ],
+            ),
+            &[],
+            Label::new(TRUSTED, Audience::public()),
+        );
+        let answers = source_evidence(vec![
+            user_group("board", vec![corp_reader("outsider")]),
+            user_group("officers", vec![corp_reader("treasurer")]),
+        ]);
+        assert_eq!(
+            e.judge_release(
+                &Label::new(TRUSTED, readers(&["insider"])),
+                ToolName::new("post"),
+                b"{}",
+                answers,
+                None,
+                |_| true,
+            )
+            .expect("the answered release is judged"),
+            ReleaseJudgment::Released {
+                approved_by: vec![AuthorityName::new("officer")]
+            }
+        );
+    }
 }
 
 fn channel_source() -> crate::audience::AudienceConfig {

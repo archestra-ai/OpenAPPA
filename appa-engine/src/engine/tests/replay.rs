@@ -143,7 +143,8 @@ fn a_result_replays_only_for_a_successful_close() {
                 log.clone(),
                 vec![
                     closed(crate::fact::CloseOutcome::Success {
-                        effects: EffectSet::default()
+                        effects: EffectSet::default(),
+                        crossing: None,
                     }),
                     admitted.clone()
                 ]

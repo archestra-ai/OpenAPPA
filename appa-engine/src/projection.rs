@@ -261,9 +261,9 @@ struct Released {
     /// Where each dispatch's trajectory stood as the dispatch opened: the bound its result
     /// releases at.
     received: OrdMap<DispatchId, FoldPoint>,
-    /// The crossing each bound spawn's dispatch stood answered by as it closed: what a
-    /// repeated report of that spawn replays, whatever the child crossed since.
-    spawn_closes: OrdMap<DispatchId, u64>,
+    /// The crossing each bound spawn's close delivered: what a repeated report of that spawn
+    /// replays, whatever the child crossed since. A close that delivered none replays none.
+    spawn_closes: OrdMap<DispatchId, ChildReturnId>,
     /// The offer whose decision admitted each confined result an offer admitted.
     admitted_by: OrdMap<DispatchId, crate::value::OfferId>,
 }
@@ -333,6 +333,18 @@ impl Released {
             } => {
                 self.received
                     .insert(dispatch.clone(), FoldPoint::of(trajectory, local, resumed));
+                return;
+            }
+            Fact::DispatchClosed {
+                dispatch,
+                outcome:
+                    CloseOutcome::Success {
+                        crossing: Some(crossing),
+                        ..
+                    },
+                ..
+            } => {
+                self.spawn_closes.insert(dispatch.clone(), crossing.clone());
                 return;
             }
             // An offer's decision admits a confined result by accepting the staged candidate, or
@@ -606,14 +618,6 @@ impl Projection {
     /// Fold one record into every view. The one fold: replay, cache rebuild, and the advance of a
     /// held view all reach the log through this function, so no second fold can drift from it.
     pub(crate) fn fold(&mut self, fact: &Fact) {
-        let spawn_close = match fact {
-            Fact::DispatchClosed { dispatch, .. } => self
-                .bound
-                .get(&ForkId::of(dispatch))
-                .and_then(|child| self.latest_crossing_at(child))
-                .map(|at| (dispatch.clone(), at)),
-            _ => None,
-        };
         let Projection {
             position: _,
             values,
@@ -657,9 +661,6 @@ impl Projection {
             released,
         } = self;
         released.fold(fact, ValueId::new(values.len() as u64), local, resumed);
-        if let Some((dispatch, at)) = spawn_close {
-            released.spawn_closes.insert(dispatch, at);
-        }
         match fact {
             Fact::TrajectoryOpened(crate::fact::TrajectoryOpening {
                 trajectory,
@@ -874,7 +875,7 @@ impl Projection {
                     reservations.remove(dispatch);
                 }
                 let kind = match outcome {
-                    CloseOutcome::Success { effects: committed } => {
+                    CloseOutcome::Success { effects: committed, .. } => {
                         effects.extend(committed.iter().cloned());
                         CloseKind::Success
                     }
@@ -1150,13 +1151,12 @@ impl Projection {
         Some(ChildReturnId::new(child.clone(), occurrence))
     }
 
-    /// The record that admitted `child`'s latest return into its parent, unless that return
-    /// froze as a deferral.
-    fn latest_crossing_at(&self, child: &TrajectoryId) -> Option<u64> {
+    /// `child`'s latest return, if it crossed into its parent rather than froze as a deferral.
+    fn latest_crossing_of(&self, child: &TrajectoryId) -> Option<ChildReturnId> {
         let latest = self.latest_occurrence(child)?;
-        match self.deferrals.contains_key(&latest) {
+        match self.deferrals.contains_key(&latest) || !self.released.returns.contains_key(&latest) {
             true => None,
-            false => self.released.returns.get(&latest).copied(),
+            false => Some(latest),
         }
     }
 
@@ -1715,21 +1715,27 @@ impl Views<'_> {
     /// crosses anew, at the label it stands at then. A deferral's crossing, once accepted,
     /// answers the parent's settlement, not the child.
     pub(crate) fn latest_crossing(&self, child: &TrajectoryId) -> Option<crate::transition::Admitted> {
-        self.projection.admitted_at(self.projection.latest_crossing_at(child)?)
+        self.projection
+            .released_return(&self.projection.latest_crossing_of(child)?)
     }
 
-    /// The crossing a report of the spawn `dispatch` bound to `child` answers with: while the
-    /// dispatch stands open, `child`'s latest; once closed, the one it closed answered by.
-    pub(crate) fn spawn_crossing(
-        &self,
-        dispatch: &DispatchId,
-        child: &TrajectoryId,
-    ) -> Option<crate::transition::Admitted> {
-        let at = match self.is_open(dispatch) {
-            true => self.projection.latest_crossing_at(child),
-            false => self.projection.released.spawn_closes.get(dispatch).copied(),
+    /// The return a close of the open spawn `dispatch` may deliver: its bound child's latest,
+    /// where that crossed.
+    pub(crate) fn spawn_delivery(&self, dispatch: &DispatchId) -> Option<ChildReturnId> {
+        let child = self.projection.bound.get(&ForkId::of(dispatch))?;
+        self.projection.latest_crossing_of(child)
+    }
+
+    /// The crossing a report of the spawn `dispatch` answers with, beside the record that
+    /// admitted it: while the dispatch stands open, its bound child's latest; once closed, the
+    /// one its close delivered, if it delivered one.
+    pub(crate) fn spawn_crossing(&self, dispatch: &DispatchId) -> Option<(ChildReturnId, crate::transition::Admitted)> {
+        let crossing = match self.is_open(dispatch) {
+            true => self.spawn_delivery(dispatch)?,
+            false => self.projection.released.spawn_closes.get(dispatch)?.clone(),
         };
-        self.projection.admitted_at(at?)
+        let admitted = self.projection.released_return(&crossing)?;
+        Some((crossing, admitted))
     }
 
     /// The offer whose decision admitted `dispatch`'s confined result, if an offer's did.
@@ -2256,6 +2262,7 @@ mod tests {
                 dispatch: dispatch("a"),
                 outcome: CloseOutcome::Success {
                     effects: EffectSet::new([egress.clone()]).unwrap(),
+                    crossing: None,
                 },
             },
         ];

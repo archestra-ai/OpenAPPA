@@ -339,6 +339,11 @@ pub enum ObservedResult {
 pub enum CloseOutcome {
     Success {
         effects: EffectSet,
+        /// The child return a bound spawn's close delivered to the parent: the return the
+        /// spawn's report repeated, which crossed at its own admission. A close without one
+        /// delivered no crossing, whatever the child returned before it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crossing: Option<ChildReturnId>,
     },
     Failure,
     FailureWithBody {

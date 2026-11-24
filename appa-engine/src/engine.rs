@@ -842,17 +842,16 @@ impl Engine {
         view.views(child).map_or(0, |views| views.returns_by(child))
     }
 
-    /// The value `child` crossed that a report of the spawn `dispatch` bound to it answers with,
-    /// beside the record that admitted it into the parent: `child`'s latest crossing while the
-    /// dispatch stands open, the one its close was answered by after. A report repeating it
-    /// replays that crossing and appends nothing.
+    /// The return of the child bound to the spawn `dispatch` that a report of the spawn answers
+    /// with, beside the record that admitted it into the parent: the child's latest crossing
+    /// while the dispatch stands open, the one its close delivered after. A report repeating it
+    /// delivers that crossing, reported as [`crate::transition::OutcomeBody::Crossed`].
     pub fn spawn_return_of(
         &self,
         view: &EngineView,
         dispatch: &DispatchId,
-        child: &TrajectoryId,
-    ) -> Option<crate::transition::Admitted> {
-        view.views(child)?.spawn_crossing(dispatch, child)
+    ) -> Option<(ChildReturnId, crate::transition::Admitted)> {
+        view.views(dispatch.trajectory())?.spawn_crossing(dispatch)
     }
 
     /// The plan one recorded offer of `trajectory` carries, for the runtime to read what the

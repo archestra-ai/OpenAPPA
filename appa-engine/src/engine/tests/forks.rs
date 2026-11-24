@@ -362,6 +362,7 @@ fn a_marked_spawn_prepares_its_fork_and_the_child_binds_to_it() {
             dispatch: fork.dispatch().clone(),
             outcome: crate::fact::CloseOutcome::Success {
                 effects: crate::fact::EffectSet::default(),
+                crossing: None,
             },
         }],
     ]
@@ -532,4 +533,116 @@ fn a_spawn_mark_takes_declared_context_control() {
         ),
         Err(crate::transition::TransitionError::SpawnUncontrolled)
     );
+}
+
+/// The spawn whose fork bound `child` in `log`.
+fn spawn_of(log: &[Fact], child: &TrajectoryId) -> DispatchId {
+    let fork = fork_in(log, child);
+    log.iter()
+        .find_map(|fact| match fact {
+            Fact::DispatchOpened { dispatch, .. } if ForkId::of(dispatch) == fork => Some(dispatch.clone()),
+            _ => None,
+        })
+        .expect("the spawn opened its fork")
+}
+
+fn delivering(dispatch: &DispatchId, crossing: &ChildReturnId) -> EngineEvent {
+    EngineEvent::Outcome(ToolReport {
+        dispatch: dispatch.clone(),
+        outcome: ToolOutcome::Success {
+            body: OutcomeBody::Crossed(crossing.clone()),
+        },
+        evidence: Vec::new(),
+        offer_nonce: nonce(),
+        audience: crate::audience::AudienceEvidence::default(),
+    })
+}
+
+/// A spawn's report delivers only its bound child's latest crossing, and its close records
+/// that delivery: a report naming another return is refused, the repeat answers from the
+/// record, and a close recording a return the child did not cross last is forged.
+#[test]
+fn a_spawn_close_delivers_only_its_bound_childs_latest_crossing() {
+    let e = engine_at(vec![], Label::new(SUSPICIOUS, Audience::public()));
+    let child = TrajectoryId::new("child");
+    let mut log = spawn_family(&e, &child);
+    log.extend(crossed_report(&e, &log.clone(), &child, "x"));
+    let dispatch = spawn_of(&log, &child);
+    let (crossing, admitted) = e
+        .spawn_return_of(&viewing(&e, &log), &dispatch)
+        .expect("the open spawn answers with the child's crossing");
+    assert_eq!(admitted.body, ValueBody::new("x"));
+
+    let other = ChildReturnId::new(child.clone(), crossing.occurrence() + 1);
+    assert_eq!(
+        e.handle(&viewing(&e, &log), delivering(&dispatch, &other)),
+        Err(crate::transition::TransitionError::ObservationMismatch)
+    );
+
+    let closed = appended_facts(
+        e.handle(&viewing(&e, &log), delivering(&dispatch, &crossing))
+            .expect("the latest crossing closes the spawn"),
+    );
+    assert!(
+        closed.iter().any(|fact| matches!(
+            fact,
+            Fact::DispatchClosed {
+                outcome: crate::fact::CloseOutcome::Success { crossing: Some(delivered), .. },
+                ..
+            } if *delivered == crossing
+        )),
+        "{closed:?}"
+    );
+    let log = [log, closed].concat();
+    assert_eq!(e.validate_replay(&log), Ok(()));
+    let repeat = e
+        .handle(&viewing(&e, &log), delivering(&dispatch, &crossing))
+        .expect("the repeat answers from the record");
+    assert_eq!(repeat.append, None);
+    assert_eq!(
+        e.handle(&viewing(&e, &log), delivering(&dispatch, &other)),
+        Err(crate::transition::TransitionError::ObservationMismatch)
+    );
+
+    let forged: Vec<Fact> = log
+        .iter()
+        .cloned()
+        .map(|fact| match fact {
+            Fact::DispatchClosed {
+                trajectory,
+                dispatch,
+                outcome:
+                    crate::fact::CloseOutcome::Success {
+                        effects,
+                        crossing: Some(_),
+                    },
+            } => Fact::DispatchClosed {
+                trajectory,
+                dispatch,
+                outcome: crate::fact::CloseOutcome::Success {
+                    effects,
+                    crossing: Some(other.clone()),
+                },
+            },
+            fact => fact,
+        })
+        .collect();
+    assert_eq!(e.validate_replay(&forged), Err(TransitionRefusal::ForgedEvidence));
+}
+
+/// A spawn answers with the crossing of the child bound to its own fork, never another
+/// spawn's child.
+#[test]
+fn a_spawn_answers_only_with_its_own_childs_crossing() {
+    let e = engine_at(vec![], Label::new(SUSPICIOUS, Audience::public()));
+    let (first, second) = (TrajectoryId::new("first"), TrajectoryId::new("second"));
+    let mut log = spawn_family(&e, &first);
+    log.extend(forked_child(&e, &log.clone(), &second));
+    log.extend(crossed_report(&e, &log.clone(), &second, "y"));
+    let view = viewing(&e, &log);
+    assert_eq!(e.spawn_return_of(&view, &spawn_of(&log, &first)), None);
+    let (crossing, admitted) = e
+        .spawn_return_of(&view, &spawn_of(&log, &second))
+        .expect("the second spawn answers with its child's crossing");
+    assert_eq!((crossing.child(), admitted.body), (&second, ValueBody::new("y")));
 }

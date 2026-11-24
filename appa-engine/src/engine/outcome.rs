@@ -26,8 +26,20 @@ impl Engine {
             (matches!(report.outcome, ToolOutcome::FailureWithBody { .. }) && views.bound_sanitizer(dispatch).is_some())
                 .then_some(Withheld::ByRelease)
         });
+        let crossing = match &report.outcome {
+            ToolOutcome::Success {
+                body: OutcomeBody::Crossed(crossing),
+            } => Some(crossing),
+            _ => None,
+        };
         let observed = match (&report.outcome, withholds_output) {
-            (ToolOutcome::Success { .. }, true) => Some(ObservedResult::Unavailable),
+            (ToolOutcome::Success { .. }, true)
+            | (
+                ToolOutcome::Success {
+                    body: OutcomeBody::Crossed(_),
+                },
+                false,
+            ) => Some(ObservedResult::Unavailable),
             (
                 ToolOutcome::Success {
                     body: OutcomeBody::Available(raw),
@@ -45,10 +57,13 @@ impl Engine {
                 Some(ObservedResult::Available(RawResultDigest::of(body.as_str().as_bytes())))
             }
         };
+        // A confined result an offer admitted is the offer's release, never the report's.
         let closed = || EngineDecision {
             append: None,
             follow_up: FollowUp::Outcome(OutcomeFollowUp::Closed {
-                admitted: views.admitted_result(dispatch),
+                admitted: views
+                    .admitted_result(dispatch)
+                    .filter(|_| views.admitted_by(dispatch).is_none()),
                 withheld,
             }),
         };
@@ -82,6 +97,12 @@ impl Engine {
             {
                 return Err(TransitionError::ObservationMismatch);
             }
+            // A report delivering a crossing repeats a close that delivered the same one.
+            if let Some(crossing) = crossing
+                && views.spawn_crossing(dispatch).map(|(delivered, _)| delivered).as_ref() != Some(crossing)
+            {
+                return Err(TransitionError::ObservationMismatch);
+            }
             return Ok(closed());
         }
         let checkpointed = views.observed_result(dispatch).cloned();
@@ -112,6 +133,16 @@ impl Engine {
         }
 
         let admission = match (&report.outcome, withheld.is_some()) {
+            // The crossing a close delivers is the open spawn's own: its bound child's latest.
+            (
+                ToolOutcome::Success {
+                    body: OutcomeBody::Crossed(crossing),
+                },
+                _,
+            ) => match views.spawn_delivery(dispatch) {
+                Some(delivery) if &delivery == crossing => ResultAdmission::SuccessCrossed { crossing: delivery },
+                _ => return Err(TransitionError::ObservationMismatch),
+            },
             (ToolOutcome::Success { .. }, true) => ResultAdmission::SuccessNoValue,
             (ToolOutcome::Failure, _) => ResultAdmission::Failure,
             (ToolOutcome::FailureWithBody { .. }, true) => {

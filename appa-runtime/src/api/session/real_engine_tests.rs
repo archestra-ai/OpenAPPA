@@ -810,7 +810,7 @@ async fn the_success_checkpoint_commits_once_across_a_lost_admission() {
         .cloned()
         .find_map(|fact| match fact {
             appa_engine::fact::Fact::DispatchClosed {
-                outcome: appa_engine::fact::CloseOutcome::Success { effects },
+                outcome: appa_engine::fact::CloseOutcome::Success { effects, .. },
                 ..
             } => Some(effects),
             _ => None,
@@ -3312,7 +3312,7 @@ async fn a_withhold_remedy_commits_effects_without_admitting_the_result() {
     assert!(facts.iter().any(|fact| matches!(
         fact,
         appa_engine::fact::Fact::DispatchClosed {
-            outcome: appa_engine::fact::CloseOutcome::Success { effects },
+            outcome: appa_engine::fact::CloseOutcome::Success { effects, .. },
             ..
         } if effects.contains(&appa_engine::fact::EffectKind::new("leak"))
     )));

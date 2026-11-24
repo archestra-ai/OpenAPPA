@@ -1621,13 +1621,22 @@ selectors = [{{ template = "user-group/<handle>" }}]
     )
 }
 
+/// [`covered_by_groups_policy`] with the directory's user groups reporting Slack ids, each
+/// seated through its `people` lookup.
+fn covered_by_redirected_groups_policy(groups: u32) -> String {
+    format!(
+        "{}lookup = \"people\"\n\n[externals.audience.people]\nurl = \"AUDIENCE_URL\"\n",
+        covered_by_groups_policy(groups)
+    )
+}
+
 /// The root's answer, its audience narrowed to Alice and Bob, judged into `send` to Eve.
 async fn answer_sent_to_eve(
     dir: &tempfile::TempDir,
-    groups: u32,
+    policy: &str,
     url: &str,
 ) -> Result<(), appa_runtime_api::ReleaseRefusal> {
-    let runtime = narrowed_under(dir, &covered_by_groups_policy(groups), url).await;
+    let runtime = narrowed_under(dir, policy, url).await;
     let answer = hooks::handle_embedded(
         &runtime,
         HookEvent::TurnEnd {
@@ -1648,12 +1657,15 @@ async fn answer_sent_to_eve(
         .await
 }
 
+/// The selectors a judgment read, in sorted order: one batch reads them concurrently.
 fn selectors_read(directory: &Directory) -> Vec<String> {
-    directory
+    let mut read: Vec<String> = directory
         .requests()
         .iter()
         .filter_map(|request| request["artifact"]["selector"].as_str().map(str::to_string))
-        .collect()
+        .collect();
+    read.sort();
+    read
 }
 
 /// A cover whose roster does not answer leaves the next independent cover to be read: the
@@ -1663,23 +1675,48 @@ async fn a_release_whose_first_cover_does_not_answer_is_judged_on_the_next() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, directory) = serve_directory().await;
     directory.group("user-group/g2", "eve@corp.example", None);
-    assert_eq!(answer_sent_to_eve(&dir, 2, &url).await, Ok(()));
+    assert_eq!(
+        answer_sent_to_eve(&dir, &covered_by_groups_policy(2), &url).await,
+        Ok(())
+    );
     assert_eq!(selectors_read(&directory), ["user-group/g1", "user-group/g2"]);
 }
 
-/// Eight covers read one roster a batch, the eighth the one that holds the recipient: the
-/// judgment after the eighth batch reads its answer.
+/// Every cover's roster is read in one consult batch, more covers than a judgment has
+/// rounds: the ninth holds the recipient, and each roster is read once.
 #[tokio::test]
-async fn a_release_is_judged_on_the_answer_of_its_eighth_consult_batch() {
+async fn a_release_reads_every_covers_roster_in_one_consult_batch() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, directory) = serve_directory().await;
-    for k in 1..=7 {
+    for k in 1..=8 {
         directory.group(&format!("user-group/g{k}"), "zed@corp.example", None);
     }
-    directory.group("user-group/g8", "eve@corp.example", None);
-    assert_eq!(answer_sent_to_eve(&dir, 8, &url).await, Ok(()));
+    directory.group("user-group/g9", "eve@corp.example", None);
+    assert_eq!(
+        answer_sent_to_eve(&dir, &covered_by_groups_policy(9), &url).await,
+        Ok(())
+    );
     assert_eq!(
         selectors_read(&directory),
-        (1..=8).map(|k| format!("user-group/g{k}")).collect::<Vec<_>>()
+        (1..=9).map(|k| format!("user-group/g{k}")).collect::<Vec<_>>()
     );
+}
+
+/// A member whose lookup does not answer loses only the rosters that report it: the release
+/// is judged on a cover whose roster seats the recipient.
+#[tokio::test]
+async fn a_release_whose_first_roster_holds_an_unseatable_member_is_judged_on_the_next() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, directory) = serve_directory().await;
+    directory
+        .members
+        .lock()
+        .unwrap()
+        .insert("user-group/g1".to_string(), vec!["slack:U1".to_string()]);
+    directory.group("user-group/g2", "slack:U2", Some("eve@corp.example"));
+    assert_eq!(
+        answer_sent_to_eve(&dir, &covered_by_redirected_groups_policy(2), &url).await,
+        Ok(())
+    );
+    assert_eq!(selectors_read(&directory), ["user-group/g1", "user-group/g2"]);
 }

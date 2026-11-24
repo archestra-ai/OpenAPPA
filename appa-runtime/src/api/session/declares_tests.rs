@@ -2682,4 +2682,26 @@ async fn a_held_returns_retry_through_another_line_is_refused() {
         .on_child_return("one".to_string(), operation("op-1"))
         .await;
     assert!(matches!(retried, Err(EventError::PolicyUnavailable(_))), "{retried:?}");
+/// A spawn result withheld while its child had crossed other bytes delivers no crossing:
+/// reported again with those bytes, after a reload, it stays withheld rather than replaying
+/// the child's crossing.
+#[tokio::test]
+async fn a_withheld_spawn_result_reported_again_with_the_crossed_bytes_stays_withheld() {
+    let deployed = deployed(false);
+    let child = bound_child(&deployed.runtime, 1).await;
+    crossing(&child, "x", "op-1").await;
+    let withheld = spawn_reported(&deployed.runtime, &child, 1, "y").await;
+    assert!(
+        matches!(
+            withheld,
+            SpawnResultDecision::Return(ChildReturnDecision::Blocked { .. })
+        ),
+        "{withheld:?}"
+    );
+    let replica = deployed.replica();
+    let again = spawn_reported(&replica, &child, 1, "x").await;
+    assert!(
+        matches!(again, SpawnResultDecision::Return(ChildReturnDecision::Blocked { .. })),
+        "{again:?}"
+    );
 }

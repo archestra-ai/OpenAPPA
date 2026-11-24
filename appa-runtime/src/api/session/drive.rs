@@ -774,12 +774,8 @@ impl Decided<'_> {
         self.engine().fork_status(self.view, fork)
     }
 
-    pub(super) fn spawn_return(
-        &self,
-        dispatch: &appa_engine::value::DispatchId,
-        child: &TrajectoryId,
-    ) -> Option<(String, appa_runtime_api::ReleaseReceipt)> {
-        self.engine().spawn_return(self.view, dispatch, child)
+    pub(super) fn spawn_return(&self, dispatch: &appa_engine::value::DispatchId) -> Option<crate::engine::SpawnReturn> {
+        self.engine().spawn_return(self.view, dispatch)
     }
 
     /// The fan-out spawn released under this prompt that still binds children: its fork

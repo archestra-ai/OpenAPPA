@@ -23,6 +23,11 @@ pub enum ResultAdmission {
     Indeterminate,
     SuccessAbandoned,
     SuccessNoValue,
+    /// A bound spawn's success delivering the crossing its child made, which admitted its value
+    /// into the parent already.
+    SuccessCrossed {
+        crossing: crate::value::ChildReturnId,
+    },
     SuccessRaw {
         body: ValueBody,
     },
@@ -243,6 +248,7 @@ pub(crate) fn admit_result(
         ResultAdmission::CandidateAccepted { .. }
         | ResultAdmission::CandidateAdmissible
         | ResultAdmission::SuccessNoValue
+        | ResultAdmission::SuccessCrossed { .. }
         | ResultAdmission::SuccessAbandoned
         | ResultAdmission::Failure
         | ResultAdmission::FailureWithBody { .. }
@@ -257,7 +263,7 @@ pub(crate) fn admit_result(
     let trajectory = views.trajectory().clone();
     views.receiving_bound(dispatch).ok_or(AdmitError::NotOpen)?;
     let output_label = || call.output_label_from(&contract.output_label());
-    let close_success = || Fact::DispatchClosed {
+    let close_delivering = |crossing| Fact::DispatchClosed {
         trajectory: trajectory.clone(),
         dispatch: dispatch.clone(),
         outcome: CloseOutcome::Success {
@@ -266,8 +272,10 @@ pub(crate) fn admit_result(
             } else {
                 contract.contract.emits.clone()
             },
+            crossing,
         },
     };
+    let close_success = || close_delivering(None);
     let admit_derived = |value: LabeledValue| Fact::ValueAdmitted {
         trajectory: trajectory.clone(),
         value,
@@ -323,6 +331,7 @@ pub(crate) fn admit_result(
             outcome: CloseOutcome::Indeterminate,
         }],
         ResultAdmission::SuccessNoValue => vec![close_success()],
+        ResultAdmission::SuccessCrossed { crossing } => vec![close_delivering(Some(crossing))],
         ResultAdmission::SuccessAbandoned => vec![Fact::DispatchClosed {
             trajectory: trajectory.clone(),
             dispatch: dispatch.clone(),
@@ -622,7 +631,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             &batch[0],
-            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
+            Fact::DispatchClosed { outcome: CloseOutcome::Success { effects, .. }, .. } if effects == &EffectSet::new([EffectKind::new("read")]).unwrap()
         ));
         match &batch[1] {
             Fact::ValueAdmitted { value, .. } => {
@@ -787,7 +796,7 @@ mod tests {
         assert!(batch.iter().any(|fact| matches!(
             fact,
             Fact::DispatchClosed {
-                outcome: CloseOutcome::Success { effects },
+                outcome: CloseOutcome::Success { effects, .. },
                 ..
             } if effects.is_empty()
         )));
@@ -853,7 +862,7 @@ mod tests {
         assert!(batch.iter().any(|fact| matches!(
             fact,
             Fact::DispatchClosed {
-                outcome: CloseOutcome::Success { effects },
+                outcome: CloseOutcome::Success { effects, .. },
                 ..
             } if effects.is_empty()
         )));

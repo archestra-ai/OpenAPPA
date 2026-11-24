@@ -574,7 +574,10 @@ static DISPATCH_SUCCEEDED: Table = Table {
 
 static CLOSE_SUCCESS: Table = Table {
     name: "CloseOutcome::Success",
-    entries: &[("effects", Rule::Elements(Class::Effect))],
+    entries: &[
+        ("effects", Rule::Elements(Class::Effect)),
+        ("crossing", Rule::Table(&CHILD_RETURN_ID)),
+    ],
 };
 
 static CLOSE_OUTCOME: Table = Table {

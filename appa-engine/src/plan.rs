@@ -4730,6 +4730,7 @@ mod tests {
             dispatch,
             outcome: crate::fact::CloseOutcome::Success {
                 effects: EffectSet::new([kind]).unwrap(),
+                crossing: None,
             },
         }
     }

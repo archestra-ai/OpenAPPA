@@ -43,8 +43,17 @@ pub(in crate::api) async fn judge_release(
             ReleaseRound::Consult(_) if consulted == RESOLUTION_ROUNDS => break,
             ReleaseRound::Consult(requests) => {
                 let asked = requests.iter().map(|request| membership(deployment, request));
+                let mut learned = false;
                 for answered in crate::external::settle_batch(asked).await {
-                    evidence.push(answered?);
+                    let answered = answered?;
+                    if !evidence.contains(&answered) {
+                        evidence.push(answered);
+                        learned = true;
+                    }
+                }
+                // A round that learns nothing asks the same batch again.
+                if !learned {
+                    break;
                 }
             }
         }

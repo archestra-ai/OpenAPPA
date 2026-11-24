@@ -491,6 +491,9 @@ pub enum ToolOutcome {
 pub enum OutcomeBody {
     Available(ValueBody),
     Unavailable,
+    /// The return of the spawn's bound child that the report repeats: it crossed into the
+    /// parent at its own admission, so the close admits nothing more and records the delivery.
+    Crossed(ChildReturnId),
 }
 
 /// Actual typed evidence from a registered external, bound to the subject it was resolved for.
@@ -1788,10 +1791,17 @@ impl<'a> Sequence<'a> {
             {
                 Err(TransitionRefusal::ForgedEvidence)
             }
-            (CloseOutcome::Success { effects }, true) if effects != &EffectSet::default() => {
+            (
+                CloseOutcome::Success {
+                    crossing: Some(crossing),
+                    ..
+                },
+                _,
+            ) if views.spawn_delivery(dispatch).as_ref() != Some(crossing) => Err(TransitionRefusal::ForgedEvidence),
+            (CloseOutcome::Success { effects, .. }, true) if effects != &EffectSet::default() => {
                 Err(TransitionRefusal::EffectsMismatch)
             }
-            (CloseOutcome::Success { effects }, false) if effects != &contract.contract.emits => {
+            (CloseOutcome::Success { effects, .. }, false) if effects != &contract.contract.emits => {
                 Err(TransitionRefusal::EffectsMismatch)
             }
             _ => Ok(()),
@@ -2594,7 +2604,7 @@ impl<'a> Sequence<'a> {
                 dispatch,
                 outcome,
             } => match outcome {
-                CloseOutcome::Success { effects } => effect_advance(!effects.is_empty()),
+                CloseOutcome::Success { effects, .. } => effect_advance(!effects.is_empty()),
                 CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => {
                     effect_advance(self.projection.view(trajectory).reserves(dispatch))
                 }

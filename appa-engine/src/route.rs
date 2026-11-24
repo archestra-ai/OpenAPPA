@@ -1105,6 +1105,7 @@ mod tests {
             dispatch: DispatchId::new(traj(), seed_call(kind).digest(), 0),
             outcome: CloseOutcome::Success {
                 effects: EffectSet::new([effect(kind)]).unwrap(),
+                crossing: None,
             },
         }
     }
