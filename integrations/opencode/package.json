@@ -10,7 +10,7 @@
   "dependencies": {
     "@opencode/plugin": "2.3.0",
     "@opencode/schema": "2.3.0",
-    "effect": "4.1.4"
+    "effect": "4.1.0"
   },
   "devDependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.83",
