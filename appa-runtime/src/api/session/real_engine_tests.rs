@@ -7341,6 +7341,10 @@ mod replay;
 /// a block.
 mod settings;
 
+/// The family's attendance window: what a block plans and what the runtime applies on its own
+/// while a person attends the family.
+mod attendance;
+
 #[tokio::test]
 async fn an_empty_crossing_child_turn_stays_open_and_a_root_cannot_end_as_a_child() {
     let dir = tempfile::tempdir().unwrap();

@@ -117,6 +117,7 @@ pub(crate) enum HookKind {
     ChildReturn,
     SpawnResult,
     ReviewRelease,
+    Attendance,
     /// The body did not parse.
     Unparsable,
     /// The codec answered "not mine". Neither an event nor a parse failure — and worth

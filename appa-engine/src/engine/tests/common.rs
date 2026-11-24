@@ -586,6 +586,7 @@ pub(super) fn substituting_config() -> RegistryConfig {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }],
         sanitizers: vec![crate::authority::Sanitizer {
             name: crate::names::SanitizerName::new("redact"),
@@ -770,6 +771,7 @@ pub(super) fn officer(name: &str) -> crate::authority::Authority {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     }
 }
 

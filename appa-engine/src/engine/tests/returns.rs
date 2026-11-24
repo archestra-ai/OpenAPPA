@@ -1316,6 +1316,7 @@ pub(super) fn gapped_spawn_registry() -> RegistryConfig {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     }];
     cfg
 }

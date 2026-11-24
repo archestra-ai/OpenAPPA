@@ -1004,6 +1004,7 @@ mod tests {
             mandate,
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }
     }
 

@@ -1480,6 +1480,7 @@ mod tests {
                 scope: Scope::default(),
                 except: Vec::new(),
                 hint: None,
+                serves: appa_engine::authority::Serves::Always,
             };
             serde_json::to_value(AuthorityDeclaration::of(&authority, &chain()).permits).expect("serializes")
         };

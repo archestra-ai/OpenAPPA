@@ -201,6 +201,8 @@ pub(crate) struct RawAuthority {
     pub(crate) tags: Vec<String>,
     #[serde(default)]
     pub(crate) except_tags: Vec<String>,
+    #[serde(default)]
+    pub(crate) unattended_only: bool,
     pub(crate) implementation: Option<toml::Value>,
 }
 

@@ -517,7 +517,10 @@ impl Engine {
             EngineEvent::ChildReturn(report) => Some(&report.child),
             EngineEvent::SettleReturn(settlement) => Some(&settlement.trajectory),
             EngineEvent::Answer(report) => Some(&report.trajectory),
-            EngineEvent::Outcome(_) | EngineEvent::BindFork(_) | EngineEvent::Review(_) => None,
+            EngineEvent::Outcome(_)
+            | EngineEvent::BindFork(_)
+            | EngineEvent::Review(_)
+            | EngineEvent::Attendance(_) => None,
         };
         if acting.is_some_and(|trajectory| !view.projection().is_opened(trajectory)) {
             return Err(TransitionError::UnopenedTrajectory);
@@ -532,6 +535,7 @@ impl Engine {
             EngineEvent::SettleReturn(settlement) => self.decide_settlement(view, &settlement),
             EngineEvent::Answer(report) => self.decide_answer(view, &report),
             EngineEvent::Review(report) => self.decide_review(view, &report),
+            EngineEvent::Attendance(state) => self.decide_attendance(view, state),
         }?;
         act.settle(self.registry.audience())?;
         Ok(decision)
@@ -562,7 +566,8 @@ impl Engine {
             EngineEvent::BindFork(_)
             | EngineEvent::SettleReturn(_)
             | EngineEvent::Answer(_)
-            | EngineEvent::Review(_) => (AudienceEvidence::default(), AudienceEvidence::default()),
+            | EngineEvent::Review(_)
+            | EngineEvent::Attendance(_) => (AudienceEvidence::default(), AudienceEvidence::default()),
         };
         self.act_evidence(merged, inherited, projection.principal().cloned())
     }
@@ -634,6 +639,68 @@ impl Engine {
         self.registry.recorder(call)
     }
 
+    /// Move the family's attendance window to `state`. A window already there records nothing;
+    /// opening it supersedes every unspent approval an authority that answers only unattended
+    /// families ruled on, and closing it revives none.
+    fn decide_attendance(
+        &self,
+        view: &EngineView,
+        state: appa_runtime_api::Attendance,
+    ) -> Result<EngineDecision, TransitionError> {
+        let follow_up = FollowUp::Attendance { state };
+        if view.projection().attendance() == state {
+            return Ok(EngineDecision {
+                append: None,
+                follow_up,
+            });
+        }
+        let moved = Fact::Attendance {
+            trajectory: view.family().clone(),
+            state,
+        };
+        let batch = self.decided(view, crate::basis::DecidedAct::Attendance(state), vec![moved])?;
+        Ok(EngineDecision {
+            append: Some(batch),
+            follow_up,
+        })
+    }
+
+    /// Does `authority` answer a family whose window stands at `attendance`? An authority the
+    /// registry does not hold answers nothing a plan could name.
+    pub(crate) fn answers(
+        &self,
+        authority: &crate::names::AuthorityName,
+        attendance: appa_runtime_api::Attendance,
+    ) -> bool {
+        self.registry
+            .authority(authority)
+            .is_none_or(|registered| registered.answers(attendance))
+    }
+
+    /// Refuse, while the family's window stands at `attendance`, an offer whose plan consults an
+    /// authority that does not answer it, or one the runtime would apply on its own while open.
+    pub(crate) fn attending(
+        &self,
+        attendance: appa_runtime_api::Attendance,
+        plan: &crate::plan::ExecutableRemedyPlan,
+        initiator: Option<appa_runtime_api::Initiator>,
+    ) -> Result<(), crate::transition::AttendedRefusal> {
+        use crate::transition::AttendedRefusal;
+        if let Some(required) = plan
+            .required
+            .iter()
+            .find(|required| !self.answers(&required.authority, attendance))
+        {
+            return Err(AttendedRefusal::UnattendedOnly(required.authority.clone()));
+        }
+        match (attendance, initiator) {
+            (appa_runtime_api::Attendance::Open, Some(appa_runtime_api::Initiator::AutoApply)) => {
+                Err(AttendedRefusal::AutoApply)
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// What the runtime must resolve before it can execute one live offer.
     pub fn offer_consults(
         &self,
@@ -651,6 +718,7 @@ impl Engine {
         if let Some(end) = &recorded.end {
             return Ok(OfferConsult::Replay(replay_outcome(recorded, end)));
         }
+        self.attending(views.attendance(), &recorded.plan, None)?;
         let stale = || OfferConsult::Stale {
             subject: recorded.subject.clone(),
         };
@@ -1127,6 +1195,12 @@ impl Engine {
         if raw.is_hard() {
             offers.clear();
         }
+        // Nor does one the family's attendance window refuses taking.
+        offers.retain(|(offer, _)| {
+            views
+                .offer(offer)
+                .is_some_and(|open| self.attending(views.attendance(), &open.plan, None).is_ok())
+        });
         let mut block = plan::plan(
             &self.registry,
             views,

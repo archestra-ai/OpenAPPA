@@ -58,6 +58,20 @@ impl Session {
     }
 }
 
+impl Session {
+    /// Move the family's attendance window to `state`. A window already there records nothing.
+    pub(crate) async fn on_attendance(&self, state: appa_runtime_api::Attendance) -> Result<(), EventError> {
+        self.drive_with_evidence(
+            |_, _| Ok(EngineEvent::Attendance { state }),
+            None,
+            None,
+            Occasion::Other,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
 /// Record on each offer `facts` open the digest of the review the block renders for it, as
 /// `then` carries it to the people its `hitl` authorities ask: the bytes a release of that
 /// review may name. The only writer of [`Fact::OfferOpened`]'s `review_digest`, run on a

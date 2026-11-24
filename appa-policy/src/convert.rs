@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use appa_engine::authority::{
     Attends, Authority, ContextHint, DeclaredTransition, Hint, HintTooLong, Mandate, Sanitizer, SanitizerPoints, Scope,
+    Serves,
 };
 use appa_engine::contract::{
     AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
@@ -299,6 +300,10 @@ impl RawAuthority {
             },
             except: self.except_tags.into_iter().map(TagName::new).collect(),
             hint,
+            serves: match self.unattended_only {
+                true => Serves::UnattendedOnly,
+                false => Serves::Always,
+            },
         })
     }
 }

@@ -545,6 +545,9 @@ pub enum RemedyRefusal {
     /// Another plan's approval for this exact call still stands, so this plan was not
     /// applied. Nothing is appended; the call proposed again is checked anew.
     ApprovalPending,
+    /// A person attends the family, and the plan consults an authority that answers only
+    /// unattended families. Nothing is consulted or appended; the offer stands.
+    UnattendedOnly { authority: String },
     /// An annotator the plan consults gave no answer. This attempt committed no engine facts,
     /// did not authorize the call, and did not consume the offer; a retry needs a fresh vouch,
     /// which a control hook writes.
@@ -574,6 +577,10 @@ impl RemedyRefusal {
             Self::ApprovalPending => {
                 "[appa] Another plan already approved this exact call, so this plan was not applied. Call the \
                  blocked tool again with the same arguments; it will be checked again."
+            }
+            Self::UnattendedOnly { .. } => {
+                "[appa] This plan asks an approver that answers only while no person attends the session, and \
+                 a person attends it now. Take another plan the block offers, or ask the person to approve the call."
             }
             // Which annotator failed, and how, is the host's to read from the fields.
             Self::Unanswered { .. } => crate::engine::MissingIn::Remedy.model_text(),
@@ -644,6 +651,11 @@ impl From<EventError> for RemedyOutcome {
                 ..
             } => RemedyRefusal::Unanswered { annotator, class },
             EventError::ApprovalPending => RemedyRefusal::ApprovalPending,
+            EventError::Attended(appa_engine::transition::AttendedRefusal::UnattendedOnly(authority)) => {
+                RemedyRefusal::UnattendedOnly {
+                    authority: authority.as_str().to_string(),
+                }
+            }
             error => RemedyRefusal::Runtime {
                 detail: error.to_string(),
             },
@@ -898,6 +910,10 @@ pub(crate) enum EventError {
     /// The call already carries a current approval another plan recorded. Nothing is appended.
     #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
     ApprovalPending,
+    /// The family's attendance window is open, and the offer may not be taken while it is.
+    /// Nothing is appended.
+    #[error(transparent)]
+    Attended(appa_engine::transition::AttendedRefusal),
     /// The declaration ahead an application was for was settled, or no longer applies through
     /// this offer, where the application would commit. Nothing is appended.
     #[error("the return declared ahead was settled or changed while it was applied")]
@@ -1047,6 +1063,7 @@ impl EventError {
             EventError::UnknownOffer
             | EventError::OtherReview
             | EventError::ApprovalPending
+            | EventError::Attended(_)
             | EventError::AheadMoved
             | EventError::RemedyArguments { .. } => RefusalClass::Remedy,
             EventError::SpawnNotTaken => RefusalClass::SpawnNotTaken,
@@ -1107,6 +1124,7 @@ impl EventError {
             | EventError::UnknownOffer
             | EventError::OtherReview
             | EventError::ApprovalPending
+            | EventError::Attended(_)
             | EventError::AheadMoved
             | EventError::NotAChild
             | EventError::SpawnNotTaken
@@ -1139,6 +1157,7 @@ impl From<EngineRefusal> for EventError {
             EngineRefusal::UnknownOffer => EventError::UnknownOffer,
             EngineRefusal::OtherReview => EventError::OtherReview,
             EngineRefusal::ApprovalPending => EventError::ApprovalPending,
+            EngineRefusal::Attended(refusal) => EventError::Attended(refusal),
             EngineRefusal::Unbindable => EventError::BindingMismatch,
             EngineRefusal::CallIdReused => EventError::CallIdReused,
             EngineRefusal::OutcomeMismatch => EventError::OutcomeMismatch,
@@ -4064,6 +4083,9 @@ impl Runtime {
             if host.claimed(&claimed).is_some() {
                 return Err(refused(RemedyRefusal::AlreadyExecuting));
             }
+            if let Some(refusal) = self.offer_attended_in(log, &quoted) {
+                return Err(EventError::Attended(refusal).into());
+            }
             let ruling = match admission {
                 Admission::Open => None,
                 Admission::Vouched { fresh } => {
@@ -4267,6 +4289,14 @@ impl Runtime {
             OfferStanding::Live(kind) => Some(kind),
             OfferStanding::Stale | OfferStanding::Ended => None,
         }
+    }
+
+    fn offer_attended_in(&self, log: &Log, quoted: &OfferId) -> Option<appa_engine::transition::AttendedRefusal> {
+        self.read_offer_in(log, quoted, |standing| {
+            standing
+                .engine
+                .offer_attended(standing.view, &standing.pursuer, &standing.offer)
+        })
     }
 
     fn offer_standing_in(&self, log: &Log, quoted: &OfferId) -> OfferStanding {

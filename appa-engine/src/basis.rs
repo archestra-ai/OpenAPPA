@@ -131,6 +131,8 @@ pub enum DecidedAct {
     Answer(TrajectoryId),
     /// An offer's review released to its host.
     Review(OfferId),
+    /// The family's attendance window moved, named by the state it moved to.
+    Attendance(appa_runtime_api::Attendance),
 }
 
 /// What one decision declares it moves. `family` and `flow` move at most once in a decision;

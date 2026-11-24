@@ -80,6 +80,7 @@ fn engine() -> Engine {
         },
         scope: Scope::default(),
         hint: None,
+        serves: appa_engine::authority::Serves::Always,
     };
     Engine::open(DeploymentPolicy {
         profile: ProfileDeclaration {

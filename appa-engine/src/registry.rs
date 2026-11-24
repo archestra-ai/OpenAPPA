@@ -2636,6 +2636,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }
     }
 
@@ -2671,6 +2672,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }];
 
         let registry = Registry::build_covered(cfg).expect("a catch-all mandate is valid policy");
@@ -2699,6 +2701,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }];
 
         assert!(matches!(
@@ -2789,6 +2792,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }];
 
         let sanitizer = |transition| Sanitizer {
@@ -2921,6 +2925,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }];
         assert!(Registry::build_covered(public_ceiling).is_ok());
 
@@ -3127,6 +3132,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let redact = Sanitizer {
             name: SanitizerName::new("redact"),
@@ -3649,6 +3655,7 @@ mod tests {
             mandate: Mandate::default(),
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }];
         assert!(matches!(
             Registry::build_covered(cfg),
@@ -3677,6 +3684,7 @@ mod tests {
                     tags: scope.iter().map(|tag| TagName::new(*tag)).collect(),
                 },
                 hint: None,
+                serves: crate::authority::Serves::Always,
             }];
             Registry::build_covered(cfg).map(|_| ())
         };
@@ -3737,6 +3745,7 @@ mod tests {
             mandate,
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }
     }
 
@@ -4499,6 +4508,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let mut cfg = base();
         cfg.tools = declared(vec![two_marks]);
@@ -4559,6 +4569,7 @@ mod tests {
                 },
                 scope: Scope::default(),
                 hint: None,
+                serves: crate::authority::Serves::Always,
             };
             let mut cfg = base();
             cfg.annotators = vec![annotator("classifier")];
@@ -4590,6 +4601,7 @@ mod tests {
                     },
                     scope: Scope::default(),
                     hint: None,
+                    serves: crate::authority::Serves::Always,
                 })
                 .collect();
             cfg
@@ -4628,6 +4640,7 @@ mod tests {
                     },
                     scope: Scope::default(),
                     hint: None,
+                    serves: crate::authority::Serves::Always,
                 })
                 .collect();
             // The emitter's own menu fits two; the annotated one never does.
@@ -4661,6 +4674,7 @@ mod tests {
                 },
                 scope: Scope::default(),
                 hint: None,
+                serves: crate::authority::Serves::Always,
             })
             .collect();
         assert!(matches!(
@@ -4690,6 +4704,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         // None of these reaches `auditor`, so none of them can cover the gap.
         cfg.authorities = (0..80)
@@ -4950,6 +4965,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let mut cfg = base();
         cfg.tools = declared(tools);

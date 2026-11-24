@@ -409,8 +409,7 @@ fn planned(
         role,
     } = blocked;
     let current = views.current_label();
-    let no_denials = BTreeSet::new();
-    let denied = views.denied_authorities(&call.digest()).unwrap_or(&no_denials);
+    let denied = &excluded(registry, views, call);
 
     let has_committed = |kind: &EffectKind| views.has_effect(kind);
     let has_reserved = |kind: &EffectKind| views.has_reservation(kind);
@@ -647,8 +646,7 @@ pub(crate) fn bundled_spawn_menu(
     let CallRole::MarkedSpawn(class) = blocked.role else {
         return Ok(Vec::new());
     };
-    let no_denials = BTreeSet::new();
-    let denied = views.denied_authorities(&blocked.call.digest()).unwrap_or(&no_denials);
+    let denied = &excluded(registry, views, blocked.call);
     Ok(enumerate_plans(
         registry,
         blocked.contract,
@@ -666,6 +664,18 @@ pub(crate) fn bundled_spawn_menu(
     .into_iter()
     .filter(|plan| !denied.iter().any(|authority| plan.names_authority(authority)))
     .collect())
+}
+
+/// The authorities no plan for `call` names: each that denied it, and each that does not answer
+/// the family's attendance window as it stands.
+fn excluded(registry: &Registry, views: &Views, call: &ResolvedCall) -> BTreeSet<AuthorityName> {
+    let denied = views.denied_authorities(&call.digest()).into_iter().flatten();
+    let unanswering = registry
+        .authorities()
+        .iter()
+        .filter(|authority| !authority.answers(views.attendance()))
+        .map(|authority| &authority.name);
+    denied.chain(unanswering).cloned().collect()
 }
 
 /// The executable plans of one stage over an explicit state: the branch's label and the
@@ -1849,6 +1859,7 @@ mod tests {
             mandate,
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }
     }
 
@@ -2669,6 +2680,7 @@ mod tests {
                 },
                 scope: Scope { tags: tags(scope) },
                 hint: None,
+                serves: crate::authority::Serves::Always,
             }
         }
 
@@ -3649,6 +3661,7 @@ mod tests {
                     tags: vec![TagName::new("mail")],
                 },
                 hint: None,
+                serves: crate::authority::Serves::Always,
             }],
             vec![Sanitizer {
                 name: SanitizerName::new("scrub"),
@@ -3746,6 +3759,7 @@ mod tests {
                     tags: vec![TagName::new("mail")],
                 },
                 hint: None,
+                serves: crate::authority::Serves::Always,
             }],
             vec![],
         );
@@ -3980,6 +3994,7 @@ mod tests {
                 tags: vec![TagName::new("unrelated")],
             },
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let registry = registry(vec![tool], vec![officer], vec![]);
         let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
@@ -4306,6 +4321,7 @@ mod tests {
                     },
                     scope: Scope::default(),
                     hint: None,
+                    serves: crate::authority::Serves::Always,
                 },
             )
     }

@@ -12,7 +12,7 @@ mod wire;
 pub use launch::{LaunchStart, LaunchToken, LaunchTokenError, StartKind};
 pub use peer::{PeerAddress, PeerDigest, PeerFrame, PeerValueError, SessionTitle};
 pub use release::{ReleaseDigest, ReleaseReceipt, ReleaseRefusal};
-pub use settings::{AutoApply, Initiator, LineVariant, LineVariantError, SessionSettings};
+pub use settings::{Attendance, AutoApply, Initiator, LineVariant, LineVariantError, SessionSettings};
 
 pub use wire::{
     Accepted, Adapter, ConformLaunchFn, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn,
@@ -724,6 +724,9 @@ pub enum HookEvent {
         offer: String,
         digest: ReleaseDigest,
     },
+    /// The host opens or closes the actor's family's attendance window. Opening an open
+    /// window or closing a closed one records nothing.
+    Attendance { actor: Actor, state: Attendance },
 }
 
 /// Which operational fault a [`HookDecision::Refuse`] names: a closed

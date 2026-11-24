@@ -248,6 +248,8 @@ pub enum EngineEvent {
     SettleReturn(ReturnSettlement),
     Answer(AnswerReport),
     Review(ReviewReport),
+    /// The host moves the family's attendance window.
+    Attendance(appa_runtime_api::Attendance),
 }
 
 /// The root's final answer of a turn, by the digest of the bytes its host may deliver.
@@ -303,6 +305,15 @@ pub struct OfferExecution {
     /// Audience primitives this act reads that the offer's record did not pin; an execution
     /// starts from the offer's own pinned evidence, so this is normally empty.
     pub audience: AudienceEvidence,
+}
+
+/// Why a family whose attendance window is open refuses to execute, review or apply an offer.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AttendedRefusal {
+    #[error("the offer's plan consults {}, which answers only unattended families", .0.as_str())]
+    UnattendedOnly(AuthorityName),
+    #[error("the runtime applies no offer on its own while a person attends the family")]
+    AutoApply,
 }
 
 /// What the runtime must resolve before it can execute one live offer.
@@ -636,6 +647,11 @@ pub enum FollowUp {
     Released {
         at: ReleasedAt,
     },
+    /// The family's attendance window stands at `state`: moved by this decision, or held there
+    /// already.
+    Attendance {
+        state: appa_runtime_api::Attendance,
+    },
 }
 
 /// One released record of the family log: its position among the family's records, and the
@@ -670,6 +686,8 @@ impl Admitted {
 pub enum TransitionError {
     #[error(transparent)]
     Call(#[from] crate::engine::EngineError),
+    #[error(transparent)]
+    Attended(#[from] AttendedRefusal),
     #[error("the view stands at policy revision {view}, later than revision {engine} this engine decides at")]
     NewerRevision {
         view: PolicyRevision,
@@ -953,6 +971,11 @@ impl EngineView {
     }
 
     /// The reader this family acts for, as its opening pinned it.
+    /// Where the family's attendance window stands.
+    pub fn attendance(&self) -> appa_runtime_api::Attendance {
+        self.projection.attendance()
+    }
+
     pub fn principal(&self) -> Option<&crate::label::ReaderId> {
         self.projection.principal()
     }
@@ -1181,6 +1204,10 @@ pub enum TransitionRefusal {
     AnswerLabelMismatch,
     #[error("a review record stands outside its own act, or off its offer's trajectory or block label")]
     ReviewMismatch,
+    #[error("an attendance record stands outside its own act, off the family root, or at the state the window holds")]
+    AttendanceMismatch,
+    #[error(transparent)]
+    Attended(AttendedRefusal),
     #[error("no authority registered as {0}")]
     UnknownAuthority(String),
     #[error("no sanitizer registered as {0}")]
@@ -1469,7 +1496,11 @@ impl<'a> Sequence<'a> {
                 }
                 self.offer_opened(trajectory, offer, block, act, call, subject, plan, basis, evidence)?
             }
-            Fact::OfferAccepted { trajectory, offer, .. } => self.offer_accepted(trajectory, offer)?,
+            Fact::OfferAccepted {
+                trajectory,
+                offer,
+                initiator,
+            } => self.offer_accepted(trajectory, offer, *initiator)?,
             Fact::CallApprovalConsumed { trajectory, offer, .. } => self.approval_consumed(trajectory, offer)?,
             Fact::CandidateConsumed {
                 trajectory, subject, ..
@@ -1653,6 +1684,7 @@ impl<'a> Sequence<'a> {
                 digest,
                 label,
             } => self.review_released(trajectory, offer, digest, label)?,
+            Fact::Attendance { trajectory, state } => self.attendance(trajectory, *state)?,
         }
         self.settle_advance(fact, &implied, released)?;
         self.projection.fold(fact);
@@ -2225,10 +2257,14 @@ impl<'a> Sequence<'a> {
         &mut self,
         trajectory: &TrajectoryId,
         offer: &crate::value::OfferId,
+        initiator: Option<appa_runtime_api::Initiator>,
     ) -> Result<(), TransitionRefusal> {
         use crate::basis::SubjectKey;
         let views = self.projection.view(trajectory);
         let recorded = ending_offer(&views, trajectory, offer)?;
+        self.engine
+            .attending(views.attendance(), &recorded.plan, initiator)
+            .map_err(TransitionRefusal::Attended)?;
         // The executing act inherits the accepted offer's pinned evidence.
         self.audit_inherit(&recorded.evidence)?;
         let (basis, subject) = (recorded.basis, recorded.subject.clone());
@@ -2258,6 +2294,9 @@ impl<'a> Sequence<'a> {
     ) -> Result<(), TransitionRefusal> {
         let views = self.projection.view(trajectory);
         let recorded = ending_offer(&views, trajectory, offer)?;
+        self.engine
+            .attending(views.attendance(), &recorded.plan, None)
+            .map_err(TransitionRefusal::Attended)?;
         if !recorded.plan.names_authority(authority) {
             return Err(TransitionRefusal::UnbackedDenial);
         }
@@ -2597,9 +2636,30 @@ impl<'a> Sequence<'a> {
             .as_ref()
             .is_some_and(|open| open.act == crate::basis::DecidedAct::Review(*offer));
         let rendered = self.projection.review_digest(offer) == Some(*digest);
+        if let Some(recorded) = self.projection.view(trajectory).offer(offer) {
+            self.engine
+                .attending(self.projection.attendance(), &recorded.plan, None)
+                .map_err(TransitionRefusal::Attended)?;
+        }
         match self.projection.offered_at(offer) {
             Some((opened, held)) if own_act && rendered && &opened == trajectory && &held == label => Ok(()),
             _ => Err(TransitionRefusal::ReviewMismatch),
+        }
+    }
+
+    /// The window moves under its own act, on the family root, to a state it does not hold.
+    fn attendance(
+        &self,
+        trajectory: &TrajectoryId,
+        state: appa_runtime_api::Attendance,
+    ) -> Result<(), TransitionRefusal> {
+        let own_act = self
+            .declared
+            .as_ref()
+            .is_some_and(|open| open.act == crate::basis::DecidedAct::Attendance(state));
+        match trajectory == &self.family && own_act && self.projection.attendance() != state {
+            true => Ok(()),
+            false => Err(TransitionRefusal::AttendanceMismatch),
         }
     }
 
@@ -2682,6 +2742,15 @@ impl<'a> Sequence<'a> {
             },
             Fact::CandidateDerived { subject, .. } | Fact::CandidateConsumed { subject, .. } => BasisAdvance {
                 subjects: vec![subject.clone()],
+                ..BasisAdvance::default()
+            },
+            Fact::Attendance { state, .. } => BasisAdvance {
+                subjects: self
+                    .projection
+                    .approvals_ruled_by(|authority| !self.engine.answers(authority, *state))
+                    .into_iter()
+                    .map(crate::basis::SubjectKey::Approval)
+                    .collect(),
                 ..BasisAdvance::default()
             },
             _ => BasisAdvance::default(),
@@ -4137,6 +4206,7 @@ fn belongs_to(sequence: &Sequence<'_>, act: &crate::basis::DecidedAct, fact: &Fa
             },
         ) => confines(sequence, act, dispatch),
         (DecidedAct::Offer(_), Fact::Denial { .. }) => true,
+        (DecidedAct::Attendance(act), Fact::Attendance { state, .. }) => state == act,
         _ => false,
     }
 }

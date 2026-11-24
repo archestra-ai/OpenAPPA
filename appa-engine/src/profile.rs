@@ -498,14 +498,17 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
                 },
                 "scope": sorted_set(&authority.scope.tags),
             });
-            // Written only where the authority excepts a tag or waives a prior, so a policy that
-            // does neither keeps the identity it had.
+            // Written only where the authority excepts a tag, waives a prior, or answers only
+            // unattended events, so a policy that does none of these keeps the identity it had.
             if !authority.except.is_empty() {
                 document["except"] = serde_json::Value::Array(sorted_set(&authority.except));
             }
             if !authority.mandate.prior_waivers.is_empty() {
                 document["mandate"]["prior_waivers"] =
                     serde_json::Value::Array(sorted_set(&authority.mandate.prior_waivers));
+            }
+            if authority.unattended_only() {
+                document["serves"] = serde_json::json!(authority.serves);
             }
             document
         })
@@ -1249,6 +1252,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         }];
         cfg.sanitizers = vec![output_sanitizer("redactor")];
         let profile = covering_profile(&cfg);
@@ -1289,6 +1293,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         cfg.authorities = vec![officer("first"), officer("second")];
         let profile = covering_profile(&cfg);

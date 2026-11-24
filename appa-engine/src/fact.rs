@@ -760,6 +760,13 @@ pub enum Fact {
         digest: appa_runtime_api::ReleaseDigest,
         label: Label,
     },
+    /// The family's attendance window moved to `state`, as its host reported. Opening it
+    /// supersedes every unspent approval an authority answering only unattended families
+    /// ruled on.
+    Attendance {
+        trajectory: TrajectoryId,
+        state: appa_runtime_api::Attendance,
+    },
 }
 
 impl Fact {
@@ -824,7 +831,8 @@ impl Fact {
             | Fact::ReturnDiscarded { trajectory, .. }
             | Fact::Boundary { trajectory, .. }
             | Fact::AnswerReleased { trajectory, .. }
-            | Fact::ReviewReleased { trajectory, .. } => trajectory,
+            | Fact::ReviewReleased { trajectory, .. }
+            | Fact::Attendance { trajectory, .. } => trajectory,
         }
     }
 }

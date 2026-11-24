@@ -139,6 +139,25 @@ fn an_authority_excepts_the_tags_it_names() {
     assert!(approver.scope.is_unscoped());
 }
 
+/// `unattended_only` reaches the engine as an authority that answers no attended event, and
+/// is part of the policy's identity.
+#[test]
+fn an_authority_may_answer_only_unattended_events() {
+    let policy = DECLARATIONS.replace("[authority.permits]", "unattended_only = true\n[authority.permits]");
+    let (marked, plain) = (load(&policy).expect("the policy compiles"), load(DECLARATIONS).unwrap());
+    let approver = |config: &Config| {
+        config
+            .engine()
+            .registry()
+            .authority(&AuthorityName::new("approver"))
+            .expect("the authority registers")
+            .unattended_only()
+    };
+    assert!(approver(&marked));
+    assert!(!approver(&plain));
+    assert_ne!(marked.engine().identity(), plain.engine().identity());
+}
+
 #[test]
 fn server_qualification_preserves_the_contract_and_deployment_references() {
     let qualified = DECLARATIONS.replace("name = \"lookup\"", "name = \"lookup\"\nserver = \"demo\"");

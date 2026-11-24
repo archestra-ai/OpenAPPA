@@ -41,6 +41,15 @@
 //! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
 //! to arrive is an operational refusal, never a policy denial.
 //!
+//! A family has one **attendance window** ([`appa_runtime_api::Attendance`]), which its host
+//! opens on a person's request and closes when they leave ([`fact::Fact::Attendance`]). An
+//! authority may answer only unattended families ([`authority::Serves::UnattendedOnly`]): while
+//! the window is open no block plans it, no offer whose plan consults it is executed or
+//! reviewed, and no offer is applied by the runtime on its own
+//! ([`transition::AttendedRefusal`]). Opening the window supersedes every unspent approval such
+//! an authority ruled on; an offer it left pending stands, and is taken again once the window
+//! closes.
+//!
 //! ## Two fork lifecycles
 //!
 //! A **subagent fork** branches within one family log. A released spawn records

@@ -90,6 +90,7 @@ fn required_rulings_route_each_gap_to_its_authority() {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     };
     let cfg = RegistryConfig {
         recorders: Default::default(),
@@ -923,6 +924,7 @@ fn the_ruling_binds_the_payload_by_digest_and_never_copies_it() {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     };
     let cfg = RegistryConfig {
         recorders: Default::default(),

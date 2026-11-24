@@ -27,6 +27,23 @@ pub enum Initiator {
     AutoApply,
 }
 
+/// Whether a person attends a family. A host opens the window on a person's request and closes
+/// it when they leave; while it is open the runtime applies nothing on its own, and no authority
+/// that answers only unattended families is planned, consulted or reviewed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attendance {
+    #[default]
+    Closed,
+    Open,
+}
+
+impl Attendance {
+    pub fn is_closed(&self) -> bool {
+        *self == Attendance::Closed
+    }
+}
+
 const LINE_VARIANT_MAX_BYTES: usize = 64;
 
 /// The host's opaque name for the authority line it composed for a family, such as `observe`

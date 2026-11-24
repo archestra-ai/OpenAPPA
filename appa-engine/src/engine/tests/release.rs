@@ -239,6 +239,7 @@ fn a_gap_is_lifted_only_by_an_authority_the_judgment_admits() {
         scope: crate::authority::Scope::default(),
         except: Vec::new(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     });
     let e = open_engine(cfg);
     let suspicious = Label::new(SUSPICIOUS, Audience::public());

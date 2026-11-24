@@ -282,6 +282,7 @@ mod held_view_law {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let tools: Vec<ToolAnnotation> = [
             seen,

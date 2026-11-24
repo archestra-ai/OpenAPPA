@@ -129,6 +129,7 @@ static DECIDED_ACT: Table = Table {
         ("Offer", DIGEST),
         ("Answer", TRAJECTORY),
         ("Review", DIGEST),
+        ("Attendance", Rule::Keep),
     ],
 };
 
@@ -858,6 +859,11 @@ static REVIEW_RELEASED: Table = Table {
     ],
 };
 
+static ATTENDANCE: Table = Table {
+    name: "Attendance",
+    entries: &[("trajectory", TRAJECTORY), ("state", Rule::Keep)],
+};
+
 /// The outer table: `Fact` is externally tagged, so each key is a variant name. A variant
 /// added to the engine and not added here becomes `"<unclassified>"` with its name recorded,
 /// which the inventory test turns into a failure naming the variant.
@@ -894,6 +900,7 @@ pub(crate) static FACT: Table = Table {
         ("Boundary", Rule::Table(&BOUNDARY)),
         ("AnswerReleased", Rule::Table(&ANSWER_RELEASED)),
         ("ReviewReleased", Rule::Table(&REVIEW_RELEASED)),
+        ("Attendance", Rule::Table(&ATTENDANCE)),
     ],
 };
 

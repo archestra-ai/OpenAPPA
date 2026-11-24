@@ -240,6 +240,7 @@ pub struct Projection {
     /// The approvals not yet spent: a spend is the one advance an approval's subject ever
     /// takes, so a spent approval is never current again and scans skip it.
     unspent: OrdSet<crate::value::OfferId>,
+    attendance: appa_runtime_api::Attendance,
     versions: crate::basis::Versions,
     released: Released,
 }
@@ -551,6 +552,7 @@ impl Projection {
             offers: Default::default(),
             approvals: Default::default(),
             unspent: Default::default(),
+            attendance: Default::default(),
             versions: crate::basis::Versions::default(),
             released: Released::default(),
         }
@@ -693,6 +695,7 @@ impl Projection {
             offers,
             approvals,
             unspent,
+            attendance,
             versions,
             released,
         } = self;
@@ -1093,6 +1096,7 @@ impl Projection {
             },
             // Folded into `released` above, and nowhere else: neither moves a label.
             Fact::AnswerReleased { .. } | Fact::ReviewReleased { .. } => {}
+            Fact::Attendance { state, .. } => *attendance = *state,
         }
     }
 
@@ -1357,6 +1361,24 @@ impl Projection {
         self.principal.as_ref()
     }
 
+    /// Where the family's attendance window stands.
+    pub fn attendance(&self) -> appa_runtime_api::Attendance {
+        self.attendance
+    }
+
+    /// The unspent approvals that stand on a ruling of an authority `refused` names.
+    pub(crate) fn approvals_ruled_by(&self, refused: impl Fn(&AuthorityName) -> bool) -> Vec<crate::value::OfferId> {
+        self.unspent
+            .iter()
+            .copied()
+            .filter(|offer| {
+                self.approvals
+                    .get(offer)
+                    .is_some_and(|approval| approval.rulings.iter().any(|ruling| refused(&ruling.authority)))
+            })
+            .collect()
+    }
+
     /// Has a value been admitted for this dispatch's result?
     pub(crate) fn admitted_result(&self, dispatch: &DispatchId) -> bool {
         self.admitted_results.contains(dispatch)
@@ -1422,6 +1444,11 @@ impl Views<'_> {
     /// The reader the family acts for, as its opening pinned it.
     pub(crate) fn principal(&self) -> Option<&crate::label::ReaderId> {
         self.projection.principal()
+    }
+
+    /// Where the family's attendance window stands.
+    pub(crate) fn attendance(&self) -> appa_runtime_api::Attendance {
+        self.projection.attendance()
     }
 
     /// The annotation an Annotator pinned to this same canonical call, in a proposal this

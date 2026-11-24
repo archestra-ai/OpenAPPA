@@ -138,6 +138,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let attester = Authority {
             except: Vec::new(),
@@ -148,6 +149,7 @@ mod tests {
             },
             scope: Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         Registry::build_covered(crate::registry::RegistryConfig {
             recorders: Default::default(),

@@ -156,6 +156,9 @@ impl Engine {
         if projection.review_digest(&report.offer) != Some(report.digest) {
             return Err(TransitionError::OtherReview);
         }
+        if let Some(recorded) = projection.view(&trajectory).offer(&report.offer) {
+            self.attending(projection.attendance(), &recorded.plan, None)?;
+        }
         let review = Fact::ReviewReleased {
             trajectory,
             offer: report.offer,

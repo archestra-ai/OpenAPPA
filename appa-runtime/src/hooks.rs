@@ -339,6 +339,10 @@ fn continued(
             offer,
             digest,
         },
+        HookEvent::Attendance { actor: who, state } => HookEvent::Attendance {
+            actor: actor(who),
+            state,
+        },
     };
     (event, names_children.into_iter().map(id).collect())
 }
@@ -520,7 +524,8 @@ fn hook_root(event: &HookEvent) -> &TrajectoryId {
         | HookEvent::SpawnResume { actor, .. }
         | HookEvent::ToolResult { actor, .. }
         | HookEvent::SpawnResult { actor, .. }
-        | HookEvent::ReviewRelease { actor, .. } => &actor.root,
+        | HookEvent::ReviewRelease { actor, .. }
+        | HookEvent::Attendance { actor, .. } => &actor.root,
     }
 }
 
@@ -702,6 +707,7 @@ fn hook_shape(event: &HookEvent) -> (crate::events::HookKind, Option<String>) {
         HookEvent::ChildReturn { .. } => (HookKind::ChildReturn, None),
         HookEvent::SpawnResult { call, .. } => (HookKind::SpawnResult, Some(call.tool.clone())),
         HookEvent::ReviewRelease { .. } => (HookKind::ReviewRelease, None),
+        HookEvent::Attendance { .. } => (HookKind::Attendance, None),
     }
 }
 
@@ -850,6 +856,7 @@ async fn dispatch_event(
             operation,
         } => dispatcher.child_return(root, child, value, operation).await,
         HookEvent::ReviewRelease { actor, offer, digest } => dispatcher.review_release(actor, offer, digest).await,
+        HookEvent::Attendance { actor, state } => dispatcher.attendance(actor, state).await,
     }
 }
 
@@ -1068,6 +1075,23 @@ impl Dispatcher<'_> {
                 *self.receipt = Some(receipt);
                 HookDecision::Ack
             }
+            Err(error) => refuse(error),
+        }
+    }
+
+    /// Move the family's attendance window. Only a family already open answers: attendance
+    /// opens no session.
+    async fn attendance(&mut self, actor: Actor, state: appa_runtime_api::Attendance) -> HookDecision {
+        let acting = actor.child.as_ref().unwrap_or(&actor.root);
+        let moved = match self
+            .runtime
+            .session_with_presentation(&actor.root, acting, self.options.clone())
+        {
+            Ok(session) => session.on_attendance(state).await,
+            Err(error) => Err(error),
+        };
+        match moved {
+            Ok(()) => HookDecision::Ack,
             Err(error) => refuse(error),
         }
     }

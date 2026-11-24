@@ -180,6 +180,9 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
             let _: String = offer;
             let _: appa_runtime_api::ReleaseDigest = digest;
         }
+        HookEvent::Attendance { actor: _, state } => {
+            let _: appa_runtime_api::Attendance = state;
+        }
     }
     match decision {
         HookDecision::Ack | HookDecision::PassControl | HookDecision::DeferReturn => {}

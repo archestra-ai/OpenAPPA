@@ -172,6 +172,7 @@ fn public_ceiling_officer() -> crate::authority::Authority {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     }
 }
 
@@ -656,6 +657,7 @@ fn a_call_approval_extends_the_offered_calls_pins() {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     };
     let alice = Audience::restricted([corp_reader("alice")]);
     let e = audience_engine(vec![officer], Label::new(TRUSTED, alice.clone()));
@@ -716,6 +718,7 @@ fn replay_names_the_refusal_of_a_duplicated_pin() {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     };
     let e = audience_engine(
         vec![officer],
@@ -770,6 +773,7 @@ fn spending_under_pins(fresh: crate::audience::AudienceEvidence) -> Result<Engin
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     };
     let alice = Audience::restricted([corp_reader("alice")]);
     let e = audience_engine(vec![officer], Label::new(TRUSTED, alice.clone()));
@@ -952,6 +956,7 @@ mod symbolic_audiences {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let e = grouped_engine(
             config(vec![backup, wire], vec![officer]),
@@ -1105,6 +1110,7 @@ mod symbolic_audiences {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let mut send = plain_tool("send");
         send.requires = Requires {
@@ -1339,6 +1345,7 @@ mod symbolic_audiences {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let mut send = plain_tool("send");
         send.requires = Requires {
@@ -1795,6 +1802,7 @@ mod symbolic_audiences {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let e = grouped_engine(
             config(
@@ -1859,6 +1867,7 @@ mod symbolic_audiences {
             },
             scope: crate::authority::Scope::default(),
             hint: None,
+            serves: crate::authority::Serves::Always,
         };
         let e = grouped_engine(
             config(
@@ -2248,6 +2257,7 @@ fn a_blocked_call_reads_no_mandate_live_or_on_replay() {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     };
     let mut send = plain_tool("send");
     send.parameters = crate::params::test_string_argument_schema("to");
@@ -2305,6 +2315,7 @@ fn a_blocked_calls_mandate_pins_replay_only_behind_an_answered_check() {
         },
         scope: crate::authority::Scope::default(),
         hint: None,
+        serves: crate::authority::Serves::Always,
     };
     let mut send = plain_tool("send");
     send.parameters = crate::params::test_string_argument_schema("to");

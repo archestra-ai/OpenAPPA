@@ -216,9 +216,39 @@ pub struct Authority {
     #[serde(default)]
     pub except: Vec<TagName>,
     pub hint: Option<Hint>,
+    #[serde(default, skip_serializing_if = "Serves::is_always")]
+    pub serves: Serves,
+}
+
+/// Which families an authority's ruling may answer. One that serves only unattended families
+/// is planned, consulted and reviewed for none whose attendance window is open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Serves {
+    #[default]
+    Always,
+    UnattendedOnly,
+}
+
+impl Serves {
+    fn is_always(&self) -> bool {
+        *self == Serves::Always
+    }
 }
 
 impl Authority {
+    pub fn unattended_only(&self) -> bool {
+        self.serves == Serves::UnattendedOnly
+    }
+
+    /// May this authority answer a family whose attendance window stands at `attendance`?
+    pub fn answers(&self, attendance: appa_runtime_api::Attendance) -> bool {
+        matches!(
+            (self.serves, attendance),
+            (Serves::Always, _) | (Serves::UnattendedOnly, appa_runtime_api::Attendance::Closed)
+        )
+    }
+
     /// Is a tool carrying `tags` within this authority's jurisdiction: covered by its scope and
     /// carrying no excepted tag? The one home of the predicate, read by planning, execution and
     /// the load-time planner count alike. Attention gaps never read it — they route by the

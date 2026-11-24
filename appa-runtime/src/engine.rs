@@ -370,6 +370,10 @@ pub enum EngineEvent {
         offer: OfferId,
         digest: appa_runtime_api::ReleaseDigest,
     },
+    /// The host moves the family's attendance window.
+    Attendance {
+        state: appa_runtime_api::Attendance,
+    },
 }
 
 /// What `execute_remedy_plan` carries beside the offer id: the floor the child's return may
@@ -531,6 +535,8 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::AnswerOffRoot => ReplayRefusalClass("answer_off_root"),
             TransitionRefusal::AnswerLabelMismatch => ReplayRefusalClass("answer_label_mismatch"),
             TransitionRefusal::ReviewMismatch => ReplayRefusalClass("review_mismatch"),
+            TransitionRefusal::AttendanceMismatch => ReplayRefusalClass("attendance_mismatch"),
+            TransitionRefusal::Attended(refusal) => refusal.into(),
             TransitionRefusal::UnknownAuthority(..) => ReplayRefusalClass("unknown_authority"),
             TransitionRefusal::UnknownSanitizer(..) => ReplayRefusalClass("unknown_sanitizer"),
             TransitionRefusal::SanitizerUnapplicable => ReplayRefusalClass("sanitizer_unapplicable"),
@@ -580,6 +586,15 @@ impl From<&appa_engine::transition::OpeningTransitionRefusal> for ReplayRefusalC
             appa_engine::transition::OpeningTransitionRefusal::ForkPrincipalMismatch => {
                 ReplayRefusalClass("opening_fork_principal_mismatch")
             }
+        }
+    }
+}
+
+impl From<&appa_engine::transition::AttendedRefusal> for ReplayRefusalClass {
+    fn from(refusal: &appa_engine::transition::AttendedRefusal) -> Self {
+        match refusal {
+            appa_engine::transition::AttendedRefusal::UnattendedOnly(_) => ReplayRefusalClass("unattended_only"),
+            appa_engine::transition::AttendedRefusal::AutoApply => ReplayRefusalClass("attended_auto_apply"),
         }
     }
 }
@@ -652,6 +667,10 @@ pub enum EngineRefusal {
     /// The call already carries a current approval another plan recorded.
     #[error("this exact call already carries a current approval from another plan; this plan is not applied")]
     ApprovalPending,
+    /// The family's attendance window is open, and the offer may not be taken while it is.
+    /// Nothing is consulted or appended; the offer stands.
+    #[error(transparent)]
+    Attended(appa_engine::transition::AttendedRefusal),
     #[error("the fork and the child are already bound elsewhere")]
     Unbindable,
     #[error("the host reused a call id")]
@@ -687,6 +706,7 @@ impl EngineRefusal {
             EngineRefusal::UnknownOffer => ReplayRefusalClass("unknown_offer"),
             EngineRefusal::OtherReview => ReplayRefusalClass("other_review"),
             EngineRefusal::ApprovalPending => ReplayRefusalClass("approval_pending"),
+            EngineRefusal::Attended(refusal) => refusal.into(),
             EngineRefusal::Unbindable => ReplayRefusalClass("unbindable"),
             EngineRefusal::CallIdReused => ReplayRefusalClass("call_id_reused"),
             EngineRefusal::OutcomeMismatch => ReplayRefusalClass("outcome_mismatch"),
@@ -709,6 +729,9 @@ pub struct TrajectoryStatus {
     /// What the family's opening pinned.
     #[serde(skip_serializing_if = "SessionSettings::is_default")]
     pub settings: SessionSettings,
+    /// Where the family's attendance window stands.
+    #[serde(skip_serializing_if = "appa_runtime_api::Attendance::is_closed")]
+    pub attendance: appa_runtime_api::Attendance,
 }
 
 /// One label rendered for a display surface: each dimension as chain
@@ -1531,6 +1554,7 @@ impl RuntimeEngine {
             trust: label.trust,
             audience: label.audience,
             settings,
+            attendance: view.attendance(),
         })
     }
 
@@ -1711,7 +1735,8 @@ impl RuntimeEngine {
             | Fact::CandidateConsumed { .. }
             | Fact::BasisAdvanced { .. }
             | Fact::AnswerReleased { .. }
-            | Fact::ReviewReleased { .. } => return Some(None),
+            | Fact::ReviewReleased { .. }
+            | Fact::Attendance { .. } => return Some(None),
             Fact::ForkPrepared { .. } | Fact::ForkOpened { .. } => return Some(None),
         };
         Some(Some(event))
@@ -1813,6 +1838,43 @@ impl RuntimeEngine {
             } => self.settle_return(view, parent, id, decision),
             EngineEvent::Answer { digest } => self.answer(view, trajectory, digest),
             EngineEvent::Review { offer, digest } => self.review(view, &offer, digest),
+            EngineEvent::Attendance { state } => self.attendance(view, state),
+        }
+    }
+
+    /// Moves the family's attendance window; a window already there records nothing.
+    fn attendance(
+        &self,
+        view: &EngineView,
+        state: appa_runtime_api::Attendance,
+    ) -> Result<EngineDecision, EngineRefusal> {
+        match self.engine.handle(view, CoreEvent::Attendance(state)) {
+            Ok(EngineDecisionCore {
+                append,
+                follow_up: FollowUp::Attendance { .. },
+            }) => Ok(EngineDecision {
+                append: append.map(ValidatedFactBatch::into_unsealed),
+                then: Next::Done,
+            }),
+            Ok(other) => Err(EngineRefusal::Invariant {
+                detail: format!("an attendance change produced another follow-up: {:?}", other.follow_up),
+            }),
+            Err(error) => Err(EngineRefusal::Invariant {
+                detail: format!("moving the attendance window: {error}"),
+            }),
+        }
+    }
+
+    /// Why the family's attendance window refuses taking `offer` as it stands, if it does.
+    pub(crate) fn offer_attended(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        offer: &OfferId,
+    ) -> Option<appa_engine::transition::AttendedRefusal> {
+        match self.engine.offer_consults(view, trajectory, &parse_offer(offer)?) {
+            Err(TransitionError::Attended(refusal)) => Some(refusal),
+            _ => None,
         }
     }
 
@@ -1873,6 +1935,7 @@ impl RuntimeEngine {
             Err(TransitionError::BranchEnded) => Err(EngineRefusal::Ended),
             Err(TransitionError::UnknownOffer) => Err(EngineRefusal::UnknownOffer),
             Err(TransitionError::OtherReview) => Err(EngineRefusal::OtherReview),
+            Err(TransitionError::Attended(refusal)) => Err(EngineRefusal::Attended(refusal)),
             Err(error) => Err(EngineRefusal::Invariant {
                 detail: format!("recording a release: {error}"),
             }),
@@ -2874,7 +2937,7 @@ impl RuntimeEngine {
 
     /// What this offer's plan asks at most, by its most demanding step, where `auto_apply`
     /// lets the runtime apply it with rulings only by authorities `rules` accepts. `None` for a
-    /// plan the agent applies itself.
+    /// plan the agent applies itself, and for every plan while a person attends the family.
     pub(crate) fn auto_applied(
         &self,
         view: &EngineView,
@@ -2883,6 +2946,9 @@ impl RuntimeEngine {
         auto_apply: AutoApply,
         rules: impl Fn(&str) -> bool,
     ) -> Option<Remedy> {
+        if view.attendance() == appa_runtime_api::Attendance::Open {
+            return None;
+        }
         parse_offer(offer)
             .and_then(|offer| self.engine.offer_plan(view, trajectory, &offer))
             .filter(|plan| plan.auto_applies(auto_apply, |authority| rules(authority.as_str())))
@@ -5147,6 +5213,7 @@ fn offer_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::UnknownOffer | TransitionError::OfferElsewhere => EngineRefusal::UnknownOffer,
         TransitionError::ApprovalPending => EngineRefusal::ApprovalPending,
+        TransitionError::Attended(refusal) => EngineRefusal::Attended(refusal),
         TransitionError::BranchEnded => EngineRefusal::Ended,
         error => EngineRefusal::Invariant {
             detail: format!("deciding an offer: {error}"),
