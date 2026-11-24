@@ -176,6 +176,7 @@ fn round(engine: &Engine, view: &mut EngineView, history: History, round: usize)
         engine,
         view,
         EngineEvent::ExecuteOffer(OfferExecution {
+            initiator: appa_runtime_api::Initiator::Agent,
             trajectory: trajectory(),
             offer,
             outcome: OfferOutcome::Approved(evidence),

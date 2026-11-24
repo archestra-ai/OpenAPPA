@@ -1,7 +1,7 @@
 use super::*;
 use crate::api::AuditEvent;
 use appa_runtime_api::{
-    AutoApply, HookDecision, HookEvent, LineVariant, Outcome, RefusalClass, SessionSettings, StartKind,
+    AutoApply, HookDecision, HookEvent, Initiator, LineVariant, Outcome, RefusalClass, SessionSettings, StartKind,
 };
 
 fn variant(name: &str) -> LineVariant {
@@ -43,12 +43,18 @@ fn settings_of(runtime: &Runtime, root: &TrajectoryId) -> SessionSettings {
     runtime.try_status(root).expect("the root answers its status").settings
 }
 
-fn narrowed(runtime: &Runtime) -> bool {
+/// Who took each acceptance the family's audit shows on `trajectory`.
+fn acceptances(runtime: &Runtime, trajectory: &str) -> Vec<Option<Initiator>> {
     runtime
         .audit(&root())
         .expect("the root answers its audit")
-        .iter()
-        .any(|entry| matches!(entry.event, AuditEvent::Narrowed { .. }))
+        .into_iter()
+        .filter(|entry| entry.trajectory == trajectory)
+        .filter_map(|entry| match entry.event {
+            AuditEvent::Narrowed { initiator, .. } => Some(initiator),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Whether any execution of an offer was claimed: the record an agent's own execution of a
@@ -102,7 +108,7 @@ async fn a_narrowing_is_accepted_at_the_block_only_under_rulings_and_accept() {
                     matches!(decision, ToolCallDecision::Allow { spawn: None, .. }),
                     "{decision:?}"
                 );
-                assert!(narrowed(&runtime), "the acceptance is recorded");
+                assert_eq!(acceptances(&runtime, "cc:root"), [Some(Initiator::AutoApply)]);
                 assert!(!claimed(&session), "no agent claimed the execution");
                 succeed(&session, taint(serde_json::json!({"a": 1}))).await;
                 assert_eq!(runtime.status(&root()).expect("the root answers").trust, "suspicious");
@@ -113,7 +119,7 @@ async fn a_narrowing_is_accepted_at_the_block_only_under_rulings_and_accept() {
                 };
                 assert_eq!(offers.len(), 1);
                 assert_eq!(outcomes.deciding(), Outcome::Consent);
-                assert!(!narrowed(&runtime));
+                assert_eq!(acceptances(&runtime, "cc:root"), []);
                 // The agent's own execution of the same plan records the same acceptance, and
                 // its claim on the offer beside it.
                 let quoted = OfferId(offers[0].id.clone());
@@ -129,7 +135,7 @@ async fn a_narrowing_is_accepted_at_the_block_only_under_rulings_and_accept() {
                     matches!(released, ToolCallDecision::Allow { spawn: None, .. }),
                     "{released:?}"
                 );
-                assert!(narrowed(&runtime));
+                assert_eq!(acceptances(&runtime, "cc:root"), [Some(Initiator::Agent)]);
                 assert!(claimed(&session));
             }
         }
@@ -430,6 +436,125 @@ async fn a_launched_fork_pins_the_settings_its_start_names() {
     assert!(settings_of(&runtime, &root()).is_default());
 }
 
+const LAUNCH: &str = "5d2a7c1e-3b4f-4e6a-8c9d-0e1f2a3b4c5d";
+
+/// A start of the one launch these tests run, under host id `host`.
+async fn launched(runtime: &Runtime, host: &TrajectoryId, start: StartKind, settings: SessionSettings) -> HookDecision {
+    crate::hooks::handle(
+        runtime,
+        HookEvent::SessionStart {
+            root: host.clone(),
+            principal: None,
+            address: None,
+            title: None,
+            start: Some(start),
+            launch: Some(appa_runtime_api::LaunchStart {
+                launch: appa_runtime_api::LaunchToken::parse(LAUNCH).expect("a token"),
+                forked_from: None,
+            }),
+            settings,
+        },
+    )
+    .await
+}
+
+/// What `root`'s log holds: its engine facts and its host records.
+fn stored(runtime: &Runtime, root: &TrajectoryId) -> (Vec<appa_engine::fact::Fact>, usize) {
+    let log = runtime.inner.log(root).expect("the log reads");
+    (log.facts().to_vec(), log.host_records().len())
+}
+
+/// A launched start the family it would continue refuses for its line variant records
+/// nothing: a compaction aliases no host id to the family, and a resume of another
+/// conversation takes the launch from no one. Every host id resolves as it did.
+#[tokio::test]
+async fn a_launched_start_refused_for_its_line_variant_records_nothing() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    assert_eq!(
+        launched(&runtime, &root(), StartKind::Startup, observe()).await,
+        HookDecision::Ack
+    );
+    let other = TrajectoryId("cc:other".to_string());
+    assert_eq!(start(&runtime, &other, enforce()).await, HookDecision::Ack);
+    let compacted = TrajectoryId("cc:compacted".to_string());
+    let before = (stored(&runtime, &root()), stored(&runtime, &other));
+
+    for (host, start, refused_by) in [
+        (&compacted, StartKind::Compact, enforce()),
+        (&other, StartKind::Resume, observe()),
+    ] {
+        assert!(
+            matches!(
+                launched(&runtime, host, start, refused_by).await,
+                HookDecision::Refuse {
+                    class: RefusalClass::Trajectory,
+                    ..
+                }
+            ),
+            "{start:?}"
+        );
+        assert_eq!(
+            (stored(&runtime, &root()), stored(&runtime, &other)),
+            before,
+            "{start:?}"
+        );
+    }
+    assert_eq!(runtime.alias_of(&compacted).expect("the alias reads"), None);
+    assert!(!runtime.inner.store.has_root(&compacted).expect("the store reads"));
+    // The launch still runs the family it opened: a compaction under its own line continues it.
+    assert_eq!(
+        launched(&runtime, &compacted, StartKind::Compact, observe()).await,
+        HookDecision::Ack
+    );
+    assert_eq!(runtime.alias_of(&compacted).expect("the alias reads"), Some(root()));
+}
+
+/// A host id recorded as a family's alias is that family's: a typed start under it continues
+/// the family and is held to its pin, and neither a session nor a root fork opens a root of
+/// its own there.
+#[tokio::test]
+async fn a_durable_alias_is_never_shadowed_by_a_root_of_its_own() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let compacted = TrajectoryId("cc:compacted".to_string());
+    assert_eq!(
+        launched(&runtime, &root(), StartKind::Startup, observe()).await,
+        HookDecision::Ack
+    );
+    assert_eq!(
+        launched(&runtime, &compacted, StartKind::Compact, observe()).await,
+        HookDecision::Ack
+    );
+    assert_eq!(runtime.alias_of(&compacted).expect("the alias reads"), Some(root()));
+
+    assert!(matches!(
+        start(&runtime, &compacted, enforce()).await,
+        HookDecision::Refuse {
+            class: RefusalClass::Trajectory,
+            ..
+        }
+    ));
+    assert_eq!(
+        start(&runtime, &compacted, SessionSettings::default()).await,
+        HookDecision::Ack
+    );
+    assert!(!runtime.inner.store.has_root(&compacted).expect("the store reads"));
+    assert_eq!(settings_of(&runtime, &root()), observe());
+
+    assert!(matches!(
+        runtime.create_session(compacted.clone(), None),
+        Err(EventError::TrajectoryExists)
+    ));
+    assert_eq!(
+        runtime.open_root_fork(&root(), &root(), &compacted, observe()),
+        Err(crate::api::RootForkRefusal::RootIdConflict)
+    );
+    assert!(!runtime.inner.store.has_root(&compacted).expect("the store reads"));
+}
+
 /// The pinned settings are in the log: a runtime reopened on it reads them back and decides
 /// under them.
 #[tokio::test]
@@ -506,11 +631,6 @@ async fn a_staged_narrowing_is_accepted_at_the_result_only_under_rulings_and_acc
         let runtime =
             Runtime::open(staged_config(&url, false), dir.path().join("appa.db"), None).expect("the deployment opens");
         let decided = staged_in_child(&runtime, settings.clone(), "suspicious").await;
-        let accepted_on_record = runtime
-            .audit(&root())
-            .expect("the root answers its audit")
-            .iter()
-            .any(|entry| entry.trajectory == "cc:child" && matches!(entry.event, AuditEvent::Narrowed { .. }));
         match accepted {
             true => {
                 assert_eq!(
@@ -519,7 +639,7 @@ async fn a_staged_narrowing_is_accepted_at_the_result_only_under_rulings_and_acc
                         value: "scrubbed".to_string()
                     }
                 );
-                assert!(accepted_on_record);
+                assert_eq!(acceptances(&runtime, "cc:child"), [Some(Initiator::AutoApply)]);
             }
             false => {
                 let ToolResultDecision::Replace {
@@ -534,7 +654,22 @@ async fn a_staged_narrowing_is_accepted_at_the_result_only_under_rulings_and_acc
                     presentation.outcomes.map(|outcomes| outcomes.deciding()),
                     Some(Outcome::Consent)
                 );
-                assert!(!accepted_on_record);
+                assert_eq!(acceptances(&runtime, "cc:child"), []);
+                // The agent's own execution of the same plan delivers the same value, recorded
+                // as the agent's.
+                let child = Actor {
+                    root: root(),
+                    child: Some(TrajectoryId("cc:child".to_string())),
+                };
+                assert_eq!(
+                    runtime
+                        .execute_remedy(&child, OfferId(presentation.offers[0].id.clone()))
+                        .await,
+                    crate::api::RemedyOutcome::Returned {
+                        value: "scrubbed".to_string()
+                    }
+                );
+                assert_eq!(acceptances(&runtime, "cc:child"), [Some(Initiator::Agent)]);
             }
         }
     }

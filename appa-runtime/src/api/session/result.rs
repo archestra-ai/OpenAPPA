@@ -1,4 +1,5 @@
 use super::*;
+use appa_runtime_api::AutoApply;
 
 /// Why a reported outcome named no reportable dispatch. The threat model puts
 /// operator diagnostics for these reports on the runtime: an
@@ -174,37 +175,40 @@ impl Session {
     ) -> Result<ToolResultDecision, EventError> {
         self.refuse_substituted_embedded_read(&call, call_id.as_deref(), &o)?;
         let o = self.cap_outcome(o);
-        let mut deferral = None;
+        let (mut deferral, mut auto_apply) = (None, AutoApply::default());
         let decision = self
-            .report_outcome(&call, call_id.as_deref(), &o, &mut deferral)
+            .report_outcome(&call, call_id.as_deref(), &o, &mut deferral, &mut auto_apply)
             .await?;
         let decided = self
-            .accept_staged(outcome_decision(decision, &self.deployment().externals)?)
+            .accept_staged(outcome_decision(decision, &self.deployment().externals)?, auto_apply)
             .await?;
         deferred_or(deferral, decided)
     }
 
-    /// Under `RulingsAndAccept`, a staged result whose block offers a plan the family lets the
+    /// Under `RulingsAndAccept`, as the snapshot that decided the result read it, a staged result whose block offers a plan the family lets the
     /// runtime apply itself ([`Session::auto_applied_offer`]) is settled through the same
     /// execution an agent's plan takes, and its admitted value delivered: the agent sees the
     /// value, never the block. A plan that was not applied lost a race, and its block stands as
     /// decided. An operational failure to apply it refuses the report.
-    async fn accept_staged(&self, decided: ToolResultDecision) -> Result<ToolResultDecision, EventError> {
-        let ToolResultDecision::Replace {
-            presentation: Some(presentation),
-            ..
-        } = &decided
+    async fn accept_staged(
+        &self,
+        decided: ToolResultDecision,
+        auto_apply: AutoApply,
+    ) -> Result<ToolResultDecision, EventError> {
+        let (
+            AutoApply::RulingsAndAccept,
+            ToolResultDecision::Replace {
+                presentation: Some(presentation),
+                ..
+            },
+        ) = (auto_apply, &decided)
         else {
             return Ok(decided);
         };
-        let auto_apply = crate::api::pinned_settings(&self.inner.log(&self.root)?).auto_apply;
-        if auto_apply == appa_runtime_api::AutoApply::RulingsOnly {
-            return Ok(decided);
-        }
-        let Some(offer) = self.auto_applied_offer(&presentation.offers)? else {
+        let Some(offer) = self.auto_applied_offer(&presentation.offers, auto_apply)? else {
             return Ok(decided);
         };
-        match self.on_remedy(offer, RemedyArguments::default(), None, None).await {
+        match self.auto_apply(offer).await {
             Ok(RemedyDecision::Returned { value }) => Ok(ToolResultDecision::Deliver { value }),
             Err(error) if error.is_operational() => Err(error),
             applied => {
@@ -215,16 +219,19 @@ impl Session {
     }
 
     /// `deferral` receives the notice of the reported dispatch, where it is a spawn whose
-    /// child's answer was deferred.
+    /// child's answer was deferred, and `auto_apply` the family's pinned setting, both as the
+    /// snapshot that decided the report read them.
     pub(super) async fn report_outcome(
         &self,
         call: &ProposedCall,
         call_id: Option<&str>,
         o: &ToolOutcome,
         deferral: &mut Option<String>,
+        auto_apply: &mut AutoApply,
     ) -> Result<EngineDecision, EventError> {
         self.drive_with_evidence(
             |context, evidence| {
+                *auto_apply = crate::api::pinned_settings(context.log).auto_apply;
                 let dispatch = context.classify_report(call, call_id)?;
                 *deferral = context.deferral_notice(&dispatch);
                 Ok(EngineEvent::ToolOutcome {
@@ -293,10 +300,11 @@ impl Session {
             // The attempt that commits is the one whose plan the delivery below
             // follows, so each attempt overwrites what the last one wrote.
             let mut plan: Option<SpawnPlan> = None;
-            let mut deferral = None;
+            let (mut deferral, mut auto_apply) = (None, AutoApply::default());
             let decision = self
                 .drive_with_evidence(
                     |context, evidence| {
+                        auto_apply = crate::api::pinned_settings(context.log).auto_apply;
                         let dispatch = context.classify_spawn_report(&call, call_id.as_deref())?;
                         deferral = context.deferral_notice(&dispatch);
                         let fork = appa_engine::value::ForkId::of(&dispatch);
@@ -388,7 +396,7 @@ impl Session {
             match plan.expect("the spawn result is typed before the engine decides") {
                 SpawnPlan::Outcome => {
                     let decided = self
-                        .accept_staged(outcome_decision(decision, &self.deployment().externals)?)
+                        .accept_staged(outcome_decision(decision, &self.deployment().externals)?, auto_apply)
                         .await?;
                     return deferred_or(deferral, decided).map(SpawnResultDecision::Outcome);
                 }

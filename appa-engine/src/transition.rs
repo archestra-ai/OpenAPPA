@@ -239,6 +239,7 @@ pub enum SettlementFollowUp {
 pub struct OfferExecution {
     pub trajectory: TrajectoryId,
     pub offer: crate::value::OfferId,
+    pub initiator: appa_runtime_api::Initiator,
     pub outcome: OfferOutcome,
     /// The child's return policy the parent declares for a marked spawn's plan: the floor it
     /// chose, and the schema where the plan attests. `None` for every other plan.
@@ -1336,7 +1337,7 @@ impl<'a> Sequence<'a> {
                 basis,
                 evidence,
             } => self.offer_opened(trajectory, offer, block, act, call, subject, plan, basis, evidence)?,
-            Fact::OfferAccepted { trajectory, offer } => self.offer_accepted(trajectory, offer)?,
+            Fact::OfferAccepted { trajectory, offer, .. } => self.offer_accepted(trajectory, offer)?,
             Fact::CallApprovalConsumed { trajectory, offer, .. } => self.approval_consumed(trajectory, offer)?,
             Fact::CandidateConsumed {
                 trajectory, subject, ..
@@ -2485,7 +2486,7 @@ impl<'a> Sequence<'a> {
                     .collect(),
                 ..BasisAdvance::default()
             },
-            Fact::OfferAccepted { trajectory, offer } => match self.projection.view(trajectory).offer(offer) {
+            Fact::OfferAccepted { trajectory, offer, .. } => match self.projection.view(trajectory).offer(offer) {
                 Some(recorded) => BasisAdvance {
                     subjects: vec![recorded.subject.clone()],
                     ..BasisAdvance::default()

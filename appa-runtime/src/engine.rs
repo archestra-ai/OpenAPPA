@@ -320,6 +320,7 @@ pub enum EngineEvent {
     ExecuteOffer {
         trajectory: TrajectoryId,
         offer: OfferId,
+        initiator: appa_runtime_api::Initiator,
         declared: appa_runtime_api::DeclaredReturn,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
@@ -721,6 +722,9 @@ pub enum AuditEvent {
     Narrowed {
         from: AuditLabel,
         to: AuditLabel,
+        /// Who took the plan that accepted it; absent where the log does not record one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        initiator: Option<appa_runtime_api::Initiator>,
     },
     SanitizerBound {
         sanitizer: String,
@@ -1478,6 +1482,7 @@ impl RuntimeEngine {
                 );
             }
         }
+        let initiated = Initiated::of(facts);
         // The log binds each identified call to its dispatch in the batch that opened it.
         let calls: BTreeMap<&appa_engine::value::DispatchId, &str> = log
             .call_bindings()
@@ -1498,7 +1503,7 @@ impl RuntimeEngine {
                     // A child opened with no recorded preparation in this read.
                     None => continue,
                 },
-                _ => match self.audit_event(fact) {
+                _ => match self.audit_event(fact, &initiated) {
                     Some(Some(event)) => event,
                     // A record the audit does not show.
                     Some(None) => continue,
@@ -1517,7 +1522,7 @@ impl RuntimeEngine {
         Ok(Some(entries))
     }
 
-    fn audit_event(&self, fact: &Fact) -> Option<Option<AuditEvent>> {
+    fn audit_event(&self, fact: &Fact, initiated: &Initiated<'_>) -> Option<Option<AuditEvent>> {
         let event = match fact {
             Fact::DispatchOpened {
                 tool,
@@ -1551,9 +1556,17 @@ impl RuntimeEngine {
             Fact::Denial { authority, .. } => AuditEvent::Denied {
                 authority: terminal_safe(authority.as_str()),
             },
-            Fact::Acceptance { narrowing, .. } | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
+            Fact::Acceptance {
+                dispatch, narrowing, ..
+            } => AuditEvent::Narrowed {
                 from: self.render_label(&narrowing.from)?,
                 to: self.render_label(&narrowing.to)?,
+                initiator: initiated.approval(dispatch),
+            },
+            Fact::CandidateAccepted { offer, narrowing, .. } => AuditEvent::Narrowed {
+                from: self.render_label(&narrowing.from)?,
+                to: self.render_label(&narrowing.to)?,
+                initiator: initiated.offer(offer),
             },
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
@@ -1575,6 +1588,7 @@ impl RuntimeEngine {
             Fact::ReturnAccepted { narrowing, .. } => AuditEvent::Narrowed {
                 from: self.render_label(&narrowing.from)?,
                 to: self.render_label(&narrowing.to)?,
+                initiator: None,
             },
             Fact::ReturnDiscarded { .. } => AuditEvent::ReturnDiscarded,
             Fact::Boundary { kind, .. } => match kind {
@@ -1631,6 +1645,7 @@ impl RuntimeEngine {
             EngineEvent::ExecuteOffer {
                 trajectory: owner,
                 offer,
+                initiator,
                 declared,
                 evidence,
                 entropy,
@@ -1639,6 +1654,7 @@ impl RuntimeEngine {
                 view,
                 &owner,
                 &offer,
+                initiator,
                 &declared,
                 &evidence,
                 &entropy,
@@ -2187,6 +2203,7 @@ impl RuntimeEngine {
         view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
+        initiator: appa_runtime_api::Initiator,
         declared: &appa_runtime_api::DeclaredReturn,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
@@ -2301,6 +2318,7 @@ impl RuntimeEngine {
                 let execution = OfferExecution {
                     trajectory: trajectory.clone(),
                     offer: engine_offer,
+                    initiator,
                     outcome,
                     return_policy,
                     offer_nonce: engine_nonce(entropy),
@@ -4090,6 +4108,46 @@ pub(crate) fn parse_fork(log: &Log, binding: &SpawnBinding) -> Option<ForkId> {
     Some(fork)
 }
 
+/// Who took each accepted offer, and the offer whose approval each release spent, as a log
+/// records them: what an acceptance's audit entry names its initiator by.
+struct Initiated<'a> {
+    offers: BTreeMap<&'a EngineOfferId, appa_runtime_api::Initiator>,
+    approvals: BTreeMap<&'a appa_engine::value::DispatchId, &'a EngineOfferId>,
+}
+
+impl<'a> Initiated<'a> {
+    fn of(facts: &'a [Fact]) -> Self {
+        let mut initiated = Initiated {
+            offers: BTreeMap::new(),
+            approvals: BTreeMap::new(),
+        };
+        for fact in facts {
+            match fact {
+                Fact::OfferAccepted {
+                    offer,
+                    initiator: Some(initiator),
+                    ..
+                } => {
+                    initiated.offers.insert(offer, *initiator);
+                }
+                Fact::CallApprovalConsumed { offer, dispatch, .. } => {
+                    initiated.approvals.insert(dispatch, offer);
+                }
+                _ => {}
+            }
+        }
+        initiated
+    }
+
+    fn offer(&self, offer: &EngineOfferId) -> Option<appa_runtime_api::Initiator> {
+        self.offers.get(offer).copied()
+    }
+
+    fn approval(&self, dispatch: &appa_engine::value::DispatchId) -> Option<appa_runtime_api::Initiator> {
+        self.approvals.get(dispatch).and_then(|offer| self.offer(offer))
+    }
+}
+
 const RENDERED_OFFER_CHARS: usize = 16;
 
 fn offer_id(offer: &EngineOfferId) -> OfferId {
@@ -4147,21 +4205,40 @@ pub(crate) fn renders_offer(quoted: &OfferId) -> bool {
 /// The canonical identity a quoted id names, resolved against the offers this
 /// log has opened.
 pub(crate) fn resolve_rendered(log: &Log, rendered: &OfferId) -> Option<OfferId> {
-    let mut found = None;
+    resolve_rendered_all(log, std::slice::from_ref(rendered))
+        .pop()
+        .flatten()
+}
+
+/// [`resolve_rendered`] for each of `rendered`, in one pass over the log: `None` where an id
+/// names no offer, or more than one.
+pub(crate) fn resolve_rendered_all(log: &Log, rendered: &[OfferId]) -> Vec<Option<OfferId>> {
+    enum Named {
+        Nothing,
+        One(EngineOfferId),
+        Several,
+    }
+    let mut named: BTreeMap<&str, Named> = rendered.iter().map(|id| (id.0.as_str(), Named::Nothing)).collect();
     for fact in log.facts() {
         let Fact::OfferOpened { offer, .. } = fact else {
             continue;
         };
-        if offer_id(offer) != *rendered {
+        let Some(slot) = named.get_mut(offer_id(offer).0.as_str()) else {
             continue;
-        }
-        match found {
-            None => found = Some(OfferId(offer.to_hex())),
-            Some(ref already) if already.0 == offer.to_hex() => {}
-            Some(_) => return None,
-        }
+        };
+        *slot = match slot {
+            Named::Nothing => Named::One(*offer),
+            Named::One(already) if already == offer => continue,
+            Named::One(_) | Named::Several => Named::Several,
+        };
     }
-    found
+    rendered
+        .iter()
+        .map(|id| match named.get(id.0.as_str()) {
+            Some(Named::One(offer)) => Some(OfferId(offer.to_hex())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The exact-bytes key of one policy file, as text. The type is the

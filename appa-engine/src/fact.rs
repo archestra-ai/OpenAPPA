@@ -578,6 +578,9 @@ pub enum Fact {
     OfferAccepted {
         trajectory: TrajectoryId,
         offer: crate::value::OfferId,
+        /// Absent on an acceptance recorded before initiators were.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator: Option<appa_runtime_api::Initiator>,
     },
     OfferDenied {
         trajectory: TrajectoryId,

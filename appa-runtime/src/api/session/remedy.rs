@@ -1,4 +1,5 @@
 use super::*;
+use appa_runtime_api::Initiator;
 
 pub(super) fn remedy_presentation(
     feedback: String,
@@ -145,9 +146,25 @@ impl Session {
     ) -> Result<RemedyDecision, EventError> {
         self.on_remedy_at(
             &offer,
+            Initiator::Agent,
             DeclaredReturn::Arguments(arguments),
             elicitation,
             ruling,
+            Occasion::Remedy { offer: &offer },
+        )
+        .await
+    }
+
+    /// Execute an offer the runtime takes itself under the family's
+    /// [`appa_runtime_api::AutoApply`], through the execution an agent's takes, recorded as
+    /// the runtime's.
+    pub(super) async fn auto_apply(&self, offer: OfferId) -> Result<RemedyDecision, EventError> {
+        self.on_remedy_at(
+            &offer,
+            Initiator::AutoApply,
+            DeclaredReturn::Arguments(RemedyArguments::default()),
+            None,
+            None,
             Occasion::Remedy { offer: &offer },
         )
         .await
@@ -159,8 +176,15 @@ impl Session {
         offer: &OfferId,
         declared: DeclaredReturn,
     ) -> Result<RemedyDecision, EventError> {
-        self.on_remedy_at(offer, declared, None, None, Occasion::Remedy { offer })
-            .await
+        self.on_remedy_at(
+            offer,
+            Initiator::Agent,
+            declared,
+            None,
+            None,
+            Occasion::Remedy { offer },
+        )
+        .await
     }
 
     /// Apply the declaration a blocked spawn took through its block's offer. The application
@@ -174,6 +198,7 @@ impl Session {
     ) -> Result<RemedyDecision, EventError> {
         self.on_remedy_at(
             offer,
+            Initiator::Agent,
             DeclaredReturn::Arguments(arguments),
             None,
             None,
@@ -185,6 +210,7 @@ impl Session {
     async fn on_remedy_at(
         &self,
         offer: &OfferId,
+        initiator: Initiator,
         declared: DeclaredReturn,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
@@ -211,6 +237,7 @@ impl Session {
                     Ok(EngineEvent::ExecuteOffer {
                         trajectory: trajectory.clone(),
                         offer: offer.clone(),
+                        initiator,
                         declared: declared.clone(),
                         evidence,
                         entropy: fresh_entropy(),

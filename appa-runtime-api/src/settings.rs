@@ -18,6 +18,15 @@ impl AutoApply {
     }
 }
 
+/// Who took a remedy plan: the agent executing it, or the runtime under the family's
+/// [`AutoApply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Initiator {
+    Agent,
+    AutoApply,
+}
+
 const LINE_VARIANT_MAX_BYTES: usize = 64;
 
 /// The host's opaque name for the authority line it composed for a family, such as `observe`

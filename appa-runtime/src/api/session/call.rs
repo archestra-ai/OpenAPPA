@@ -297,49 +297,54 @@ impl Session {
         proposal: &Proposal,
         invocation: Option<appa_eventlog::InvocationNonce>,
     ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
-        let (mut decision, took) = self.propose_once(proposal, invocation).await?;
+        let (mut decision, took, mut auto_apply) = self.propose_once(proposal, invocation).await?;
         for _ in 0..AUTO_APPLY_ROUNDS {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
                 break;
             };
-            let Some(offer) = self.auto_applied_offer(offers)? else {
+            let Some(offer) = self.auto_applied_offer(offers, auto_apply)? else {
                 break;
             };
-            match self.on_remedy(offer, RemedyArguments::default(), None, None).await {
+            match self.auto_apply(offer).await {
                 Ok(RemedyDecision::Authorized { .. }) => {}
                 Err(error) if error.is_operational() => return Err(error),
                 applied => {
                     tracing::debug!(trajectory = %self.trajectory.0, ?applied, "an auto-applied plan was not applied");
                 }
             }
-            decision = self.propose_once(proposal, took.as_ref().and(invocation)).await?.0;
+            (decision, _, auto_apply) = self.propose_once(proposal, took.as_ref().and(invocation)).await?;
         }
         Ok((decision, took))
     }
 
-    /// The offered plan the runtime applies itself under the family's pinned
-    /// [`appa_runtime_api::AutoApply`], if the block has one: stock `approve` rulings, and the
-    /// acceptance of a narrowing where the family allows it. Of several, the one whose most
-    /// demanding step asks the least, and the first of those in offer order.
+    /// The offered plan the runtime applies itself under `auto_apply`, the family's pinned
+    /// setting as the snapshot that decided the block read it, if the block has one: stock
+    /// `approve` rulings, and the acceptance of a narrowing where the family allows it. Of
+    /// several, the one whose most demanding step asks the least, and the first of those in
+    /// offer order.
     pub(super) fn auto_applied_offer(
         &self,
         offers: &[appa_runtime_api::OfferedRemedy],
+        auto_apply: appa_runtime_api::AutoApply,
     ) -> Result<Option<OfferId>, EventError> {
-        use appa_runtime_api::AutoApply;
-        if offers.is_empty() {
-            return Ok(None);
-        }
         let deployment = self.deployment();
-        let auto_apply = crate::api::pinned_settings(&self.inner.log(&self.root)?).auto_apply;
-        if auto_apply == AutoApply::RulingsOnly && !deployment.externals.has_stock_approve() {
-            return Ok(None);
+        // A plan that declares a return or rewrites arguments is never applied unasked.
+        let eligible: Vec<OfferId> = offers
+            .iter()
+            .filter(|offer| offer.returns.is_none() && offer.input_sanitizer.is_none())
+            .map(|offer| OfferId(offer.id.clone()))
+            .collect();
+        match (auto_apply, eligible.is_empty()) {
+            (_, true) => return Ok(None),
+            (appa_runtime_api::AutoApply::RulingsOnly, _) if !deployment.externals.has_stock_approve() => {
+                return Ok(None);
+            }
+            _ => {}
         }
         self.with_view(|context| {
-            Ok(offers
-                .iter()
-                // A plan that declares a return or rewrites arguments is never applied unasked.
-                .filter(|offer| offer.returns.is_none() && offer.input_sanitizer.is_none())
-                .filter_map(|offer| crate::engine::resolve_rendered(context.log, &OfferId(offer.id.clone())))
+            Ok(crate::engine::resolve_rendered_all(context.log, &eligible)
+                .into_iter()
+                .flatten()
                 .filter_map(|offer| {
                     context
                         .engine()
@@ -376,11 +381,20 @@ impl Session {
         })
     }
 
+    /// One proposal, with the auto-apply its family pinned as the snapshot that decided it read
+    /// it.
     async fn propose_once(
         &self,
         proposal: &Proposal,
         invocation: Option<appa_eventlog::InvocationNonce>,
-    ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
+    ) -> Result<
+        (
+            ToolCallDecision,
+            Option<appa_eventlog::AheadAttempt>,
+            appa_runtime_api::AutoApply,
+        ),
+        EventError,
+    > {
         let took = Took::default();
         let Proposal {
             call,
@@ -406,9 +420,11 @@ impl Session {
                 tool: call.tool.clone(),
             });
         }
+        let mut auto_apply = appa_runtime_api::AutoApply::default();
         let decision = self
             .drive_with_evidence(
                 |context, mut evidence| {
+                    auto_apply = crate::api::pinned_settings(context.log).auto_apply;
                     if let Some(message) = held_message {
                         evidence.push(ExternalEvidence::Held {
                             message: message.clone(),
@@ -463,7 +479,7 @@ impl Session {
             },
             _ => Err(EventError::UnexpectedDecision),
         };
-        decision.map(|decision| (decision, took))
+        decision.map(|decision| (decision, took, auto_apply))
     }
 
     /// Whether the serving policy writes a contract for this tool's exact name — the

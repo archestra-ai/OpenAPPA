@@ -966,6 +966,7 @@ fn an_unknown_or_foreign_offer_is_refused() {
         e.handle(
             &view,
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: elsewhere,
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -1178,6 +1179,7 @@ fn a_repeat_of_an_unapproved_acceptance_answers_a_refusal() {
         e.handle(
             &view,
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),

@@ -506,6 +506,7 @@ mod held_view_law {
                         outcome,
                         return_policy,
                         offer_nonce: nonce(),
+                        initiator: appa_runtime_api::Initiator::Agent,
                         audience: crate::audience::AudienceEvidence::default(),
                     }))
                 }

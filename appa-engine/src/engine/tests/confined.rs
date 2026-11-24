@@ -589,14 +589,21 @@ fn a_sanitized_file_read_keeps_the_files_audience() {
 
 /// The log an engine built before held messages had a record of their own wrote for
 /// [`released_file_fetch`], as it stored it: the held message pinned as a file read. It reads
-/// as the same held message, so the family replays.
+/// as the same held message, so the family replays. It predates acceptances naming who took
+/// them, which is all a log built now adds.
 #[test]
 fn a_log_written_before_held_messages_were_recorded_replays() {
     let e = file_redacting_engine();
     let stored: Vec<Fact> =
         serde_json::from_str(include_str!("fixtures/held_read_before_recorders.json")).expect("the stored log decodes");
     assert_eq!(e.validate_replay(&stored), Ok(()));
-    assert_eq!(stored, released_file_fetch(&e, &insider_file()).0);
+    let mut built = released_file_fetch(&e, &insider_file()).0;
+    for fact in &mut built {
+        if let Fact::OfferAccepted { initiator, .. } = fact {
+            assert_eq!(initiator.take(), Some(appa_runtime_api::Initiator::Agent));
+        }
+    }
+    assert_eq!(stored, built);
 }
 
 /// A held message was recorded as a file read. Any other file basis is no held message.

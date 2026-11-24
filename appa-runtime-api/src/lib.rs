@@ -10,7 +10,7 @@ mod wire;
 
 pub use launch::{LaunchStart, LaunchToken, LaunchTokenError, StartKind};
 pub use peer::{PeerAddress, PeerDigest, PeerFrame, PeerValueError, SessionTitle};
-pub use settings::{AutoApply, LineVariant, LineVariantError, SessionSettings};
+pub use settings::{AutoApply, Initiator, LineVariant, LineVariantError, SessionSettings};
 
 pub use wire::{
     Accepted, Adapter, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn, OutcomeStatus,

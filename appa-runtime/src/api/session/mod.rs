@@ -244,9 +244,9 @@ impl Session {
         self.with_view(|context| Ok(context.view.principal().cloned()))
     }
 
-    /// The settings this session's family opening pinned.
+    /// The settings this session's family opening pinned, read from the opening as stored.
     pub(crate) fn settings(&self) -> Result<appa_runtime_api::SessionSettings, EventError> {
-        self.with_view(|context| Ok(crate::api::pinned_settings(context.log)))
+        Ok(crate::api::pinned_settings(&self.inner.log(&self.root)?).clone())
     }
 
     /// The host call ids of the calls in `closing` that `answered` does not name: calls a

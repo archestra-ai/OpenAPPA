@@ -513,7 +513,15 @@ static TRAJECTORY_OPENED: Table = Table {
         ("forked_from", Rule::Table(&ROOT_FORK_ORIGIN)),
         // The person the family acts for.
         ("principal", Rule::Token(Class::Reader)),
+        ("settings", Rule::Table(&SESSION_SETTINGS)),
     ],
+};
+
+/// What the family's host pinned: a closed-set setting, and the host's own name for the line
+/// it composed, which names no person but tells deployments apart.
+static SESSION_SETTINGS: Table = Table {
+    name: "SessionSettings",
+    entries: &[("auto_apply", Rule::Keep), ("line_variant", Rule::Fingerprint)],
 };
 
 static VALUE_ADMITTED: Table = Table {
@@ -725,12 +733,13 @@ static OFFER_OPENED: Table = Table {
     ],
 };
 
-/// `OfferAccepted` and `OfferInvalidated` carry the same two fields. The name is the shared
-/// one, not either variant's: it is what a drift report prints, and naming one of the two
-/// would file the other's drift under a fact it did not come from.
+/// `OfferAccepted` and `OfferInvalidated` carry the same two fields, and an acceptance who
+/// took it, one of a closed set. The name is the shared one, not either variant's: it is what
+/// a drift report prints, and naming one of the two would file the other's drift under a fact
+/// it did not come from.
 static OFFER_LIFECYCLE: Table = Table {
     name: "OfferLifecycle",
-    entries: &[("trajectory", TRAJECTORY), ("offer", DIGEST)],
+    entries: &[("trajectory", TRAJECTORY), ("offer", DIGEST), ("initiator", Rule::Keep)],
 };
 
 static OFFER_DENIED: Table = Table {

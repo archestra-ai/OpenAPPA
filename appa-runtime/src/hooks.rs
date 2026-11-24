@@ -691,10 +691,25 @@ async fn dispatch_event(
             start,
             launch,
             settings,
-        } => match launch.map(|launch| runtime.decide_launch(launch)).transpose() {
-            Ok(deciding) => dispatcher.session_start(root, principal, settings, address, title, start, deciding),
-            Err(error) => refuse(error),
-        },
+        } => {
+            // As in `answer`, a host id another family continues under starts that family.
+            let decided = launch
+                .map(|launch| runtime.decide_launch(launch))
+                .transpose()
+                .and_then(|deciding| Ok((runtime.alias_of(&root)?, deciding)));
+            match decided {
+                Ok((family, deciding)) => dispatcher.session_start(
+                    family.unwrap_or(root),
+                    principal,
+                    settings,
+                    address,
+                    title,
+                    start,
+                    deciding,
+                ),
+                Err(error) => refuse(error),
+            }
+        }
         HookEvent::Prompt {
             actor,
             text,

@@ -114,6 +114,7 @@ fn a_return_declaration_is_held_to_its_plan_and_to_the_parents_label() {
         e.handle(
             &viewing(&e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -220,6 +221,7 @@ fn an_approval_declaring_a_return_policy_spends_only_at_the_marked_spawn() {
         .handle(
             &viewing(&e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -455,6 +457,7 @@ fn a_void_declaration_answers_only_the_void_plan() {
         e.handle(
             &viewing(&e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -797,6 +800,7 @@ fn the_reserved_route_is_declared_only_with_its_shape() {
         e.handle(
             &viewing(&e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -1182,6 +1186,7 @@ fn executed_by(
     e.handle(
         &viewing(e, log),
         EngineEvent::ExecuteOffer(OfferExecution {
+            initiator: appa_runtime_api::Initiator::Agent,
             trajectory: trajectory.clone(),
             offer,
             outcome: OfferOutcome::Approved(Vec::new()),
@@ -1255,6 +1260,7 @@ fn a_child_stop_carries_its_parents_declared_floor_to_a_grandchild() {
         e.handle(
             &viewing(&e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: child.clone(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -1358,6 +1364,7 @@ pub(super) fn execute_offer_declaring(
     e.handle(
         &viewing(e, log),
         EngineEvent::ExecuteOffer(OfferExecution {
+            initiator: appa_runtime_api::Initiator::Agent,
             trajectory: traj(),
             offer,
             outcome,
@@ -1366,6 +1373,27 @@ pub(super) fn execute_offer_declaring(
             audience: crate::audience::AudienceEvidence::default(),
         }),
     )
+}
+
+/// Offers accepted before acceptances named who took them read with no initiator, and the log
+/// writes back exactly as stored and replays.
+#[test]
+fn an_acceptance_stored_before_initiators_reads_with_none_and_writes_back_unchanged() {
+    let stored = include_str!("fixtures/bundled-spawn-log.json");
+    let log: Vec<Fact> = serde_json::from_str(stored).expect("a log recorded at the base commit decodes");
+    let initiators: Vec<_> = log
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::OfferAccepted { initiator, .. } => Some(*initiator),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(initiators, vec![None, None]);
+    assert_eq!(
+        serde_json::to_value(&log).expect("the log serializes"),
+        serde_json::from_str::<serde_json::Value>(stored).expect("the stored log is JSON"),
+    );
+    assert_eq!(gapped_spawn_engine().validate_replay(&log), Ok(()));
 }
 
 #[test]

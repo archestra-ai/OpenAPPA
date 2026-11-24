@@ -368,6 +368,7 @@ async fn an_accepted_narrowing_records_where_the_label_moved() {
         Some(&AuditEvent::Narrowed {
             from: label("internal", "public"),
             to: label("internal", "hr"),
+            initiator: Some(appa_runtime_api::Initiator::Agent),
         }),
         "the acceptance is the first thing recorded: {entries:?}",
     );

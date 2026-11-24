@@ -2297,10 +2297,22 @@ pub enum RootForkRefusal {
 }
 
 /// The settings the family's opening pinned: the log's first record is its opening.
-fn pinned_settings(log: &Log) -> SessionSettings {
+fn pinned_settings(log: &Log) -> &SessionSettings {
+    const UNPINNED: &SessionSettings = &SessionSettings {
+        auto_apply: appa_runtime_api::AutoApply::RulingsOnly,
+        line_variant: None,
+    };
     match log.facts().first() {
-        Some(appa_engine::fact::Fact::TrajectoryOpened(opening)) => opening.settings.clone(),
-        _ => SessionSettings::default(),
+        Some(appa_engine::fact::Fact::TrajectoryOpened(opening)) => &opening.settings,
+        _ => UNPINNED,
+    }
+}
+
+/// Refuses an event naming a line variant other than the one the family's opening pinned.
+fn line_continued(log: &Log, settings: &SessionSettings) -> Result<(), EventError> {
+    match pinned_settings(log).continued_by(settings.line_variant.as_ref()) {
+        true => Ok(()),
+        false => Err(EventError::LineVariantMismatch),
     }
 }
 
@@ -2805,7 +2817,8 @@ impl Runtime {
     /// identifies the source trajectory; an ordinary `SessionStart` does not infer that
     /// relationship. Opening the same root fork again is not an error, even once the parent has
     /// ended: a root already open is recognized before the parent is read, and keeps the
-    /// settings its first opening pinned. The new root pins `settings`, not its parent's.
+    /// settings its first opening pinned. The new root pins `settings`, not its parent's. A
+    /// host id another family continues under is that family's, and refused as a conflict.
     pub fn open_root_fork(
         &self,
         parent_root: &TrajectoryId,
@@ -2814,6 +2827,12 @@ impl Runtime {
         settings: SessionSettings,
     ) -> Result<(), RootForkRefusal> {
         if new_root == parent_root || new_root == parent {
+            return Err(RootForkRefusal::RootIdConflict);
+        }
+        if self
+            .aliased(new_root)
+            .map_err(|error| RootForkRefusal::Refused(error.to_string()))?
+        {
             return Err(RootForkRefusal::RootIdConflict);
         }
         let standing = self
@@ -2897,6 +2916,11 @@ impl Runtime {
         settings: SessionSettings,
         inventory: Option<appa_runtime_api::inventory::ToolInventory>,
     ) -> Result<Session, EventError> {
+        // A host id another family continues under is that family's: opening a root there
+        // would shadow it.
+        if self.aliased(&id)? {
+            return Err(EventError::TrajectoryExists);
+        }
         // A root with an inventory is bound to the composed file — the serving policy with the
         // inventory embedded — so every revision the family follows compiles with it, and the
         // previous version reads the family as pinned to that file.
@@ -3066,7 +3090,7 @@ impl Runtime {
             .map_err(|error| StatusReadError::Replay(error.to_string()))?;
         policy
             .engine()
-            .trajectory_status(&view, id, pinned_settings(&log))
+            .trajectory_status(&view, id, pinned_settings(&log).clone())
             .ok_or_else(|| StatusReadError::Replay("the root has no status projection".to_string()))
     }
 
@@ -4400,7 +4424,7 @@ impl Runtime {
         let log = self.inner.log(root).expect("the rebuilt root's log reads");
         policy
             .engine()
-            .trajectory_status(&view, trajectory, pinned_settings(&log))
+            .trajectory_status(&view, trajectory, pinned_settings(&log).clone())
     }
 
     /// Drive one event straight at the engine and take its refusal, for the

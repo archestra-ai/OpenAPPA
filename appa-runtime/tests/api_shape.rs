@@ -260,7 +260,7 @@ fn the_declared_audit(runtime: &Runtime, id: &TrajectoryId) {
             AuditEvent::Ruled { authority } | AuditEvent::Denied { authority } => {
                 let _: String = authority;
             }
-            AuditEvent::Narrowed { from, to } => {
+            AuditEvent::Narrowed { from, to, .. } => {
                 let _: (AuditLabel, AuditLabel) = (from, to);
             }
             AuditEvent::SanitizerBound { sanitizer } | AuditEvent::Sanitized { sanitizer } => {
