@@ -69,9 +69,12 @@ impl Pattern {
     /// Whether every string `narrower` matches, this pattern matches too: each of its
     /// alternatives is covered by one of ours. Sufficient, not necessary.
     fn covers(&self, Pattern(narrower): &Pattern) -> bool {
-        narrower
-            .iter()
-            .all(|alternative| self.0.iter().any(|wider| alternative_covers(wider, alternative)))
+        match self.scans() {
+            false => narrower.is_subset(&self.0),
+            true => narrower
+                .iter()
+                .all(|alternative| self.0.iter().any(|wider| alternative_covers(wider, alternative))),
+        }
     }
 }
 
