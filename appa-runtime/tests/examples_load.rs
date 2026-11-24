@@ -283,6 +283,7 @@ async fn a_bound_secret_masker_delivers_the_masked_shell_output() {
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -580,6 +581,7 @@ async fn the_coding_battery_judges_relative_credentials_and_offers_review_for_pu
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -767,6 +769,7 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -871,6 +874,7 @@ command = ["appa", "file-tracker", "record"]
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -917,6 +921,7 @@ async fn the_coding_battery_covers_grep_write_and_edit_of_the_requesters_secrets
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,

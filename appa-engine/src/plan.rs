@@ -57,6 +57,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use appa_runtime_api::AutoApply;
 use serde::{Deserialize, Serialize};
 
 use crate::authority::{Authority, DeclaredTransition, Mandate, Sanitizer};
@@ -144,15 +145,19 @@ impl ExecutableRemedyPlan {
         matches!(self.steps.as_slice(), [RemedyStep::Return(_)])
     }
 
-    /// Is this plan rulings alone, each by an authority `rules` accepts? Such a plan accepts no
-    /// narrowing, treats no result and declares no return, so executing it settles nothing the
-    /// agent would otherwise choose.
-    pub fn asks_only(&self, rules: impl Fn(&AuthorityName) -> bool) -> bool {
-        !self.steps.is_empty()
-            && self
-                .steps
-                .iter()
-                .all(|step| matches!(step, RemedyStep::Authorize(authority) if rules(authority)))
+    /// May the runtime apply this plan at its block, under `auto_apply`, with rulings only by
+    /// authorities `rules` accepts? Such a plan treats no result, rewrites no argument and
+    /// declares no return; under [`AutoApply::RulingsOnly`] it also accepts no narrowing. So
+    /// executing it settles nothing the agent would otherwise choose.
+    pub fn auto_applies(&self, auto_apply: AutoApply, rules: impl Fn(&AuthorityName) -> bool) -> bool {
+        !self.steps.is_empty() && self.steps.iter().all(|step| match (step, auto_apply) {
+            (RemedyStep::Authorize(authority), _) => rules(authority),
+            (RemedyStep::Accept(_), AutoApply::RulingsAndAccept) => true,
+            (RemedyStep::Accept(_), AutoApply::RulingsOnly)
+            | (RemedyStep::Withhold | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_), _) => {
+                false
+            }
+        })
     }
 
     /// The narrowing this plan asks the agent to accept, where its route carries one.
@@ -4642,6 +4647,57 @@ mod tests {
             outcome: crate::fact::CloseOutcome::Success {
                 effects: EffectSet::new([kind]).unwrap(),
             },
+        }
+    }
+
+    /// The runtime applies a plan at its block only when every step is a ruling by an
+    /// authority it accepts, or, where the family allows it, the acceptance of a narrowing.
+    #[test]
+    fn a_plan_auto_applies_only_as_rulings_and_the_acceptances_its_family_allows() {
+        let narrowing = Narrowing {
+            from: Label::new(TRUSTED, Audience::public()),
+            to: Label::new(SUSPICIOUS, Audience::public()),
+        };
+        let stock = || RemedyStep::Authorize(AuthorityName::new("stock"));
+        let other = || RemedyStep::Authorize(AuthorityName::new("other"));
+        let accept = || RemedyStep::Accept(narrowing.clone());
+        let output = || RemedyStep::Sanitize(SanitizerName::new("scrub"));
+        let input = || RemedyStep::Derive(SanitizerName::new("redact"));
+        let declare = || RemedyStep::Return(ReturnRoute::Raw);
+        // (steps, under rulings only, under rulings and accept)
+        let table = [
+            (vec![stock()], true, true),
+            (vec![stock(), stock()], true, true),
+            (vec![accept()], false, true),
+            (vec![accept(), stock()], false, true),
+            (vec![other()], false, false),
+            (vec![accept(), other()], false, false),
+            (vec![RemedyStep::Withhold], false, false),
+            (vec![accept(), output()], false, false),
+            (vec![output()], false, false),
+            (vec![input()], false, false),
+            (vec![stock(), input()], false, false),
+            (vec![declare()], false, false),
+            (vec![accept(), RemedyStep::Return(ReturnRoute::Void)], false, false),
+            (vec![], false, false),
+        ];
+        for (steps, rulings_only, rulings_and_accept) in table {
+            let plan = ExecutableRemedyPlan {
+                id: PlanId::new(0),
+                steps: steps.clone(),
+                required: Vec::new(),
+            };
+            let rules = |authority: &AuthorityName| authority.as_str() == "stock";
+            assert_eq!(
+                plan.auto_applies(AutoApply::RulingsOnly, rules),
+                rulings_only,
+                "{steps:?} under rulings only"
+            );
+            assert_eq!(
+                plan.auto_applies(AutoApply::RulingsAndAccept, rules),
+                rulings_and_accept,
+                "{steps:?} under rulings and accept"
+            );
         }
     }
 }

@@ -408,6 +408,10 @@ pub struct TrajectoryOpening {
     /// in the family; a root fork carries its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<ReaderId>,
+    /// What the host pinned for the family at this opening. The engine decides nothing on
+    /// them; every trajectory in the family reads them from here.
+    #[serde(default, skip_serializing_if = "appa_runtime_api::SessionSettings::is_default")]
+    pub settings: appa_runtime_api::SessionSettings,
 }
 
 /// One record in the log. New variants are added by the slice that both emits and consumes them

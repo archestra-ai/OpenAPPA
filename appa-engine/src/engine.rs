@@ -875,8 +875,9 @@ impl Engine {
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
         principal: Option<ReaderId>,
+        settings: appa_runtime_api::SessionSettings,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
-        self.opening(trajectory, policy_file_key, None, principal)
+        self.opening(trajectory, policy_file_key, None, principal, settings)
     }
 
     /// The opening batch of an independent conversation-root fork. `forked_from` came from
@@ -887,9 +888,10 @@ impl Engine {
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
         forked_from: crate::fact::RootForkOrigin,
+        settings: appa_runtime_api::SessionSettings,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let principal = forked_from.principal.clone();
-        self.opening(trajectory, policy_file_key, Some(forked_from), principal)
+        self.opening(trajectory, policy_file_key, Some(forked_from), principal, settings)
     }
 
     fn opening(
@@ -898,6 +900,7 @@ impl Engine {
         policy_file_key: crate::profile::PolicyFileKey,
         forked_from: Option<crate::fact::RootForkOrigin>,
         principal: Option<ReaderId>,
+        settings: appa_runtime_api::SessionSettings,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let Some(line) = &self.line else {
             return Err(TransitionRefusal::NoRevision);
@@ -913,6 +916,7 @@ impl Engine {
                 revision: line.revision,
                 forked_from,
                 principal,
+                settings,
             })],
         )
     }

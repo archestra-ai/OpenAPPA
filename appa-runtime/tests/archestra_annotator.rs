@@ -95,6 +95,7 @@ mod served {
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -266,6 +267,7 @@ confined_results = ["mcp/tracker/read"]
                     title: None,
                     start: None,
                     launch: None,
+                    settings: Default::default(),
                 },
             )
             .await,

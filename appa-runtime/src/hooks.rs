@@ -5,8 +5,8 @@ use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcomes, ParseRefusal, PeerAddress, PeerFrame,
-    PrincipalSource, PromptKey, ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind, ToolOutcome,
-    TrajectoryId, WireDecision, WireEvent,
+    PrincipalSource, PromptKey, ProposedCall, Ruling, SessionSettings, SessionTitle, SpawnKind, SpawnRef, StartKind,
+    ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
@@ -102,6 +102,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
                 address,
                 title,
                 start,
+                settings,
                 ..
             },
             deciding,
@@ -114,7 +115,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
                 options: &presentation,
                 call_ids,
             }
-            .session_start(root, principal, address, title, start, deciding);
+            .session_start(root, principal, settings, address, title, start, deciding);
             handled((crate::events::HookKind::SessionStart, None), dispatch, shown, decision)
         }
         (event, None) => handle_internal(runtime, event, presentation, call_ids).await,
@@ -186,6 +187,7 @@ fn continued(
             title,
             start,
             launch,
+            settings,
         } => HookEvent::SessionStart {
             root: id(root),
             principal,
@@ -193,6 +195,7 @@ fn continued(
             title,
             start,
             launch,
+            settings,
         },
         HookEvent::Prompt {
             actor: who,
@@ -338,22 +341,31 @@ fn observed(
         HookEvent::ToolCall { actor, .. } => actor.clone(),
         _ => unreachable!("wire validation restricts inventory to starts and tool calls"),
     };
-    // A start's principal is held to its shape and to the root it continues before the
-    // inventory lands, so a refused start leaves no root behind and changes no stored one.
-    let principal = match event {
-        HookEvent::SessionStart { principal, .. } => {
-            session_principal(principal.as_deref()).map_err(|error| refused_hook(runtime, root, event, error))?
-        }
-        _ => None,
+    // A start's principal and settings are held to their shape and to the root they continue
+    // before the inventory lands, so a refused start leaves no root behind and changes no
+    // stored one.
+    let (principal, settings) = match event {
+        HookEvent::SessionStart {
+            principal, settings, ..
+        } => (
+            session_principal(principal.as_deref()).map_err(|error| refused_hook(runtime, root, event, error))?,
+            settings.clone(),
+        ),
+        _ => (None, SessionSettings::default()),
     };
     let continued = |session: Session| {
-        continues_for(&session, principal.as_ref())?;
+        continues_for(&session, principal.as_ref(), &settings)?;
         runtime.observe_inventory(&actor, *adapter, inventory)
     };
     let observed = match runtime.session(root, root) {
         Ok(session) => continued(session),
         Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
-            match runtime.create_session_with_inventory(root.clone(), inventory.clone(), principal.clone()) {
+            match runtime.create_session_with_inventory(
+                root.clone(),
+                inventory.clone(),
+                principal.clone(),
+                settings.clone(),
+            ) {
                 Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
                 Err(EventError::TrajectoryExists) => runtime.session(root, root).and_then(continued),
                 Err(error) => Err(error),
@@ -678,8 +690,9 @@ async fn dispatch_event(
             title,
             start,
             launch,
+            settings,
         } => match launch.map(|launch| runtime.decide_launch(launch)).transpose() {
-            Ok(deciding) => dispatcher.session_start(root, principal, address, title, start, deciding),
+            Ok(deciding) => dispatcher.session_start(root, principal, settings, address, title, start, deciding),
             Err(error) => refuse(error),
         },
         HookEvent::Prompt {
@@ -783,10 +796,12 @@ impl Dispatcher<'_> {
     /// refuses sends to it, so the start goes on. A launched start opens the family its
     /// launch runs, which a host id the launch continues under does not change; it holds
     /// its launch's `deciding` through the identity it records.
+    #[allow(clippy::too_many_arguments)]
     fn session_start(
         &mut self,
         root: TrajectoryId,
         principal: Option<String>,
+        settings: SessionSettings,
         address: Option<PeerAddress>,
         title: Option<SessionTitle>,
         start: Option<StartKind>,
@@ -795,7 +810,7 @@ impl Dispatcher<'_> {
         let runtime = self.runtime;
         let launched = match (&principal, &launch) {
             (_, None) => Ok(LaunchedStart::Opened(root)),
-            (None, Some(deciding)) => runtime.launched_start(&root, start, deciding),
+            (None, Some(deciding)) => runtime.launched_start(&root, start, &settings, deciding),
             (Some(_), Some(_)) => Err(EventError::PrincipalMismatch),
         };
         let launched = match launched {
@@ -804,7 +819,7 @@ impl Dispatcher<'_> {
         };
         let root = launched.root().clone();
         let opened = session_principal(principal.as_deref())
-            .and_then(|principal| open_or_reopen(runtime, &root, principal, self.options.clone()));
+            .and_then(|principal| open_or_reopen(runtime, &root, principal, &settings, self.options.clone()));
         if opened.is_ok()
             && let Err(error) = runtime.record_peer_identity(&root, address.as_ref(), title.as_ref())
         {
@@ -1304,29 +1319,45 @@ fn session_principal(spelling: Option<&str>) -> Result<Option<ReaderId>, EventEr
         .transpose()
 }
 
-/// Open the root for `principal`, or reopen it when the principal it opened for is the one
-/// named. A reopen that names none continues under the principal the opening pinned.
+/// Open the root for `principal`, pinning `settings`, or reopen it when the principal it
+/// opened for is the one named. A reopen that names none continues under the principal the
+/// opening pinned, and every reopen under the settings it pinned.
 fn open_or_reopen(
     runtime: &Runtime,
     root: &appa_runtime_api::TrajectoryId,
     principal: Option<ReaderId>,
+    settings: &SessionSettings,
     presentation: EmbeddedPresentationOptions,
 ) -> Result<Session, EventError> {
     let session = match runtime.session_with_presentation(root, root, presentation.clone()) {
-        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone(), principal.clone()) {
-            Ok(_) | Err(EventError::TrajectoryExists) => runtime.session_with_presentation(root, root, presentation)?,
-            Err(error) => return Err(error),
-        },
+        Err(EventError::UnknownTrajectory) => {
+            match runtime.create_pinned_session(root.clone(), principal.clone(), settings.clone()) {
+                Ok(_) | Err(EventError::TrajectoryExists) => {
+                    runtime.session_with_presentation(root, root, presentation)?
+                }
+                Err(error) => return Err(error),
+            }
+        }
         reopened => reopened?,
     };
-    continues_for(&session, principal.as_ref())?;
+    continues_for(&session, principal.as_ref(), settings)?;
     Ok(session)
 }
 
-/// A start that names a principal continues a session only when that session opened for it.
-fn continues_for(session: &Session, principal: Option<&ReaderId>) -> Result<(), EventError> {
-    match principal {
-        Some(named) if session.principal()?.as_ref() != Some(named) => Err(EventError::PrincipalMismatch),
+/// A start that names a principal continues a session only when that session opened for it,
+/// and one that names a line variant only when the session opened under it.
+fn continues_for(
+    session: &Session,
+    principal: Option<&ReaderId>,
+    settings: &SessionSettings,
+) -> Result<(), EventError> {
+    if let Some(named) = principal
+        && session.principal()?.as_ref() != Some(named)
+    {
+        return Err(EventError::PrincipalMismatch);
+    }
+    match &settings.line_variant {
+        Some(named) if !session.settings()?.continued_by(Some(named)) => Err(EventError::LineVariantMismatch),
         _ => Ok(()),
     }
 }
@@ -1354,8 +1385,13 @@ fn control_call(
             // it. It can be a root's first call, which opens the root as any root call does.
             if let Ok(args) = serde_json::from_str::<crate::api::ExecuteRemedyPlanArgs>(call.arguments.get()) {
                 if actor.child.is_none()
-                    && let Err(error) =
-                        open_or_reopen(runtime, &actor.root, None, EmbeddedPresentationOptions::default())
+                    && let Err(error) = open_or_reopen(
+                        runtime,
+                        &actor.root,
+                        None,
+                        &SessionSettings::default(),
+                        EmbeddedPresentationOptions::default(),
+                    )
                 {
                     return fold(error, Refusal::Deny);
                 }
@@ -1440,7 +1476,16 @@ where
 {
     match &actor.child {
         Some(child) => on_child(runtime, &actor.root, child, missing_start, presentation, event).await,
-        None => event(open_or_reopen(runtime, &actor.root, None, presentation.clone())?).await,
+        None => {
+            event(open_or_reopen(
+                runtime,
+                &actor.root,
+                None,
+                &SessionSettings::default(),
+                presentation.clone(),
+            )?)
+            .await
+        }
     }
 }
 
@@ -1685,6 +1730,7 @@ mod tests {
             title,
             start,
             launch: None,
+            settings,
         }) = through_the_codec(&host)
         else {
             panic!("a session start parses as one");
@@ -1696,6 +1742,7 @@ mod tests {
             title,
             start,
             launch: Some(launch),
+            settings,
         }
     }
 
@@ -1795,7 +1842,12 @@ mod tests {
             .decide_launch(launch("second-launch"))
             .expect("the second launch decides");
         runtime
-            .launched_start(hook_root(&compacted), Some(StartKind::Compact), &second)
+            .launched_start(
+                hook_root(&compacted),
+                Some(StartKind::Compact),
+                &Default::default(),
+                &second,
+            )
             .expect("the compacted id aliases the second family too");
         drop(second);
         assert!(matches!(
@@ -3359,6 +3411,7 @@ mod tests {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;

@@ -58,7 +58,7 @@ use appa_eventlog::{
     AheadAttempt, Backend, DeploymentName, EndKind, HostObservation, Log, LogStore, PolicyHead, PublishError,
     StoredLabel,
 };
-use appa_runtime_api::Adapter;
+use appa_runtime_api::{Adapter, SessionSettings};
 use host::{AheadState, Declared, HostState, host_actor, inventory_at};
 
 /// One remedy offer as it is quoted and carried.
@@ -750,6 +750,8 @@ pub(crate) enum EventError {
     MalformedPrincipal(String),
     #[error("the session already acts for another principal")]
     PrincipalMismatch,
+    #[error("the session was opened under another line variant")]
+    LineVariantMismatch,
     #[error("no open dispatch with this id exists")]
     UnknownDispatch,
     #[error("this outcome does not match the open dispatch; it is not reported")]
@@ -896,9 +898,12 @@ impl EventError {
             | EventError::ChildDispatchOpen => RefusalClass::OutstandingCall,
             EventError::CallIdReused => RefusalClass::CallIdReused,
             EventError::TrajectoryEnded => RefusalClass::TrajectoryEnded,
-            EventError::UnknownTrajectory | EventError::TrajectoryExists | EventError::RootArchived => {
-                RefusalClass::Trajectory
-            }
+            // A start under another line variant names a family its id does not hold, as a
+            // reused id does.
+            EventError::UnknownTrajectory
+            | EventError::TrajectoryExists
+            | EventError::RootArchived
+            | EventError::LineVariantMismatch => RefusalClass::Trajectory,
             EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
             EventError::UnknownOffer
             | EventError::ApprovalPending
@@ -938,6 +943,7 @@ impl EventError {
             | EventError::UndeclaredTool { .. }
             | EventError::MalformedPrincipal(_)
             | EventError::PrincipalMismatch
+            | EventError::LineVariantMismatch
             | EventError::DeclaresOffSpawn
             | EventError::DeferralUnkeyed
             | EventError::UnexpectedDecision => true,
@@ -1311,9 +1317,14 @@ impl Deployment {
         crate::engine::selector_templates(audience, provider).expect("the probe reads only registered providers")
     }
 
-    fn root_opening(&self, trajectory: &TrajectoryId, principal: Option<ReaderId>) -> Vec<appa_engine::fact::Fact> {
+    fn root_opening(
+        &self,
+        trajectory: &TrajectoryId,
+        principal: Option<ReaderId>,
+        settings: SessionSettings,
+    ) -> Vec<appa_engine::fact::Fact> {
         self.resident
-            .root_opening(trajectory, self.config.policy_file().bytes(), principal)
+            .root_opening(trajectory, self.config.policy_file().bytes(), principal, settings)
     }
 }
 
@@ -2279,8 +2290,18 @@ pub enum RootForkRefusal {
     ParentUnavailable,
     #[error("the new root ID names its source family, source trajectory, or an unrelated existing root")]
     RootIdConflict,
+    #[error("the root fork is already open under another line variant")]
+    LineVariantMismatch,
     #[error("the root fork could not be opened: {0}")]
     Refused(String),
+}
+
+/// The settings the family's opening pinned: the log's first record is its opening.
+fn pinned_settings(log: &Log) -> SessionSettings {
+    match log.facts().first() {
+        Some(appa_engine::fact::Fact::TrajectoryOpened(opening)) => opening.settings.clone(),
+        _ => SessionSettings::default(),
+    }
 }
 
 fn read_refused(error: appa_eventlog::ReadError) -> EventError {
@@ -2591,11 +2612,23 @@ impl Runtime {
     }
 
     /// Opens a fresh root in this view's deployment line, decided at the revision its
-    /// deployment serves. Refuses an id whose log already exists: a reused harness id MUST NOT
-    /// continue another trajectory's history.
+    /// deployment serves, with no settings pinned.
+    #[cfg(test)]
     pub(crate) fn create_session(&self, id: TrajectoryId, principal: Option<ReaderId>) -> Result<Session, EventError> {
+        self.create_pinned_session(id, principal, SessionSettings::default())
+    }
+
+    /// Opens a fresh root in this view's deployment line, decided at the revision its
+    /// deployment serves, pinning `settings` for the family. Refuses an id whose log already
+    /// exists: a reused harness id MUST NOT continue another trajectory's history.
+    pub(crate) fn create_pinned_session(
+        &self,
+        id: TrajectoryId,
+        principal: Option<ReaderId>,
+        settings: SessionSettings,
+    ) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
-        self.create_session_under(id, deployment, principal, None)
+        self.create_session_under(id, deployment, principal, settings, None)
     }
 
     pub(crate) fn create_session_with_inventory(
@@ -2603,6 +2636,7 @@ impl Runtime {
         id: TrajectoryId,
         inventory: appa_runtime_api::inventory::ToolInventory,
         principal: Option<ReaderId>,
+        settings: SessionSettings,
     ) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
         // A root opens with an inventory only when the policy it opens under covers every tool
@@ -2617,7 +2651,7 @@ impl Runtime {
         )
         .map_err(EventError::PolicyUnavailable)?;
         self.inner.inventory_engine(&deployment, &inventory)?;
-        self.create_session_under(id, deployment, principal, Some(inventory))
+        self.create_session_under(id, deployment, principal, settings, Some(inventory))
     }
 
     /// Reserve identities in the actor's own scope, independently of the immutable
@@ -2770,12 +2804,14 @@ impl Runtime {
     /// has no prepared spawn, `ChildStart`/`ChildEnd`, or return contract. The embedding integration
     /// identifies the source trajectory; an ordinary `SessionStart` does not infer that
     /// relationship. Opening the same root fork again is not an error, even once the parent has
-    /// ended: a root already open is recognized before the parent is read.
+    /// ended: a root already open is recognized before the parent is read, and keeps the
+    /// settings its first opening pinned. The new root pins `settings`, not its parent's.
     pub fn open_root_fork(
         &self,
         parent_root: &TrajectoryId,
         parent: &TrajectoryId,
         new_root: &TrajectoryId,
+        settings: SessionSettings,
     ) -> Result<(), RootForkRefusal> {
         if new_root == parent_root || new_root == parent {
             return Err(RootForkRefusal::RootIdConflict);
@@ -2790,7 +2826,7 @@ impl Runtime {
             })
             .map_err(|error| RootForkRefusal::Refused(error.to_string()))?;
         if standing {
-            return self.root_fork_already_open(new_root, parent_root, parent);
+            return self.root_fork_already_open(new_root, parent_root, parent, &settings);
         }
         let refused = |error: EventError| RootForkRefusal::Refused(error.to_string());
         let deployment = self.inner.deployment();
@@ -2810,13 +2846,13 @@ impl Runtime {
         // inventory. It follows the parent's deployment at the head.
         let opening = policy
             .engine()
-            .root_fork_opening(new_root, log.policy_file(), origin)
+            .root_fork_opening(new_root, log.policy_file(), origin, settings.clone())
             .map_err(|refusal| RootForkRefusal::Refused(refusal.to_string()))?;
         match self.inner.store.create_root(opening, log.policy_file()) {
             Ok(_) => Ok(()),
             // A concurrent caller created this root ID after the check above.
             Err(appa_eventlog::CreateError::AlreadyExists { .. }) => {
-                self.root_fork_already_open(new_root, parent_root, parent)
+                self.root_fork_already_open(new_root, parent_root, parent, &settings)
             }
             Err(error) => {
                 self.inner
@@ -2827,12 +2863,14 @@ impl Runtime {
     }
 
     /// A repeat [`Runtime::open_root_fork`]: `fork_root` exists, which is the same root fork
-    /// only when its opening record forked this parent.
+    /// only when its opening record forked this parent, and continues it only under the line
+    /// variant that opening pinned or none.
     fn root_fork_already_open(
         &self,
         fork_root: &TrajectoryId,
         parent_root: &TrajectoryId,
         parent: &TrajectoryId,
+        settings: &SessionSettings,
     ) -> Result<(), RootForkRefusal> {
         let log = self
             .inner
@@ -2841,8 +2879,12 @@ impl Runtime {
         match log.facts().first() {
             Some(appa_engine::fact::Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
                 forked_from: Some(origin),
+                settings: pinned,
                 ..
-            })) if origin.is_from(parent_root, parent) => Ok(()),
+            })) if origin.is_from(parent_root, parent) => match pinned.continued_by(settings.line_variant.as_ref()) {
+                true => Ok(()),
+                false => Err(RootForkRefusal::LineVariantMismatch),
+            },
             _ => Err(RootForkRefusal::RootIdConflict),
         }
     }
@@ -2852,6 +2894,7 @@ impl Runtime {
         id: TrajectoryId,
         deployment: Arc<Deployment>,
         principal: Option<ReaderId>,
+        settings: SessionSettings,
         inventory: Option<appa_runtime_api::inventory::ToolInventory>,
     ) -> Result<Session, EventError> {
         // A root with an inventory is bound to the composed file — the serving policy with the
@@ -2859,7 +2902,7 @@ impl Runtime {
         // previous version reads the family as pinned to that file.
         let (opening, policy_file) = match inventory {
             None => (
-                deployment.root_opening(&id, principal),
+                deployment.root_opening(&id, principal, settings),
                 deployment.config.policy_file().bytes().to_vec(),
             ),
             Some(inventory) => {
@@ -2869,7 +2912,7 @@ impl Runtime {
                     .map_err(EventError::PolicyUnavailable)?;
                 let bytes = composed.policy_file().bytes().to_vec();
                 let engine = self.inner.inventory_engine(&deployment, &inventory)?;
-                (engine.root_opening(&id, &bytes, principal), bytes)
+                (engine.root_opening(&id, &bytes, principal, settings), bytes)
             }
         };
         let line = self.inner.line();
@@ -3023,7 +3066,7 @@ impl Runtime {
             .map_err(|error| StatusReadError::Replay(error.to_string()))?;
         policy
             .engine()
-            .trajectory_status(&view, id)
+            .trajectory_status(&view, id, pinned_settings(&log))
             .ok_or_else(|| StatusReadError::Replay("the root has no status projection".to_string()))
     }
 
@@ -4354,7 +4397,10 @@ impl Runtime {
     pub(crate) fn branch_status(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
         let deployment = self.inner.deployment();
         let (policy, view) = self.rebuilt(&deployment, root);
-        policy.engine().trajectory_status(&view, trajectory)
+        let log = self.inner.log(root).expect("the rebuilt root's log reads");
+        policy
+            .engine()
+            .trajectory_status(&view, trajectory, pinned_settings(&log))
     }
 
     /// Drive one event straight at the engine and take its refusal, for the
@@ -5649,7 +5695,12 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
             let session = |id: &str| {
                 runtime
-                    .create_session_with_inventory(TrajectoryId(id.to_string()), ToolInventory::default(), None)
+                    .create_session_with_inventory(
+                        TrajectoryId(id.to_string()),
+                        ToolInventory::default(),
+                        None,
+                        Default::default(),
+                    )
                     .expect("the inventory session opens")
             };
             let (first, second) = (session("first"), session("second"));
@@ -5940,6 +5991,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -5971,6 +6023,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -6015,6 +6068,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     start: None,
                     launch: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -6085,6 +6139,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -6180,6 +6235,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                         title: None,
                         launch: None,
                         start: None,
+                        settings: Default::default(),
                     }
                 )
                 .await,
@@ -6316,7 +6372,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             ..ToolInventory::default()
         };
         runtime
-            .create_session_with_inventory(id.clone(), inventory.clone(), None)
+            .create_session_with_inventory(id.clone(), inventory.clone(), None, Default::default())
             .unwrap();
         runtime
             .reload(claude_config(
@@ -6542,7 +6598,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             sources: Vec::new(),
         };
         runtime
-            .create_session_with_inventory(root.clone(), inventory("parent"), None)
+            .create_session_with_inventory(root.clone(), inventory("parent"), None, Default::default())
             .unwrap();
         let child = Actor {
             root: root.clone(),
@@ -6619,7 +6675,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         assert!(
             runtime
-                .create_session_with_inventory(id.clone(), inventory, None)
+                .create_session_with_inventory(id.clone(), inventory, None, Default::default())
                 .is_err()
         );
         assert!(matches!(runtime.session(&id, &id), Err(EventError::UnknownTrajectory)));
@@ -6865,6 +6921,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -6936,6 +6993,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -6992,6 +7050,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7046,6 +7105,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7094,6 +7154,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -7147,6 +7208,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7216,6 +7278,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -7275,6 +7338,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -7314,6 +7378,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7393,6 +7458,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7484,6 +7550,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -7550,6 +7617,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -7584,6 +7652,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         };
         let runtime = Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens");
         assert_eq!(
@@ -7759,6 +7828,7 @@ url = "{url}"
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,

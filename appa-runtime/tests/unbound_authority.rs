@@ -56,6 +56,7 @@ async fn a_remedy_naming_an_unbound_authority_gives_no_answer_and_the_offer_stan
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -105,6 +106,7 @@ async fn an_offer_from_an_earlier_revision_consults_nothing_and_its_call_is_deci
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;

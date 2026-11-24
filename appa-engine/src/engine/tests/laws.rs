@@ -344,7 +344,12 @@ mod held_view_law {
 
         fn opened(engine: Engine) -> Walk {
             let opening = engine
-                .open_trajectory(&traj(), crate::profile::PolicyFileKey::of(b"law"), None)
+                .open_trajectory(
+                    &traj(),
+                    crate::profile::PolicyFileKey::of(b"law"),
+                    None,
+                    Default::default(),
+                )
                 .expect("the opening validates against the empty log");
             let log = opening.into_unsealed();
             let held = engine.view(&traj(), log.clone(), 1).expect("the opening replays");

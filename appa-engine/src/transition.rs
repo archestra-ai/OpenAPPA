@@ -3997,7 +3997,12 @@ mod tests {
 
     fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
         engine
-            .open_trajectory(family, crate::profile::PolicyFileKey::of(b"policy"), None)
+            .open_trajectory(
+                family,
+                crate::profile::PolicyFileKey::of(b"policy"),
+                None,
+                Default::default(),
+            )
             .expect("the opening validates against the empty log")
             .into_unsealed()
             .remove(0)

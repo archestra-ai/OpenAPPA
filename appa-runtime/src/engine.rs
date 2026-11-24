@@ -99,7 +99,8 @@ use crate::consult::{
 };
 pub(crate) use appa_engine::engine::DeferredReturn;
 use appa_runtime_api::{
-    OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Outcomes, Remediable, Remedy, RetryHint, Ruling,
+    AutoApply, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Outcomes, Remediable, Remedy, RetryHint, Ruling,
+    SessionSettings,
 };
 
 /// One fresh 256-bit random number per act that can surface offers; the
@@ -662,6 +663,9 @@ pub struct TrajectoryStatus {
     pub trajectory: String,
     pub trust: String,
     pub audience: String,
+    /// What the family's opening pinned.
+    #[serde(skip_serializing_if = "SessionSettings::is_default")]
+    pub settings: SessionSettings,
 }
 
 /// One label rendered for a display surface: each dimension as chain
@@ -1009,9 +1013,10 @@ impl RuntimeEngine {
         trajectory: &TrajectoryId,
         policy_file: &[u8],
         principal: Option<ReaderId>,
+        settings: SessionSettings,
     ) -> Vec<Fact> {
         self.engine
-            .open_trajectory(trajectory, EnginePolicyFileKey::of(policy_file), principal)
+            .open_trajectory(trajectory, EnginePolicyFileKey::of(policy_file), principal, settings)
             .expect("the engine's own opening batch validates against the empty log")
             .into_unsealed()
     }
@@ -1024,9 +1029,10 @@ impl RuntimeEngine {
         trajectory: &TrajectoryId,
         policy_file: &[u8],
         origin: RootForkOrigin,
+        settings: SessionSettings,
     ) -> Result<Vec<Fact>, TransitionRefusal> {
         self.engine
-            .open_root_fork(trajectory, EnginePolicyFileKey::of(policy_file), origin)
+            .open_root_fork(trajectory, EnginePolicyFileKey::of(policy_file), origin, settings)
             .map(ValidatedFactBatch::into_unsealed)
     }
 
@@ -1405,13 +1411,19 @@ impl RuntimeEngine {
     /// Render one trajectory's current label from the rebuilt view, for the
     /// statusline. A projection read: no engine event, no fact, nothing
     /// gated.
-    pub(crate) fn trajectory_status(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
+    pub(crate) fn trajectory_status(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        settings: SessionSettings,
+    ) -> Option<TrajectoryStatus> {
         let current = view.views(trajectory)?.current_label();
         let label = self.render_label(&current)?;
         Some(TrajectoryStatus {
             trajectory: terminal_safe(&trajectory.0),
             trust: label.trust,
             audience: label.audience,
+            settings,
         })
     }
 
@@ -2532,17 +2544,21 @@ impl RuntimeEngine {
             .is_some_and(|plan| plan.declares_only())
     }
 
-    /// Whether this offer's plan is rulings alone, each by an authority `rules` accepts.
-    pub(crate) fn offer_asks_only(
+    /// What this offer's plan asks at most, by its most demanding step, where `auto_apply`
+    /// lets the runtime apply it with rulings only by authorities `rules` accepts. `None` for a
+    /// plan the agent applies itself.
+    pub(crate) fn auto_applied(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
+        auto_apply: AutoApply,
         rules: impl Fn(&str) -> bool,
-    ) -> bool {
+    ) -> Option<Remedy> {
         parse_offer(offer)
             .and_then(|offer| self.engine.offer_plan(view, trajectory, &offer))
-            .is_some_and(|plan| plan.asks_only(|authority| rules(authority.as_str())))
+            .filter(|plan| plan.auto_applies(auto_apply, |authority| rules(authority.as_str())))
+            .and_then(|plan| plan.steps.iter().map(step_remedy).min())
     }
 
     fn return_policy_of_route(
@@ -5805,7 +5821,7 @@ mod tests {
     }
 
     fn opened_view(engine: &RuntimeEngine, trajectory: &TrajectoryId) -> EngineView {
-        let opening = engine.root_opening(trajectory, b"policy", None);
+        let opening = engine.root_opening(trajectory, b"policy", None, Default::default());
         engine.viewed(opening, trajectory, 1).expect("the opening validates")
     }
 
@@ -5824,7 +5840,7 @@ mod tests {
         let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored)
             .at(&appa_engine::profile::DeploymentName::new("default"), 1);
         let trajectory = TrajectoryId::new("file-delivery-retry");
-        let mut facts = engine.root_opening(&trajectory, b"policy", None);
+        let mut facts = engine.root_opening(&trajectory, b"policy", None, Default::default());
         let view = engine.viewed(facts.clone(), &trajectory, 1).unwrap();
         let id = super::ProposalBatchId::new("recorded-file-call");
         let bytes = br#"{"path":"fixture.txt"}"#;
@@ -5935,7 +5951,7 @@ mod tests {
         let policy = annotator_policy();
         let engine = annotator_engine(&policy);
         let trajectory = TrajectoryId("t".to_string());
-        let opening = engine.root_opening(&trajectory, b"policy", None);
+        let opening = engine.root_opening(&trajectory, b"policy", None, Default::default());
         let view = engine
             .engine
             .view(&trajectory, opening.clone(), 1)

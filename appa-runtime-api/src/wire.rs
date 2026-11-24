@@ -49,11 +49,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
-    Actor, AdapterName, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
-    OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes, ParseRefusal,
-    PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, Remediable, Remedy, RetryHint, Review,
-    ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding, SpawnKind, SpawnRef, StartKind, ToolOutcome,
-    TrajectoryId,
+    Actor, AdapterName, AutoApply, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
+    LineVariant, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes,
+    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, Remediable, Remedy, RetryHint, Review,
+    ReviewChannel, ReviewScopeItem, Ruling, SessionSettings, SessionTitle, SpawnBinding, SpawnKind, SpawnRef,
+    StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -167,10 +167,12 @@ enum Field {
     Principal,
     AnsweredCallIds,
     Declares,
+    AutoApply,
+    LineVariant,
 }
 
 impl Field {
-    const ALL: [Field; 23] = [
+    const ALL: [Field; 25] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -194,6 +196,8 @@ impl Field {
         Field::Principal,
         Field::AnsweredCallIds,
         Field::Declares,
+        Field::AutoApply,
+        Field::LineVariant,
     ];
 
     fn spelling(self) -> &'static str {
@@ -221,6 +225,8 @@ impl Field {
             Field::Principal => "principal",
             Field::AnsweredCallIds => "answered_call_ids",
             Field::Declares => "declares",
+            Field::AutoApply => "auto_apply",
+            Field::LineVariant => "line_variant",
         }
     }
 }
@@ -246,6 +252,8 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Start,
             Field::ForkedFrom,
             Field::Principal,
+            Field::AutoApply,
+            Field::LineVariant,
         ],
         EventName::Prompt => &[
             Field::RootId,
@@ -586,6 +594,13 @@ pub struct WireEvent {
     /// On a single spawn's tool call: the return it declares for its subagent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declares: Option<DeclaredReturn>,
+    /// On a session start: what the runtime applies at a block on its own, if the start
+    /// opens the family. Absent is [`AutoApply::RulingsOnly`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_apply: Option<AutoApply>,
+    /// On a session start: the host's name for the authority line it composed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_variant: Option<LineVariant>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -671,6 +686,8 @@ impl WireEvent {
             principal: None,
             answered_call_ids: None,
             declares: None,
+            auto_apply: None,
+            line_variant: None,
         }
     }
 
@@ -701,6 +718,8 @@ impl WireEvent {
             Field::Principal => self.principal.is_some(),
             Field::AnsweredCallIds => self.answered_call_ids.is_some(),
             Field::Declares => self.declares.is_some(),
+            Field::AutoApply => self.auto_apply.is_some(),
+            Field::LineVariant => self.line_variant.is_some(),
         }
     }
 
@@ -732,6 +751,7 @@ impl WireEvent {
                 title,
                 start,
                 launch,
+                settings,
             } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
@@ -755,6 +775,8 @@ impl WireEvent {
                     start: *start,
                     forked_from,
                     principal: checked_principal(adapter, PrincipalSource::Wire, principal.clone())?,
+                    auto_apply: (settings.auto_apply != AutoApply::default()).then_some(settings.auto_apply),
+                    line_variant: settings.line_variant.clone(),
                     ..Self::bare(adapter, EventName::SessionStart)
                 }
             }
@@ -1005,6 +1027,8 @@ impl WireEvent {
             forked_from,
             answered_call_ids,
             declares,
+            auto_apply,
+            line_variant,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -1067,6 +1091,10 @@ impl WireEvent {
                 title,
                 start,
                 launch: launch_start(served.name, launch, start, forked_from)?,
+                settings: SessionSettings {
+                    auto_apply: auto_apply.unwrap_or_default(),
+                    line_variant,
+                },
             }),
             EventName::Prompt => match text {
                 Some(text) => accepted(HookEvent::Prompt {
@@ -2352,6 +2380,7 @@ mod tests {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &foreign).is_err());
         let principal = HookEvent::SessionStart {
@@ -2361,6 +2390,7 @@ mod tests {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &principal).is_err());
     }
@@ -2508,8 +2538,91 @@ mod tests {
                 title,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             };
             assert_eq!(through(&start), start);
+        }
+    }
+
+    /// A start's settings cross the wire and back; a start that names none reads the
+    /// defaults and spells nothing for them, another event naming one is refused, and a line
+    /// variant that is no token does not read.
+    #[test]
+    fn session_settings_round_trip_and_cross_only_on_a_start() {
+        use crate::{AutoApply, LineVariant};
+        let through = |event: &HookEvent| {
+            let wire = WireEvent::from_event(AdapterName::ClaudeCode, event).expect("translates");
+            let bytes = serde_json::to_vec(&wire).expect("serializes");
+            WireEvent::read(&bytes)
+                .expect("reads")
+                .into_event(&CLAUDE_CODE, PrincipalSource::None)
+                .expect("parses")
+                .expect("event")
+                .event
+        };
+        let observe = LineVariant::parse("observe").expect("a token");
+        for settings in [
+            SessionSettings {
+                auto_apply: AutoApply::RulingsAndAccept,
+                line_variant: Some(observe.clone()),
+            },
+            SessionSettings {
+                auto_apply: AutoApply::RulingsOnly,
+                line_variant: Some(observe),
+            },
+            SessionSettings {
+                auto_apply: AutoApply::RulingsAndAccept,
+                line_variant: None,
+            },
+            SessionSettings::default(),
+        ] {
+            let start = HookEvent::SessionStart {
+                root: TrajectoryId("cc:s1".to_string()),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+                settings,
+            };
+            assert_eq!(through(&start), start);
+        }
+
+        let posted = |row: &str| {
+            WireEvent::read(row.as_bytes()).and_then(|wire| wire.into_event(&CLAUDE_CODE, PrincipalSource::None))
+        };
+        let old = r#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1"}"#;
+        let Ok(Some(Accepted {
+            event: HookEvent::SessionStart { settings, .. },
+            ..
+        })) = posted(old)
+        else {
+            panic!("a start that names no settings reads");
+        };
+        assert_eq!(settings, SessionSettings::default());
+        let default_start = HookEvent::SessionStart {
+            root: TrajectoryId("cc:s1".to_string()),
+            principal: None,
+            address: None,
+            title: None,
+            launch: None,
+            start: None,
+            settings: SessionSettings::default(),
+        };
+        let spelled = WireEvent::from_event(AdapterName::ClaudeCode, &default_start).expect("translates");
+        assert_eq!(serde_json::to_vec(&spelled).expect("serializes"), old.as_bytes());
+
+        for row in [
+            r#"{"protocol":1,"adapter":"claude-code","event":"prompt","root_id":"s1","text":"hi","line_variant":"observe"}"#,
+            r#"{"protocol":1,"adapter":"claude-code","event":"turn_end","root_id":"s1","auto_apply":"rulings_and_accept"}"#,
+            r#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1","line_variant":"not a token"}"#,
+            r#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1","auto_apply":"everything"}"#,
+        ] {
+            let read = posted(row);
+            assert!(
+                matches!(read, Err(ParseRefusal::Malformed { .. })),
+                "{row} must be refused, got {read:?}"
+            );
         }
     }
 
@@ -2543,6 +2656,7 @@ mod tests {
                     launch: launch.clone(),
                     forked_from,
                 }),
+                settings: Default::default(),
             };
             assert_eq!(through(&event), event);
         }
@@ -3302,6 +3416,7 @@ mod tests {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         };
         let wire = WireEvent::from_event(AdapterName::Kagent, &event).expect("translates");
         let bytes = serde_json::to_vec(&wire).expect("serializes");

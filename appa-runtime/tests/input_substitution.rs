@@ -91,6 +91,7 @@ async fn narrowed_and_blocked(dir: &tempfile::TempDir, policy: &str, raw_body: &
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,

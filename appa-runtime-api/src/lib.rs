@@ -5,10 +5,12 @@
 pub mod inventory;
 mod launch;
 mod peer;
+mod settings;
 mod wire;
 
 pub use launch::{LaunchStart, LaunchToken, LaunchTokenError, StartKind};
 pub use peer::{PeerAddress, PeerDigest, PeerFrame, PeerValueError, SessionTitle};
+pub use settings::{AutoApply, LineVariant, LineVariantError, SessionSettings};
 
 pub use wire::{
     Accepted, Adapter, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn, OutcomeStatus,
@@ -568,6 +570,9 @@ pub enum HookEvent {
         start: Option<StartKind>,
         /// The protected launch this start belongs to, when a launcher started the host.
         launch: Option<LaunchStart>,
+        /// What the family pins if this start opens it. A family already open keeps its own,
+        /// and refuses a start naming another line variant.
+        settings: SessionSettings,
     },
     Prompt {
         actor: Actor,

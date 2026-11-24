@@ -406,6 +406,7 @@ pub async fn loaded_session_runtime(dir: &Path, config: Config) -> Arc<Runtime> 
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,

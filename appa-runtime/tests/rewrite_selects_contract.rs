@@ -164,6 +164,7 @@ async fn narrowed_under(
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,

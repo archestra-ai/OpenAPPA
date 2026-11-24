@@ -234,6 +234,7 @@ impl Launcher {
                 title,
                 start,
                 launch: None,
+                settings,
             } => {
                 let launch = self
                     .launch
@@ -253,6 +254,7 @@ impl Launcher {
                     title,
                     start,
                     launch: launch.map(|launch| LaunchStart { launch, forked_from }),
+                    settings,
                 }
             }
             other => other,
@@ -559,6 +561,7 @@ mod tests {
                 title,
                 start,
                 launch: None,
+                settings,
             })) => HookEvent::SessionStart {
                 root,
                 principal,
@@ -566,6 +569,7 @@ mod tests {
                 title,
                 start,
                 launch: Some(launch.clone()),
+                settings,
             },
             _ => panic!("a session start parses as one"),
         }

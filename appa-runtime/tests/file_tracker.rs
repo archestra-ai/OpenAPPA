@@ -95,6 +95,7 @@ async fn start(runtime: &Arc<Runtime>, root: &str) {
         title: None,
         launch: None,
         start: None,
+        settings: Default::default(),
     };
     assert_eq!(hooks::handle(runtime, event).await, HookDecision::Ack);
 }

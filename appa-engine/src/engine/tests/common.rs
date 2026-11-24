@@ -111,10 +111,15 @@ pub(super) fn opened(e: &Engine) -> Fact {
 }
 
 pub(super) fn opened_root(e: &Engine, trajectory: &TrajectoryId) -> Fact {
-    e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"), None)
-        .expect("the engine opens its own root")
-        .into_unsealed()
-        .remove(0)
+    e.open_trajectory(
+        trajectory,
+        crate::profile::PolicyFileKey::of(b"policy"),
+        None,
+        Default::default(),
+    )
+    .expect("the engine opens its own root")
+    .into_unsealed()
+    .remove(0)
 }
 
 pub(super) fn read_tool(name: &str, delta: Delta) -> ToolAnnotation {

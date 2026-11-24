@@ -10,7 +10,7 @@ use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, Adapter, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, PrincipalSource, PromptKey,
-    ProposedCall, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
+    ProposedCall, SessionSettings, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
 fn the_reexported_vocabulary(
@@ -33,8 +33,9 @@ fn the_declared_root_fork(
     parent_root: &TrajectoryId,
     parent: &TrajectoryId,
     new_root: &TrajectoryId,
+    settings: SessionSettings,
 ) {
-    let _: Result<(), RootForkRefusal> = runtime.open_root_fork(parent_root, parent, new_root);
+    let _: Result<(), RootForkRefusal> = runtime.open_root_fork(parent_root, parent, new_root, settings);
 }
 
 fn the_declared_reload(runtime: &Runtime, config: Config) {

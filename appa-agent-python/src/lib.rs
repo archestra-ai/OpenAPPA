@@ -300,6 +300,7 @@ impl SessionInner {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         })?;
         inner.event(HookEvent::Prompt {
             actor: inner.actor(None),

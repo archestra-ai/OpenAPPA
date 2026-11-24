@@ -923,6 +923,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,
@@ -1022,6 +1023,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,
@@ -1110,6 +1112,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,
@@ -1187,6 +1190,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,
@@ -1382,6 +1386,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,

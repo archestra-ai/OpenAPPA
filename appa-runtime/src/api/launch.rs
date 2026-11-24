@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::sync::{Mutex, PoisonError};
 
 use appa_eventlog::{HostObservation, Log, host_alias_key, launch_key};
-use appa_runtime_api::{LaunchStart, LaunchToken, StartKind, TrajectoryId};
+use appa_runtime_api::{LaunchStart, LaunchToken, SessionSettings, StartKind, TrajectoryId};
 
 use super::{EventError, Runtime};
 
@@ -115,11 +115,13 @@ impl Runtime {
 
     /// Open the family a launched start belongs to. `root` is the start's own host id,
     /// resolved through [`Runtime::alias_of`] under the same `deciding`. A start whose
-    /// handoff finds the launch already moved is refused as contended: it claims nothing.
+    /// handoff finds the launch already moved is refused as contended: it claims nothing. A
+    /// family it opens pins `settings`.
     pub(crate) fn launched_start(
         &self,
         root: &TrajectoryId,
         start: Option<StartKind>,
+        settings: &SessionSettings,
         deciding: &Deciding<'_>,
     ) -> Result<LaunchedStart, EventError> {
         let launch = &deciding.launch;
@@ -139,7 +141,7 @@ impl Runtime {
             (false, Some(family)) => match start {
                 Some(StartKind::Clear) => match self.clear_launch(&family, token, root)? {
                     Cleared::Moved => {
-                        self.open_fresh(root)?;
+                        self.open_fresh(root, settings)?;
                         LaunchedStart::Opened(root.clone())
                     }
                     Cleared::Kept => LaunchedStart::ClearKept(family),
@@ -148,7 +150,7 @@ impl Runtime {
                 // A conversation APPA never held replaces this one, as a resume of it would.
                 Some(StartKind::Resume) => match self.move_launch(&family, token, root)? {
                     Handoff::Moved => {
-                        self.open_fresh(root)?;
+                        self.open_fresh(root, settings)?;
                         LaunchedStart::Opened(root.clone())
                     }
                     Handoff::Gone => return Err(raced()),
@@ -160,8 +162,8 @@ impl Runtime {
             },
             (false, None) => {
                 match (start, &launch.forked_from) {
-                    (Some(StartKind::Fork), Some(parent)) => self.fork_launch(parent, root)?,
-                    _ => self.open_fresh(root)?,
+                    (Some(StartKind::Fork), Some(parent)) => self.fork_launch(parent, root, settings)?,
+                    _ => self.open_fresh(root, settings)?,
                 }
                 LaunchedStart::Opened(root.clone())
             }
@@ -247,19 +249,24 @@ impl Runtime {
     /// Open `root` as a root fork of the family the host copied. A parent APPA never held
     /// gives nothing to carry, so the fork opens fresh, as a resume of that conversation
     /// would.
-    fn fork_launch(&self, parent: &TrajectoryId, root: &TrajectoryId) -> Result<(), EventError> {
+    fn fork_launch(
+        &self,
+        parent: &TrajectoryId,
+        root: &TrajectoryId,
+        settings: &SessionSettings,
+    ) -> Result<(), EventError> {
         let parent = match self.alias_of(parent)? {
             Some(family) => family,
             None if self.has_root(parent)? => parent.clone(),
-            None => return self.open_fresh(root),
+            None => return self.open_fresh(root, settings),
         };
-        self.open_root_fork(&parent, &parent, root)
+        self.open_root_fork(&parent, &parent, root, settings.clone())
             .map(|_| ())
             .map_err(|refusal| EventError::Storage(refusal.to_string()))
     }
 
-    fn open_fresh(&self, root: &TrajectoryId) -> Result<(), EventError> {
-        match self.create_session(root.clone(), None) {
+    fn open_fresh(&self, root: &TrajectoryId, settings: &SessionSettings) -> Result<(), EventError> {
+        match self.create_pinned_session(root.clone(), None, settings.clone()) {
             Ok(_) | Err(EventError::TrajectoryExists) => Ok(()),
             Err(error) => Err(error),
         }

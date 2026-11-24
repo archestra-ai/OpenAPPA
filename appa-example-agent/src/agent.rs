@@ -205,6 +205,7 @@ impl Agent {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             })
             .await
         {

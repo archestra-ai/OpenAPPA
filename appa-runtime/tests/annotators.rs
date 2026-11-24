@@ -118,6 +118,7 @@ async fn open_runtime(dir: &tempfile::TempDir, config_toml: &str) -> Arc<Runtime
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -715,6 +716,7 @@ async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_erro
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -1066,6 +1068,7 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -1973,6 +1976,7 @@ async fn open_hosted(config: Config) -> Arc<Runtime> {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -2013,6 +2017,7 @@ async fn a_pinned_view_consults_its_own_deployment_after_the_runtime_serves_anot
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -2512,6 +2517,7 @@ async fn a_hung_command_recorder_never_delays_a_command_annotator() {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;

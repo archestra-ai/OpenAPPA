@@ -244,6 +244,11 @@ impl Session {
         self.with_view(|context| Ok(context.view.principal().cloned()))
     }
 
+    /// The settings this session's family opening pinned.
+    pub(crate) fn settings(&self) -> Result<appa_runtime_api::SessionSettings, EventError> {
+        self.with_view(|context| Ok(crate::api::pinned_settings(context.log)))
+    }
+
     /// The host call ids of the calls in `closing` that `answered` does not name: calls a
     /// stop would close while they still run. A call with no host call id is never reported
     /// by id, so it never holds a stop. A stop judges and closes the same `closing` list, so

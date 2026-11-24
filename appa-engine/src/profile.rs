@@ -649,6 +649,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         revision: PolicyRevision::FIRST,
         forked_from: None,
         principal: None,
+        settings: Default::default(),
     })
 }
 

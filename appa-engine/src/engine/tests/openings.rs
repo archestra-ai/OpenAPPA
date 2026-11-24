@@ -6,7 +6,7 @@ fn the_opening_batch_names_the_deployment_and_revision_it_opened_at() {
     let t = traj();
     let key = crate::profile::PolicyFileKey::of(b"the policy file");
     let batch = e
-        .open_trajectory(&t, key.clone(), None)
+        .open_trajectory(&t, key.clone(), None, Default::default())
         .expect("a fresh root's opening seals");
     assert_eq!(batch.basis(), 0, "the opening stands on the empty log");
     assert_eq!(
@@ -24,9 +24,14 @@ fn the_opening_batch_names_the_deployment_and_revision_it_opened_at() {
                 revision,
                 forked_from,
                 principal,
+                settings,
             }),
         ] => {
             assert_eq!(forked_from, &None, "a fresh root opens as no fork");
+            assert!(
+                settings.is_default(),
+                "an opening no host pinned settings for keeps the defaults"
+            );
             assert_eq!(principal, &None, "an opening no host named a principal for has none");
             assert_eq!(policy_file_key, &key, "the opening names the file it opened under");
             assert_eq!(trajectory, &t);
@@ -52,7 +57,9 @@ fn an_engine_at_no_revision_opens_and_judges_nothing() {
     assert_eq!(compiled.revision(), None);
     let key = crate::profile::PolicyFileKey::of(b"policy");
     assert_eq!(
-        compiled.open_trajectory(&traj(), key, None).map(|_| ()),
+        compiled
+            .open_trajectory(&traj(), key, None, Default::default())
+            .map(|_| ()),
         Err(TransitionRefusal::NoRevision)
     );
     let log = opening_log(&placed);
@@ -134,7 +141,12 @@ fn cold_replay_verifies_the_opening_strictly() {
     );
     let line = e.clone().at(DeploymentName::new("default"), PolicyRevision::new(2));
     let followed = line
-        .open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"), None)
+        .open_trajectory(
+            &t,
+            crate::profile::PolicyFileKey::of(b"policy"),
+            None,
+            Default::default(),
+        )
         .expect("the opening seals")
         .into_unsealed();
     assert!(line.view(&t, followed.clone(), 1).is_ok());
@@ -157,9 +169,14 @@ fn root_fork_log(e: &Engine, view: &EngineView, parent: &TrajectoryId, fork: &Tr
     let origin = e
         .root_fork_origin(view, parent)
         .expect("an open trajectory can be root-forked");
-    e.open_root_fork(fork, crate::profile::PolicyFileKey::of(b"policy"), origin)
-        .expect("a fork of another family's trajectory seals")
-        .into_unsealed()
+    e.open_root_fork(
+        fork,
+        crate::profile::PolicyFileKey::of(b"policy"),
+        origin,
+        Default::default(),
+    )
+    .expect("a fork of another family's trajectory seals")
+    .into_unsealed()
 }
 
 /// The requirement gaps `tool` blocks on as `root`'s next proposal, or `None` when it is
@@ -351,8 +368,13 @@ fn a_root_fork_opening_that_forks_the_root_from_itself_is_refused() {
     let self_fork = Err(TransitionRefusal::Opening(OpeningTransitionRefusal::SelfFork));
 
     let sealed = |root: &TrajectoryId, origin: &crate::fact::RootForkOrigin| {
-        e.open_root_fork(root, crate::profile::PolicyFileKey::of(b"policy"), origin.clone())
-            .map(|_| ())
+        e.open_root_fork(
+            root,
+            crate::profile::PolicyFileKey::of(b"policy"),
+            origin.clone(),
+            Default::default(),
+        )
+        .map(|_| ())
     };
     assert_eq!(sealed(&traj(), &own), self_fork);
     assert_eq!(sealed(&child, &childs), self_fork);
@@ -431,8 +453,13 @@ fn a_root_folds_from_its_openings_starting_label() {
     let mut advanced = EngineView::validated(Projection::empty(0), &e, t.clone());
     advanced
         .advance(
-            &e.open_trajectory(&t, crate::profile::PolicyFileKey::of(b"policy"), None)
-                .expect("the opening seals"),
+            &e.open_trajectory(
+                &t,
+                crate::profile::PolicyFileKey::of(b"policy"),
+                None,
+                Default::default(),
+            )
+            .expect("the opening seals"),
         )
         .expect("the sealed opening advances the empty view");
     assert_eq!(
@@ -494,4 +521,26 @@ fn an_unopened_trajectory_has_no_views_and_takes_no_event() {
         ]),
         Err(TransitionRefusal::ForeignTrajectory)
     );
+}
+
+/// The logs an engine stored before openings pinned settings read with the defaults, and
+/// their openings write back exactly as they were stored: the opening gains no field.
+#[test]
+fn an_opening_stored_before_settings_reads_with_the_defaults_and_writes_back_unchanged() {
+    for stored in [
+        include_str!("fixtures/held_read_before_recorders.json"),
+        include_str!("fixtures/bundled-spawn-log.json"),
+        include_str!("fixtures/hard-block-hop-log.json"),
+    ] {
+        let log: Vec<Fact> = serde_json::from_str(stored).expect("the stored log decodes");
+        let Some(Fact::TrajectoryOpened(opening)) = log.first() else {
+            panic!("a family log opens with its opening");
+        };
+        assert!(opening.settings.is_default());
+        let written: serde_json::Value = serde_json::from_str(stored).expect("the stored log is JSON");
+        assert_eq!(
+            serde_json::to_value(&log[0]).expect("the opening serializes"),
+            written[0]
+        );
+    }
 }

@@ -707,7 +707,7 @@ mod tests {
         ));
         let fork = TrajectoryId("cc:fork-session".to_string());
         runtime
-            .open_root_fork(&parent, &parent, &fork)
+            .open_root_fork(&parent, &parent, &fork, Default::default())
             .expect("the root fork opens");
 
         let projection = project(&runtime, &fork, Mode::Pseudonymized, Budget::default());

@@ -4140,7 +4140,7 @@ fn root_fork_id(name: &str) -> TrajectoryId {
 /// Open `fork` as an independent root fork of `parent`, and a session on it.
 fn open_root_fork_session(runtime: &Runtime, parent: &TrajectoryId, fork: &TrajectoryId) -> Session {
     runtime
-        .open_root_fork(parent, parent, fork)
+        .open_root_fork(parent, parent, fork, Default::default())
         .expect("the root fork opens");
     runtime.session(fork, fork).expect("the root fork reopens")
 }
@@ -4155,7 +4155,7 @@ async fn a_root_fork_starts_at_its_parents_label() {
 
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &root(), &fork)
+        .open_root_fork(&root(), &root(), &fork, Default::default())
         .expect("the root fork opens");
 
     assert_eq!(
@@ -4177,8 +4177,12 @@ async fn root_forks_and_their_parent_continue_apart() {
         .expect("the deployment opens");
     let mut parent = runtime.create_session(root(), None).expect("a fresh id opens");
     let (a, b) = (root_fork_id("fork-a"), root_fork_id("fork-b"));
-    runtime.open_root_fork(&root(), &root(), &a).expect("root fork a opens");
-    runtime.open_root_fork(&root(), &root(), &b).expect("root fork b opens");
+    runtime
+        .open_root_fork(&root(), &root(), &a, Default::default())
+        .expect("root fork a opens");
+    runtime
+        .open_root_fork(&root(), &root(), &b, Default::default())
+        .expect("root fork b opens");
 
     let mut fork_a = runtime.session(&a, &a).expect("fork a reopens");
     taint_in(&runtime, &a, &mut fork_a).await;
@@ -4225,7 +4229,7 @@ async fn a_parents_open_call_survives_its_root_forks_turn() {
 
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &root(), &fork)
+        .open_root_fork(&root(), &root(), &fork, Default::default())
         .expect("the root fork opens");
     let forked = runtime.session(&fork, &fork).expect("the fork reopens");
     forked.on_turn_end().await.expect("the fork's turn ends");
@@ -4254,13 +4258,13 @@ async fn a_root_fork_of_a_root_fork_starts_where_its_own_parent_stands() {
     runtime.create_session(root(), None).expect("a fresh id opens");
     let (first, second) = (root_fork_id("first"), root_fork_id("second"));
     runtime
-        .open_root_fork(&root(), &root(), &first)
+        .open_root_fork(&root(), &root(), &first, Default::default())
         .expect("the first root fork opens");
     let mut forked = runtime.session(&first, &first).expect("the first fork reopens");
     taint_in(&runtime, &first, &mut forked).await;
 
     runtime
-        .open_root_fork(&first, &first, &second)
+        .open_root_fork(&first, &first, &second, Default::default())
         .expect("a root fork opens from another root fork");
 
     assert_eq!(
@@ -4278,10 +4282,10 @@ async fn opening_a_root_fork_again_is_harmless_and_an_unrelated_root_is_refused(
     runtime.create_session(root(), None).expect("a fresh id opens");
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &root(), &fork)
+        .open_root_fork(&root(), &root(), &fork, Default::default())
         .expect("the root fork opens");
     runtime
-        .open_root_fork(&root(), &root(), &fork)
+        .open_root_fork(&root(), &root(), &fork, Default::default())
         .expect("opening the same root fork again is not an error");
 
     let unrelated = root_fork_id("unrelated");
@@ -4289,17 +4293,17 @@ async fn opening_a_root_fork_again_is_harmless_and_an_unrelated_root_is_refused(
         .create_session(unrelated.clone(), None)
         .expect("an unrelated root opens");
     assert_eq!(
-        runtime.open_root_fork(&unrelated, &root(), &fork),
+        runtime.open_root_fork(&unrelated, &root(), &fork, Default::default()),
         Err(super::super::RootForkRefusal::RootIdConflict),
         "a standing fork cannot be reopened under another parent family"
     );
     assert_eq!(
-        runtime.open_root_fork(&root(), &unrelated, &fork),
+        runtime.open_root_fork(&root(), &unrelated, &fork, Default::default()),
         Err(super::super::RootForkRefusal::RootIdConflict),
         "a standing fork cannot be reopened from another parent trajectory"
     );
     assert_eq!(
-        runtime.open_root_fork(&root(), &root(), &unrelated),
+        runtime.open_root_fork(&root(), &root(), &unrelated, Default::default()),
         Err(super::super::RootForkRefusal::RootIdConflict),
         "a root that governs its own trajectory never becomes a fork"
     );
@@ -4307,12 +4311,13 @@ async fn opening_a_root_fork_again_is_harmless_and_an_unrelated_root_is_refused(
         runtime.open_root_fork(
             &root_fork_id("missing"),
             &root_fork_id("missing"),
-            &root_fork_id("orphan")
+            &root_fork_id("orphan"),
+            Default::default()
         ),
         Err(super::super::RootForkRefusal::ParentUnavailable)
     );
     assert_eq!(
-        runtime.open_root_fork(&root(), &root(), &root()),
+        runtime.open_root_fork(&root(), &root(), &root(), Default::default()),
         Err(super::super::RootForkRefusal::RootIdConflict)
     );
 }
@@ -4329,15 +4334,15 @@ async fn opening_a_root_fork_again_holds_after_its_parent_ended() {
     let spawned = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &child_id, &fork)
+        .open_root_fork(&root(), &child_id, &fork, Default::default())
         .expect("a root fork opens from a spawned child");
     spawned.on_child_end(None).await.expect("the child ends with no return");
 
     runtime
-        .open_root_fork(&root(), &child_id, &fork)
+        .open_root_fork(&root(), &child_id, &fork, Default::default())
         .expect("the standing root fork is recognized though its parent ended");
     assert_eq!(
-        runtime.open_root_fork(&root(), &child_id, &root_fork_id("late")),
+        runtime.open_root_fork(&root(), &child_id, &root_fork_id("late"), Default::default()),
         Err(super::super::RootForkRefusal::ParentUnavailable),
         "an ended trajectory takes no new fork"
     );
@@ -4555,7 +4560,7 @@ async fn a_root_fork_of_a_spawned_child_starts_at_the_childs_label() {
 
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &child_id, &fork)
+        .open_root_fork(&root(), &child_id, &fork, Default::default())
         .expect("a root fork opens from a spawned child");
     assert_eq!(
         runtime.status(&fork).expect("the fork is a root of its own").trust,
@@ -7281,6 +7286,10 @@ async fn a_panicking_transcriber_leaves_the_consult_outcome_standing() {
 /// appended twice, no offer or binding is re-minted, and a repeat that disagrees with
 /// the record is refused without reaching the model.
 mod replay;
+
+/// The settings a family's first opening pins, and the remedies they let the runtime apply at
+/// a block.
+mod settings;
 
 #[tokio::test]
 async fn an_empty_crossing_child_turn_stays_open_and_a_root_cannot_end_as_a_child() {

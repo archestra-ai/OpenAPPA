@@ -97,6 +97,7 @@ async fn start(runtime: &Runtime) {
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             },
         )
         .await,

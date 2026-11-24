@@ -582,6 +582,7 @@ async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> Trac
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await

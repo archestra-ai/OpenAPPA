@@ -189,6 +189,7 @@ async fn deployment_from(policy: String) -> Deployment {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;
@@ -318,6 +319,7 @@ builtin = "hitl"
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;
@@ -829,6 +831,7 @@ async fn reviews_of_blocked_publish(policy: String) -> Vec<Review> {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;
@@ -969,6 +972,7 @@ async fn the_block_carries_the_review_for_the_hitl_authority() {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;

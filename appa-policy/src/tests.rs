@@ -1684,7 +1684,12 @@ fn forwards_loads_as_a_literal_and_its_sources_are_consulted() {
 
     let trajectory = appa_engine::value::TrajectoryId::new("t");
     let opening = engine
-        .open_trajectory(&trajectory, appa_engine::profile::PolicyFileKey::of(b"policy"), None)
+        .open_trajectory(
+            &trajectory,
+            appa_engine::profile::PolicyFileKey::of(b"policy"),
+            None,
+            Default::default(),
+        )
         .expect("the trajectory opens")
         .into_unsealed();
     let view = engine.view(&trajectory, opening, 1).expect("the opening replays");

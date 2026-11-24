@@ -388,6 +388,7 @@ async fn the_base_alone_keeps_every_rule_without_the_audience_source() {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,

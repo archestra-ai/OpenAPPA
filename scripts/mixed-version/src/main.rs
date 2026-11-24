@@ -171,7 +171,12 @@ mod new {
     pub fn open(store: &new_eventlog::LogStore, engine: &new_engine::engine::Engine, root: &str) {
         let id = TrajectoryId::new(root);
         let opening = engine
-            .open_trajectory(&id, new_engine::profile::PolicyFileKey::of(POLICY.as_bytes()), None)
+            .open_trajectory(
+                &id,
+                new_engine::profile::PolicyFileKey::of(POLICY.as_bytes()),
+                None,
+                Default::default(),
+            )
             .expect("seals")
             .into_unsealed();
         store
