@@ -237,7 +237,7 @@ impl Session {
         self.on_remedy_at(
             offer,
             Initiator::Agent,
-            DeclaredReturn::Arguments(arguments),
+            claim.declared(arguments),
             None,
             None,
             Occasion::AheadApply { offer, claim },

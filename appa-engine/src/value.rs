@@ -694,6 +694,26 @@ mod tests {
         assert_eq!(over("sha256:aa").digest(), over("sha256:bb").digest());
     }
 
+    /// What the host declared about a single spawn's return is part of the batch identity, and
+    /// a batch marked before either class existed keeps its digest.
+    #[test]
+    fn a_spawns_return_class_is_part_of_the_batch_identity() {
+        use crate::transition::SpawnMark;
+        let spawn = call("Agent", json!({ "prompt": "go" }));
+        let digests = [SpawnMark::at(0), SpawnMark::deferred(0), SpawnMark::decides(0)]
+            .map(|mark| CanonicalDigest::of_batch([&spawn], Some(mark)));
+        for (at, digest) in digests.iter().enumerate() {
+            assert!(!digests[..at].contains(digest), "mark {at}");
+        }
+        let mut planned = Sha256::new();
+        planned.update(b"appa.proposal-batch.v1");
+        planned.update([1u8]);
+        planned.update(0usize.to_be_bytes());
+        planned.update([0u8]);
+        planned.update(spawn.digest().0);
+        assert_eq!(digests[0], CanonicalDigest(planned.finalize().into()));
+    }
+
     #[test]
     fn an_offer_id_round_trips_through_its_hex_wire_form() {
         let id = OfferId::of_plan(&BlockId([7u8; 32]), 3, b"plan-bytes");

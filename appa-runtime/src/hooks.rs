@@ -1284,6 +1284,9 @@ impl Dispatcher<'_> {
         .await
         {
             Ok(decision) => return_decision(said, decision),
+            // A retry naming a held operation with other words is the host's to correct, by its
+            // class: nothing is in the model's way.
+            Err(error @ EventError::ReturnRetryChanged) => refuse(error),
             Err(error) => fold(error, Refusal::Block),
         }
     }

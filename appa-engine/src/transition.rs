@@ -3300,9 +3300,10 @@ impl<'a> Sequence<'a> {
         }
     }
 
-    /// The value a pending deferred return froze, for the parent that owns it. A discard is
-    /// judged by this alone: an engine before held returns let a parent that had ended discard
-    /// what its child froze, and its logs replay.
+    /// The value a pending deferred return froze, for the parent that owns it. A recorded
+    /// decision is judged by this, not by the parent's liveness: an engine before held returns
+    /// let a parent that had ended accept or discard what its child froze, and its logs replay.
+    /// A live decision refuses a parent that ended.
     fn pending_deferral(
         &self,
         parent: &TrajectoryId,
@@ -3328,10 +3329,6 @@ impl<'a> Sequence<'a> {
     ) -> Result<crate::value::LabeledValue, TransitionRefusal> {
         let frozen = self.pending_deferral(parent, id)?;
         let views = self.projection.view(parent);
-        // A pending return never crosses into a parent that has ended.
-        if views.has_ended(parent) {
-            return Err(TransitionRefusal::BranchEnded);
-        }
         let standing = views.branch_label(parent);
         if narrowing.from != standing || narrowing.to != standing.combine(&frozen.label) {
             return Err(TransitionRefusal::AcceptanceMismatch);

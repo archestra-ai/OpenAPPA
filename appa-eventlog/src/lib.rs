@@ -877,12 +877,11 @@ impl Step<'_> {
         revision: PolicyRevision,
     ) -> Result<(), AppendError> {
         let batch = Batch {
-            bytes: encode(&[], Some(observation)),
-            key: observation.key(),
             fence: Some(Fence {
                 deployment: based_on.deployment(),
                 revision,
             }),
+            ..Batch::of(based_on, &[], Some(observation))?
         };
         self.write(based_on, batch, None)
     }
@@ -2143,6 +2142,16 @@ mod tests {
                 Err(AppendError::HeldReturnUnbound(_))
             ));
         }
+        // A fenced host append is validated as every other append is.
+        let log = store.log(&root()).expect("the log reads");
+        assert!(matches!(
+            store
+                .step(&root())
+                .expect("the step holds the family")
+                .append_host_fenced(&log, &binding("op-1", 0), PolicyRevision::FIRST),
+            Err(AppendError::HeldReturnUnbound(_))
+        ));
+        assert_eq!(store.log(&root()).expect("the log reads").basis(), log.basis());
         append(&[deferral(0, true)], binding("op-1", 0)).expect("the operation binds its held return");
         for (facts, observation) in [
             (vec![deferral(1, true)], binding("op-1", 1)),

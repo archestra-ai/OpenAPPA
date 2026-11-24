@@ -3,7 +3,7 @@ use crate::fact::{BelowFloor, CrossingReturn, ReturnPolicy};
 use crate::profile::{DeploymentName, PolicyRevision};
 use crate::transition::{
     ChildFollowUp, ChildReport, ChildSubmission, EngineEvent, FollowUp, ForkBinding, ReturnClass, ReturnDecision,
-    ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark, TransitionError, TransitionRefusal,
+    ReturnKind, ReturnSettlement, SettlementFollowUp, SpawnMark, TransitionError,
 };
 use crate::value::ChildReturnId;
 
@@ -245,7 +245,7 @@ fn nested_family(e: &Engine, child: &TrajectoryId, grandchild: &TrajectoryId) ->
 }
 
 #[test]
-fn a_held_return_never_crosses_into_a_parent_that_ended() {
+fn a_held_return_never_crosses_live_into_a_parent_that_ended() {
     let e = open_engine(returning_registry(vec![]));
     let (child, grandchild) = (TrajectoryId::new("child"), TrajectoryId::new("grandchild"));
     let mut log = nested_family(&e, &child, &grandchild);
@@ -281,8 +281,8 @@ fn a_held_return_never_crosses_into_a_parent_that_ended() {
     );
     assert_eq!(
         e.validate_replay(&[log, accepted].concat()),
-        Err(TransitionRefusal::BranchEnded),
-        "a log that crosses a held return after its parent ended does not replay"
+        Ok(()),
+        "a recorded acceptance replays by its ownership and its pending standing, as a discard does"
     );
 }
 
@@ -392,11 +392,14 @@ fn a_return_below_the_floor_is_held_only_for_a_raw_return_under_no_floor_of_the_
         ),
         Err(crate::plan::ReturnPolicyRefusal::HoldUnavailable)
     );
-    // A hold is declared exactly for the spawn whose parent decides, and that spawn holds.
+    // A hold is declared exactly for the spawn whose parent decides, and that spawn takes
+    // nothing but a hold.
     for (policy, returns) in [
         (holding(floor_crossing(&e, &root)), ReturnClass::Planned),
         (holding(floor_crossing(&e, &root)), ReturnClass::Deferred),
         (ReturnPolicy::Crossing(floor_crossing(&e, &root)), ReturnClass::Decides),
+        (ReturnPolicy::Void, ReturnClass::Decides),
+        (ReturnPolicy::Deferred, ReturnClass::Decides),
     ] {
         assert_eq!(
             e.check_return_declaration(&viewing(&e, &root), &traj(), &policy, returns),
@@ -625,29 +628,72 @@ fn a_terminal_deferral_log_counts_each_return_once_and_replays_at_every_deferral
     }
 }
 
-/// A log recorded before returns could be held: a child under no return spawned a grandchild
+/// Logs recorded before returns could be held: a child under no return spawned a grandchild
 /// under a deferred one, the grandchild's stop froze, the child ended by its void return, and
-/// only then discarded the grandchild's return.
+/// only then accepted or discarded the grandchild's return.
 #[test]
-fn a_return_discarded_after_its_parent_ended_under_an_earlier_engine_replays() {
+fn a_return_settled_after_its_parent_ended_under_an_earlier_engine_replays() {
     let e = open_engine(returning_registry(vec![]));
-    let stored = include_str!("../fixtures/discard-after-parent-ended-log.json");
-    let log: Vec<Fact> = serde_json::from_str(stored).expect("a log recorded at the base commit decodes");
-    assert_eq!(
-        serde_json::to_string_pretty(&log).expect("the log serializes"),
-        stored.trim_end()
-    );
     let child = TrajectoryId::new("child");
-    let ended_at = log
-        .iter()
-        .position(|fact| matches!(fact, Fact::Boundary { trajectory, kind: crate::fact::BoundaryKind::VoidReturn } if *trajectory == child))
-        .expect("the child ends by its void return");
-    let discarded_at = log
-        .iter()
-        .position(|fact| matches!(fact, Fact::ReturnDiscarded { .. }))
-        .expect("the grandchild's return is discarded");
-    assert!(ended_at < discarded_at, "the discard follows the parent's end");
-    assert_eq!(e.validate_replay(&log), Ok(()));
+    for stored in [
+        include_str!("../fixtures/accept-after-parent-ended-log.json"),
+        include_str!("../fixtures/discard-after-parent-ended-log.json"),
+    ] {
+        let log: Vec<Fact> = serde_json::from_str(stored).expect("a log recorded at the base commit decodes");
+        assert_eq!(
+            serde_json::to_string_pretty(&log).expect("the log serializes"),
+            stored.trim_end()
+        );
+        let ended_at = log
+            .iter()
+            .position(|fact| matches!(fact, Fact::Boundary { trajectory, kind: crate::fact::BoundaryKind::VoidReturn } if *trajectory == child))
+            .expect("the child ends by its void return");
+        let settled_at = log
+            .iter()
+            .position(|fact| matches!(fact, Fact::ReturnAccepted { .. } | Fact::ReturnDiscarded { .. }))
+            .expect("the grandchild's return is settled");
+        assert!(ended_at < settled_at, "the settlement follows the parent's end");
+        assert_eq!(e.validate_replay(&log), Ok(()));
+    }
+}
+
+/// The declaration menu of a spawn whose parent decides offers only a route that can declare
+/// its hold: the bare floor under no floor of the declarer's own, and nothing under one. A plain
+/// spawn is offered every route.
+#[test]
+fn a_deciding_spawns_declaration_menu_offers_only_a_route_that_can_hold() {
+    use crate::fact::ReturnRoute;
+    let e = open_engine(returning_registry(vec![lifting_sanitizer("scrubber")]));
+    let child = TrajectoryId::new("child");
+    let root = vec![opened(&e)];
+    let log = [root.clone(), forked_child(&e, &root, &child)].concat();
+    let routes = |trajectory: &TrajectoryId, mark: SpawnMark| {
+        let event = EngineEvent::Proposals(crate::transition::ProposalBatch {
+            id: crate::transition::ProposalBatchId::new("marked"),
+            trajectory: trajectory.clone(),
+            provider_results: Vec::new(),
+            proposals: vec![raw(&call("spawn", json!({})))],
+            spawn: Some(mark),
+            offer_nonce: nonce(),
+            evidence: Vec::new(),
+            audience: crate::audience::AudienceEvidence::default(),
+        });
+        let blocked = e.handle(&viewing(&e, &log), event).expect("the marked spawn decides");
+        opened_offers(&appended_facts(blocked))
+            .into_iter()
+            .filter_map(|(_, plan)| plan.return_step().cloned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(routes(&traj(), SpawnMark::decides(0)), vec![ReturnRoute::Raw]);
+    assert_eq!(routes(&child, SpawnMark::decides(0)), Vec::new());
+    assert_eq!(
+        routes(&traj(), SpawnMark::at(0)),
+        vec![
+            ReturnRoute::Raw,
+            ReturnRoute::Sanitized(SanitizerName::new("scrubber")),
+            ReturnRoute::Void
+        ]
+    );
 }
 
 #[test]

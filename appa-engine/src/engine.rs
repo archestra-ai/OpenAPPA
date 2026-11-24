@@ -831,6 +831,12 @@ impl Engine {
         }
     }
 
+    /// How many values `child` has returned, crossed or frozen: its latest occurrence is the
+    /// one below.
+    pub fn returns_by(&self, view: &EngineView, child: &TrajectoryId) -> u32 {
+        view.views(child).map_or(0, |views| views.returns_by(child))
+    }
+
     /// The value `child` crossed most recently: a stop or a spawn result repeating it replays
     /// that crossing and appends nothing.
     pub fn latest_return_of(&self, view: &EngineView, child: &TrajectoryId) -> Option<ValueBody> {

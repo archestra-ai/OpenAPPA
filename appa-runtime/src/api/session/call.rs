@@ -177,6 +177,11 @@ impl Session {
             let claim = AheadClaim {
                 attempt: &attempt,
                 spawn,
+                returns: match &proposal.declares {
+                    Some(DeclaredReturn::Deferred) => ReturnClass::Deferred,
+                    Some(DeclaredReturn::Decides(_)) => ReturnClass::Decides,
+                    Some(DeclaredReturn::Arguments(_)) | None => ReturnClass::Planned,
+                },
                 offers: &offers,
             };
             let (offer, arguments) = match self.settle_terminal(&claim)? {

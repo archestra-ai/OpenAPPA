@@ -309,6 +309,55 @@ fn a_deferred_return_that_crosses_at_the_stop_is_held_to_the_inherited_floor() {
     );
 }
 
+/// A grandchild's deferral froze under its parent's floor at revision 1, whose sanitizer leaves
+/// trust unbound; revision 2 drops the sanitizer, so the parent's acceptance would land below
+/// the floor there. The live acceptance is refused and appends nothing.
+#[test]
+fn an_acceptance_is_held_to_the_parents_floor_where_it_settles() {
+    let first = open_engine(returning_registry(vec![lifting_sanitizer("scrubber")]));
+    let second = open_engine(returning_registry(vec![])).at(DeploymentName::new("default"), PolicyRevision::new(2));
+    let (child, grandchild) = (TrajectoryId::new("child"), TrajectoryId::new("grandchild"));
+    let root = vec![opened(&first)];
+    let policy = ReturnPolicy::Crossing(crate::fact::CrossingReturn {
+        sanitizer: Some(ReturnSanitizer::Named(SanitizerName::new("scrubber"))),
+        ..floor_crossing(&first, &root)
+    });
+    let mut log = [root.clone(), spawn_family_at(&first, &root, &child, policy)].concat();
+    log.extend(spawn_family_marked(
+        &first,
+        &log,
+        &child,
+        &grandchild,
+        ReturnPolicy::Deferred,
+        SpawnMark::deferred(0),
+    ));
+    reads(&first, &mut log, &grandchild, "read_suspicious");
+    let frozen = first
+        .handle(&viewing(&first, &log), stop(&log, &grandchild, "done"))
+        .expect("the sanitizer leaves the floor's trust unbound");
+    log.extend(appended_facts(frozen));
+    let accept = EngineEvent::SettleReturn(ReturnSettlement {
+        trajectory: child.clone(),
+        id: ChildReturnId::new(grandchild.clone(), 0),
+        decision: ReturnDecision::Accept,
+    });
+    let recorded = StampedBatch {
+        revision: Some(PolicyRevision::FIRST),
+        facts: &log,
+    };
+    let view = second.replay(&traj(), &[recorded], &[&first]).expect("the log replays");
+    assert_eq!(
+        second.handle(&view, accept.clone()).err(),
+        Some(TransitionError::ReturnBelowFloor {
+            floor: Label::new(TRUSTED, Audience::public())
+        })
+    );
+    assert!(
+        first.handle(&viewing(&first, &log), accept).is_ok(),
+        "the floor the first revision reads holds the acceptance"
+    );
+}
+
 #[test]
 fn only_the_parent_that_owns_a_deferred_return_settles_it() {
     let e = open_engine(returning_registry(vec![]));

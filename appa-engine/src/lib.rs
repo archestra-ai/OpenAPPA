@@ -70,7 +70,8 @@
 //! at once and each is settled alone: acceptance meets the parent's label with the occurrence's,
 //! and the meet does not depend on the order. A raw return under a floor may be declared to hold
 //! what falls below the floor ([`fact::BelowFloor::Hold`]) rather than refuse it, for a parent
-//! that stands under no floor of its own. The spawn's own result admits no value where its return
+//! that stands under no floor of its own; a spawn whose parent decides takes that declaration
+//! and no other. The spawn's own result admits no value where its return
 //! may be deferred or held, so the child's words reach its parent by a crossing alone. An
 //! approval belongs to the class of the proposal it was made for, deferring or not, and covers
 //! no proposal of the other class. A fan-out spawn defers nothing.

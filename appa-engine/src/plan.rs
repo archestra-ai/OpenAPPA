@@ -618,17 +618,17 @@ pub(crate) enum Declaring {
     No,
     /// A marked spawn with no declaration: each plan is one return route, with no authority
     /// and no settlement. The retry is planned on whatever else blocks it.
-    Separately(crate::transition::SpawnKind),
+    Separately(crate::check::SpawnClass),
     /// Every gap plan with every return route: the menu an earlier planner recorded for a
     /// marked spawn. Read only to replay those offers.
-    Bundled(crate::transition::SpawnKind),
+    Bundled(crate::check::SpawnClass),
 }
 
 impl Declaring {
     pub(crate) fn of(role: CallRole, views: &Views, call: &ResolvedCall) -> Declaring {
         match role {
             CallRole::MarkedSpawn(class) if views.declaration(call, class.returns).is_none() => {
-                Declaring::Separately(class.kind)
+                Declaring::Separately(class)
             }
             CallRole::MarkedSpawn(_) | CallRole::Ordinary => Declaring::No,
         }
@@ -644,7 +644,7 @@ pub(crate) fn bundled_spawn_menu(
     blocked: BlockedCall<'_>,
     context: &MembershipContext<'_>,
 ) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
-    let Some(kind) = blocked.role.spawn() else {
+    let CallRole::MarkedSpawn(class) = blocked.role else {
         return Ok(Vec::new());
     };
     let no_denials = BTreeSet::new();
@@ -658,7 +658,7 @@ pub(crate) fn bundled_spawn_menu(
         blocked.call,
         blocked.stage,
         blocked.role,
-        Declaring::Bundled(kind),
+        Declaring::Bundled(class),
         denied,
         floor_of(registry, views).as_ref(),
         context,
@@ -737,7 +737,7 @@ pub(crate) fn enumerate_plans(
         // Only the bundled menu declares beside a gap plan.
         let returns: Vec<Option<ReturnRoute>> = match declaring {
             Declaring::No | Declaring::Separately(_) => vec![None],
-            Declaring::Bundled(kind) => return_options(registry, current, floor, kind)
+            Declaring::Bundled(class) => return_options(registry, current, floor, class)
                 .into_iter()
                 .map(Some)
                 .collect(),
@@ -768,7 +768,7 @@ pub(crate) fn enumerate_plans(
     needs.refuse_if_any()?;
     // An undeclared spawn is offered its declarations alone, where its other gaps have a plan.
     // A plan naming an authority that denied this call does not count: the caller drops it.
-    if let Declaring::Separately(kind) = declaring {
+    if let Declaring::Separately(class) = declaring {
         let unblocked = block.requirement_gaps.is_empty() && block.narrowing.is_none();
         let planned = candidates.iter().any(|candidate| {
             !candidate
@@ -779,7 +779,7 @@ pub(crate) fn enumerate_plans(
         if !unblocked && !planned {
             return Ok(Vec::new());
         }
-        candidates = return_options(registry, current, floor, kind)
+        candidates = return_options(registry, current, floor, class)
             .into_iter()
             .map(|route| PlanCandidate {
                 steps: vec![RemedyStep::Return(route)],
@@ -1375,13 +1375,22 @@ pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
 /// `current` covers its trust rank, the condition its declaration is checked against, so no
 /// offered route is one the declaration then refuses. A fan-out spawn is not offered the
 /// attestation: it holds only for a child started while the parent is trusted, which the
-/// declaration checks once and a fan-out's later children need not meet.
+/// declaration checks once and a fan-out's later children need not meet. A spawn whose parent
+/// decides is offered the bare floor alone, which it holds as spoken, and nothing under a floor
+/// of the declarer's own, which could refuse the decision.
 fn return_options(
     registry: &Registry,
     current: &Label,
     floor: Option<&Floor>,
-    kind: crate::transition::SpawnKind,
+    class: crate::check::SpawnClass,
 ) -> Vec<ReturnRoute> {
+    let kind = class.kind;
+    if class.returns == crate::transition::ReturnClass::Decides {
+        return match floor {
+            None => vec![ReturnRoute::Raw],
+            Some(_) => Vec::new(),
+        };
+    }
     let mut options = vec![ReturnRoute::Raw];
     options.extend(
         registry
@@ -1444,7 +1453,11 @@ fn preserving_return_exists(
     context: &MembershipContext<'_>,
 ) -> bool {
     let unchanged = Floor::new(current.clone(), None);
-    return_options(registry, current, floor, crate::transition::SpawnKind::Single)
+    let planned = crate::check::SpawnClass {
+        kind: crate::transition::SpawnKind::Single,
+        returns: crate::transition::ReturnClass::Planned,
+    };
+    return_options(registry, current, floor, planned)
         .into_iter()
         .filter_map(|route| match route {
             ReturnRoute::Sanitized(name) => registry.sanitizer(&name),
@@ -1479,7 +1492,7 @@ pub enum ReturnPolicyRefusal {
     )]
     HoldUnavailable,
     #[error(
-        "a return below its floor is held exactly for the single spawn whose own proposal carries the host's declaration that its parent decides"
+        "a return below its floor is held exactly for the single spawn whose own proposal carries the host's declaration that its parent decides, and that spawn takes no other return"
     )]
     HoldUndeclared,
 }
@@ -1491,7 +1504,8 @@ pub enum ReturnPolicyRefusal {
 /// reserved sanitizer registered at a rank this label covers; a named sanitizer is a registered
 /// untagged output sanitizer, which is what the step offered. A deferred return is declared only
 /// for the single spawn whose own proposal carries the host's deferral, and a crossing that holds
-/// what falls below its floor exactly for the single spawn whose proposal says its parent decides.
+/// what falls below its floor exactly for the single spawn whose proposal says its parent decides,
+/// which takes no other return.
 pub(crate) fn declared_return_policy(
     registry: &Registry,
     views: &Views,
@@ -1510,14 +1524,14 @@ pub(crate) fn declared_return_policy(
                 returns,
             })
     };
+    // A spawn whose parent decides takes a held crossing and nothing else: no other return
+    // waits for that decision.
+    if policy.holds_below_floor() != single(ReturnClass::Decides) {
+        return Err(ReturnPolicyRefusal::HoldUndeclared);
+    }
     match policy {
         ReturnPolicy::Void => Ok(()),
-        ReturnPolicy::Crossing(crossing) => {
-            if (crossing.below_floor == crate::fact::BelowFloor::Hold) != single(ReturnClass::Decides) {
-                return Err(ReturnPolicyRefusal::HoldUndeclared);
-            }
-            declared_crossing(registry, views, crossing)
-        }
+        ReturnPolicy::Crossing(crossing) => declared_crossing(registry, views, crossing),
         ReturnPolicy::Deferred if single(ReturnClass::Deferred) => Ok(()),
         ReturnPolicy::Deferred => Err(ReturnPolicyRefusal::DeferralUndeclared),
     }

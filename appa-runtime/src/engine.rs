@@ -2519,6 +2519,10 @@ impl RuntimeEngine {
             (appa_runtime_api::DeclaredReturn::Arguments(arguments), route) => self
                 .return_policy_of_route(views, route, arguments, BelowFloor::Refuse)
                 .map(Some),
+            (appa_runtime_api::DeclaredReturn::Decides(_), ReturnRoute::Void) => Err(
+                "the parent decides on this subagent's return, so the plan that takes no return does not apply"
+                    .to_string(),
+            ),
             (appa_runtime_api::DeclaredReturn::Decides(label), route) => self
                 .return_policy_of_route(views, route, &decided_floor(label), BelowFloor::Hold)
                 .map(Some),
@@ -2812,8 +2816,9 @@ impl RuntimeEngine {
     }
 
     /// The frozen return of the child `parent`'s spawn `dispatch` bound that its parent is told
-    /// about: the latest one awaiting its decision, held or at the stop, else the latest one,
-    /// however the parent decided on it, so the spawn's result keeps its notice.
+    /// about: the latest one awaiting its decision, else the child's latest occurrence once the
+    /// parent decided on it, so the spawn's result keeps its notice. A return the child made
+    /// after a decided one supersedes its notice, and a parent that ended is offered no decision.
     pub(crate) fn deferred_return_of(
         &self,
         view: &EngineView,
@@ -2821,8 +2826,14 @@ impl RuntimeEngine {
         dispatch: &EngineDispatchId,
     ) -> Option<DeferredReturn> {
         let mut frozen = self.child_occurrences(view, parent, dispatch);
-        let pending = frozen.iter().rposition(|deferred| deferred.settled.is_none());
-        let at = pending.or(frozen.len().checked_sub(1))?;
+        let decides = self.liveness(view, parent) != Liveness::Ended;
+        let latest = self.engine.returns_by(view, frozen.first()?.id.child()).checked_sub(1);
+        let at = match frozen.iter().rposition(|deferred| deferred.settled.is_none()) {
+            Some(pending) if decides => pending,
+            _ => frozen
+                .iter()
+                .rposition(|deferred| deferred.settled.is_some() && Some(deferred.id.occurrence()) == latest)?,
+        };
         Some(frozen.swap_remove(at))
     }
 

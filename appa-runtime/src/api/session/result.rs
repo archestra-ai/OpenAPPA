@@ -306,9 +306,21 @@ impl Session {
                     |context, evidence| {
                         auto_apply = crate::api::pinned_settings(context.log).auto_apply;
                         let dispatch = context.classify_spawn_report(&call, call_id.as_deref())?;
-                        deferral = context.deferral_notice(&dispatch);
                         let fork = appa_engine::value::ForkId::of(&dispatch);
-                        let next = match (context.fork_status(&fork), &child) {
+                        let status = context.fork_status(&fork);
+                        // A report repeating the bound child's latest crossing is that crossing,
+                        // whatever the child froze before it.
+                        let crossed = match (&status, &child, &value) {
+                            (ForkStatus::Bound(bound), Some(named), Some(said)) => {
+                                named == bound && context.latest_return(named).as_deref() == Some(said.as_str())
+                            }
+                            _ => false,
+                        };
+                        deferral = match crossed {
+                            true => None,
+                            false => context.deferral_notice(&dispatch),
+                        };
+                        let next = match (status, &child) {
                             _ if matches!(outcome, ToolOutcome::Indeterminate) => SpawnPlan::Outcome,
                             (ForkStatus::Unprepared | ForkStatus::FanOut, _) => SpawnPlan::Outcome,
                             // A deferred return answers every report of its spawn with the notice,
@@ -337,12 +349,10 @@ impl Session {
                             (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
                                 None => SpawnPlan::Outcome,
                                 // A failure repeating the crossed return closes as the host reported it.
-                                Some(said) if context.latest_return(child).as_deref() == Some(said.as_str()) => {
-                                    match outcome {
-                                        ToolOutcome::Failure { .. } => SpawnPlan::Outcome,
-                                        _ => SpawnPlan::Replay,
-                                    }
-                                }
+                                Some(_) if crossed => match outcome {
+                                    ToolOutcome::Failure { .. } => SpawnPlan::Outcome,
+                                    _ => SpawnPlan::Replay,
+                                },
                                 Some(_) => SpawnPlan::Withheld,
                             },
                             (ForkStatus::Bound(_), _) => SpawnPlan::Close(EventError::BindingMismatch),

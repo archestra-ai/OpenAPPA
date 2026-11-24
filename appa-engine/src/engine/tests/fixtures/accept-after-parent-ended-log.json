@@ -1,0 +1,1120 @@
+[
+  {
+    "TrajectoryOpened": {
+      "trajectory": "t",
+      "profile": {
+        "starting_label": {
+          "trust": 1,
+          "audience": []
+        },
+        "context_control": true,
+        "dispatch": "enforced",
+        "executor_exceptions": {},
+        "confined_results": [
+          "fetch",
+          "read_internal",
+          "read_suspicious",
+          "read_suspicious_internal",
+          "spawn"
+        ],
+        "provider_surfaces": {},
+        "binding": "harness"
+      },
+      "policy_file_key": "823412d1eacb67956220e532959f0104603057c88704863ca38e7cd188fda812",
+      "deployment": "default",
+      "revision": 1
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "spawn-child"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "spawn-child",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single"
+      },
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "198a9b3a931c44fac61d5a4984de317ee4c8dcd35de22e13825fd482fe5460a7",
+      "block": "d82028deb5ea49267b535167293dc1694367ea2ba9955baf1e3807ad8cf897c0",
+      "act": {
+        "Proposals": "spawn-child"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-child",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Return": "Raw"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "t",
+      "offer": "235f31e28c08aecaeb015035a860ed50266bdfe867fb173e7ad0449f565b92e9",
+      "block": "d82028deb5ea49267b535167293dc1694367ea2ba9955baf1e3807ad8cf897c0",
+      "act": {
+        "Proposals": "spawn-child"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-child",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 1,
+        "steps": [
+          {
+            "Return": "Void"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Offer": "235f31e28c08aecaeb015035a860ed50266bdfe867fb173e7ad0449f565b92e9"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "t",
+              "batch": "spawn-child",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "t",
+      "offer": "235f31e28c08aecaeb015035a860ed50266bdfe867fb173e7ad0449f565b92e9",
+      "initiator": "agent"
+    }
+  },
+  {
+    "OfferInvalidated": {
+      "trajectory": "t",
+      "offer": "198a9b3a931c44fac61d5a4984de317ee4c8dcd35de22e13825fd482fe5460a7"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "t",
+      "offer": "235f31e28c08aecaeb015035a860ed50266bdfe867fb173e7ad0449f565b92e9",
+      "call": {
+        "tool": "spawn",
+        "arguments": "{}",
+        "annotation": null
+      },
+      "plan": 1,
+      "acceptance": null,
+      "rulings": [],
+      "output": null,
+      "return_policy": "Void",
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Proposals": "spawn-approved-child"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "235f31e28c08aecaeb015035a860ed50266bdfe867fb173e7ad0449f565b92e9"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "t",
+      "batch": "spawn-approved-child",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single"
+      },
+      "released": [
+        {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "t",
+      "offer": "235f31e28c08aecaeb015035a860ed50266bdfe867fb173e7ad0449f565b92e9",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "t",
+      "dispatch": {
+        "trajectory": "t",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 0
+      },
+      "tool": "spawn",
+      "arguments": "{}",
+      "proposed_label": {
+        "trust": 1,
+        "audience": []
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "subject": {
+        "Call": {
+          "trajectory": "t",
+          "batch": "spawn-approved-child",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": null,
+          "audience": null
+        }
+      }
+    }
+  },
+  {
+    "ForkPrepared": {
+      "trajectory": "t",
+      "fork": {
+        "Spawn": {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      },
+      "snapshot": {
+        "base": {
+          "trust": 1,
+          "audience": []
+        },
+        "inherited": [],
+        "seed": {
+          "trust": 1,
+          "audience": []
+        }
+      },
+      "return_policy": "Void",
+      "kind": "Single"
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Binding": {
+          "Spawn": {
+            "trajectory": "t",
+            "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+            "occurrence": 0
+          }
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ForkOpened": {
+      "trajectory": "child",
+      "fork": {
+        "Spawn": {
+          "trajectory": "t",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "child",
+      "act": {
+        "Proposals": "spawn-grandchild"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "child",
+      "batch": "spawn-grandchild",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single",
+        "deferral": true
+      },
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "child",
+      "offer": "53cceece17fbf5b16ab0b44796652135cdea35d57f747d9bcd97c0ead89bb0a0",
+      "block": "b126ab9f0c2f48dc9710d171dda748ccfd73a7f0f24a0536c535abe206fef1c8",
+      "act": {
+        "Proposals": "spawn-grandchild"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "child",
+          "batch": "spawn-grandchild",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Return": "Raw"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "child",
+      "offer": "d0ec360158e5364b8adf81197a919713a5b4aaa16053d12af745aec40cd8aa19",
+      "block": "b126ab9f0c2f48dc9710d171dda748ccfd73a7f0f24a0536c535abe206fef1c8",
+      "act": {
+        "Proposals": "spawn-grandchild"
+      },
+      "call": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+      "subject": {
+        "Call": {
+          "trajectory": "child",
+          "batch": "spawn-grandchild",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 1,
+        "steps": [
+          {
+            "Return": "Void"
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "child",
+      "act": {
+        "Offer": "53cceece17fbf5b16ab0b44796652135cdea35d57f747d9bcd97c0ead89bb0a0"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "child",
+              "batch": "spawn-grandchild",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "child",
+      "offer": "53cceece17fbf5b16ab0b44796652135cdea35d57f747d9bcd97c0ead89bb0a0",
+      "initiator": "agent"
+    }
+  },
+  {
+    "OfferInvalidated": {
+      "trajectory": "child",
+      "offer": "d0ec360158e5364b8adf81197a919713a5b4aaa16053d12af745aec40cd8aa19"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "child",
+      "offer": "53cceece17fbf5b16ab0b44796652135cdea35d57f747d9bcd97c0ead89bb0a0",
+      "call": {
+        "tool": "spawn",
+        "arguments": "{}",
+        "annotation": null
+      },
+      "plan": 0,
+      "acceptance": null,
+      "rulings": [],
+      "output": null,
+      "return_policy": "Deferred",
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "child",
+      "act": {
+        "Proposals": "spawn-approved-grandchild"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "53cceece17fbf5b16ab0b44796652135cdea35d57f747d9bcd97c0ead89bb0a0"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "child",
+      "batch": "spawn-approved-grandchild",
+      "proposals": [
+        {
+          "tool": "spawn",
+          "arguments": "{}",
+          "annotation": null
+        }
+      ],
+      "spawn": {
+        "index": 0,
+        "kind": "Single",
+        "deferral": true
+      },
+      "released": [
+        {
+          "trajectory": "child",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "child",
+      "offer": "53cceece17fbf5b16ab0b44796652135cdea35d57f747d9bcd97c0ead89bb0a0",
+      "dispatch": {
+        "trajectory": "child",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "child",
+      "dispatch": {
+        "trajectory": "child",
+        "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+        "occurrence": 0
+      },
+      "tool": "spawn",
+      "arguments": "{}",
+      "proposed_label": {
+        "trust": 1,
+        "audience": []
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "subject": {
+        "Call": {
+          "trajectory": "child",
+          "batch": "spawn-approved-grandchild",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": null,
+          "audience": null
+        }
+      }
+    }
+  },
+  {
+    "ForkPrepared": {
+      "trajectory": "child",
+      "fork": {
+        "Spawn": {
+          "trajectory": "child",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      },
+      "snapshot": {
+        "base": {
+          "trust": 1,
+          "audience": []
+        },
+        "inherited": [],
+        "seed": {
+          "trust": 1,
+          "audience": []
+        }
+      },
+      "return_policy": "Deferred",
+      "kind": "Single"
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "Binding": {
+          "Spawn": {
+            "trajectory": "child",
+            "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+            "occurrence": 0
+          }
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ForkOpened": {
+      "trajectory": "grandchild",
+      "fork": {
+        "Spawn": {
+          "trajectory": "child",
+          "digest": "000cdc544c14bc1a3eda114c92d610a6eff336af7b660adcb84b5363b1372fc3",
+          "occurrence": 0
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "grandchild",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-31"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "grandchild",
+      "batch": "read-read_suspicious_internal-31",
+      "proposals": [
+        {
+          "tool": "read_suspicious_internal",
+          "arguments": "{\"who\":\"someone\"}",
+          "annotation": null
+        }
+      ],
+      "spawn": null,
+      "released": []
+    }
+  },
+  {
+    "OfferOpened": {
+      "trajectory": "grandchild",
+      "offer": "55fb7046a21b91d60448f2f1d5e00b4e1c3d76251efb31d0218b3d8e071449eb",
+      "block": "541f0165d657b752ffb824dbe0451eb0b3789c94e44e23f5853e07642dd511ac",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-31"
+      },
+      "call": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+      "subject": {
+        "Call": {
+          "trajectory": "grandchild",
+          "batch": "read-read_suspicious_internal-31",
+          "position": 0
+        }
+      },
+      "plan": {
+        "id": 0,
+        "steps": [
+          {
+            "Accept": {
+              "from": {
+                "trust": 1,
+                "audience": []
+              },
+              "to": {
+                "trust": 0,
+                "audience": [
+                  {
+                    "readers": [
+                      "insider"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "required": []
+      },
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "grandchild",
+      "act": {
+        "Offer": "55fb7046a21b91d60448f2f1d5e00b4e1c3d76251efb31d0218b3d8e071449eb"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Call": {
+              "trajectory": "grandchild",
+              "batch": "read-read_suspicious_internal-31",
+              "position": 0
+            }
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "OfferAccepted": {
+      "trajectory": "grandchild",
+      "offer": "55fb7046a21b91d60448f2f1d5e00b4e1c3d76251efb31d0218b3d8e071449eb",
+      "initiator": "agent"
+    }
+  },
+  {
+    "CallApproved": {
+      "trajectory": "grandchild",
+      "offer": "55fb7046a21b91d60448f2f1d5e00b4e1c3d76251efb31d0218b3d8e071449eb",
+      "call": {
+        "tool": "read_suspicious_internal",
+        "arguments": "{\"who\":\"someone\"}",
+        "annotation": null
+      },
+      "plan": 0,
+      "acceptance": {
+        "from": {
+          "trust": 1,
+          "audience": []
+        },
+        "to": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "rulings": [],
+      "output": null,
+      "return_policy": null,
+      "basis": {
+        "family": 0,
+        "flow": 0,
+        "subject": 0
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "grandchild",
+      "act": {
+        "Proposals": "read-read_suspicious_internal-31-approved"
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": [
+          {
+            "Approval": "55fb7046a21b91d60448f2f1d5e00b4e1c3d76251efb31d0218b3d8e071449eb"
+          }
+        ]
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ProposalBatchDecided": {
+      "trajectory": "grandchild",
+      "batch": "read-read_suspicious_internal-31-approved",
+      "proposals": [
+        {
+          "tool": "read_suspicious_internal",
+          "arguments": "{\"who\":\"someone\"}",
+          "annotation": null
+        }
+      ],
+      "spawn": null,
+      "released": [
+        {
+          "trajectory": "grandchild",
+          "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+          "occurrence": 0
+        }
+      ]
+    }
+  },
+  {
+    "CallApprovalConsumed": {
+      "trajectory": "grandchild",
+      "offer": "55fb7046a21b91d60448f2f1d5e00b4e1c3d76251efb31d0218b3d8e071449eb",
+      "dispatch": {
+        "trajectory": "grandchild",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      }
+    }
+  },
+  {
+    "Acceptance": {
+      "trajectory": "grandchild",
+      "dispatch": {
+        "trajectory": "grandchild",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "plan": 0,
+      "narrowing": {
+        "from": {
+          "trust": 1,
+          "audience": []
+        },
+        "to": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "DispatchOpened": {
+      "trajectory": "grandchild",
+      "dispatch": {
+        "trajectory": "grandchild",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "tool": "read_suspicious_internal",
+      "arguments": "{\"who\":\"someone\"}",
+      "proposed_label": {
+        "trust": 0,
+        "audience": [
+          {
+            "readers": [
+              "insider"
+            ]
+          }
+        ]
+      },
+      "receiving": {
+        "trust": 1,
+        "audience": []
+      },
+      "proposed_effects": [],
+      "annotation": null,
+      "subject": {
+        "Call": {
+          "trajectory": "grandchild",
+          "batch": "read-read_suspicious_internal-31-approved",
+          "position": 0
+        }
+      },
+      "terms": {
+        "delta": {
+          "trust": 0,
+          "audience": {
+            "Union": {
+              "readers": [
+                "insider"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "grandchild",
+      "act": {
+        "Outcome": {
+          "trajectory": "grandchild",
+          "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [
+          "grandchild"
+        ],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "DispatchClosed": {
+      "trajectory": "grandchild",
+      "dispatch": {
+        "trajectory": "grandchild",
+        "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+        "occurrence": 0
+      },
+      "outcome": {
+        "Success": {
+          "effects": []
+        }
+      }
+    }
+  },
+  {
+    "ValueAdmitted": {
+      "trajectory": "grandchild",
+      "value": {
+        "body": "read",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "ToolResult": {
+          "dispatch": {
+            "trajectory": "grandchild",
+            "digest": "0a05703023eda03cef937f9005717713e169e84a79d3bc87a48c2bc80ec03405",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "ChildReturn": {
+          "child": "grandchild",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ReturnDeferred": {
+      "trajectory": "grandchild",
+      "id": {
+        "child": "grandchild",
+        "occurrence": 0
+      },
+      "value": {
+        "body": "found",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "t",
+      "act": {
+        "ChildReturn": {
+          "child": "child",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "Boundary": {
+      "trajectory": "child",
+      "kind": "VoidReturn"
+    }
+  },
+  {
+    "BasisAdvanced": {
+      "trajectory": "child",
+      "act": {
+        "Settlement": {
+          "child": "grandchild",
+          "occurrence": 0
+        }
+      },
+      "advance": {
+        "family": false,
+        "flows": [
+          "child"
+        ],
+        "subjects": []
+      },
+      "revision": 1
+    }
+  },
+  {
+    "ReturnAccepted": {
+      "trajectory": "child",
+      "id": {
+        "child": "grandchild",
+        "occurrence": 0
+      },
+      "narrowing": {
+        "from": {
+          "trust": 1,
+          "audience": []
+        },
+        "to": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "ChildReturn": {
+      "trajectory": "grandchild",
+      "id": {
+        "child": "grandchild",
+        "occurrence": 0
+      },
+      "value": {
+        "body": "found",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "derivation": "Raw"
+    }
+  },
+  {
+    "ValueAdmitted": {
+      "trajectory": "child",
+      "value": {
+        "body": "found",
+        "label": {
+          "trust": 0,
+          "audience": [
+            {
+              "readers": [
+                "insider"
+              ]
+            }
+          ]
+        }
+      },
+      "provenance": {
+        "ChildReturn": {
+          "child": "grandchild",
+          "id": {
+            "child": "grandchild",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  },
+  {
+    "Boundary": {
+      "trajectory": "child",
+      "kind": {
+        "Merge": {
+          "child_return": {
+            "child": "grandchild",
+            "occurrence": 0
+          }
+        }
+      }
+    }
+  }
+]

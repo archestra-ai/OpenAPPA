@@ -261,12 +261,9 @@ impl Session {
                 self.cross_return(Some(value.clone()), ReturnKind::KeyedTurn, Occasion::Return(keyed))
                     .await
             }
-            None => match self.child_calls()? {
-                ChildCalls::Ended(end @ ChildEnd::Deferred { .. }) => ended_child(end, Some(value)),
-                ChildCalls::Ended(ChildEnd::Void) | ChildCalls::Open(_) => {
-                    self.cross_return(Some(value), ReturnKind::Turn, Occasion::Other).await
-                }
-            },
+            // Only a retry of the stop repeats the deferral that ended the child: a turn on
+            // the ended child is refused as ended.
+            None => self.cross_return(Some(value), ReturnKind::Turn, Occasion::Other).await,
         }
     }
 

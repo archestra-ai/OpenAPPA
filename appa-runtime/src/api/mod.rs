@@ -2044,6 +2044,19 @@ impl Inner {
         Ok(self.resolve_policy(deployment, log)?.engine().trust_chain().clone())
     }
 
+    /// Refuses a family that follows another deployment than this view's line.
+    pub(super) fn follows_line(&self, log: &Log) -> Result<(), EventError> {
+        let line = self.line();
+        let followed = log.deployment();
+        match followed == line {
+            true => Ok(()),
+            false => Err(EventError::PolicyUnavailable(format!(
+                "the family of {} follows deployment {followed}, not {line}",
+                log.root().as_str()
+            ))),
+        }
+    }
+
     /// The engines that judge `log`'s family while `deployment` serves this view's line.
     ///
     /// A family that follows the line is judged at the deployment's revision — by the
@@ -2056,14 +2069,8 @@ impl Inner {
         deployment: &'a Deployment,
         log: &Log,
     ) -> Result<PolicyEngine<'a>, EventError> {
+        self.follows_line(log)?;
         let line = self.line();
-        let followed = log.deployment();
-        if followed != line {
-            return Err(EventError::PolicyUnavailable(format!(
-                "the family of {} follows deployment {followed}, not {line}",
-                log.root().as_str()
-            )));
-        }
         let revision = deployment.serving_revision()?;
         if let Some(stamp) = log.stamp().map(|stamp| stamp.value())
             && stamp > revision

@@ -540,6 +540,59 @@ async fn a_launched_start_naming_a_line_variant_is_refused_and_records_nothing()
     assert_eq!(settings_of(&runtime, &root()), accepting());
 }
 
+/// The same start posted on the wire: a startup carrying both a launch token and a line
+/// variant is refused as a trajectory refusal before it records anything or opens a root.
+#[tokio::test]
+async fn a_posted_launched_start_naming_a_line_variant_is_refused_and_records_nothing() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(config_with(FETCH_AND_SEND, None), dir.path().join("appa.db"), None)
+        .expect("the deployment opens");
+    let host = TrajectoryId("cc:posted".to_string());
+    let start = HookEvent::SessionStart {
+        root: host.clone(),
+        principal: None,
+        address: None,
+        title: None,
+        start: Some(StartKind::Startup),
+        launch: Some(appa_runtime_api::LaunchStart {
+            launch: appa_runtime_api::LaunchToken::parse(LAUNCH).expect("a token"),
+            forked_from: None,
+        }),
+        settings: observe(),
+    };
+    let wire = appa_runtime_api::WireEvent::from_event(appa_runtime_api::AdapterName::ClaudeCode, &start)
+        .expect("the start translates");
+    let posted = serde_json::to_value(&wire).expect("the start serializes");
+    assert!(
+        posted.get("launch").is_some() && posted.get("line_variant").is_some(),
+        "{posted}"
+    );
+    let (status, answered) = crate::hooks::answer(
+        &runtime,
+        &appa_adapter_claude_code::adapter(),
+        appa_runtime_api::PrincipalSource::None,
+        &serde_json::to_vec(&posted).expect("the body serializes"),
+    )
+    .await;
+    assert_eq!(status, 409, "{answered}");
+    let decision = serde_json::from_value::<appa_runtime_api::WireDecision>(answered)
+        .expect("a wire decision")
+        .into_decision()
+        .expect("a hook decision");
+    assert!(
+        matches!(
+            decision,
+            HookDecision::Refuse {
+                class: RefusalClass::Trajectory,
+                ..
+            }
+        ),
+        "{decision:?}"
+    );
+    assert!(!runtime.inner.store.has_root(&host).expect("the store reads"));
+    assert_eq!(runtime.alias_of(&host).expect("the alias reads"), None);
+}
+
 /// A host id recorded as a family's alias is that family's: a typed start under it continues
 /// the family and is held to its pin, and neither a session nor a root fork opens a root of
 /// its own there.

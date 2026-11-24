@@ -103,12 +103,25 @@ pub(super) struct KeyedReturn<'a> {
 }
 
 /// The declaration ahead a blocked spawn took, and what its judgment reads: whether the spawn
-/// starts several subagents, and the offers its block made.
+/// starts several subagents, the return class its proposal declares, and the offers its block
+/// made.
 #[derive(Debug)]
 pub(super) struct AheadClaim<'a> {
     attempt: &'a appa_eventlog::AheadAttempt,
     spawn: SpawnKind,
+    returns: appa_engine::transition::ReturnClass,
     offers: &'a [appa_runtime_api::OfferedRemedy],
+}
+
+impl AheadClaim<'_> {
+    /// The return the declaration made ahead declares for this spawn: one whose parent decides
+    /// holds what falls below the declared floor.
+    fn declared(&self, arguments: RemedyArguments) -> DeclaredReturn {
+        match (self.returns, &arguments.label) {
+            (appa_engine::transition::ReturnClass::Decides, Some(label)) => DeclaredReturn::Decides(label.clone()),
+            _ => DeclaredReturn::Arguments(arguments),
+        }
+    }
 }
 
 impl<'a> Occasion<'a> {

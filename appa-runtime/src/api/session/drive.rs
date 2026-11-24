@@ -422,7 +422,7 @@ impl Decided<'_> {
         // application round.
         if self
             .engine()
-            .declare_ahead(self.view, trajectory, &declared.arguments, ReturnClass::Planned)
+            .declare_ahead(self.view, trajectory, &declared.arguments, claim.returns)
             .is_err()
         {
             return Ok(Judgment::Settled(AheadOutcome::Unfit));
@@ -685,27 +685,6 @@ impl Decided<'_> {
             .map(|binding| binding.dispatch.clone())
     }
 
-    /// What a retry of the held return `keyed` names answers: the occurrence it froze at, for
-    /// the same words, and a refusal for other words. `None` where no held return bound the
-    /// operation, which is then decided afresh.
-    fn held_retry(&self, keyed: KeyedReturn<'_>) -> Result<Option<EngineDecision>, EventError> {
-        let child = &self.session.trajectory;
-        let Some(id) = self.log.held_return(child, keyed.operation) else {
-            return Ok(None);
-        };
-        let parent = self.parent_of(child).ok_or(EventError::NotAChild)?;
-        let held = self
-            .engine()
-            .deferred_return(self.view, &parent, id)
-            .ok_or_else(|| EventError::EngineInvariant("a held operation names no deferral".to_string()))?;
-        match held.body.as_str() == keyed.value {
-            true => Ok(Some(EngineDecision::deliver(Next::PresentToModel(
-                Presentation::Deferred,
-            )))),
-            false => Err(EventError::ReturnRetryChanged),
-        }
-    }
-
     /// How the ended `child` ended: by the deferral at its stop, the one occurrence of it that
     /// is not held, or by its void return.
     pub(super) fn child_end(&self, child: &TrajectoryId) -> super::child::ChildEnd {
@@ -836,6 +815,16 @@ impl Session {
             },
             Occasion::Report { .. } | Occasion::Remedy { .. } | Occasion::Other => Opening::default(),
         };
+        // A retry of a held return is answered inside a write step from the family's own log,
+        // before a serving policy is selected for it.
+        if let Some(keyed) = opening.keyed {
+            let step = self.inner.step(&self.root)?;
+            let log = self.inner.step_log(&step, &self.root)?;
+            self.inner.follows_line(&log)?;
+            if let Some(retried) = held_retry(&log, &self.trajectory, keyed)? {
+                return Ok(retried);
+            }
+        }
         let opened = self.inner.log(&self.root)?;
         let policy = self.inner.resolve_policy(deployment, &opened)?;
         tracing::Span::current().record(
@@ -911,6 +900,13 @@ impl Session {
             // wait for it rather than lose their compare-and-swap to it.
             let step = self.inner.step(&self.root)?;
             let log = self.inner.step_log(&step, &self.root)?;
+            // A retry of a held return is known by its operation alone, whatever the child did
+            // since: it is answered before the child's liveness or its open calls are read.
+            if let Some(keyed) = opening.keyed
+                && let Some(retried) = held_retry(&log, &self.trajectory, keyed)?
+            {
+                return Ok(retried);
+            }
             let view = policy.rebuild_view(&log).map_err(EventError::from)?;
             let context = Decided {
                 session: self,
@@ -918,13 +914,6 @@ impl Session {
                 view: &view,
                 log: &log,
             };
-            // A retry of a held return is known by its operation alone, whatever the child did
-            // since: it is answered before the child's liveness or its open calls are read.
-            if let Some(keyed) = opening.keyed
-                && let Some(retried) = context.held_retry(keyed)?
-            {
-                return Ok(retried);
-            }
             if entering {
                 match policy.engine().liveness(&view, &self.trajectory) {
                     Liveness::Ended => return Err(EventError::TrajectoryEnded),
@@ -1061,5 +1050,36 @@ impl Session {
             }
         }
         Err(EventError::Contended { attempts: REPLAY_LIMIT })
+    }
+}
+
+/// What a retry of the held return `keyed` of `child` answers, read from the validated family
+/// log alone: the occurrence it froze at, for the same words, and a refusal for other words.
+/// `None` where no held return bound the operation, which is then decided afresh. No policy
+/// judges it, so it answers whatever revision the family was stamped at since.
+fn held_retry(
+    log: &appa_eventlog::Log,
+    child: &TrajectoryId,
+    keyed: KeyedReturn<'_>,
+) -> Result<Option<EngineDecision>, EventError> {
+    let Some(id) = log.held_return(child, keyed.operation) else {
+        return Ok(None);
+    };
+    let frozen = log
+        .facts()
+        .iter()
+        .rev()
+        .find_map(|fact| match fact {
+            appa_engine::fact::Fact::ReturnDeferred {
+                id: deferred, value, ..
+            } if deferred == id => Some(&value.body),
+            _ => None,
+        })
+        .ok_or_else(|| EventError::EngineInvariant("a held operation names no deferral".to_string()))?;
+    match frozen.as_str() == keyed.value {
+        true => Ok(Some(EngineDecision::deliver(Next::PresentToModel(
+            Presentation::Deferred,
+        )))),
+        false => Err(EventError::ReturnRetryChanged),
     }
 }
