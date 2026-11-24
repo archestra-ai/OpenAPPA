@@ -2682,6 +2682,8 @@ async fn a_held_returns_retry_through_another_line_is_refused() {
         .on_child_return("one".to_string(), operation("op-1"))
         .await;
     assert!(matches!(retried, Err(EventError::PolicyUnavailable(_))), "{retried:?}");
+}
+
 /// A spawn result withheld while its child had crossed other bytes delivers no crossing:
 /// reported again with those bytes, after a reload, it stays withheld rather than replaying
 /// the child's crossing.
