@@ -70,6 +70,10 @@ SPAWN_NOT_TAKEN = "the spawn did not take"
 RETURN_TOOL = "appa_return"
 VOID_CROSSED = "the void return crossed"
 
+# The runtime's words in place of a spawn reply that carries no message
+# (`appa-runtime/src/api/session/result.rs`, `NO_RETURN`).
+NO_RETURN = "[appa] this reply carries no message from the subagent; its return crosses only through the return check"
+
 # The sanitizer the policy registers for the crash logs' trust. Its
 # offer names it; the runtime's wording around the name is not pinned
 # here. Which offers the child gets is the whole point of the second case.
@@ -280,7 +284,8 @@ def test_nothing_a_child_says_after_returning_nothing_reaches_its_parent(stack):
     assert set(returned) == {"result", "subagent_session_id"}, (
         f"the parent reads the runtime's words beside the child's session id alone: {returned}"
     )
-    assert isinstance(returned["result"], str) and isinstance(returned["subagent_session_id"], str), returned
+    assert returned["result"] == NO_RETURN, returned
+    assert isinstance(returned["subagent_session_id"], str), returned
     stops = stack.child_results(RETURN_TOOL)
     assert len(stops) == 1, (
         f"one stop of this child reached the runtime, and the plugin replayed that crossing after it: {stops}"

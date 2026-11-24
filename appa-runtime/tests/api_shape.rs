@@ -190,7 +190,9 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::Block { reason, .. } => {
             let _: String = reason;
         }
-        HookDecision::ReplaceOutput { output, .. } | HookDecision::NoReturn { output } => {
+        HookDecision::ReplaceOutput { output, .. }
+        | HookDecision::NoReturn { output }
+        | HookDecision::Launched { output } => {
             let _: String = output;
         }
         HookDecision::DeliverValue { value } => {

@@ -38,7 +38,8 @@
 //! [`names_children`] is always empty.
 
 use appa_runtime_api::{
-    Actor, Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, ProposedCall, SpawnKind, TrajectoryId,
+    Actor, Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, ProposedCall, SpawnKind, SpawnLaunch,
+    TrajectoryId,
 };
 
 /// The server-side identification the runtime applies to every kagent call. kagent's spawns
@@ -54,7 +55,14 @@ pub fn adapter() -> Adapter {
         spell,
         wildcard_covers_spawn: false,
         spells_server: |name| name.contains(AGENT_SPELLING_SEPARATOR),
+        spawn_launch: SpawnLaunch::Conformed(launch_fields),
     }
+}
+
+/// A kagent spawn's launch reply is the child's context id, the one field the UI follows the
+/// child by. kagent asks for no `result` beside it: its own pending reply carries none.
+fn launch_fields(_: Option<serde_json::Value>, spawned: &str) -> serde_json::Value {
+    serde_json::json!({ "subagent_session_id": spawned })
 }
 
 /// The separator of an agent's authored spelling, `<namespace>__NS__<agent>`.

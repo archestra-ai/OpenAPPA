@@ -78,6 +78,7 @@ fn adapter() -> Adapter {
         spell,
         wildcard_covers_spawn: true,
         spells_server: |name| name.contains('.'),
+        spawn_launch: appa_runtime_api::SpawnLaunch::Undeclared,
     }
 }
 

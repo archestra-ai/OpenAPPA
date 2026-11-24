@@ -2,6 +2,7 @@ use super::super::{OpenError, OutcomeBody, Runtime};
 use super::*;
 use crate::api::{Actor, RemedyDecision, SpawnBinding, ToolCallDecision, ToolOutcome, ToolResultDecision};
 use crate::config::Config;
+use appa_runtime_api::SpawnLaunch;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -27,7 +28,8 @@ impl Session {
         child: Option<TrajectoryId>,
         value: Option<String>,
     ) -> Result<SpawnResultDecision, EventError> {
-        self.on_spawn_result_identified(call, None, outcome, child, value).await
+        self.on_spawn_result_identified(call, None, outcome, child, value, SpawnLaunch::Undeclared)
+            .await
     }
 
     pub fn on_child_start(&self, id: TrajectoryId, spawn: SpawnRef) -> Result<Session, EventError> {
@@ -5589,10 +5591,14 @@ async fn a_spawn_result_naming_an_unstarted_child_binds_it_and_closes_the_spawn(
         )
         .await
         .expect("the spawn result binds the child and closes");
-    assert!(matches!(
-        &decision,
-        SpawnResultDecision::Outcome(ToolResultDecision::Keep { .. })
-    ));
+    // A host that declares no launch fields has the launch answered in the runtime's words.
+    assert_eq!(
+        decision,
+        SpawnResultDecision::Launched {
+            output: super::result::LAUNCHED.to_string(),
+            receipt: None,
+        }
+    );
     assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
     assert!(opened(&runtime, &child("c1")), "the spawn result opened the child");
     assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child is live");
@@ -5947,6 +5953,7 @@ async fn a_turn_end_leaves_a_running_subagents_spawn_open_for_its_return() {
             agent_response(),
             Some(child("c1")),
             Some("all done".to_string()),
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the spawn's result is reported after the turn");
@@ -6012,6 +6019,7 @@ async fn a_call_without_an_id_runs_beside_a_running_subagents_spawn() {
                 agent_response(),
                 Some(child("c1")),
                 Some("all done".to_string()),
+                SpawnLaunch::Undeclared,
             )
             .await
             .expect("the spawn's result replays"),
@@ -6123,6 +6131,7 @@ async fn a_report_without_an_id_skips_an_identified_spawn_whose_child_ended() {
             agent_response(),
             Some(child("c1")),
             None,
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the ended child's spawn closes with nothing to cross");
@@ -7383,4 +7392,86 @@ async fn an_unopened_child_stopping_is_answered_as_a_spawn_not_taken() {
     let refused = unopened.on_child_end(Some("done".to_string())).await;
     assert!(matches!(refused, Err(EventError::SpawnNotTaken)), "got {refused:?}");
     assert!(!opened(&runtime, &child("c1")));
+}
+
+/// A launch report whose success the log checkpointed under a bound output sanitizer stays
+/// a launch when the child's return crosses before the report finalizes: the repeated
+/// report closes the spawn with the sanitizer's derivation.
+#[tokio::test]
+async fn a_checkpointed_launch_finalizes_as_a_launch_after_its_child_returns() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let text = format!(
+        "[policy]\n{EMITTING_LEAK}\ncontext_control = true\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n"
+    );
+    let runtime = Runtime::open(config_from(&text), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    authorize_spawn(&session, leak(), None, crate::engine::LabelSpelling::default()).await;
+    assert!(matches!(
+        session.on_tool_call(leak(), true).await.expect("the spawn is judged"),
+        ToolCallDecision::Deny { .. },
+    ));
+    let quoted = runtime
+        .minted_offers(&root(), &root())
+        .into_iter()
+        .find(|offer| {
+            matches!(
+                runtime.offer_kind(&root(), offer),
+                Some(crate::api::OfferKind::Sanitizer { .. })
+            )
+        })
+        .expect("the block surfaced the sanitize plan");
+    let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+    assert!(matches!(
+        session
+            .on_remedy(offer, RemedyArguments::default(), None, None)
+            .await
+            .expect("the sanitize offer binds"),
+        RemedyDecision::Authorized { .. },
+    ));
+    let ToolCallDecision::Allow {
+        spawn: Some(binding), ..
+    } = session.on_tool_call(leak(), true).await.expect("the spawn releases")
+    else {
+        panic!("the declared, sanitized spawn releases a fork binding");
+    };
+    let child_id = TrajectoryId("cc:root:child-1".to_string());
+    let child_session = session
+        .on_child_start(child_id.clone(), SpawnRef::Binding(binding))
+        .expect("the fork binds and the child opens");
+    let report = || {
+        session.on_spawn_result_identified(
+            leak(),
+            None,
+            ToolOutcome::Success {
+                body: OutcomeBody::Available(serde_json::json!({"subagent_session_id": "child-1"}).to_string()),
+            },
+            Some(child_id.clone()),
+            None,
+            appa_adapter_kagent::adapter().spawn_launch,
+        )
+    };
+
+    runtime.store().fail_commit_after(1);
+    assert!(matches!(report().await, Err(EventError::Storage(_))));
+    assert!(
+        dispatch_open(&runtime, &root()),
+        "the checkpointed spawn awaits its finalization"
+    );
+    assert!(matches!(
+        child_session.on_child_end(Some("the answer".to_string())).await,
+        Ok(ChildReturnDecision::Returned { .. }),
+    ));
+
+    let finalized = report()
+        .await
+        .expect("the repeated report finalizes the checkpointed launch");
+    assert!(
+        matches!(
+            &finalized,
+            SpawnResultDecision::Outcome(ToolResultDecision::Deliver { value, .. }) if value == "scrubbed"
+        ),
+        "{finalized:?}"
+    );
+    assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
 }

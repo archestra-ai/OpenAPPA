@@ -1452,6 +1452,14 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 			// the parent receives what the runtime admitted.
 			return spawnReplacement(result, decision.Value), nil
 		case "replace_output":
+			// A launch crosses kagent's launch field alone: the child's
+			// session id, which the runtime matched to its bound child.
+			if decision.Launched {
+				if spawnedID == "" {
+					return nil, failClosed("appa answered a launch the plugin named no child for")
+				}
+				return map[string]any{"subagent_session_id": spawnedID}, nil
+			}
 			replaced := map[string]any{"result": p.forModel(ctx, decision.Output)}
 			// A reply carrying no message is the named child's, its bound
 			// one: its session id stays for the UI to follow the child, and

@@ -6,7 +6,7 @@ use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcomes, ParseRefusal, PeerAddress, PeerFrame,
     PrincipalSource, PromptKey, ProposedCall, ReleaseReceipt, Ruling, SessionSettings, SessionTitle, SpawnKind,
-    SpawnRef, StartKind, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
+    SpawnLaunch, SpawnRef, StartKind, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
@@ -117,6 +117,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
                 receipt: &mut receipt,
                 options: &presentation,
                 call_ids,
+                launch: adapter.spawn_launch,
             }
             .session_start(root, principal, settings, address, title, start, deciding);
             handled(
@@ -127,7 +128,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
                 decision,
             )
         }
-        (event, None) => handle_internal(runtime, event, presentation, call_ids).await,
+        (event, None) => handle_internal(runtime, event, presentation, call_ids, adapter.spawn_launch).await,
         (_, Some(_)) => unreachable!("only a session start carries a launch"),
     };
     runtime.record(Some(&root), handled.event);
@@ -558,6 +559,7 @@ pub async fn handle(runtime: &Runtime, event: HookEvent) -> HookDecision {
         event,
         EmbeddedPresentationOptions::default(),
         ToolCallIds::Unnamed,
+        runtime.spawn_launch(),
     )
     .await
     .decision
@@ -574,7 +576,14 @@ pub async fn handle_embedded_with_options(
     event: HookEvent,
     presentation: EmbeddedPresentationOptions,
 ) -> EmbeddedHookOutcome {
-    let handled = handle_internal(runtime, event, presentation, ToolCallIds::Unnamed).await;
+    let handled = handle_internal(
+        runtime,
+        event,
+        presentation,
+        ToolCallIds::Unnamed,
+        runtime.spawn_launch(),
+    )
+    .await;
     EmbeddedHookOutcome {
         decision: handled.decision,
         presentation: handled.presentation,
@@ -612,6 +621,7 @@ pub(crate) async fn handle_internal(
     event: HookEvent,
     presentation_options: EmbeddedPresentationOptions,
     call_ids: ToolCallIds,
+    launch: SpawnLaunch,
 ) -> Handled {
     let shape = hook_shape(&event);
     let (mut dispatch, mut presentation, mut receipt) = (None, None, None);
@@ -625,6 +635,7 @@ pub(crate) async fn handle_internal(
         },
         &presentation_options,
         call_ids,
+        launch,
     )
     .await;
     handled(shape, dispatch, presentation, receipt, decision)
@@ -680,6 +691,7 @@ fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<Stri
     use crate::events::HookOutcome;
     match decision {
         HookDecision::Ack
+        | HookDecision::Launched { .. }
         | HookDecision::Context { .. }
         | HookDecision::ChildReturn { .. }
         | HookDecision::DeliverValue { .. } => (HookOutcome::Acked, Vec::new()),
@@ -707,6 +719,7 @@ async fn dispatch_event(
     out: Outparams<'_>,
     presentation_options: &EmbeddedPresentationOptions,
     call_ids: ToolCallIds,
+    launch: SpawnLaunch,
 ) -> HookDecision {
     let mut dispatcher = Dispatcher {
         runtime,
@@ -715,6 +728,7 @@ async fn dispatch_event(
         receipt: out.receipt,
         options: presentation_options,
         call_ids,
+        launch,
     };
     match event {
         HookEvent::SessionStart {
@@ -848,6 +862,8 @@ struct Dispatcher<'a> {
     receipt: &'a mut Option<ReleaseReceipt>,
     options: &'a EmbeddedPresentationOptions,
     call_ids: ToolCallIds,
+    /// The launch fields of the spawn reply of the host that reported the event.
+    launch: SpawnLaunch,
 }
 
 /// What one dispatch reports beside its decision.
@@ -1194,7 +1210,7 @@ impl Dispatcher<'_> {
         child: Option<TrajectoryId>,
         value: Option<String>,
     ) -> HookDecision {
-        let said = value.clone();
+        let (said, launch) = (value.clone(), self.launch);
         match on_actor(self.runtime, &actor, MissingStart::Refuse, self.options, |session| {
             let (call, call_id, outcome, child, value) = (
                 call.clone(),
@@ -1205,7 +1221,7 @@ impl Dispatcher<'_> {
             );
             async move {
                 session
-                    .on_spawn_result_identified(call, call_id, outcome, child, value)
+                    .on_spawn_result_identified(call, call_id, outcome, child, value, launch)
                     .await
             }
         })
@@ -1214,6 +1230,10 @@ impl Dispatcher<'_> {
             Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision, self.receipt),
             Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, self.presentation, self.receipt),
             Ok(SpawnResultDecision::NoReturn { output }) => HookDecision::NoReturn { output },
+            Ok(SpawnResultDecision::Launched { output, receipt }) => {
+                *self.receipt = receipt;
+                HookDecision::Launched { output }
+            }
             Err(error) => fold(error, Refusal::Settle),
         }
     }
@@ -2977,6 +2997,7 @@ mod tests {
                 parsed,
                 EmbeddedPresentationOptions::default(),
                 ToolCallIds::Unnamed,
+                SpawnLaunch::Undeclared,
             )
             .await
             .decision
@@ -3041,6 +3062,7 @@ mod tests {
             parsed,
             EmbeddedPresentationOptions::default(),
             ToolCallIds::Unnamed,
+            SpawnLaunch::Undeclared,
         )
         .await;
         assert!(
@@ -3065,6 +3087,7 @@ mod tests {
             through_the_codec(&call).expect("the call parses"),
             EmbeddedPresentationOptions::default(),
             ToolCallIds::Unnamed,
+            SpawnLaunch::Undeclared,
         )
         .await;
         assert!(

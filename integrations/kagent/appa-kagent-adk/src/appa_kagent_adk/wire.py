@@ -302,6 +302,10 @@ class Decision:
     """On a ``replace_output``: the reply it replaces is the spawn's
     reply from the child the plugin named, its bound one, and carries no
     message of the child's."""
+    launched: bool = False
+    """On a ``replace_output``: the reply it replaces is the launch of the
+    child the plugin named, its bound one, and ``output`` is that reply's
+    launch fields alone."""
 
 
 _DECISION_PAYLOADS: dict[str, tuple[str, ...]] = {
@@ -362,7 +366,18 @@ def parse_decision(body: bytes | str) -> Decision:
     no_return = parsed.get("no_return", False)
     if not isinstance(no_return, bool) or (no_return and kind != "replace_output"):
         raise WireError(f"a {kind} decision with a no_return mark outside the wire: {no_return!r}")
-    return Decision(kind=kind, review=review, offers=offers, refusal_class=refusal_class, no_return=no_return, **fields)
+    launched = parsed.get("launched", False)
+    if not isinstance(launched, bool) or (launched and (kind != "replace_output" or no_return)):
+        raise WireError(f"a {kind} decision with a launched mark outside the wire: {launched!r}")
+    return Decision(
+        kind=kind,
+        review=review,
+        offers=offers,
+        refusal_class=refusal_class,
+        no_return=no_return,
+        launched=launched,
+        **fields,
+    )
 
 
 def parse_answer(status: int, body: bytes) -> Decision:

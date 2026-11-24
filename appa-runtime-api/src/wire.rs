@@ -101,6 +101,21 @@ pub type NamesChildrenFn = fn(&Actor, &ProposedCall) -> Vec<TrajectoryId>;
 /// `None`. A plain `fn` pointer for the same reason [`IdentifyToolFn`] is.
 pub type SpellFn = fn(&CanonicalTool) -> Option<String>;
 
+/// The reply a host's harness owns for a spawn whose bound child runs with nothing returned:
+/// `report` is the reply's body as JSON (`None` where it carries none) and `spawned` the
+/// child's host id, the wire's `spawned_id`. The answer keeps only the harness's own launch
+/// fields, so nothing beside them, the child's bytes included, reaches the parent. A plain
+/// `fn` pointer for the same reason [`IdentifyToolFn`] is.
+pub type ConformLaunchFn = fn(report: Option<serde_json::Value>, spawned: &str) -> serde_json::Value;
+
+/// Whether a host declares the fields of its spawn's launch reply. A launch under a host that
+/// declares none admits nothing and is answered with the runtime's own words.
+#[derive(Clone, Copy)]
+pub enum SpawnLaunch {
+    Undeclared,
+    Conformed(ConformLaunchFn),
+}
+
 /// One adapter as the runtime runs under it: its name, which fixes the
 /// trajectory prefix and the review channel; the two directions of its
 /// tool identity map and the children a proposed call names; and the
@@ -121,6 +136,8 @@ pub struct Adapter {
     /// the server twice. A canonical id (one with `/`) always does; this
     /// answers for the host's raw spellings.
     pub spells_server: fn(&str) -> bool,
+    /// The launch fields of this host's spawn reply.
+    pub spawn_launch: SpawnLaunch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1365,7 +1382,8 @@ fn host_ids(adapter: AdapterName, actor: &Actor) -> Result<(String, Option<Strin
     Ok((root_id, child_id))
 }
 
-fn child_host_id(root: &TrajectoryId, child: &TrajectoryId) -> Result<String, ParseRefusal> {
+/// The host's own id of the family child `child` of `root`, as the wire spells it.
+pub fn child_host_id(root: &TrajectoryId, child: &TrajectoryId) -> Result<String, ParseRefusal> {
     child
         .0
         .strip_prefix(&root.0)
@@ -1481,6 +1499,10 @@ pub struct WireDecision {
     /// carrying no message of the child's ([`HookDecision::NoReturn`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_return: bool,
+    /// On a `replace_output`: the reply it replaces is the named bound child's launch, and
+    /// `output` is that reply's launch fields alone ([`HookDecision::Launched`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub launched: bool,
 }
 
 impl WireDecision {
@@ -1504,6 +1526,7 @@ impl WireDecision {
             retry: None,
             receipt: None,
             no_return: false,
+            launched: false,
         }
     }
 
@@ -1583,6 +1606,11 @@ impl WireDecision {
                 no_return: true,
                 ..Self::bare(DecisionName::ReplaceOutput)
             },
+            HookDecision::Launched { output } => Self {
+                output: Some(output.clone()),
+                launched: true,
+                ..Self::bare(DecisionName::ReplaceOutput)
+            },
             HookDecision::DeliverValue { value } => Self {
                 value: Some(value.clone()),
                 ..Self::bare(DecisionName::DeliverValue)
@@ -1640,8 +1668,8 @@ impl WireDecision {
             }
             _ => {}
         }
-        if self.no_return && name != DecisionName::ReplaceOutput {
-            return Err(malformed(format!("{name:?} marked no_return")));
+        if (self.no_return || self.launched) && name != DecisionName::ReplaceOutput {
+            return Err(malformed(format!("{name:?} marked no_return or launched")));
         }
         let receipted = self.receipt.is_some();
         let decision = match name {
@@ -1691,15 +1719,18 @@ impl WireDecision {
                 reason: required("reason", self.reason)?,
                 outcomes: unremedied()?,
             },
-            DecisionName::ReplaceOutput => match (self.no_return, unremedied()?) {
-                (true, None) => HookDecision::NoReturn {
+            DecisionName::ReplaceOutput => match (self.no_return, self.launched, unremedied()?) {
+                (true, false, None) => HookDecision::NoReturn {
                     output: required("output", self.output)?,
                 },
-                (true, Some(_)) => return Err(malformed(format!("{name:?} marked no_return with outcomes"))),
-                (false, outcomes) => HookDecision::ReplaceOutput {
+                (false, true, None) => HookDecision::Launched {
+                    output: required("output", self.output)?,
+                },
+                (false, false, outcomes) => HookDecision::ReplaceOutput {
                     output: required("output", self.output)?,
                     outcomes,
                 },
+                _ => return Err(malformed(format!("{name:?} marked twice or beside outcomes"))),
             },
             DecisionName::DeliverValue => HookDecision::DeliverValue {
                 value: required("value", self.value)?,
@@ -2054,6 +2085,7 @@ mod tests {
         spell,
         wildcard_covers_spawn: false,
         spells_server: |_| false,
+        spawn_launch: crate::SpawnLaunch::Undeclared,
     };
 
     /// The same adapter, refusing to answer the question an outcome has no
@@ -2065,6 +2097,7 @@ mod tests {
         spell,
         wildcard_covers_spawn: false,
         spells_server: |_| false,
+        spawn_launch: crate::SpawnLaunch::Undeclared,
     };
 
     #[test]
@@ -2879,6 +2912,7 @@ mod tests {
         spell,
         wildcard_covers_spawn: true,
         spells_server: |name| name.starts_with("mcp__"),
+        spawn_launch: crate::SpawnLaunch::Undeclared,
     };
 
     /// A field the named event does not read reaches no reader, so the
@@ -3441,6 +3475,9 @@ mod tests {
             HookDecision::NoReturn {
                 output: "o".to_string(),
             },
+            HookDecision::Launched {
+                output: "{}".to_string(),
+            },
             HookDecision::DeliverValue { value: "v".to_string() },
             HookDecision::ChildReturn { value: "v".to_string() },
             HookDecision::DeferReturn,
@@ -3472,6 +3509,9 @@ mod tests {
         for marked in [
             r#"{"protocol":1,"decision":"block","reason":"r","no_return":true}"#,
             r#"{"protocol":1,"decision":"replace_output","output":"o","outcomes":["hard_block"],"deciding":"hard_block","no_return":true}"#,
+            r#"{"protocol":1,"decision":"ack","launched":true}"#,
+            r#"{"protocol":1,"decision":"replace_output","output":"o","outcomes":["hard_block"],"deciding":"hard_block","launched":true}"#,
+            r#"{"protocol":1,"decision":"replace_output","output":"o","no_return":true,"launched":true}"#,
         ] {
             let wire: WireDecision = serde_json::from_str(marked).expect("reads");
             assert!(

@@ -11,7 +11,7 @@
 
 pub mod proxy;
 
-use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal};
+use appa_runtime_api::{Adapter, AdapterName, CanonicalTool, IdentifiedTool, ParseRefusal, SpawnLaunch};
 
 const CONTROL: &str = "mcp__appa__execute_remedy_plan";
 
@@ -23,6 +23,8 @@ pub fn adapter() -> Adapter {
         spell,
         wildcard_covers_spawn: false,
         spells_server: |name| name.starts_with("mcp__"),
+        // Amp starts no spawn this runtime checks.
+        spawn_launch: SpawnLaunch::Undeclared,
     }
 }
 

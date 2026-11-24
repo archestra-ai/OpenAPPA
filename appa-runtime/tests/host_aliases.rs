@@ -74,6 +74,7 @@ fn adapter() -> Adapter {
         spell,
         wildcard_covers_spawn: true,
         spells_server: |_| false,
+        spawn_launch: appa_runtime_api::SpawnLaunch::Undeclared,
     }
 }
 

@@ -135,6 +135,11 @@ def test_absent_optionals_stay_off_the_wire():
             wire.Decision(kind="replace_output", output="no message", no_return=True),
         ),
         (
+            "launched",
+            {"decision": "replace_output", "output": '{"subagent_session_id":"c1"}', "launched": True},
+            wire.Decision(kind="replace_output", output='{"subagent_session_id":"c1"}', launched=True),
+        ),
+        (
             "deliver_value",
             {"decision": "deliver_value", "value": "the sanitized ledger"},
             wire.Decision(kind="deliver_value", value="the sanitized ledger"),
@@ -179,6 +184,15 @@ def test_every_decision_envelope_parses(name, body, expected):
         (
             "no_return_not_a_bool",
             b'{"protocol": 1, "decision": "replace_output", "output": "o", "no_return": "yes"}',
+        ),
+        ("launched_on_an_ack", b'{"protocol": 1, "decision": "ack", "launched": true}'),
+        (
+            "launched_beside_no_return",
+            b'{"protocol": 1, "decision": "replace_output", "output": "o", "no_return": true, "launched": true}',
+        ),
+        (
+            "launched_not_a_bool",
+            b'{"protocol": 1, "decision": "replace_output", "output": "o", "launched": 1}',
         ),
         ("deliver_without_value", b'{"protocol": 1, "decision": "deliver_value"}'),
         ("refuse_without_detail", b'{"protocol": 1, "decision": "refuse", "class": "storage"}'),

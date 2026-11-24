@@ -122,6 +122,32 @@ pub(crate) fn carries_no_message(event: &HookEvent) -> bool {
     }
 }
 
+/// The response `event` delivered, as JSON.
+pub(crate) fn response(event: &HookEvent) -> Option<serde_json::Value> {
+    match event {
+        HookEvent::SpawnResult { outcome, .. } | HookEvent::ToolResult { outcome, .. } => delivered(outcome),
+        _ => None,
+    }
+}
+
+/// The `Agent` response's launch fields: the run's metadata keys alone, each conformed to its
+/// known shape, and `content` emptied, since a launch carries no message there. Every other
+/// key is dropped, so a launch reply crosses none of what sits beside its metadata.
+pub(crate) fn launch_fields(report: Option<serde_json::Value>, _spawned: &str) -> serde_json::Value {
+    match report {
+        Some(serde_json::Value::Object(fields)) => serde_json::Value::Object(
+            fields
+                .into_iter()
+                .filter_map(|(key, field)| match key.as_str() {
+                    "content" => Some((key, serde_json::json!([]))),
+                    _ => spawn_metadata(&key).map(|shape| (key, shape.conform(field))),
+                })
+                .collect(),
+        ),
+        _ => serde_json::Value::Object(serde_json::Map::new()),
+    }
+}
+
 /// One delivered response restated in place of itself.
 pub(crate) fn restated(tool: &str, response: serde_json::Value, text: &str) -> Replacement {
     match Restatement::of(tool) {
@@ -932,6 +958,50 @@ mod tests {
                 }
             ),
             rendered("the output was not shown")
+        );
+    }
+
+    /// A launch crosses the run's metadata alone: the recorded launch is its own launch fields
+    /// and rewrites nothing, and a launch carrying anything beside them is restated without it.
+    #[test]
+    fn a_launch_crosses_only_its_run_metadata() {
+        let launched = serde_json::json!({
+            "isAsync": true,
+            "status": "async_launched",
+            "agentId": "a2",
+            "description": "Compute 6*7",
+            "resolvedModel": "claude-opus-5",
+            "prompt": "Compute 6*7",
+            "outputFile": "/tmp/a2.md",
+            "canReadOutputFile": false,
+        });
+        assert_eq!(launch_fields(Some(launched.clone()), "a2"), launched);
+        let mut carrying = launched.clone();
+        carrying["note"] = serde_json::json!("the child's bytes");
+        carrying["content"] = serde_json::json!([{"type": "image", "source": "the child's bytes"}]);
+        let mut fields = launched.clone();
+        fields["content"] = serde_json::json!([]);
+        assert_eq!(launch_fields(Some(carrying.clone()), "a2"), fields);
+        assert_eq!(
+            launch_fields(Some(serde_json::json!("the child's bytes")), "a2"),
+            serde_json::json!({})
+        );
+
+        let answer = |fields: &serde_json::Value| HookDecision::Launched {
+            output: fields.to_string(),
+        };
+        assert_eq!(
+            render(&spawn_result(launched.clone()), &answer(&launched)),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            render(&spawn_result(carrying), &answer(&fields)),
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "updatedToolOutput": fields,
+                }
+            })
         );
     }
 }

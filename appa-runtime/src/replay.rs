@@ -721,6 +721,7 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
         HookDecision::Ack
         | HookDecision::ReplaceOutput { .. }
         | HookDecision::NoReturn { .. }
+        | HookDecision::Launched { .. }
         | HookDecision::DeliverValue { .. } => Ok(()),
         HookDecision::Refuse { detail, .. } => Err(detail),
         HookDecision::Block { reason, .. } => Err(reason),

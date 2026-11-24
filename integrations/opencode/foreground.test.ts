@@ -499,7 +499,8 @@ test('wire launch acknowledgment releases the parent while the background child 
     const launch = flow.find(hook => hook.event.event === 'spawn_result')!
     expect(launch.event.spawned_id).toBe(live.child.id)
     expect(launch.event.value).toBeUndefined()
-    expect(launch.reply.decision).toBe('ack')
+    const launched = launch.event.outcome.body.output
+    expect(launch.reply).toMatchObject({ decision: 'replace_output', launched: true, output: JSON.stringify({ content: launched, output: launched }) })
     expect(flow.some(hook => hook.event.event === 'child_end')).toBe(false)
     await client.session.prompt({ sessionID: live.session.id, text: 'probe-shell:while-child-active' })
     await client.session.wait({ sessionID: live.session.id })

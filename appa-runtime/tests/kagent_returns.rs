@@ -491,15 +491,26 @@ async fn a_spawn_result_carrying_bytes_that_never_crossed_is_withheld() {
 }
 
 /// A spawn result with no `value` while its child still runs with nothing returned is the
-/// launch acknowledgement of a background child: it is acknowledged, and the child's later
-/// return crosses on its own.
+/// launch of a background child: it is answered with kagent's launch fields alone, and the
+/// child's later return crosses on its own.
 #[tokio::test]
 async fn a_spawn_result_before_the_child_returns_is_its_launch_acknowledgement() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let runtime = open(&dir);
     let binding = declared(&runtime, None, None).await;
     assert_eq!(answered(&runtime, child_start(&binding)).await, ack());
-    assert_eq!(answered(&runtime, spawn_result(None)).await, ack());
+    // Only kagent's launch field crosses: the bytes in `result` beside it never do.
+    let (launched, receipt) = receipted(&runtime, spawn_result(None)).await;
+    assert_eq!(
+        launched,
+        serde_json::json!({
+            "protocol": appa_runtime_api::PROTOCOL,
+            "decision": "replace_output",
+            "output": r#"{"subagent_session_id":"c1"}"#,
+            "launched": true,
+        })
+    );
+    assert!(receipt.is_some(), "the admitted launch fields are receipted");
     assert_eq!(answered(&runtime, child_end(RETURN)).await, ack());
     assert_eq!(
         crossings(&runtime),

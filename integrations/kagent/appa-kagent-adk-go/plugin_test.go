@@ -992,6 +992,11 @@ func TestASpawnReplyWithNoMessageKeepsOnlyItsChildsSessionID(t *testing.T) {
 			map[string]any{"result": "no message", "subagent_session_id": "child-ctx"},
 		},
 		{
+			"launched",
+			map[string]any{"protocol": 1, "decision": "replace_output", "output": `{"subagent_session_id":"child-ctx"}`, "launched": true},
+			map[string]any{"subagent_session_id": "child-ctx"},
+		},
+		{
 			"another replacement",
 			map[string]any{"protocol": 1, "decision": "replace_output", "output": "confined"},
 			map[string]any{"result": "confined"},

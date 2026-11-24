@@ -206,6 +206,11 @@ func TestEveryDecisionEnvelopeParses(t *testing.T) {
 			Decision{Kind: "replace_output", Output: "no message", NoReturn: true},
 		},
 		{
+			"launched",
+			`{"protocol": 1, "decision": "replace_output", "output": "{}", "launched": true}`,
+			Decision{Kind: "replace_output", Output: "{}", Launched: true},
+		},
+		{
 			"deliver_value",
 			`{"protocol": 1, "decision": "deliver_value", "value": "the sanitized ledger"}`,
 			Decision{Kind: "deliver_value", Value: "the sanitized ledger"},
@@ -257,6 +262,9 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 		{"replace_without_output", `{"protocol": 1, "decision": "replace_output"}`},
 		{"no_return_on_a_block", `{"protocol": 1, "decision": "block", "reason": "r", "no_return": true}`},
 		{"no_return_not_a_bool", `{"protocol": 1, "decision": "replace_output", "output": "o", "no_return": "yes"}`},
+		{"launched_on_an_ack", `{"protocol": 1, "decision": "ack", "launched": true}`},
+		{"launched_beside_no_return", `{"protocol": 1, "decision": "replace_output", "output": "o", "no_return": true, "launched": true}`},
+		{"launched_not_a_bool", `{"protocol": 1, "decision": "replace_output", "output": "o", "launched": 1}`},
 		{"deliver_without_value", `{"protocol": 1, "decision": "deliver_value"}`},
 		{"refuse_without_detail", `{"protocol": 1, "decision": "refuse", "class": "storage"}`},
 		{"refuse_without_class", `{"protocol": 1, "decision": "refuse", "detail": "d"}`},

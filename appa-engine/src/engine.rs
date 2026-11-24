@@ -869,15 +869,15 @@ impl Engine {
         view.views(child).map_or(0, |views| views.returns_by(child))
     }
 
-    /// Whether `dispatch` closed on a body of its own report's: a repeat of that report answers
-    /// from the close it recorded, whatever the dispatch's child has done since.
-    pub fn closed_on_its_own_body(&self, view: &EngineView, dispatch: &DispatchId) -> bool {
-        let views = view.projection().view(dispatch.trajectory());
-        !views.is_open(dispatch)
-            && matches!(
-                outcome::fixed_observation(&views, dispatch),
-                Some(crate::fact::ObservedResult::Available(_))
-            )
+    /// The observation the log committed for `dispatch`: its success checkpoint while value
+    /// finalization is pending, the close's observation after. A repeat of the report it
+    /// observed answers from it, whatever the dispatch's child has done since.
+    pub fn committed_observation(
+        &self,
+        view: &EngineView,
+        dispatch: &DispatchId,
+    ) -> Option<crate::fact::ObservedResult> {
+        outcome::fixed_observation(&view.projection().view(dispatch.trajectory()), dispatch)
     }
 
     /// The return of the child bound to the spawn `dispatch` that a report of the spawn answers

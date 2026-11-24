@@ -788,6 +788,12 @@ class AppaPluginKagent(BasePlugin):
                     # The bytes the value crossed with, never spelled over:
                     # the parent receives what the runtime admitted.
                     return _spawn_replacement(result, decision.value)
+                # A launch crosses kagent's launch field alone: the child's session id,
+                # which the runtime matched to its bound child.
+                if decision.kind == "replace_output" and decision.launched:
+                    if spawned_id is None:
+                        raise AppaFailClosed("appa answered a launch the plugin named no child for")
+                    return {"subagent_session_id": spawned_id}
                 if decision.kind == "replace_output":
                     replaced: dict[str, Any] = {"result": self._for_model(decision.output, tool_context)}
                     # A reply carrying no message is the named child's, its bound one: its

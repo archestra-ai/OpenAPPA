@@ -15,9 +15,9 @@ pub use release::{ReleaseDigest, ReleaseReceipt, ReleaseRefusal};
 pub use settings::{AutoApply, Initiator, LineVariant, LineVariantError, SessionSettings};
 
 pub use wire::{
-    Accepted, Adapter, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn, OutcomeStatus,
-    PROTOCOL, PrincipalSource, SpellFn, UnsanitizedReturn, WireDecision, WireEvent, WireOffer, WireOutcome, WireReturn,
-    WireReview,
+    Accepted, Adapter, ConformLaunchFn, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn,
+    OutcomeStatus, PROTOCOL, PrincipalSource, SpawnLaunch, SpellFn, UnsanitizedReturn, WireDecision, WireEvent,
+    WireOffer, WireOutcome, WireReturn, WireReview, child_host_id,
 };
 
 /// The hosts this runtime serves over the wire, plus the one that is
@@ -975,6 +975,14 @@ pub enum HookDecision {
     NoReturn {
         output: String,
     },
+    /// The runtime's restatement of a spawn's launch reply, from the child the report named,
+    /// which is the spawn's bound one and runs with nothing returned: `output` is the reply's
+    /// own launch fields, as the host's [`SpawnLaunch`] keeps them, or the runtime's words
+    /// where the host declares none. Nothing else of the reply crossed. On the wire a
+    /// `replace_output` marked `launched`.
+    Launched {
+        output: String,
+    },
     /// The value the engine admitted in place of the raw result: a
     /// confined result the check let through, or a sanitizer's
     /// derivation. It reaches the model as it crossed — a harness
@@ -1039,6 +1047,7 @@ impl HookDecision {
         matches!(
             self,
             HookDecision::Ack
+                | HookDecision::Launched { .. }
                 | HookDecision::DeliverValue { .. }
                 | HookDecision::ChildReturn { .. }
                 | HookDecision::Context { .. }

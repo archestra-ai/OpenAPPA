@@ -1022,6 +1022,15 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
             {"protocol": 1, "decision": "replace_output", "output": "no message", "no_return": True},
             {"result": "no message", "subagent_session_id": "child-ctx"},
         ),
+        (
+            {
+                "protocol": 1,
+                "decision": "replace_output",
+                "output": '{"subagent_session_id":"child-ctx"}',
+                "launched": True,
+            },
+            {"subagent_session_id": "child-ctx"},
+        ),
         ({"protocol": 1, "decision": "replace_output", "output": "confined"}, {"result": "confined"}),
     ],
 )

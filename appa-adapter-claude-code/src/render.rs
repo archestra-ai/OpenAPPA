@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 use appa_runtime_api::{HookDecision, HookEvent, ToolOutcome};
 
-use crate::redact::{Replacement, carries_no_message, replacement, restated, restates};
+use crate::redact::{Replacement, carries_no_message, replacement, response, restated, restates};
 
 pub(crate) fn withheld(reason: &str) -> String {
     format!("[appa] the tool result was withheld: {reason}")
@@ -117,6 +117,22 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
             Some(_) if carries_no_message(event) => serde_json::json!({}),
             Some(replacement) => replaced(replacement, None),
             None => block(output),
+        },
+        // A launch reply restated as its launch fields alone, which rewrites nothing where the
+        // delivered response is those fields already.
+        HookDecision::Launched { output } => match serde_json::from_str::<serde_json::Value>(output) {
+            Ok(fields) if response(event).as_ref() == Some(&fields) => serde_json::json!({}),
+            Ok(fields) => replaced(
+                Replacement {
+                    output: fields,
+                    context: None,
+                },
+                None,
+            ),
+            Err(_) => match replacement(event, output) {
+                Some(replacement) => replaced(replacement, None),
+                None => block(output),
+            },
         },
         // A value the delivered response already says, and nothing beside it, rewrites nothing.
         HookDecision::DeliverValue { value } => match replacement(event, value) {

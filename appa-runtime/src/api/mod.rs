@@ -730,6 +730,13 @@ pub(crate) enum SpawnResultDecision {
     NoReturn {
         output: String,
     },
+    /// The bound child runs with nothing returned: its reply is a launch, and `output` is
+    /// what crossed of it, the host's launch fields alone or the runtime's words in their
+    /// place, with the record that admitted the fields.
+    Launched {
+        output: String,
+        receipt: Option<appa_runtime_api::ReleaseReceipt>,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1196,6 +1203,15 @@ impl ToolNaming {
                 .ok()
                 .and_then(|tool| (adapter.spell)(&tool))
                 .unwrap_or_else(|| recorded.to_string()),
+        }
+    }
+
+    /// The launch fields of the served host's spawn reply. A runtime naming tools as authored
+    /// serves no host whose reply it knows, so it declares none.
+    pub(crate) fn spawn_launch(self) -> appa_runtime_api::SpawnLaunch {
+        match self {
+            ToolNaming::Canonical { adapter } => adapter.spawn_launch,
+            ToolNaming::AsAuthored => appa_runtime_api::SpawnLaunch::Undeclared,
         }
     }
 
@@ -2496,6 +2512,12 @@ impl Runtime {
     /// tool this way.
     pub(crate) fn model_spelling(&self, recorded: &str) -> String {
         self.inner.shared.naming.model_spelling(recorded)
+    }
+
+    /// The launch fields of the spawn reply of the host this deployment serves, for a host
+    /// that hands its events over in process.
+    pub(crate) fn spawn_launch(&self) -> appa_runtime_api::SpawnLaunch {
+        self.inner.shared.naming.spawn_launch()
     }
 
     /// The deployment `appa replay` runs: the same session and engine over a log that lives

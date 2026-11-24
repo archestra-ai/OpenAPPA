@@ -30,7 +30,7 @@ mod render;
 
 pub mod environment;
 
-use appa_runtime_api::{Adapter, AdapterName, Codec};
+use appa_runtime_api::{Adapter, AdapterName, Codec, SpawnLaunch};
 
 /// The client-side shape translation `appa hook` runs.
 pub fn codec() -> Codec {
@@ -52,6 +52,7 @@ pub fn adapter() -> Adapter {
         spell: identity::spell,
         wildcard_covers_spawn: true,
         spells_server: |name| name.starts_with("mcp__"),
+        spawn_launch: SpawnLaunch::Conformed(redact::launch_fields),
     }
 }
 

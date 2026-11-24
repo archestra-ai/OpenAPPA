@@ -212,6 +212,7 @@ version = "0.47.0"
 dependencies = [
  "appa-runtime-api",
  "proptest",
+ "serde_json",
 ]
 
 [[package]]

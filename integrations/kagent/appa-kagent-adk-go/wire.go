@@ -218,6 +218,10 @@ type Decision struct {
 	// from the child the plugin named, its bound one, which carries no
 	// message of the child's.
 	NoReturn bool
+	// Launched marks a replace_output standing in for the launch of the
+	// child the plugin named, its bound one: Output is that reply's
+	// launch fields alone.
+	Launched bool
 }
 
 // Review is one reviewed offer: the id the control call quotes, and the
@@ -378,6 +382,13 @@ func parseDecision(body []byte) (Decision, error) {
 			return Decision{}, wireErrorf("a %s decision with a no_return mark outside the wire: %v", kind, raw)
 		}
 		decision.NoReturn = marked
+	}
+	if raw, present := parsed["launched"]; present {
+		marked, ok := raw.(bool)
+		if !ok || (marked && (kind != "replace_output" || decision.NoReturn)) {
+			return Decision{}, wireErrorf("a %s decision with a launched mark outside the wire: %v", kind, raw)
+		}
+		decision.Launched = marked
 	}
 	if kind == "allow_call" {
 		if binding, present := parsed["spawn_binding"]; present {

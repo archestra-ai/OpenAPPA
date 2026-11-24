@@ -1881,7 +1881,8 @@ ${task.state.value}`;
             if (release === "approved") {
               if (childID)
                 yield* runtime("child_end", { child_id: childID }).pipe(Effect4.catchCause(() => Effect4.void));
-              settled = (yield* runtime("spawn_result", backgroundReport ?? { ...proposal, spawned_id: childID, outcome: { status: "indeterminate" } })).decision === "ack";
+              let ended = yield* runtime("spawn_result", backgroundReport ?? { ...proposal, spawned_id: childID, outcome: { status: "indeterminate" } });
+              settled = ended.decision === "ack" || ended.launched === !0 || ended.no_return === !0;
             }
           }).pipe(Effect4.catchCause(() => input.background === !0 ? Effect4.logWarning("[appencode] Background launch cleanup is unconfirmed.") : Effect4.void)), launch = launches.get(call.sessionID);
           if (!launch)
@@ -1918,11 +1919,13 @@ ${task.state.value}`;
             if (initialPrompts.add(child.id), yield* ctx.session.prompt({ sessionID: child.id, id: child.promptID, text: child.prompt }), input.background === !0)
               return yield* Effect4.gen(function* () {
                 let task = crypto.randomUUID();
-                if (backgroundReport = {
+                backgroundReport = {
                   ...proposal,
                   spawned_id: child.id,
                   outcome: { status: "success", body: { output: task, content: task } }
-                }, (yield* runtime("spawn_result", backgroundReport)).decision !== "ack")
+                };
+                let acknowledged = yield* runtime("spawn_result", backgroundReport);
+                if (acknowledged.decision !== "replace_output" || acknowledged.launched !== !0)
                   throw Error("[appencode] Background launch was not confirmed.");
                 if (disposed)
                   throw Error("[appencode] Plugin disposed during launch.");

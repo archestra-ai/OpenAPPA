@@ -6,6 +6,7 @@ use crate::config::Config;
 use crate::engine::LabelSpelling;
 use appa_engine::fact::{Fact, ReturnPolicy};
 use appa_eventlog::{AheadAttempt, AheadOutcome};
+use appa_runtime_api::SpawnLaunch;
 
 const TOOLS: &str = r#"
 [policy]
@@ -1005,6 +1006,7 @@ async fn a_deferred_spawns_result_carries_the_notice_and_admits_nothing_the_host
             spoken("the answer"),
             Some(child.trajectory.clone()),
             Some("the answer".to_string()),
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the spawn's result is decided");
@@ -1068,6 +1070,7 @@ async fn a_deferred_spawns_result_reported_after_its_acceptance_still_carries_th
             spoken("the answer"),
             Some(child.trajectory.clone()),
             Some("the answer".to_string()),
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the spawn's result is decided");
@@ -1096,6 +1099,7 @@ async fn a_deferred_spawns_reported_failure_closes_its_dispatch_as_failed() {
             failed(),
             Some(child.trajectory.clone()),
             Some("the answer".to_string()),
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the spawn's result is decided");
@@ -1528,6 +1532,7 @@ async fn spawn_result_saying(runtime: &Runtime, child: &Session, said: &str) -> 
             spoken(said),
             Some(child.trajectory.clone()),
             Some(said.to_string()),
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the spawn's result is decided")
@@ -1706,6 +1711,7 @@ async fn a_return_made_through_child_return_reads_back_as_the_notice_through_the
             spoken("the answer"),
             Some(child.trajectory.clone()),
             Some("the answer".to_string()),
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the spawn's result is decided");
@@ -1951,6 +1957,7 @@ async fn a_deciding_spawn_whose_return_crossed_delivers_its_result_as_a_plain_sp
                 spoken("done"),
                 Some(child.trajectory.clone()),
                 Some("done".to_string()),
+                SpawnLaunch::Undeclared,
             )
             .await;
         // Each log places its records apart, so the deliveries compare without their receipts;
@@ -1997,9 +2004,19 @@ async fn a_child_under_a_floor_of_its_own_cannot_spawn_a_deciding_subagent() {
     );
 }
 
-/// A spawn reported with no message, kagent's `result` empty beside keys nothing checked.
-async fn reported_without_a_message(runtime: &Runtime, child: &Session) -> SpawnResultDecision {
+/// A spawn reported with no message, kagent's `result` empty beside keys nothing checked,
+/// by a host whose launch reply has the fields `launch` keeps.
+async fn reported_without_a_message(runtime: &Runtime, child: &Session, launch: SpawnLaunch) -> SpawnResultDecision {
     let reply = serde_json::json!({"result": "", "subagent_session_id": "child-ctx", "note": "the child's bytes"});
+    reported(runtime, child, &reply, launch).await
+}
+
+async fn reported(
+    runtime: &Runtime,
+    child: &Session,
+    reply: &serde_json::Value,
+    launch: SpawnLaunch,
+) -> SpawnResultDecision {
     session(runtime)
         .on_spawn_result_identified(
             call("fetch", 1),
@@ -2007,9 +2024,26 @@ async fn reported_without_a_message(runtime: &Runtime, child: &Session) -> Spawn
             spoken(&reply.to_string()),
             Some(child.trajectory.clone()),
             None,
+            launch,
         )
         .await
         .expect("the spawn's result is decided")
+}
+
+fn kagent() -> SpawnLaunch {
+    appa_adapter_kagent::adapter().spawn_launch
+}
+
+/// The bodies of every value the root admitted, in log order.
+fn admitted_bodies(runtime: &Runtime) -> Vec<String> {
+    let log = runtime.inner.log(&root()).expect("the log reads");
+    log.facts()
+        .iter()
+        .filter_map(|fact| match fact {
+            Fact::ValueAdmitted { value, .. } => Some(value.body.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// A spawn reply with no message from a child that already returned closes with no body and
@@ -2021,7 +2055,7 @@ async fn a_returned_childs_spawn_reply_without_a_message_admits_nothing() {
     crossing(&child, "the answer", "op-1").await;
     let before = admitted(&runtime);
     assert_eq!(
-        reported_without_a_message(&runtime, &child).await,
+        reported_without_a_message(&runtime, &child, kagent()).await,
         SpawnResultDecision::NoReturn {
             output: super::result::NO_RETURN.to_string(),
         }
@@ -2034,26 +2068,75 @@ async fn a_returned_childs_spawn_reply_without_a_message_admits_nothing() {
 }
 
 /// A spawn reply with no message from a child that still runs with nothing returned is its
-/// launch acknowledgement: it closes as the ordinary result of the call, and a repeat of it
-/// once the child returned answers from that close.
+/// launch: it closes on the host's launch fields alone, so nothing beside them — the child's
+/// bytes in `note` included — reaches the parent, and a repeat of it once the child returned
+/// answers from that close.
 #[tokio::test]
-async fn a_launch_acknowledgement_closes_as_the_calls_result_and_its_repeat_answers_from_the_close() {
+async fn a_launch_admits_only_the_hosts_launch_fields_and_its_repeat_answers_from_the_close() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = bound_child(&runtime, 1).await;
+    let before = admitted_bodies(&runtime);
+    let fields = serde_json::json!({"subagent_session_id": "child-1"}).to_string();
+    let launched = reported_without_a_message(&runtime, &child, kagent()).await;
+    assert!(
+        matches!(&launched, SpawnResultDecision::Launched { output, receipt: Some(_) } if *output == fields),
+        "{launched:?}"
+    );
+    assert_eq!(admitted_bodies(&runtime)[before.len()..], [fields]);
+    crossing(&child, "the answer", "op-1").await;
+    let crossed = admitted(&runtime);
+    assert_eq!(reported_without_a_message(&runtime, &child, kagent()).await, launched);
+    assert_eq!(admitted(&runtime), crossed, "the repeat admits nothing anew");
+}
+
+/// A host that declares no launch fields has its launch admit nothing: the runtime's words
+/// stand in for the reply.
+#[tokio::test]
+async fn a_launch_under_a_host_declaring_no_launch_fields_admits_nothing() {
     let Deployed { runtime, .. } = deployed(false);
     let child = bound_child(&runtime, 1).await;
     let before = admitted(&runtime);
-    let launched = reported_without_a_message(&runtime, &child).await;
+    assert_eq!(
+        reported_without_a_message(&runtime, &child, SpawnLaunch::Undeclared).await,
+        SpawnResultDecision::Launched {
+            output: super::result::LAUNCHED.to_string(),
+            receipt: None,
+        }
+    );
+    assert_eq!(admitted(&runtime), before);
+    assert!(
+        runtime.open_dispatches(&root(), &root()).is_empty(),
+        "the reply closed the spawn"
+    );
+}
+
+/// A launch whose fields are past the size limit closes on nothing and is answered with the
+/// limit's notice, and so is its repeat once the child returned.
+#[tokio::test]
+async fn a_launch_past_the_size_limit_answers_with_the_limit_and_so_does_its_repeat() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = bound_child(&runtime, 1).await;
+    let reply = serde_json::json!({
+        "isAsync": true,
+        "status": "async_launched",
+        "agentId": "child-1",
+        "prompt": "p".repeat(70_000),
+    });
+    let launch = appa_adapter_claude_code::adapter().spawn_launch;
+    let before = admitted(&runtime);
+    let launched = reported(&runtime, &child, &reply, launch).await;
     assert!(
         matches!(
-            launched,
-            SpawnResultDecision::Outcome(ToolResultDecision::Keep { receipt: Some(_) })
+            &launched,
+            SpawnResultDecision::Outcome(ToolResultDecision::Replace { .. })
         ),
         "{launched:?}"
     );
-    assert_eq!(admitted(&runtime), before + 1);
     crossing(&child, "the answer", "op-1").await;
     let crossed = admitted(&runtime);
-    assert_eq!(reported_without_a_message(&runtime, &child).await, launched);
-    assert_eq!(admitted(&runtime), crossed, "the repeat admits nothing anew");
+    assert_eq!(reported(&runtime, &child, &reply, launch).await, launched);
+    assert_eq!(admitted(&runtime), crossed);
+    assert_eq!(crossed, before + 1, "only the child's return was admitted");
 }
 
 /// [`MIDDLE`]'s `fetch` behind a `signoff` the authority at `url` rules on.
@@ -2366,6 +2449,7 @@ async fn spawn_reported(runtime: &Runtime, child: &Session, a: i64, said: &str) 
             spoken(said),
             Some(child.trajectory.clone()),
             Some(said.to_string()),
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the spawn result is decided")
@@ -2430,6 +2514,7 @@ async fn a_spawn_result_carrying_more_than_its_crossed_value_delivers_the_value_
                 ToolOutcome::Success { body: body.clone() },
                 Some(child.trajectory.clone()),
                 Some("x".to_string()),
+                SpawnLaunch::Undeclared,
             )
             .await
             .expect("the spawn result is decided");
@@ -2616,6 +2701,7 @@ async fn failed_saying(parent: &Session, child: &Session, said: &str) -> SpawnRe
             },
             Some(child.trajectory.clone()),
             Some(said.to_string()),
+            SpawnLaunch::Undeclared,
         )
         .await
         .expect("the spawn result is decided")

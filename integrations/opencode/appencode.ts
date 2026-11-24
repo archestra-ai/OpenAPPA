@@ -422,7 +422,8 @@ export default Plugin.define({
             if (release === 'approved') {
               if (childID) yield* runtime('child_end', { child_id: childID }).pipe(Effect.catchCause(() => Effect.void))
               const ended = yield* runtime('spawn_result', backgroundReport ?? { ...proposal, spawned_id: childID, outcome: { status: 'indeterminate' } })
-              settled = ended.decision === 'ack'
+              // Each of these closes the spawn: the report settles it either way.
+              settled = ended.decision === 'ack' || ended.launched === true || ended.no_return === true
             }
           }).pipe(Effect.catchCause(() => input.background === true
             ? Effect.logWarning('[appencode] Background launch cleanup is unconfirmed.') : Effect.void))
@@ -458,7 +459,10 @@ export default Plugin.define({
                 backgroundReport = { ...proposal, spawned_id: child.id,
                   outcome: { status: 'success', body: { output: task, content: task } } }
                 const acknowledged = yield* runtime('spawn_result', backgroundReport)
-                if (acknowledged.decision !== 'ack') throw new Error('[appencode] Background launch was not confirmed.')
+                // The runtime restates a launch as its handle fields alone; the plugin's own handle stands.
+                if (acknowledged.decision !== 'replace_output' || acknowledged.launched !== true) {
+                  throw new Error('[appencode] Background launch was not confirmed.')
+                }
                 if (disposed) throw new Error('[appencode] Plugin disposed during launch.')
                 const owned: Task = { handle: task, root: call.sessionID, child: child.id, proposal, promptID: child.promptID,
                   notice: SessionMessage.ID.create(), transition: Semaphore.makeUnsafe(1), state: { status: 'active' } }

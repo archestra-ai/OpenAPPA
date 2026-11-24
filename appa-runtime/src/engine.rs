@@ -2985,9 +2985,13 @@ impl RuntimeEngine {
         self.liveness(view, child) == Liveness::Live && self.engine.returns_by(view, child) == 0
     }
 
-    /// Whether the spawn `dispatch` closed on its report's own body.
-    pub(crate) fn closed_on_its_own_body(&self, view: &EngineView, dispatch: &appa_engine::value::DispatchId) -> bool {
-        self.engine.closed_on_its_own_body(view, dispatch)
+    /// The observation the log committed for `dispatch`, checkpointed or closed.
+    pub(crate) fn committed_observation(
+        &self,
+        view: &EngineView,
+        dispatch: &appa_engine::value::DispatchId,
+    ) -> Option<appa_engine::fact::ObservedResult> {
+        self.engine.committed_observation(view, dispatch)
     }
 
     pub(crate) fn spawn_return(
