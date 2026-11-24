@@ -108,6 +108,12 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
         // runtime's own words about the result. Claude Code dispatches the spellings this
         // adapter identifies from, so nothing here is spelled back and both render alike.
         HookDecision::ReplaceOutput { output, .. } => match replacement(event, output) {
+            Some(replacement) => replaced(replacement, None),
+            None => block(output),
+        },
+        // A spawn reply holding nothing beside the run's own metadata holds nothing of the
+        // child's for the runtime's words to stand in for.
+        HookDecision::NoReturn { output } => match replacement(event, output) {
             Some(_) if carries_no_message(event) => serde_json::json!({}),
             Some(replacement) => replaced(replacement, None),
             None => block(output),

@@ -540,6 +540,7 @@ fn stands_in_for_a_result(decision: &HookDecision) -> bool {
         decision,
         HookDecision::Block { .. }
             | HookDecision::ReplaceOutput { .. }
+            | HookDecision::NoReturn { .. }
             | HookDecision::DeliverValue { .. }
             | HookDecision::ChildReturn { .. }
     )

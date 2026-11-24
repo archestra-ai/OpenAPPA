@@ -298,6 +298,10 @@ class Decision:
     offers: tuple[Offer, ...] = ()
     """On a ``deny_call``: every remedy the block offers, in the order
     the feedback lists them."""
+    no_return: bool = False
+    """On a ``replace_output``: the reply it replaces is the spawn's
+    reply from the child the plugin named, its bound one, and carries no
+    message of the child's."""
 
 
 _DECISION_PAYLOADS: dict[str, tuple[str, ...]] = {
@@ -355,7 +359,10 @@ def parse_decision(body: bytes | str) -> Decision:
         offers = _parse_offers(parsed.get("offers"))
     if kind == "refuse":
         refusal_class = _parse_refusal_class(parsed.get("class"))
-    return Decision(kind=kind, review=review, offers=offers, refusal_class=refusal_class, **fields)
+    no_return = parsed.get("no_return", False)
+    if not isinstance(no_return, bool) or (no_return and kind != "replace_output"):
+        raise WireError(f"a {kind} decision with a no_return mark outside the wire: {no_return!r}")
+    return Decision(kind=kind, review=review, offers=offers, refusal_class=refusal_class, no_return=no_return, **fields)
 
 
 def parse_answer(status: int, body: bytes) -> Decision:

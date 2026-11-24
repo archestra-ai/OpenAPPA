@@ -5589,14 +5589,10 @@ async fn a_spawn_result_naming_an_unstarted_child_binds_it_and_closes_the_spawn(
         )
         .await
         .expect("the spawn result binds the child and closes");
-    assert!(
-        matches!(
-            &decision,
-            SpawnResultDecision::Outcome(ToolResultDecision::Replace { placeholder, .. })
-                if placeholder == super::result::NO_RETURN
-        ),
-        "a reply carrying no message admits none of its bytes: {decision:?}"
-    );
+    assert!(matches!(
+        &decision,
+        SpawnResultDecision::Outcome(ToolResultDecision::Keep { .. })
+    ));
     assert!(!dispatch_open(&runtime, &root()), "the spawn dispatch closed");
     assert!(opened(&runtime, &child("c1")), "the spawn result opened the child");
     assert!(runtime.live(&root(), &child("c1")).is_ok(), "the child is live");

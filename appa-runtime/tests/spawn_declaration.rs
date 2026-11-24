@@ -185,7 +185,7 @@ async fn a_declaration_ahead_releases_the_next_spawn_without_a_block_and_only_th
     let spawn = hook(&events(), "PreToolUse", "Agent", false);
     control_hook(&runtime, &spawn, serde_json::json!({})).await;
     let declared = declare_ahead(&runtime, &actor_of(&spawn), ahead(this_label())).await;
-    let RemedyOutcome::Returned { value } = declared else {
+    let RemedyOutcome::Returned { value, .. } = declared else {
         panic!("the declaration is taken, got {declared:?}");
     };
     assert!(value.starts_with("[appa] Declared."), "{value}");

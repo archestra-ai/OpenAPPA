@@ -620,6 +620,7 @@ impl Run<'_> {
         match hooks::handle(&self.agent.runtime, event).await {
             HookDecision::Ack
             | HookDecision::ReplaceOutput { .. }
+            | HookDecision::NoReturn { .. }
             | HookDecision::DeliverValue { .. }
             | HookDecision::Block { .. }
             | HookDecision::Refuse { .. } => {}
@@ -792,7 +793,7 @@ impl Run<'_> {
             }
         };
         let (record, reply) = match outcome {
-            RemedyOutcome::Returned { value } if declares => (
+            RemedyOutcome::Returned { value, .. } if declares => (
                 Record::OfferTaken {
                     call: id,
                     detail: "the next subagent call's return is declared".to_string(),
@@ -812,7 +813,7 @@ impl Run<'_> {
                     call.arguments.get(),
                 ),
             ),
-            RemedyOutcome::Returned { value } => (
+            RemedyOutcome::Returned { value, .. } => (
                 Record::OfferTaken {
                     call: id,
                     detail: "a value crossed".to_string(),

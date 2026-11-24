@@ -886,11 +886,12 @@ mod tests {
         }
     }
 
-    /// A background launch's acknowledgement holds the run's metadata alone, none of the
-    /// child's bytes, so the runtime's words standing in for a message rewrite nothing; the
-    /// same acknowledgement beside a payload is restated without it.
+    /// A spawn reply holding the run's metadata alone holds none of the child's bytes, so the
+    /// runtime's words for a reply with no message rewrite nothing; the same reply beside a
+    /// payload is restated without it, and any other notice in the reply's place, a size
+    /// limit's among them, still reaches the model.
     #[test]
-    fn a_launch_acknowledgement_is_kept_unless_a_payload_sits_beside_it() {
+    fn a_metadata_only_spawn_reply_is_kept_only_for_the_no_return_answer() {
         let launched = serde_json::json!({
             "isAsync": true,
             "status": "async_launched",
@@ -901,29 +902,36 @@ mod tests {
             "outputFile": "/tmp/a2.md",
             "canReadOutputFile": false,
         });
-        let no_message = HookDecision::ReplaceOutput {
+        let no_return = HookDecision::NoReturn {
             output: "no message".to_string(),
-            outcomes: None,
         };
-        for kept in [launched.clone(), {
-            let mut empty = launched.clone();
-            empty["content"] = serde_json::json!([]);
-            empty
-        }] {
-            assert_eq!(render(&spawn_result(kept), &no_message), serde_json::json!({}));
+        let mut empty = launched.clone();
+        empty["content"] = serde_json::json!([]);
+        for kept in [launched.clone(), empty] {
+            assert_eq!(render(&spawn_result(kept), &no_return), serde_json::json!({}));
         }
-        let mut carrying = launched.clone();
-        carrying["extra"] = serde_json::json!("the child's bytes");
-        let mut replaced = launched;
-        replaced["content"] = serde_json::json!([{"type": "text", "text": "no message"}]);
-        assert_eq!(
-            render(&spawn_result(carrying), &no_message),
+        let rendered = |output: &str| {
+            let mut replaced = launched.clone();
+            replaced["content"] = serde_json::json!([{"type": "text", "text": output}]);
             serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PostToolUse",
                     "updatedToolOutput": replaced,
                 }
             })
+        };
+        let mut carrying = launched.clone();
+        carrying["extra"] = serde_json::json!("the child's bytes");
+        assert_eq!(render(&spawn_result(carrying), &no_return), rendered("no message"));
+        assert_eq!(
+            render(
+                &spawn_result(launched.clone()),
+                &HookDecision::ReplaceOutput {
+                    output: "the output was not shown".to_string(),
+                    outcomes: None,
+                }
+            ),
+            rendered("the output was not shown")
         );
     }
 }

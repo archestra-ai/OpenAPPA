@@ -47,8 +47,8 @@ pub(super) enum SpawnPlan {
         crossing: appa_engine::value::ChildReturnId,
     },
     Withheld,
-    /// A success that carries no message: the harness's own acknowledgement, or a reply whose
-    /// message is empty. It closes as a success with no body, and none of its bytes cross.
+    /// A success that carries no message from a child that ended or already returned. It
+    /// closes as a success with no body, and none of its bytes cross.
     Unspoken,
     Close(EventError),
 }
@@ -365,6 +365,16 @@ impl Session {
                             }
                             (ForkStatus::Bound(bound), Some(child)) if *child == bound => match &value {
                                 None => match &outcome {
+                                    // A launch acknowledgement: the child runs with nothing
+                                    // returned, so the reply cannot hold its return, which
+                                    // crosses at its own stop. A repeat of a report whose close
+                                    // took its body answers from that close.
+                                    ToolOutcome::Success { .. }
+                                        if context.engine().closed_on_its_own_body(context.view, &dispatch)
+                                            || context.engine().runs_unreturned(context.view, &bound) =>
+                                    {
+                                        SpawnPlan::Outcome
+                                    }
                                     ToolOutcome::Success { .. } => SpawnPlan::Unspoken,
                                     _ => SpawnPlan::Outcome,
                                 },
@@ -474,10 +484,9 @@ impl Session {
                 }
                 SpawnPlan::Unspoken => {
                     outcome_decision(decision, &self.deployment().externals)?;
-                    return Ok(SpawnResultDecision::Outcome(ToolResultDecision::Replace {
-                        placeholder: NO_RETURN.to_string(),
-                        presentation: None,
-                    }));
+                    return Ok(SpawnResultDecision::NoReturn {
+                        output: NO_RETURN.to_string(),
+                    });
                 }
                 SpawnPlan::Withheld => {
                     outcome_decision(decision, &self.deployment().externals)?;

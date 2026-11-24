@@ -330,7 +330,7 @@ async fn a_bound_secret_masker_delivers_the_masked_shell_output() {
         "the host learns the staged residual waits on consent"
     );
     assert!(output.contains("public -> internal"), "never `self`: {output}");
-    let RemedyOutcome::Returned { value } = runtime.execute_remedy(&actor(), last_offer(&output)).await else {
+    let RemedyOutcome::Returned { value, .. } = runtime.execute_remedy(&actor(), last_offer(&output)).await else {
         panic!("accepting the residual returns the masked output");
     };
     assert_eq!(value, "GITHUB_TOKEN=[redacted-secret]\nREGION=[redacted-secret]\n");

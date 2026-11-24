@@ -869,6 +869,17 @@ impl Engine {
         view.views(child).map_or(0, |views| views.returns_by(child))
     }
 
+    /// Whether `dispatch` closed on a body of its own report's: a repeat of that report answers
+    /// from the close it recorded, whatever the dispatch's child has done since.
+    pub fn closed_on_its_own_body(&self, view: &EngineView, dispatch: &DispatchId) -> bool {
+        let views = view.projection().view(dispatch.trajectory());
+        !views.is_open(dispatch)
+            && matches!(
+                outcome::fixed_observation(&views, dispatch),
+                Some(crate::fact::ObservedResult::Available(_))
+            )
+    }
+
     /// The return of the child bound to the spawn `dispatch` that a report of the spawn answers
     /// with, beside the record that admitted it into the parent: the child's latest crossing
     /// while the dispatch stands open, the one its close delivered after. A report repeating it

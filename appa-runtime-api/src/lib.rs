@@ -968,6 +968,13 @@ pub enum HookDecision {
         /// Why the result was withheld, when a refusal withheld it.
         outcomes: Option<Outcomes>,
     },
+    /// The runtime's own words in place of a spawn's reply that carries no message, from the
+    /// child the report named, which is the spawn's bound one and has ended or already
+    /// returned: nothing of the reply crossed. On the wire a `replace_output` marked
+    /// `no_return`, so a host that reads no mark replaces the reply as it would any other.
+    NoReturn {
+        output: String,
+    },
     /// The value the engine admitted in place of the raw result: a
     /// confined result the check let through, or a sanitizer's
     /// derivation. It reaches the model as it crossed — a harness

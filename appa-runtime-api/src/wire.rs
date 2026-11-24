@@ -1477,6 +1477,10 @@ pub struct WireDecision {
     /// result, a crossed return, or a turn's answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipt: Option<ReleaseReceipt>,
+    /// On a `replace_output`: the reply it replaces is the named bound child's spawn reply,
+    /// carrying no message of the child's ([`HookDecision::NoReturn`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_return: bool,
 }
 
 impl WireDecision {
@@ -1499,6 +1503,7 @@ impl WireDecision {
             deciding: None,
             retry: None,
             receipt: None,
+            no_return: false,
         }
     }
 
@@ -1573,6 +1578,11 @@ impl WireDecision {
                 output: Some(output.clone()),
                 ..Self::refusal(outcomes.as_ref(), DecisionName::ReplaceOutput)
             },
+            HookDecision::NoReturn { output } => Self {
+                output: Some(output.clone()),
+                no_return: true,
+                ..Self::bare(DecisionName::ReplaceOutput)
+            },
             HookDecision::DeliverValue { value } => Self {
                 value: Some(value.clone()),
                 ..Self::bare(DecisionName::DeliverValue)
@@ -1630,6 +1640,9 @@ impl WireDecision {
             }
             _ => {}
         }
+        if self.no_return && name != DecisionName::ReplaceOutput {
+            return Err(malformed(format!("{name:?} marked no_return")));
+        }
         let receipted = self.receipt.is_some();
         let decision = match name {
             DecisionName::Ack => HookDecision::Ack,
@@ -1678,9 +1691,15 @@ impl WireDecision {
                 reason: required("reason", self.reason)?,
                 outcomes: unremedied()?,
             },
-            DecisionName::ReplaceOutput => HookDecision::ReplaceOutput {
-                output: required("output", self.output)?,
-                outcomes: unremedied()?,
+            DecisionName::ReplaceOutput => match (self.no_return, unremedied()?) {
+                (true, None) => HookDecision::NoReturn {
+                    output: required("output", self.output)?,
+                },
+                (true, Some(_)) => return Err(malformed(format!("{name:?} marked no_return with outcomes"))),
+                (false, outcomes) => HookDecision::ReplaceOutput {
+                    output: required("output", self.output)?,
+                    outcomes,
+                },
             },
             DecisionName::DeliverValue => HookDecision::DeliverValue {
                 value: required("value", self.value)?,
@@ -3419,6 +3438,9 @@ mod tests {
                 output: "o".to_string(),
                 outcomes: Some(Outcomes::Remediable(Remediable::new(Remedy::Consent, []))),
             },
+            HookDecision::NoReturn {
+                output: "o".to_string(),
+            },
             HookDecision::DeliverValue { value: "v".to_string() },
             HookDecision::ChildReturn { value: "v".to_string() },
             HookDecision::DeferReturn,
@@ -3437,6 +3459,25 @@ mod tests {
             let json = serde_json::to_string(&wire).expect("serializes");
             let back: WireDecision = serde_json::from_str(&json).expect("reads");
             assert_eq!(back.into_decision().expect("parses"), decision, "{json}");
+        }
+        // The no-return mark is a replacement's alone, and names no refusal.
+        let unmarked: WireDecision = serde_json::from_str(
+            r#"{"protocol":1,"decision":"replace_output","output":"o","outcomes":["hard_block"],"deciding":"hard_block"}"#,
+        )
+        .expect("reads");
+        assert!(matches!(
+            unmarked.into_decision(),
+            Ok(HookDecision::ReplaceOutput { .. })
+        ));
+        for marked in [
+            r#"{"protocol":1,"decision":"block","reason":"r","no_return":true}"#,
+            r#"{"protocol":1,"decision":"replace_output","output":"o","outcomes":["hard_block"],"deciding":"hard_block","no_return":true}"#,
+        ] {
+            let wire: WireDecision = serde_json::from_str(marked).expect("reads");
+            assert!(
+                matches!(wire.into_decision(), Err(ParseRefusal::Malformed { .. })),
+                "{marked}"
+            );
         }
         let offers = serde_json::to_value(WireDecision::of(&HookDecision::DenyCall {
             feedback: "no".to_string(),

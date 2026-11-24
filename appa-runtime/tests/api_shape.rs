@@ -190,7 +190,7 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::Block { reason, .. } => {
             let _: String = reason;
         }
-        HookDecision::ReplaceOutput { output, .. } => {
+        HookDecision::ReplaceOutput { output, .. } | HookDecision::NoReturn { output } => {
             let _: String = output;
         }
         HookDecision::DeliverValue { value } => {
@@ -293,8 +293,9 @@ async fn the_declared_remedy_entry(runtime: &Runtime, acting: &Actor, offer: Off
         RemedyOutcome::Authorized { call } => {
             let _: ProposedCall = call;
         }
-        RemedyOutcome::Returned { value } => {
+        RemedyOutcome::Returned { value, receipt } => {
             let _: String = value;
+            let _: Option<appa_runtime_api::ReleaseReceipt> = receipt;
         }
         RemedyOutcome::Declined { presentation } => {
             let _: String = presentation.feedback;

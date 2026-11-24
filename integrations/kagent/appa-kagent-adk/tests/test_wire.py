@@ -130,6 +130,11 @@ def test_absent_optionals_stay_off_the_wire():
             wire.Decision(kind="replace_output", output="the output is confined"),
         ),
         (
+            "no_return",
+            {"decision": "replace_output", "output": "no message", "no_return": True},
+            wire.Decision(kind="replace_output", output="no message", no_return=True),
+        ),
+        (
             "deliver_value",
             {"decision": "deliver_value", "value": "the sanitized ledger"},
             wire.Decision(kind="deliver_value", value="the sanitized ledger"),
@@ -170,6 +175,11 @@ def test_every_decision_envelope_parses(name, body, expected):
         ("deny_without_feedback", b'{"protocol": 1, "decision": "deny_call"}'),
         ("block_without_reason", b'{"protocol": 1, "decision": "block"}'),
         ("replace_without_output", b'{"protocol": 1, "decision": "replace_output"}'),
+        ("no_return_on_a_block", b'{"protocol": 1, "decision": "block", "reason": "r", "no_return": true}'),
+        (
+            "no_return_not_a_bool",
+            b'{"protocol": 1, "decision": "replace_output", "output": "o", "no_return": "yes"}',
+        ),
         ("deliver_without_value", b'{"protocol": 1, "decision": "deliver_value"}'),
         ("refuse_without_detail", b'{"protocol": 1, "decision": "refuse", "class": "storage"}'),
         ("refuse_without_class", b'{"protocol": 1, "decision": "refuse", "detail": "d"}'),

@@ -980,6 +980,40 @@ func TestAChildReturnSubstitutesWhatTheParentReceives(t *testing.T) {
 	}
 }
 
+func TestASpawnReplyWithNoMessageKeepsOnlyItsChildsSessionID(t *testing.T) {
+	cases := []struct {
+		name     string
+		decision map[string]any
+		want     map[string]any
+	}{
+		{
+			"no return",
+			map[string]any{"protocol": 1, "decision": "replace_output", "output": "no message", "no_return": true},
+			map[string]any{"result": "no message", "subagent_session_id": "child-ctx"},
+		},
+		{
+			"another replacement",
+			map[string]any{"protocol": 1, "decision": "replace_output", "output": "confined"},
+			map[string]any{"result": "confined"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := pluginOver(t, newHook(t, c.decision))
+			returned, err := p.afterTool(
+				newFakeContext(newFakeSession("s1")), &fakeTool{"kagent__NS__billing_agent"},
+				map[string]any{},
+				map[string]any{"result": "", "subagent_session_id": "child-ctx", "note": "bytes no stop checked"}, nil)
+			if err != nil {
+				t.Fatalf("the replacement must reach the parent, not fail: %v", err)
+			}
+			if !reflect.DeepEqual(returned, c.want) {
+				t.Errorf("got %v, want %v", returned, c.want)
+			}
+		})
+	}
+}
+
 func TestADeliveredSpawnValueReplacesTheReplyUnlessItIsTheWholeReply(t *testing.T) {
 	const value = "the total is 42"
 	cases := []struct {

@@ -863,6 +863,17 @@ async fn deferred_answer(runtime: &Runtime) -> (Session, crate::api::DeferredRet
     (child, notice)
 }
 
+/// The value a control call returned, where the return crossed as a record it names.
+fn crossed_value(outcome: &RemedyOutcome) -> Option<&str> {
+    match outcome {
+        RemedyOutcome::Returned {
+            value,
+            receipt: Some(_),
+        } => Some(value),
+        _ => None,
+    }
+}
+
 async fn settling(runtime: &Runtime, actor: &Actor, reference: &crate::api::ReturnReference) -> RemedyOutcome {
     let args =
         serde_json::from_value(serde_json::json!({ "offer_id": reference.as_str() })).expect("the arguments parse");
@@ -876,12 +887,7 @@ async fn accepting_a_deferred_return_crosses_it_once_as_the_control_calls_result
     assert!(runtime.owns_return(&parent(), &notice.accept));
 
     let accepted = settling(&runtime, &parent(), &notice.accept).await;
-    assert_eq!(
-        accepted,
-        RemedyOutcome::Returned {
-            value: "the answer".to_string()
-        }
-    );
+    assert_eq!(crossed_value(&accepted), Some("the answer"));
     assert_eq!(crossings(&runtime), 1);
 
     // A settled return answers its recorded outcome, whichever decision the repeat names.
@@ -903,12 +909,13 @@ async fn accepting_a_deferred_return_crosses_it_once_as_the_control_calls_result
 async fn an_accepted_held_returns_receipt_releases_to_a_sink() {
     let Deployed { runtime, .. } = deployed(false);
     let (_, notice) = deferred_answer(&runtime).await;
-    let accepted = session(&runtime)
-        .on_settle(&notice.accept)
-        .await
-        .expect("the parent accepts its return");
-    let crate::api::SettlementDecision::Accepted { value, receipt } = accepted else {
-        panic!("the return is accepted: {accepted:?}");
+    let accepted = settling(&runtime, &parent(), &notice.accept).await;
+    let RemedyOutcome::Returned {
+        value,
+        receipt: Some(receipt),
+    } = accepted
+    else {
+        panic!("the return is accepted with its receipt: {accepted:?}");
     };
     assert_eq!(value, "the answer");
     assert_eq!(receipt.digest, appa_runtime_api::ReleaseDigest::of(b"the answer"));
@@ -1011,10 +1018,8 @@ async fn a_deferred_spawns_result_carries_the_notice_and_admits_nothing_the_host
     assert_eq!(admitted(&runtime), before);
     assert_eq!(crossings(&runtime), 0);
     assert_eq!(
-        settling(&runtime, &parent(), &notice.accept).await,
-        RemedyOutcome::Returned {
-            value: "the answer".to_string()
-        },
+        crossed_value(&settling(&runtime, &parent(), &notice.accept).await),
+        Some("the answer"),
         "the closed dispatch leaves the decision open"
     );
 }
@@ -1238,12 +1243,7 @@ async fn held_returns_settle_out_of_order_and_repeated_settlements_replay() {
     let [first, second] = notices(&runtime).try_into().expect("two occurrences");
 
     let accepted = settling(&runtime, &parent(), &second.accept).await;
-    assert_eq!(
-        accepted,
-        RemedyOutcome::Returned {
-            value: "turn two".to_string()
-        }
-    );
+    assert_eq!(crossed_value(&accepted), Some("turn two"));
     let discarded = settling(&runtime, &parent(), &first.discard).await;
     assert!(matches!(discarded, RemedyOutcome::Returned { .. }), "{discarded:?}");
     assert_eq!(
@@ -1718,10 +1718,8 @@ async fn a_return_made_through_child_return_reads_back_as_the_notice_through_the
     );
     assert_eq!(admitted(&runtime), before);
     assert_eq!(
-        settling(&runtime, &parent(), &notice.accept).await,
-        RemedyOutcome::Returned {
-            value: "the answer".to_string()
-        }
+        crossed_value(&settling(&runtime, &parent(), &notice.accept).await),
+        Some("the answer")
     );
     assert_eq!(
         runtime
@@ -1881,10 +1879,8 @@ async fn a_return_below_a_deciding_spawns_floor_is_held_accepted_and_its_stop_en
     assert_eq!((crossings(runtime), held_records(runtime)), (0, 1));
     let [held] = notices(runtime).try_into().expect("one occurrence");
     assert_eq!(
-        settling(runtime, &parent(), &held.accept).await,
-        RemedyOutcome::Returned {
-            value: "found".to_string()
-        }
+        crossed_value(&settling(runtime, &parent(), &held.accept).await),
+        Some("found")
     );
     // The parent took the child's label: its stop crosses, and the child ends.
     assert!(matches!(
@@ -2001,49 +1997,63 @@ async fn a_child_under_a_floor_of_its_own_cannot_spawn_a_deciding_subagent() {
     );
 }
 
-/// A bound spawn's reply that carries no message of the child's — kagent's `result` empty
-/// beside keys nothing checked — closes with no body and admits none of its bytes, whatever
-/// the spawn declares: the harness is answered with the runtime's words in its place.
-#[tokio::test]
-async fn a_bound_spawns_reply_without_a_message_admits_nothing_whatever_it_declares() {
+/// A spawn reported with no message, kagent's `result` empty beside keys nothing checked.
+async fn reported_without_a_message(runtime: &Runtime, child: &Session) -> SpawnResultDecision {
     let reply = serde_json::json!({"result": "", "subagent_session_id": "child-ctx", "note": "the child's bytes"});
-    for declares in [
-        DeclaredReturn::Arguments(as_spoken()),
-        DeclaredReturn::Decides(LabelSpelling::default()),
-    ] {
-        let Deployed { runtime, .. } = deployed(false);
-        let fork = binding(
-            session(&runtime)
-                .on_spawn_declaring(call("fetch", 1), Some("toolu-1".to_string()), None, declares)
-                .await,
-        );
-        let child = session(&runtime)
-            .on_child_start(TrajectoryId("cc:root:child".to_string()), SpawnRef::Binding(fork))
-            .expect("the fork binds and the child opens");
-        let before = admitted(&runtime);
-        let decided = session(&runtime)
-            .on_spawn_result_identified(
-                call("fetch", 1),
-                Some("toolu-1".to_string()),
-                spoken(&reply.to_string()),
-                Some(child.trajectory.clone()),
-                None,
-            )
-            .await
-            .expect("the spawn's result is decided");
-        assert_eq!(
-            decided,
-            SpawnResultDecision::Outcome(ToolResultDecision::Replace {
-                placeholder: super::result::NO_RETURN.to_string(),
-                presentation: None,
-            })
-        );
-        assert_eq!(admitted(&runtime), before);
-        assert!(
-            runtime.open_dispatches(&root(), &root()).is_empty(),
-            "the reply closed the spawn"
-        );
-    }
+    session(runtime)
+        .on_spawn_result_identified(
+            call("fetch", 1),
+            Some("toolu-1".to_string()),
+            spoken(&reply.to_string()),
+            Some(child.trajectory.clone()),
+            None,
+        )
+        .await
+        .expect("the spawn's result is decided")
+}
+
+/// A spawn reply with no message from a child that already returned closes with no body and
+/// admits none of its bytes: the harness is answered with the runtime's words in its place.
+#[tokio::test]
+async fn a_returned_childs_spawn_reply_without_a_message_admits_nothing() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = bound_child(&runtime, 1).await;
+    crossing(&child, "the answer", "op-1").await;
+    let before = admitted(&runtime);
+    assert_eq!(
+        reported_without_a_message(&runtime, &child).await,
+        SpawnResultDecision::NoReturn {
+            output: super::result::NO_RETURN.to_string(),
+        }
+    );
+    assert_eq!(admitted(&runtime), before);
+    assert!(
+        runtime.open_dispatches(&root(), &root()).is_empty(),
+        "the reply closed the spawn"
+    );
+}
+
+/// A spawn reply with no message from a child that still runs with nothing returned is its
+/// launch acknowledgement: it closes as the ordinary result of the call, and a repeat of it
+/// once the child returned answers from that close.
+#[tokio::test]
+async fn a_launch_acknowledgement_closes_as_the_calls_result_and_its_repeat_answers_from_the_close() {
+    let Deployed { runtime, .. } = deployed(false);
+    let child = bound_child(&runtime, 1).await;
+    let before = admitted(&runtime);
+    let launched = reported_without_a_message(&runtime, &child).await;
+    assert!(
+        matches!(
+            launched,
+            SpawnResultDecision::Outcome(ToolResultDecision::Keep { receipt: Some(_) })
+        ),
+        "{launched:?}"
+    );
+    assert_eq!(admitted(&runtime), before + 1);
+    crossing(&child, "the answer", "op-1").await;
+    let crossed = admitted(&runtime);
+    assert_eq!(reported_without_a_message(&runtime, &child).await, launched);
+    assert_eq!(admitted(&runtime), crossed, "the repeat admits nothing anew");
 }
 
 /// [`MIDDLE`]'s `fetch` behind a `signoff` the authority at `url` rules on.
@@ -2280,10 +2290,8 @@ async fn a_replayed_return_carries_the_receipt_of_the_occurrence_it_replays() {
     // The parent now accepts the earlier held occurrence.
     let [first] = notices(&runtime).try_into().expect("one held occurrence");
     assert_eq!(
-        settling(&runtime, &parent(), &first.accept).await,
-        RemedyOutcome::Returned {
-            value: "turn one".to_string()
-        }
+        crossed_value(&settling(&runtime, &parent(), &first.accept).await),
+        Some("turn one")
     );
 
     // The child stops repeating its latest return: the engine replays "turn two".

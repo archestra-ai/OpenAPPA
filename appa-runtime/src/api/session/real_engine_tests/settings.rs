@@ -742,13 +742,15 @@ async fn a_staged_narrowing_is_accepted_at_the_result_only_under_rulings_and_acc
                     root: root(),
                     child: Some(TrajectoryId("cc:child".to_string())),
                 };
-                assert_eq!(
-                    runtime
-                        .execute_remedy(&child, OfferId(presentation.offers[0].id.clone()))
-                        .await,
-                    crate::api::RemedyOutcome::Returned {
-                        value: "scrubbed".to_string()
-                    }
+                let returned = runtime
+                    .execute_remedy(&child, OfferId(presentation.offers[0].id.clone()))
+                    .await;
+                assert!(
+                    matches!(
+                        &returned,
+                        crate::api::RemedyOutcome::Returned { value, receipt: Some(_) } if value == "scrubbed"
+                    ),
+                    "{returned:?}"
                 );
                 assert_eq!(acceptances(&runtime, "cc:child"), [Some(Initiator::Agent)]);
             }

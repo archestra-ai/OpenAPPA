@@ -1016,6 +1016,27 @@ async def test_a_child_return_substitutes_what_the_parent_receives():
 
 
 @pytest.mark.parametrize(
+    "decision,returned",
+    [
+        (
+            {"protocol": 1, "decision": "replace_output", "output": "no message", "no_return": True},
+            {"result": "no message", "subagent_session_id": "child-ctx"},
+        ),
+        ({"protocol": 1, "decision": "replace_output", "output": "confined"}, {"result": "confined"}),
+    ],
+)
+async def test_a_spawn_reply_with_no_message_keeps_only_its_childs_session_id(decision, returned):
+    plugin = plugin_over(Hook(decision))
+    replaced = await plugin.after_tool_callback(
+        tool=FakeTool("kagent__NS__billing_agent"),
+        tool_args={},
+        tool_context=FakeContext(FakeSession("s1")),
+        result={"result": "", "subagent_session_id": "child-ctx", "note": "bytes no stop checked"},
+    )
+    assert replaced == returned
+
+
+@pytest.mark.parametrize(
     "result,returned",
     [
         ({"result": "the total is 42", "subagent_session_id": "child-ctx"}, None),

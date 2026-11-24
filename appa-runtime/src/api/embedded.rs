@@ -828,6 +828,7 @@ impl TryFrom<&EmbeddedHookOutcome> for StoredOutcome {
             | HookDecision::DeferReturn
             | HookDecision::DenyCall { .. }
             | HookDecision::Block { .. }
+            | HookDecision::NoReturn { .. }
             | HookDecision::Refuse { .. }
             | HookDecision::Held { .. } => Err(refused("this read did not admit the stored message")),
         }

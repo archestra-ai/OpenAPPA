@@ -1452,7 +1452,14 @@ func (p *AppaPluginKagent) afterTool(ctx agent.Context, t tool.Tool, args, resul
 			// the parent receives what the runtime admitted.
 			return spawnReplacement(result, decision.Value), nil
 		case "replace_output":
-			return map[string]any{"result": p.forModel(ctx, decision.Output)}, nil
+			replaced := map[string]any{"result": p.forModel(ctx, decision.Output)}
+			// A reply carrying no message is the named child's, its bound
+			// one: its session id stays for the UI to follow the child, and
+			// nothing else does.
+			if decision.NoReturn && spawnedID != "" {
+				replaced["subagent_session_id"] = spawnedID
+			}
+			return replaced, nil
 		case "block":
 			return withheldResult(p.forModel(ctx, decision.Reason)), nil
 		default:

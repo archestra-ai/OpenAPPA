@@ -490,6 +490,24 @@ async fn a_spawn_result_carrying_bytes_that_never_crossed_is_withheld() {
     assert_eq!(crossings(&runtime), vec![None], "only the child's own return crossed");
 }
 
+/// A spawn result with no `value` while its child still runs with nothing returned is the
+/// launch acknowledgement of a background child: it is acknowledged, and the child's later
+/// return crosses on its own.
+#[tokio::test]
+async fn a_spawn_result_before_the_child_returns_is_its_launch_acknowledgement() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open(&dir);
+    let binding = declared(&runtime, None, None).await;
+    assert_eq!(answered(&runtime, child_start(&binding)).await, ack());
+    assert_eq!(answered(&runtime, spawn_result(None)).await, ack());
+    assert_eq!(answered(&runtime, child_end(RETURN)).await, ack());
+    assert_eq!(
+        crossings(&runtime),
+        vec![None],
+        "the child's return crossed at its stop"
+    );
+}
+
 /// The plugin holds bytes that are not what crossed, so it sends no `value`. None of the
 /// reply's bytes cross, and the runtime's words stand in for it.
 #[tokio::test]
@@ -501,7 +519,11 @@ async fn a_spawn_result_that_omits_the_value_admits_none_of_its_bytes() {
     assert_eq!(answered(&runtime, child_end(RETURN)).await, ack());
 
     let replaced = answered(&runtime, spawn_result(None)).await;
-    assert_eq!(replaced["decision"], "replace_output", "{replaced}");
+    assert_eq!(
+        (&replaced["decision"], &replaced["no_return"]),
+        (&serde_json::json!("replace_output"), &serde_json::json!(true)),
+        "{replaced}"
+    );
     assert_eq!(crossings(&runtime), vec![None], "an omitted value crosses nothing");
 }
 

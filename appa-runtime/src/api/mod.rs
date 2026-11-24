@@ -601,11 +601,24 @@ impl RemedyAttempt {
 /// never an engine decision.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
-    Authorized { call: ProposedCall },
-    Returned { value: String },
-    Declined { presentation: RemedyPresentation },
-    NoAnswer { feedback: String },
-    Refused { reason: RemedyRefusal },
+    Authorized {
+        call: ProposedCall,
+    },
+    /// A return crossed or settled. `receipt` names the record a crossed or accepted return
+    /// crossed as, for a sink judged on it; a discarded return crossed none.
+    Returned {
+        value: String,
+        receipt: Option<appa_runtime_api::ReleaseReceipt>,
+    },
+    Declined {
+        presentation: RemedyPresentation,
+    },
+    NoAnswer {
+        feedback: String,
+    },
+    Refused {
+        reason: RemedyRefusal,
+    },
 }
 
 /// A family log other writers kept contended: nothing was decided, and asking again later
@@ -713,6 +726,10 @@ pub(crate) enum ChildReturnDecision {
 pub(crate) enum SpawnResultDecision {
     Return(ChildReturnDecision),
     Outcome(ToolResultDecision),
+    /// The bound child's reply carried no message, and nothing of it crossed.
+    NoReturn {
+        output: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -3599,7 +3616,7 @@ impl Runtime {
                 self.model_spelling(&call.tool),
                 call.arguments.get(),
             )),
-            RemedyOutcome::Returned { value } => answer(value),
+            RemedyOutcome::Returned { value, .. } => answer(value),
             RemedyOutcome::Declined { presentation } => answer(presentation.feedback),
             RemedyOutcome::NoAnswer { feedback } => answer(feedback),
             RemedyOutcome::Refused { reason } => RemedyReply {
@@ -3795,6 +3812,7 @@ fn replayed<'a>(
 fn declared_ahead() -> RemedyOutcome {
     RemedyOutcome::Returned {
         value: DECLARED_AHEAD.to_string(),
+        receipt: None,
     }
 }
 
@@ -4093,9 +4111,13 @@ impl Runtime {
             Err(error) => Err(error),
         };
         let outcome = match settled {
-            Ok(SettlementDecision::Accepted { value, .. }) => RemedyOutcome::Returned { value },
+            Ok(SettlementDecision::Accepted { value, receipt }) => RemedyOutcome::Returned {
+                value,
+                receipt: Some(receipt),
+            },
             Ok(SettlementDecision::Discarded) => RemedyOutcome::Returned {
                 value: DISCARDED_RETURN.to_string(),
+                receipt: None,
             },
             Ok(SettlementDecision::Unacceptable { feedback }) => RemedyOutcome::Declined {
                 presentation: RemedyPresentation {
@@ -4191,7 +4213,10 @@ impl Runtime {
         };
         match session.on_remedy(offer, arguments, elicitation, ruling).await {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
-            Ok(RemedyDecision::Returned { value, .. }) => RemedyOutcome::Returned { value },
+            Ok(RemedyDecision::Returned { value, receipt }) => RemedyOutcome::Returned {
+                value,
+                receipt: Some(receipt),
+            },
             Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
             Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
             Err(error) => error.into(),

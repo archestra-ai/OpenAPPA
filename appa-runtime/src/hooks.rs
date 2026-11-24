@@ -689,7 +689,9 @@ fn hook_result(decision: &HookDecision) -> (crate::events::HookOutcome, Vec<Stri
             HookOutcome::Denied,
             offers.iter().map(|offered| offered.id.clone()).collect(),
         ),
-        HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } => (HookOutcome::Blocked, Vec::new()),
+        HookDecision::Block { .. } | HookDecision::ReplaceOutput { .. } | HookDecision::NoReturn { .. } => {
+            (HookOutcome::Blocked, Vec::new())
+        }
         HookDecision::Refuse { .. } => (HookOutcome::Refused, Vec::new()),
         HookDecision::Held { .. } => (HookOutcome::Held, Vec::new()),
         HookDecision::DeferReturn => (HookOutcome::Deferred, Vec::new()),
@@ -1211,6 +1213,7 @@ impl Dispatcher<'_> {
         {
             Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision, self.receipt),
             Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, self.presentation, self.receipt),
+            Ok(SpawnResultDecision::NoReturn { output }) => HookDecision::NoReturn { output },
             Err(error) => fold(error, Refusal::Settle),
         }
     }

@@ -537,7 +537,7 @@ fn admission_refusal(error: AdmitError) -> TransitionError {
     }
 }
 
-fn fixed_observation(views: &Views, dispatch: &DispatchId) -> Option<ObservedResult> {
+pub(super) fn fixed_observation(views: &Views, dispatch: &DispatchId) -> Option<ObservedResult> {
     if let Some(observed) = views.observed_result(dispatch) {
         return Some(observed.clone());
     }

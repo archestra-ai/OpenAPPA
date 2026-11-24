@@ -718,7 +718,10 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
             output,
             outcomes: Some(Outcomes::MissingFact(_)),
         } => Err(output),
-        HookDecision::Ack | HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } => Ok(()),
+        HookDecision::Ack
+        | HookDecision::ReplaceOutput { .. }
+        | HookDecision::NoReturn { .. }
+        | HookDecision::DeliverValue { .. } => Ok(()),
         HookDecision::Refuse { detail, .. } => Err(detail),
         HookDecision::Block { reason, .. } => Err(reason),
         other => Err(format!("the result answered {other:?}")),

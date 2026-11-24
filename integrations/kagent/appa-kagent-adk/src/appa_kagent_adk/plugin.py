@@ -789,7 +789,12 @@ class AppaPluginKagent(BasePlugin):
                     # the parent receives what the runtime admitted.
                     return _spawn_replacement(result, decision.value)
                 if decision.kind == "replace_output":
-                    return {"result": self._for_model(decision.output, tool_context)}
+                    replaced: dict[str, Any] = {"result": self._for_model(decision.output, tool_context)}
+                    # A reply carrying no message is the named child's, its bound one: its
+                    # session id stays for the UI to follow the child, and nothing else does.
+                    if decision.no_return and spawned_id is not None:
+                        replaced["subagent_session_id"] = spawned_id
+                    return replaced
                 if decision.kind == "block":
                     return _withheld(self._for_model(decision.reason, tool_context))
                 raise AppaFailClosed(f"appa answered the spawn result with {decision.kind}")

@@ -2979,6 +2979,17 @@ impl RuntimeEngine {
     }
 
     /// The crossing of its bound child that a report of the spawn `dispatch` answers with.
+    /// Whether `child` runs with nothing returned: it has not ended, and no value of it
+    /// crossed or is held.
+    pub(crate) fn runs_unreturned(&self, view: &EngineView, child: &TrajectoryId) -> bool {
+        self.liveness(view, child) == Liveness::Live && self.engine.returns_by(view, child) == 0
+    }
+
+    /// Whether the spawn `dispatch` closed on its report's own body.
+    pub(crate) fn closed_on_its_own_body(&self, view: &EngineView, dispatch: &appa_engine::value::DispatchId) -> bool {
+        self.engine.closed_on_its_own_body(view, dispatch)
+    }
+
     pub(crate) fn spawn_return(
         &self,
         view: &EngineView,

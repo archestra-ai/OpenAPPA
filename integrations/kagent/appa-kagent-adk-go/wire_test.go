@@ -201,6 +201,11 @@ func TestEveryDecisionEnvelopeParses(t *testing.T) {
 			Decision{Kind: "replace_output", Output: "the output is confined"},
 		},
 		{
+			"no_return",
+			`{"protocol": 1, "decision": "replace_output", "output": "no message", "no_return": true}`,
+			Decision{Kind: "replace_output", Output: "no message", NoReturn: true},
+		},
+		{
 			"deliver_value",
 			`{"protocol": 1, "decision": "deliver_value", "value": "the sanitized ledger"}`,
 			Decision{Kind: "deliver_value", Value: "the sanitized ledger"},
@@ -250,6 +255,8 @@ func TestAnAnswerOutsideTheContractIsAWireError(t *testing.T) {
 		{"deny_without_feedback", `{"protocol": 1, "decision": "deny_call"}`},
 		{"block_without_reason", `{"protocol": 1, "decision": "block"}`},
 		{"replace_without_output", `{"protocol": 1, "decision": "replace_output"}`},
+		{"no_return_on_a_block", `{"protocol": 1, "decision": "block", "reason": "r", "no_return": true}`},
+		{"no_return_not_a_bool", `{"protocol": 1, "decision": "replace_output", "output": "o", "no_return": "yes"}`},
 		{"deliver_without_value", `{"protocol": 1, "decision": "deliver_value"}`},
 		{"refuse_without_detail", `{"protocol": 1, "decision": "refuse", "class": "storage"}`},
 		{"refuse_without_class", `{"protocol": 1, "decision": "refuse", "detail": "d"}`},

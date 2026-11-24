@@ -495,7 +495,7 @@ impl SessionInner {
                 call.tool,
                 call.arguments.get(),
             ),
-            RemedyOutcome::Returned { value } => value,
+            RemedyOutcome::Returned { value, .. } => value,
             RemedyOutcome::Declined { presentation } => presentation.feedback,
             RemedyOutcome::NoAnswer { feedback } => feedback,
             RemedyOutcome::Refused { reason } => reason.detail().to_string(),
@@ -645,9 +645,9 @@ impl SessionInner {
             // `DeliverValue` carries what the engine admitted in place of the
             // raw result, so it is sealed for the reason `ChildReturn` is
             // substituted: the model reads it, and the tool did not write it.
-            HookDecision::ReplaceOutput { output, .. } | HookDecision::DeliverValue { value: output } => {
-                (output, DeliveryDisposition::Sealed)
-            }
+            HookDecision::ReplaceOutput { output, .. }
+            | HookDecision::NoReturn { output }
+            | HookDecision::DeliverValue { value: output } => (output, DeliveryDisposition::Sealed),
             HookDecision::Block { reason, .. } => (reason, DeliveryDisposition::Sealed),
             other => return failed(format!("the runtime answered a tool outcome with {other:?}")),
         };
@@ -914,7 +914,9 @@ impl SessionInner {
             },
             // A void return closes the spawn with nothing carried; the placeholder
             // is the parent's tool result, not a value.
-            HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } if crossing.is_none() => {
+            HookDecision::ReplaceOutput { .. } | HookDecision::NoReturn { .. } | HookDecision::DeliverValue { .. }
+                if crossing.is_none() =>
+            {
                 ReturnResponse::Returned {
                     value: None,
                     disposition,

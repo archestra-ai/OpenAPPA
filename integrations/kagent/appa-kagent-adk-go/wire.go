@@ -214,6 +214,10 @@ type Decision struct {
 	// Offers rides a deny_call: every remedy the block offers, in the
 	// order the feedback lists them.
 	Offers []Offer
+	// NoReturn marks a replace_output standing in for the spawn's reply
+	// from the child the plugin named, its bound one, which carries no
+	// message of the child's.
+	NoReturn bool
 }
 
 // Review is one reviewed offer: the id the control call quotes, and the
@@ -367,6 +371,13 @@ func parseDecision(body []byte) (Decision, error) {
 			return Decision{}, err
 		}
 		decision.Class = class
+	}
+	if raw, present := parsed["no_return"]; present {
+		marked, ok := raw.(bool)
+		if !ok || (marked && kind != "replace_output") {
+			return Decision{}, wireErrorf("a %s decision with a no_return mark outside the wire: %v", kind, raw)
+		}
+		decision.NoReturn = marked
 	}
 	if kind == "allow_call" {
 		if binding, present := parsed["spawn_binding"]; present {
