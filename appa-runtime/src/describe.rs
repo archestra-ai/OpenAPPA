@@ -462,7 +462,11 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
         Some(loaded) => crate::api::Runtime::validate_served(loaded, served).map_err(|error| error.to_string()),
         None => Err("configuration cannot be loaded; check the configuration diagnostics above".to_string()),
     };
-    let valid = validation.is_ok();
+    let unsatisfiable = served_policy
+        .as_ref()
+        .map(|policy| policy.engine().registry().unsatisfiable_requirements())
+        .unwrap_or_default();
+    let valid = validation.is_ok() && unsatisfiable.is_empty();
     if !valid && config.state == ConfigState::Loadable {
         config.state = ConfigState::Invalid;
     }
@@ -613,6 +617,12 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
         }
         Err(error) => {
             let _ = writeln!(output, "Validation failed: {error}");
+        }
+    }
+    if !unsatisfiable.is_empty() {
+        let _ = writeln!(output, "Unsatisfiable requirements (every call they gate is refused):");
+        for requirement in &unsatisfiable {
+            let _ = writeln!(output, "  {requirement}");
         }
     }
     Description { text: output, valid }

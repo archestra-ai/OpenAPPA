@@ -843,6 +843,48 @@ pub enum LoadError {
     },
 }
 
+/// A requirement a tool declaration states that no reachable trajectory and no remedy can ever
+/// meet: every call it gates is refused. An authoring check, never a load error — a deployment
+/// may keep a mark unattended on purpose, and a stored policy keeps loading.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnsatisfiableRequirement {
+    pub tool: ToolName,
+    pub requirement: RequirementKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequirementKind {
+    /// No tool emits the effect and no in-scope authority waives it.
+    Prior(EffectKind),
+    /// The floor is above every trust the call can carry, and no in-scope authority's trust
+    /// ceiling reaches it.
+    TrustFloor,
+    /// No authority attends the mark.
+    Attention(MarkName),
+}
+
+impl std::fmt::Display for UnsatisfiableRequirement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tool = self.tool.as_str();
+        match &self.requirement {
+            RequirementKind::Prior(kind) => write!(
+                f,
+                "tool {tool} requires prior effect {:?}, which no tool emits and no authority waives",
+                kind.as_str()
+            ),
+            RequirementKind::TrustFloor => write!(
+                f,
+                "tool {tool} requires a trust floor above both the starting label and its own `forwards`, which no authority's trust ceiling reaches"
+            ),
+            RequirementKind::Attention(mark) => write!(
+                f,
+                "tool {tool} requires attention mark {:?}, which no authority attends",
+                mark.as_str()
+            ),
+        }
+    }
+}
+
 /// The planner cap: the most alternatives one current-stage plan menu may hold — per
 /// tool, the grouped-assignment product times its release paths plus its direct-redispatch
 /// candidates; per catalogue, the confined child-return menu. The bound keeps enumeration total
@@ -2060,6 +2102,92 @@ impl Registry {
 
     pub fn sanitizers(&self) -> impl Iterator<Item = &Sanitizer> {
         self.sanitizers.values()
+    }
+
+    /// Every requirement a declaration states that nothing can ever meet. A trajectory's trust
+    /// only narrows from its starting label, and the call's own `forwards` narrows what it sends,
+    /// so a floor above both is met only by an authority; a sanitizer settles a narrowing, never
+    /// a requirement gap. Covers read the predicate planning reads. Requirements an Annotator
+    /// produces exist per call and are its own: only the floor written beside it is judged, and
+    /// an Annotator whose mandate admits an effect counts as its emitter. The reserved `blocked`
+    /// mark is unsatisfiable by design and never listed.
+    pub fn unsatisfiable_requirements(&self) -> Vec<UnsatisfiableRequirement> {
+        use crate::check::Gap;
+        use crate::plan::covers_gap;
+
+        let no_expansions = Expansions::default();
+        let context = MembershipContext::new(
+            self.audience.within_assertions(),
+            self.audience.providers(),
+            &no_expansions,
+        );
+        let starting = self.profile.starting_label().trust;
+        let declarations = || {
+            self.tools
+                .values()
+                .flatten()
+                .map(|(_, declaration)| declaration)
+                .chain(self.wildcard.as_ref())
+        };
+        let emitted = |kind: &EffectKind| {
+            declarations().any(|declaration| match declaration {
+                ToolDeclaration::Declared(tool) => tool.emits.contains(kind),
+                ToolDeclaration::Annotated { annotator, .. } => self
+                    .annotators
+                    .get(annotator)
+                    .is_some_and(|mandate| mandate.permits_effect(kind)),
+            }) || self.provider_run.values().any(|tool| tool.emits.contains(kind))
+        };
+        let mut unsatisfiable = Vec::new();
+        for declaration in declarations() {
+            let tags = declaration.tags();
+            let covered = |gap: Gap| {
+                self.authorities
+                    .iter()
+                    .any(|authority| covers_gap(authority, &gap, tags, &context))
+            };
+            let mut unmet = |requirement| {
+                unsatisfiable.push(UnsatisfiableRequirement {
+                    tool: declaration.name().clone(),
+                    requirement,
+                })
+            };
+            let (floor, carried) = match declaration {
+                ToolDeclaration::Declared(tool) => (
+                    tool.requires.trust_floor(),
+                    tool.forwards
+                        .trust
+                        .map_or(starting, |forwarded| forwarded.min(starting)),
+                ),
+                ToolDeclaration::Annotated { requires, .. } => (requires.trust_floor, starting),
+            };
+            if let Some(required) = floor
+                && required > carried
+                && !covered(Gap::TrustFloor {
+                    required,
+                    actual: carried,
+                })
+            {
+                unmet(RequirementKind::TrustFloor);
+            }
+            let Some(tool) = declaration.declared() else {
+                continue;
+            };
+            for requirement in &tool.requires.history {
+                if let HistoryRequirement::Prior(kind) = requirement
+                    && !emitted(kind)
+                    && !covered(Gap::Prior(kind.clone()))
+                {
+                    unmet(RequirementKind::Prior(kind.clone()));
+                }
+            }
+            for mark in tool.requires.attention_marks() {
+                if !mark.is_blocked() && !covered(Gap::Attention(mark.clone())) {
+                    unmet(RequirementKind::Attention(mark.clone()));
+                }
+            }
+        }
+        unsatisfiable
     }
 }
 
@@ -3488,6 +3616,225 @@ mod tests {
                 Err(LoadError::ExceptedTag { authority, tag }) if authority == "rollout" && tag == except
             ));
         }
+    }
+
+    /// What the registry lists as unsatisfiable under a starting label at `starting`. The
+    /// registry always loads: the list is an authoring check.
+    fn unsatisfiable_under(cfg: RegistryConfig, starting: Trust) -> Vec<UnsatisfiableRequirement> {
+        let profile = crate::profile::DeploymentProfile::declare(crate::profile::ProfileDeclaration {
+            starting_label: crate::label::Label::new(starting, Audience::public()),
+            ..crate::profile::covering_declaration(&cfg)
+        })
+        .expect("the covering profile validates");
+        Registry::build(cfg, PlannerCap::default(), profile)
+            .expect("an unsatisfiable requirement never refuses the load")
+            .unsatisfiable_requirements()
+    }
+
+    fn unsatisfiable(cfg: RegistryConfig) -> Vec<UnsatisfiableRequirement> {
+        unsatisfiable_under(cfg, Trust::new(1))
+    }
+
+    /// The one entry naming the tool `gated`.
+    fn listed(requirement: RequirementKind) -> Vec<UnsatisfiableRequirement> {
+        vec![UnsatisfiableRequirement {
+            tool: ToolName::new("gated"),
+            requirement,
+        }]
+    }
+
+    fn with(tools: Vec<ToolDeclaration>, authorities: Vec<Authority>) -> RegistryConfig {
+        RegistryConfig {
+            tools,
+            authorities,
+            ..base()
+        }
+    }
+
+    fn authority(name: &str, mandate: Mandate) -> Authority {
+        Authority {
+            except: Vec::new(),
+            name: AuthorityName::new(name),
+            mandate,
+            scope: Scope::default(),
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn a_prior_is_listed_unless_a_tool_emits_it_or_an_in_scope_authority_waives_it() {
+        let reviewed = EffectKind::new("reviewed");
+        let mut gated = tool("gated");
+        gated.tags = vec![TagName::new("prod")];
+        gated.requires.history = vec![HistoryRequirement::Prior(reviewed.clone())];
+        let gated = ToolDeclaration::Declared(gated);
+        let mut review = tool("review");
+        review.emits = EffectSet::new([reviewed.clone()]).unwrap();
+        let waiver = authority(
+            "desk",
+            Mandate {
+                prior_waivers: vec![reviewed.clone()],
+                ..Mandate::default()
+            },
+        );
+        let out_of_scope = Authority {
+            scope: Scope {
+                tags: vec![TagName::new("staging")],
+            },
+            ..waiver.clone()
+        };
+
+        assert_eq!(
+            unsatisfiable(with(vec![gated.clone()], vec![])),
+            listed(RequirementKind::Prior(reviewed.clone()))
+        );
+        assert_eq!(
+            unsatisfiable(with(vec![gated.clone()], vec![out_of_scope])),
+            listed(RequirementKind::Prior(reviewed.clone()))
+        );
+        assert_eq!(
+            unsatisfiable(with(vec![gated.clone(), ToolDeclaration::Declared(review)], vec![])),
+            vec![]
+        );
+        assert_eq!(unsatisfiable(with(vec![gated.clone()], vec![waiver])), vec![]);
+        let mut annotated_emitter = with(vec![gated, annotated("classify", "classifier")], vec![]);
+        annotated_emitter.annotators = vec![AnnotatorDeclaration {
+            effects: Some(BTreeSet::from([reviewed])),
+            ..annotator("classifier")
+        }];
+        assert_eq!(unsatisfiable(annotated_emitter), vec![]);
+    }
+
+    #[test]
+    fn a_trust_floor_is_listed_unless_the_call_or_an_in_scope_authority_reaches_it() {
+        let (suspicious, trusted) = (Trust::new(0), Trust::new(1));
+        let gated = |forwards: Option<Trust>| {
+            let mut gated = tool("gated");
+            gated.requires.label.trust_floor = Some(trusted);
+            gated.forwards.trust = forwards;
+            ToolDeclaration::Declared(gated)
+        };
+        let lifting = authority(
+            "officer",
+            Mandate {
+                trust_ceiling: Some(trusted),
+                ..Mandate::default()
+            },
+        );
+
+        assert_eq!(unsatisfiable(with(vec![gated(None)], vec![])), vec![]);
+        assert_eq!(
+            unsatisfiable(with(vec![gated(Some(suspicious))], vec![])),
+            listed(RequirementKind::TrustFloor)
+        );
+        assert_eq!(
+            unsatisfiable_under(with(vec![gated(None)], vec![]), suspicious),
+            listed(RequirementKind::TrustFloor)
+        );
+        assert_eq!(
+            unsatisfiable(with(vec![gated(Some(suspicious))], vec![lifting.clone()])),
+            vec![]
+        );
+        assert_eq!(
+            unsatisfiable_under(with(vec![gated(None)], vec![lifting]), suspicious),
+            vec![]
+        );
+
+        // An output sanitizer settles a narrowing and never a requirement gap.
+        let mut sanitized = with(vec![gated(Some(suspicious))], vec![]);
+        sanitized.sanitizers = vec![Sanitizer {
+            name: SanitizerName::new("vouch"),
+            on: SanitizerPoints {
+                input: false,
+                output: true,
+            },
+            transition: DeclaredTransition::Trust {
+                from_floor: suspicious,
+                to: trusted,
+            },
+            scope: Scope::default(),
+            hint: None,
+        }];
+        assert_eq!(unsatisfiable(sanitized), listed(RequirementKind::TrustFloor));
+
+        // The floor written beside an Annotator is the policy's own, whatever the answer.
+        let mut floored = with(
+            vec![ToolDeclaration::Annotated {
+                name: ToolName::new("gated"),
+                tags: vec![],
+                description: None,
+                parameters: crate::params::ToolParameters::open(),
+                annotator: AnnotatorName::new("classifier"),
+                requires: LabelRequirements {
+                    trust_floor: Some(trusted),
+                    audience: vec![],
+                },
+                delta_trust: None,
+            }],
+            vec![],
+        );
+        floored.annotators = vec![annotator("classifier")];
+        assert_eq!(unsatisfiable(floored.clone()), vec![]);
+        assert_eq!(
+            unsatisfiable_under(floored, suspicious),
+            listed(RequirementKind::TrustFloor)
+        );
+    }
+
+    #[test]
+    fn an_attention_mark_is_listed_unless_an_authority_attends_it() {
+        let signoff = MarkName::new("signoff");
+        let mut gated = tool("gated");
+        gated.requires.attention = vec![signoff.clone()];
+        let gated = ToolDeclaration::Declared(gated);
+        let attending = |attends| {
+            authority(
+                "desk",
+                Mandate {
+                    attends,
+                    ..Mandate::default()
+                },
+            )
+        };
+
+        assert_eq!(
+            unsatisfiable(with(vec![gated.clone()], vec![])),
+            listed(RequirementKind::Attention(signoff.clone()))
+        );
+        assert_eq!(
+            unsatisfiable(with(
+                vec![gated.clone()],
+                vec![attending(Attends::Named(vec![MarkName::new("other")]))]
+            )),
+            listed(RequirementKind::Attention(signoff.clone()))
+        );
+        assert_eq!(
+            unsatisfiable(with(
+                vec![gated.clone()],
+                vec![attending(Attends::Named(vec![signoff]))]
+            )),
+            vec![]
+        );
+        assert_eq!(unsatisfiable(with(vec![gated], vec![attending(Attends::Any)])), vec![]);
+    }
+
+    #[test]
+    fn the_reserved_denial_and_audience_placeholders_are_never_unsatisfiable() {
+        let mut blocked = tool("gated");
+        blocked.requires.attention = vec![MarkName::new(MarkName::BLOCKED)];
+        assert_eq!(
+            unsatisfiable(with(vec![ToolDeclaration::Declared(blocked)], vec![])),
+            vec![]
+        );
+
+        let mut addressed = tool("gated");
+        addressed.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Placeholder(
+            "to".to_string(),
+        ))];
+        assert_eq!(
+            unsatisfiable(with(vec![ToolDeclaration::Declared(addressed)], vec![])),
+            vec![]
+        );
     }
 
     #[test]

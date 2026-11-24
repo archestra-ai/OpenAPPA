@@ -23,6 +23,14 @@ version = 2
 context_control = true
 confined_results = ["host/claude-code/WebFetch"]
 
+# The Claude Code default's `hitl` authority attends the batteries' attention
+# marks; `appa describe --check` flags a mark no authority attends.
+[[policy.authority]]
+name = "hitl"
+
+[policy.authority.permits]
+attention = ["*"]
+
 # The Claude Code default's own sanitizer, on calls bound for `public`
 # readers. `tests/test_bench.py` holds it equal to its source.
 [[policy.sanitizer]]

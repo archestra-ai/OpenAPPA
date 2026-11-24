@@ -659,6 +659,14 @@ Authorities with `permits = { attention = ["*"] }` can approve any declared atte
 
 `blocked` is a reserved attention mark used for unconditional denials. No authority can permit `blocked`, and the `["*"]` wildcard does not match it. A call requiring `blocked` cannot be approved by any authority or remedy plan.
 
+Use `blocked` to deny a call outright. Any other requirement that nothing can meet also refuses every call it gates. `appa describe --check` lists each tool rule that requires one of these, and exits unsuccessfully:
+
+- an attention mark that no authority permits;
+- an effect in `effects.contains` that no tool emits and no in-scope authority waives with `prior_effects_containing`;
+- a trust floor above both the starting label and the rule's own `forwards`, which no in-scope authority covers with `trust_below`.
+
+Such a policy still loads, and the runtime refuses the call with no remedy plan. The check reads only the requirements that the policy writes. It does not read the requirements that an annotator returns for a call.
+
 ## Annotators
 
 An annotator dynamically computes contract rules for tool calls. It can return output restrictions (`delta`), restrictions on content the call sends beyond its arguments (`forwards`), execution preconditions (`requires`), and side effects (`effects`). (The built-in `jev` annotator determines audience and trust labels only.)

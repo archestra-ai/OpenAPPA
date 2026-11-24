@@ -11,6 +11,15 @@ trust_chain = ["suspicious", "trusted"]
 [policy.audience]
 self = ["huggingface:viewer"]
 
+# The battery's writes need review; the trace runs none of them.
+[[policy.authority]]
+name = "huggingface-operator"
+hint = "Review the exact call, destination and content."
+permits = { attention = ["huggingface-review"] }
+
 [externals]
 timeout_ms = 30000
 max_body_bytes = 1048576
+
+[externals.authorities.huggingface-operator]
+builtin = "hitl"
