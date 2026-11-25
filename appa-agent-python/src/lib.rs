@@ -517,7 +517,10 @@ impl SessionInner {
                 call.arguments.get(),
             )),
             RemedyOutcome::Returned { value } => ControlReply::of(value),
-            RemedyOutcome::Declined { presentation } => ControlReply::of(presentation.feedback),
+            RemedyOutcome::Declined { presentation } => ControlReply {
+                retry: presentation.outcomes.as_ref().and_then(Outcomes::retry),
+                reply: presentation.feedback,
+            },
             RemedyOutcome::NoAnswer { feedback, retry } => ControlReply { reply: feedback, retry },
             RemedyOutcome::Refused { reason } => ControlReply {
                 reply: reason.detail().to_string(),
