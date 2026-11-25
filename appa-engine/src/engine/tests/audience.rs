@@ -99,7 +99,7 @@ fn a_chain_only_output_sanitizer_is_offered_and_admitted_without_membership() {
     let (log, dispatch) = released_under_output_sanitizer(&e, vec![opened(&e)], &call);
 
     let raw = ValueBody::new("TOKEN=abc");
-    let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+    let source = raw.digest();
     let report = |evidence: Vec<crate::transition::Evidence>| ToolReport {
         dispatch: dispatch.clone(),
         outcome: ToolOutcome::Success {
@@ -1495,7 +1495,7 @@ mod symbolic_audiences {
         let body = ValueBody::new("what I found");
         let evidence = vec![Evidence::Sanitizer {
             sanitizer: SanitizerName::new("declassify"),
-            source: RawResultDigest::of(body.as_str().as_bytes()),
+            source: body.digest(),
             derived: ValueBody::new("clean"),
         }];
         let derived = e
@@ -1597,7 +1597,7 @@ mod symbolic_audiences {
         });
         let log = [opened_log.clone(), spawn_family_at(&e, &opened_log, &child, policy)].concat();
         let body = ValueBody::new("what I found");
-        let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
+        let raw_digest = body.digest();
 
         let asked = e
             .handle(
@@ -1717,7 +1717,7 @@ mod symbolic_audiences {
         let clean = ValueBody::new("clean");
         let evidence = vec![Evidence::Sanitizer {
             sanitizer: SanitizerName::new("declassify"),
-            source: RawResultDigest::of(body.as_str().as_bytes()),
+            source: body.digest(),
             derived: clean.clone(),
         }];
         let answers = crate::audience::AudienceEvidence {

@@ -1326,7 +1326,7 @@ pub(super) fn staged_candidate(e: &Engine) -> (Vec<Fact>, DispatchId, ValueBody,
             &view(&log),
             EngineEvent::Outcome(report(vec![crate::transition::Evidence::Sanitizer {
                 sanitizer: crate::names::SanitizerName::new("redactor"),
-                source: crate::value::RawResultDigest::of(raw.as_str().as_bytes()),
+                source: raw.digest(),
                 derived: derived.clone(),
             }])),
         )

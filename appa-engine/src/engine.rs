@@ -655,7 +655,7 @@ impl Engine {
                         return Err(TransitionError::StaleOffer);
                     };
                     let body = value.body.clone();
-                    let source = crate::value::RawResultDigest::of(body.as_str().as_bytes());
+                    let source = body.digest();
                     Ok(OfferConsult::Sanitizer {
                         sanitizer: sanitizer.clone(),
                         source,
@@ -1140,8 +1140,9 @@ fn substituted_call(
     body: &ValueBody,
     annotation: Option<&crate::contract::PinnedAnnotation>,
 ) -> Result<ResolvedCall, TransitionError> {
+    let text = body.text().map_err(TransitionError::BodyDetached)?;
     let (rewritten, declaration) =
-        select_call(registry, call.tool().clone(), body.as_str().as_bytes()).map_err(TransitionError::Call)?;
+        select_call(registry, call.tool().clone(), text.as_bytes()).map_err(TransitionError::Call)?;
     let substituted = rewritten.with_annotation(annotation.cloned());
     match check::validate_annotation(registry, declaration, &substituted) {
         Ok(()) => {}

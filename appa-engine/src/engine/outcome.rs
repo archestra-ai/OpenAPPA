@@ -33,7 +33,7 @@ impl Engine {
                     body: OutcomeBody::Available(raw),
                 },
                 false,
-            ) => Some(ObservedResult::Available(RawResultDigest::of(raw.as_str().as_bytes()))),
+            ) => Some(ObservedResult::Available(raw.digest())),
             (
                 ToolOutcome::Success {
                     body: OutcomeBody::Unavailable,
@@ -41,9 +41,7 @@ impl Engine {
                 false,
             ) => Some(ObservedResult::Unavailable),
             (ToolOutcome::Failure | ToolOutcome::Indeterminate, _) => None,
-            (ToolOutcome::FailureWithBody { body }, _) => {
-                Some(ObservedResult::Available(RawResultDigest::of(body.as_str().as_bytes())))
-            }
+            (ToolOutcome::FailureWithBody { body }, _) => Some(ObservedResult::Available(body.digest())),
         };
         let closed = || EngineDecision {
             append: None,
@@ -55,7 +53,7 @@ impl Engine {
         if let ToolOutcome::FailureWithBody { body } = &report.outcome
             && views.failed_with_body(dispatch)
         {
-            let digest = RawResultDigest::of(body.as_str().as_bytes());
+            let digest = body.digest();
             if views.failure_body_digest(dispatch) != Some(digest) {
                 return Err(TransitionError::ObservationMismatch);
             }
@@ -510,7 +508,7 @@ fn fixed_observation(views: &Views, dispatch: &DispatchId) -> Option<ObservedRes
         return None;
     }
     Some(match views.admitted_body(dispatch) {
-        Some(body) => ObservedResult::Available(RawResultDigest::of(body.as_str().as_bytes())),
+        Some(body) => ObservedResult::Available(body.digest()),
         None => ObservedResult::Unavailable,
     })
 }

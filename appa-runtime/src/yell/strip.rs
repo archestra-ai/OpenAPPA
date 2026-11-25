@@ -251,9 +251,13 @@ impl Walk<'_> {
                 Some(raw) => Value::String(self.tokens.token(Mode::Pseudonymized, Class::Tool, raw)),
                 None => self.unclassify(path),
             },
-            Rule::BodyBytes => match value.as_str() {
-                Some(body) => Value::from(body.len()),
-                None => self.unclassify(path),
+            Rule::BodyBytes => match value {
+                Value::String(body) => Value::from(body.len()),
+                Value::Object(map) => match map.get("len").and_then(Value::as_u64) {
+                    Some(len) => Value::from(len),
+                    None => self.unclassify(path),
+                },
+                _ => self.unclassify(path),
             },
             Rule::ArgumentKeys => self.argument_keys(value, path),
             Rule::Elements(class) => match value.as_array() {

@@ -374,6 +374,45 @@ impl Projection {
         }
     }
 
+    /// Attach verified inline text to any detached body in this projection located at `at`.
+    /// Returns `Ok(true)` if at least one body was attached, `Ok(false)` if none matched `at`.
+    pub(crate) fn attach_body(
+        &mut self,
+        at: crate::value::BodyAt,
+        text: std::sync::Arc<str>,
+    ) -> Result<bool, crate::value::BodyMismatch> {
+        let mut attached = false;
+        let matching_values: Vec<usize> = self
+            .values
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, value)| value.body.as_ref().filter(|body| body.at() == Some(at)).map(|_| idx))
+            .collect();
+        for idx in matching_values {
+            if let Some(body) = &mut self.values[idx].body {
+                *body = body.attach(std::sync::Arc::clone(&text))?;
+                attached = true;
+            }
+        }
+        let matching_candidates: Vec<SubjectKey> = self
+            .candidates
+            .iter()
+            .filter_map(|(key, candidate)| match &candidate.derived {
+                DerivedCandidate::Result { value, .. } if value.body.at() == Some(at) => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        for key in matching_candidates {
+            if let Some(candidate) = self.candidates.get_mut(&key)
+                && let DerivedCandidate::Result { value, .. } = &mut candidate.derived
+            {
+                value.body = value.body.attach(std::sync::Arc::clone(&text))?;
+                attached = true;
+            }
+        }
+        Ok(attached)
+    }
+
     pub(crate) fn set_position(&mut self, position: u64) {
         self.position = position;
     }

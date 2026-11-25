@@ -647,6 +647,8 @@ pub enum TransitionError {
     ReturnVoid,
     #[error(transparent)]
     ReturnPolicy(#[from] crate::plan::ReturnPolicyRefusal),
+    #[error(transparent)]
+    BodyDetached(#[from] crate::value::BodyDetached),
 }
 
 impl From<crate::label::MembershipNeeded> for TransitionError {
@@ -916,6 +918,17 @@ impl EngineView {
         self.stamp = batch.revision.or(self.stamp);
         Ok(())
     }
+
+    /// Attach verified inline text to any detached body in this view located at `at`.
+    /// Intended for local, per-call hydration; callers must not write hydrated views back into
+    /// shared caches.
+    pub fn attach_body(
+        &mut self,
+        at: crate::value::BodyAt,
+        text: std::sync::Arc<str>,
+    ) -> Result<bool, crate::value::BodyMismatch> {
+        self.projection.attach_body(at, text)
+    }
 }
 
 /// Why a family log's durable opening record cannot be trusted: the validator refuses
@@ -1108,6 +1121,8 @@ pub enum TransitionRefusal {
     UnknownCandidate,
     #[error("the record spends an offer or approval that is no longer current")]
     StaleSpend,
+    #[error("the record requires inline body text that is detached: {0}")]
+    BodyDetached(#[from] crate::value::BodyDetached),
 }
 
 struct PendingRelease {
@@ -3035,7 +3050,7 @@ impl<'a> Sequence<'a> {
                             if views.bound_sanitizer(dispatch).is_some() {
                                 return Err(TransitionRefusal::ForgedLabel);
                             }
-                            let digest = RawResultDigest::of(value.body.as_str().as_bytes());
+                            let digest = value.body.digest();
                             if views.failed_with_body(dispatch) {
                                 if views.failure_body_digest(dispatch) != Some(digest) {
                                     return Err(TransitionRefusal::ForgedLabel);
@@ -3145,8 +3160,9 @@ impl<'a> Sequence<'a> {
                     .ok_or_else(|| TransitionRefusal::UnknownSanitizer(named.as_str().to_string()))?;
                 match sanitizer {
                     ReturnSanitizer::Attest(shape) => {
-                        match shape.validate(value.body.as_str()) {
-                            Ok(canonical) if canonical == value.body.as_str() => {}
+                        let text = value.body.text().map_err(TransitionRefusal::BodyDetached)?;
+                        match shape.validate(text) {
+                            Ok(canonical) if canonical == text => {}
                             _ => return Err(TransitionRefusal::ReturnShapeViolation),
                         }
                         if !views
@@ -3492,7 +3508,7 @@ impl<'a> Sequence<'a> {
         // The bytes this hop read are the predecessor's, whichever it was.
         match &predecessor {
             None => self.observed_as(trajectory, dispatch, source)?,
-            Some((body, _)) if source == &RawResultDigest::of(body.body.as_str().as_bytes()) => {}
+            Some((body, _)) if source == &body.body.digest() => {}
             Some(_) => return Err(TransitionRefusal::ObservationMismatch),
         }
         let from_label = match &predecessor {
