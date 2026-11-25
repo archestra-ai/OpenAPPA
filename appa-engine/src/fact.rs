@@ -723,6 +723,45 @@ impl Fact {
         }
     }
 
+    /// The detachable [`crate::value::ValueBody`] carried by this fact, if any.
+    pub fn detachable_body(&self) -> Option<&crate::value::ValueBody> {
+        match self {
+            Fact::ValueAdmitted {
+                value,
+                provenance: Provenance::ToolResult { .. } | Provenance::ProviderRun { .. },
+                ..
+            } => Some(&value.body),
+            Fact::CandidateDerived {
+                derived: DerivedCandidate::Result { value, .. },
+                ..
+            } => Some(&value.body),
+            _ => None,
+        }
+    }
+
+    /// Byte length of inline [`crate::value::ValueBody`] payloads retained in memory by this fact.
+    pub fn retained_body_bytes(&self) -> usize {
+        let inline_len = |body: &crate::value::ValueBody| {
+            if body.is_detached() {
+                0
+            } else {
+                usize::try_from(body.len()).unwrap_or(usize::MAX)
+            }
+        };
+        match self {
+            Fact::ValueAdmitted { value, .. }
+            | Fact::ChildReturn { value, .. }
+            | Fact::ReturnDeferred { value, .. } => inline_len(&value.body),
+            Fact::CandidateDerived { derived, .. } => match derived {
+                DerivedCandidate::Result { value, .. } | DerivedCandidate::Return { value, .. } => {
+                    inline_len(&value.body)
+                }
+                DerivedCandidate::Call { .. } => 0,
+            },
+            _ => 0,
+        }
+    }
+
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
             Fact::TrajectoryOpened(TrajectoryOpening { trajectory, .. })

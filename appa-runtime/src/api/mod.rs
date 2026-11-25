@@ -2099,6 +2099,18 @@ impl Inner {
             .map_err(read_refused)
     }
 
+    pub(super) fn step_body(
+        &self,
+        step: &appa_eventlog::Step<'_>,
+        root: &TrajectoryId,
+        at: appa_engine::value::BodyAt,
+        digest: appa_engine::value::RawResultDigest,
+    ) -> Result<std::sync::Arc<str>, EventError> {
+        step.body(at, digest)
+            .inspect_err(|error| self.note_store_error(Some(root), crate::events::StoreOperation::Read, error))
+            .map_err(read_refused)
+    }
+
     /// Record one host observation in this root's log, at the position the append is tried
     /// at, unconditionally. A write that depends on what stands at that position derives it
     /// through [`Inner::append_host_with`] instead.
@@ -2241,9 +2253,9 @@ fn read_refused(error: appa_eventlog::ReadError) -> EventError {
     match error {
         appa_eventlog::ReadError::UnknownRoot { .. } => EventError::UnknownTrajectory,
         appa_eventlog::ReadError::LegacyFamily { .. } => EventError::LegacyFamily,
-        error @ (appa_eventlog::ReadError::Undecodable { .. } | appa_eventlog::ReadError::UndecodableKey { .. }) => {
-            EventError::UntrustedLog(error.to_string())
-        }
+        error @ (appa_eventlog::ReadError::Undecodable { .. }
+        | appa_eventlog::ReadError::UndecodableKey { .. }
+        | appa_eventlog::ReadError::DetachedBody { .. }) => EventError::UntrustedLog(error.to_string()),
         error @ (appa_eventlog::ReadError::PolicyFileMissing { .. }
         | appa_eventlog::ReadError::PolicyFileMismatch { .. }
         | appa_eventlog::ReadError::UnknownRevision { .. }) => EventError::PolicyUnavailable(error.to_string()),

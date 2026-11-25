@@ -22,7 +22,7 @@ use crate::embedded::{
 };
 #[cfg(feature = "fault-injection")]
 use crate::encoding::encode;
-use crate::encoding::{contiguous_from, decoded, extend, opening_key};
+use crate::encoding::{contiguous_from, decode_body, decoded, extend, opening_key};
 use crate::held::{HeldError, HeldNotice, HeldPeerId, HeldPeerMessage, NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, LeaseOwner, OperationClaim, OperationKey, OperationRequest, ProcessedResultClaim, ProcessedResultKey,
@@ -160,7 +160,6 @@ struct LogCache {
 
 struct CachedLog {
     log: Log,
-    bytes: usize,
     tail_digest: [u8; 32],
 }
 
@@ -170,11 +169,7 @@ fn batch_digest(bytes: &[u8]) -> [u8; 32] {
 
 impl CachedLog {
     fn weight(&self) -> usize {
-        self.bytes
-            + self.log.policy_file().len()
-            + std::mem::size_of_val(self.log.facts())
-            + std::mem::size_of_val(self.log.host_records())
-            + self.log.basis() as usize * (size_of::<usize>() + size_of::<Option<PolicyRevision>>())
+        self.log.retained_bytes()
     }
 }
 
@@ -529,7 +524,6 @@ impl Sqlite {
             let new = batches.split_off(1);
             let decoded_batches = new.len();
             if let Some(last) = new.last() {
-                entry.bytes += new.iter().map(Vec::len).sum::<usize>();
                 entry.tail_digest = batch_digest(last);
                 extend(&mut entry.log, new)?;
             }
@@ -560,7 +554,6 @@ impl Sqlite {
         // Cold reads can decode many megabytes. Other roots can use the database
         // while this one decodes, and a racing reader may cache a newer snapshot.
         let decoded_batches = batches.len();
-        let bytes = batches.iter().map(Vec::len).sum();
         let tail_digest = batch_digest(batches.last().expect("a log with an opening has a tail"));
         let mut log = decoded(root, batches, policy_file)?;
         log.lineage = Some(lineage.clone().unwrap_or_default());
@@ -569,13 +562,41 @@ impl Sqlite {
             if cache.lineage == lineage {
                 cache.keep(CachedLog {
                     log: log.clone(),
-                    bytes,
                     tail_digest,
                 });
             }
         }
         tracing::trace!(decoded_batches, cache_hit = false, "read SQLite log");
         Ok(log)
+    }
+
+    pub(crate) fn body(
+        &self,
+        root: &TrajectoryId,
+        at: appa_engine::value::BodyAt,
+        digest: appa_engine::value::RawResultDigest,
+    ) -> Result<std::sync::Arc<str>, ReadError> {
+        let connection = self.connection();
+        let seq = i64::try_from(at.seq).map_err(|_| ReadError::DetachedBody {
+            seq: at.seq,
+            fact: at.fact,
+            reason: crate::DetachedBodyReason::Missing,
+        })?;
+        let batch: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT facts FROM logs WHERE root = ?1 AND seq = ?2",
+                params![root.as_str(), seq],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(batch) = batch else {
+            return Err(ReadError::DetachedBody {
+                seq: at.seq,
+                fact: at.fact,
+                reason: crate::DetachedBodyReason::Missing,
+            });
+        };
+        decode_body(at.seq, &batch, at.fact, digest)
     }
 
     pub(crate) fn roots_mentioning(&self, key: &str) -> Result<Vec<TrajectoryId>, ReadError> {

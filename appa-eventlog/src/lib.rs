@@ -446,6 +446,25 @@ impl Log {
         &self.data.root
     }
 
+    /// Approximate heap bytes retained in memory by this log: inline body payloads, policy
+    /// bytes, and the flat fact/host/index tables. Detached bodies contribute zero payload bytes.
+    pub fn retained_bytes(&self) -> usize {
+        let bodies: usize = self
+            .data
+            .facts
+            .iter()
+            .map(Fact::retained_body_bytes)
+            .fold(0usize, usize::saturating_add);
+        bodies
+            .saturating_add(self.data.policy_file.len())
+            .saturating_add(std::mem::size_of_val(self.data.facts.as_slice()))
+            .saturating_add(std::mem::size_of_val(self.data.host.as_slice()))
+            .saturating_add(
+                (self.data.basis as usize)
+                    .saturating_mul(std::mem::size_of::<usize>() + std::mem::size_of::<Option<PolicyRevision>>()),
+            )
+    }
+
     pub fn facts(&self) -> &[Fact] {
         &self.data.facts
     }
@@ -611,6 +630,7 @@ impl From<&CreateError> for StoreErrorClass {
             CreateError::Malformed { .. } => StoreErrorClass::Malformed,
             CreateError::PolicyMoved { .. } => StoreErrorClass::PolicyMoved,
             CreateError::PolicyFileMismatch => StoreErrorClass::PolicyMismatch,
+            CreateError::DetachedBody => StoreErrorClass::Malformed,
             CreateError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             CreateError::Postgres(_) => StoreErrorClass::Storage,
@@ -627,7 +647,9 @@ impl From<&ReadError> for StoreErrorClass {
             ReadError::PolicyFileMissing { .. }
             | ReadError::PolicyFileMismatch { .. }
             | ReadError::UnknownRevision { .. } => StoreErrorClass::PolicyUnavailable,
-            ReadError::Undecodable { .. } | ReadError::UndecodableKey { .. } => StoreErrorClass::Undecodable,
+            ReadError::Undecodable { .. } | ReadError::UndecodableKey { .. } | ReadError::DetachedBody { .. } => {
+                StoreErrorClass::Undecodable
+            }
             ReadError::LegacyFamily { .. } => StoreErrorClass::LegacyFamily,
             ReadError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
@@ -644,7 +666,7 @@ impl From<&AppendError> for StoreErrorClass {
             AppendError::Conflict { .. } => StoreErrorClass::Conflict,
             AppendError::ReadClaimLost => StoreErrorClass::Conflict,
             AppendError::PolicyMoved { .. } => StoreErrorClass::PolicyMoved,
-            AppendError::Unstamped => StoreErrorClass::Malformed,
+            AppendError::Unstamped | AppendError::DetachedBody => StoreErrorClass::Malformed,
             AppendError::Storage(_) => StoreErrorClass::Storage,
             #[cfg(feature = "postgres")]
             AppendError::Postgres(_) => StoreErrorClass::Storage,
@@ -693,6 +715,9 @@ pub enum CreateError {
     /// The opening was decided at a revision that is no longer its deployment's head.
     #[error("the deployment's head is {head:?}, not the revision the opening was decided at")]
     PolicyMoved { head: Option<PolicyRevision> },
+    /// An opening batch contained a detached body, which cannot be persisted.
+    #[error("an opening batch cannot carry a detached body")]
+    DetachedBody,
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
     #[cfg(feature = "postgres")]
@@ -701,6 +726,27 @@ pub enum CreateError {
     #[cfg(feature = "fault-injection")]
     #[error("injected failure before commit")]
     Injected,
+}
+
+/// Why a detached body could not be materialized from its stored batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetachedBodyReason {
+    /// The batch row at `seq` no longer exists.
+    Missing,
+    /// The batch decoded, but slot `fact` did not hold a detachable body.
+    WrongFact,
+    /// The stored body did not match the expected SHA-256 digest.
+    Mismatch,
+}
+
+impl std::fmt::Display for DetachedBodyReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => f.write_str("batch row is missing"),
+            Self::WrongFact => f.write_str("fact slot does not hold a detachable body"),
+            Self::Mismatch => f.write_str("stored body digest does not match"),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -718,6 +764,12 @@ pub enum ReadError {
     },
     #[error("stored batch {seq} does not decode: {detail}")]
     Undecodable { seq: u64, detail: String },
+    #[error("detached body at seq {seq} fact {fact} cannot be loaded: {reason}")]
+    DetachedBody {
+        seq: u64,
+        fact: u32,
+        reason: DetachedBodyReason,
+    },
     /// The root's opening names no deployment: the family was opened before policy revisions,
     /// and no engine of this build judges it. A host refuses it once and opens a new family.
     #[error("the family of {root} was opened before live policy revisions")]
@@ -747,6 +799,9 @@ pub enum AppendError {
     /// A decided batch names no revision: nothing is written. A replay refuses such a batch.
     #[error("a decided batch names no policy revision")]
     Unstamped,
+    /// A batch carried a detached body, which cannot be persisted.
+    #[error("a batch cannot carry a detached body")]
+    DetachedBody,
     #[error("storage failure: {0}")]
     Storage(#[from] rusqlite::Error),
     #[cfg(feature = "postgres")]
@@ -796,6 +851,24 @@ impl Step<'_> {
                 #[cfg(feature = "fault-injection")]
                 self.store.read_refused()?;
                 step.log()
+            }
+        }
+    }
+
+    /// Fetch and verify a single detached body from this root's log on the step's active
+    /// connection, avoiding a second pool checkout while the step holds its row lock.
+    pub fn body(
+        &self,
+        at: appa_engine::value::BodyAt,
+        digest: appa_engine::value::RawResultDigest,
+    ) -> Result<std::sync::Arc<str>, ReadError> {
+        match &self.backend {
+            StepBackend::Sqlite(_) => self.store.body(&self.root, at, digest),
+            #[cfg(feature = "postgres")]
+            StepBackend::Postgres(step) => {
+                #[cfg(feature = "fault-injection")]
+                self.store.read_refused()?;
+                step.body(at, digest)
             }
         }
     }
@@ -893,6 +966,9 @@ impl<'a> Batch<'a> {
     /// batch's first record carries. A decided batch must carry one; a host-only batch is not
     /// fenced.
     fn of(based_on: &'a Log, facts: &[Fact], observation: Option<&HostObservation>) -> Result<Batch<'a>, AppendError> {
+        if facts.iter().any(Fact::has_detached) {
+            return Err(AppendError::DetachedBody);
+        }
         let stamp = encoding::stamp_of(facts);
         if !facts.is_empty() && stamp.is_none() {
             return Err(AppendError::Unstamped);
@@ -1080,6 +1156,9 @@ impl LogStore {
     /// root or none is. The opening is fenced like every stamped batch: it commits only while the
     /// revision that decided it is the deployment's head.
     pub fn create_root(&self, opening: Vec<Fact>, policy_file: &[u8]) -> Result<TrajectoryId, CreateError> {
+        if opening.iter().any(Fact::has_detached) {
+            return Err(CreateError::DetachedBody);
+        }
         let (root, key, line) = opened_by(&opening)?;
         if PolicyFileKey::of(policy_file) != key {
             return Err(CreateError::PolicyFileMismatch);
@@ -1117,6 +1196,22 @@ impl LogStore {
             Store::Sqlite(sqlite) => sqlite.has_root(root),
             #[cfg(feature = "postgres")]
             Store::Postgres(pg) => pg.has_root(root).map_err(Into::into),
+        }
+    }
+
+    /// Fetch and verify a single detached body from `root`'s log at `at`.
+    pub fn body(
+        &self,
+        root: &TrajectoryId,
+        at: appa_engine::value::BodyAt,
+        digest: appa_engine::value::RawResultDigest,
+    ) -> Result<std::sync::Arc<str>, ReadError> {
+        #[cfg(feature = "fault-injection")]
+        self.read_refused()?;
+        match &self.store {
+            Store::Sqlite(sqlite) => sqlite.body(root, at, digest),
+            #[cfg(feature = "postgres")]
+            Store::Postgres(pg) => pg.body(root, at, digest),
         }
     }
 
@@ -5197,5 +5292,73 @@ mod tests {
             waited < checkout + Duration::from_millis(500),
             "the checkout ends when its wait runs out: {waited:?}"
         );
+    }
+
+    #[test]
+    fn a_large_tool_result_detaches_on_decode_and_loads_via_body() {
+        use appa_engine::value::{BodyAt, DETACH_AT, DispatchId, LabeledValue, Provenance, RawResultDigest, ValueBody};
+
+        let store = opened();
+        let log = store.log(&root()).expect("the opening log reads");
+        let payload = "x".repeat(DETACH_AT + 4096);
+        let digest = RawResultDigest::of(payload.as_bytes());
+        let call_digest = serde_json::from_value(serde_json::json!("ab".repeat(32))).expect("a digest decodes");
+        let admitted = Fact::ValueAdmitted {
+            trajectory: root(),
+            value: LabeledValue {
+                label: Label::top(),
+                body: ValueBody::new(payload.clone()),
+            },
+            provenance: Provenance::ToolResult {
+                dispatch: DispatchId::new(root(), call_digest, 0),
+            },
+        };
+        let batch = decided_at(PolicyRevision::FIRST, &[admitted]);
+        store.append(&log, &batch, None).expect("the large tool result appends");
+
+        let read = store.log(&root()).expect("the log with large result reads");
+        let Fact::ValueAdmitted { value, .. } = read.facts().last().expect("the admitted fact exists") else {
+            panic!("last fact is ValueAdmitted");
+        };
+        assert!(value.body.is_detached(), "large tool-result body detaches on decode");
+        assert!(
+            read.retained_bytes() < DETACH_AT,
+            "retained_bytes ({}) stays below the detach threshold",
+            read.retained_bytes()
+        );
+        let at = value.body.at().expect("detached body carries its locator");
+        assert_eq!(at, BodyAt { seq: 1, fact: 1 });
+
+        let loaded = store
+            .body(&root(), at, digest)
+            .expect("store.body fetches and verifies the exact body");
+        assert_eq!(&*loaded, payload.as_str());
+
+        let wrong_digest = RawResultDigest::of(b"different");
+        assert!(matches!(
+            store.body(&root(), at, wrong_digest),
+            Err(ReadError::DetachedBody {
+                seq: 1,
+                fact: 1,
+                reason: DetachedBodyReason::Mismatch
+            })
+        ));
+        assert!(matches!(
+            store.body(&root(), BodyAt { seq: 99, fact: 0 }, digest),
+            Err(ReadError::DetachedBody {
+                seq: 99,
+                fact: 0,
+                reason: DetachedBodyReason::Missing
+            })
+        ));
+
+        // Appending a fact that still carries a detached body is refused before encoding.
+        let detached_fact = read.facts().last().unwrap().clone();
+        assert!(detached_fact.has_detached());
+        let bad_batch = decided_at(PolicyRevision::FIRST, &[detached_fact]);
+        assert!(matches!(
+            store.append(&read, &bad_batch, None),
+            Err(AppendError::DetachedBody)
+        ));
     }
 }

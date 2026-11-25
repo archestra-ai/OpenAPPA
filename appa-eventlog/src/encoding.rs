@@ -182,12 +182,50 @@ pub(crate) fn open_log(root: &TrajectoryId, first: &[u8], policy_file: Vec<u8>) 
     })
 }
 
-/// Decode one batch onto `log` at its current basis.
+/// Decode one batch onto `log` at its current basis, detaching large eligible bodies so
+/// in-memory logs and views stay bounded.
 pub(crate) fn push_batch(log: &mut Log, batch: &[u8]) -> Result<(), ReadError> {
     let data = std::sync::Arc::make_mut(&mut log.data);
-    let record = decode(data.basis, batch)?;
+    let mut record = decode(data.basis, batch)?;
+    appa_engine::fact::detach_batch_bodies(&mut record.facts, data.basis, appa_engine::value::DETACH_AT);
     push(data, record);
     Ok(())
+}
+
+/// Decode one batch inline and extract the verified text of the detachable body at `fact`.
+pub(crate) fn decode_body(
+    seq: u64,
+    batch: &[u8],
+    fact: u32,
+    expected: appa_engine::value::RawResultDigest,
+) -> Result<std::sync::Arc<str>, ReadError> {
+    let record = decode(seq, batch)?;
+    let Some(entry) = record.facts.get(fact as usize) else {
+        return Err(ReadError::DetachedBody {
+            seq,
+            fact,
+            reason: crate::DetachedBodyReason::WrongFact,
+        });
+    };
+    let Some(body) = entry.detachable_body() else {
+        return Err(ReadError::DetachedBody {
+            seq,
+            fact,
+            reason: crate::DetachedBodyReason::WrongFact,
+        });
+    };
+    if body.digest() != expected {
+        return Err(ReadError::DetachedBody {
+            seq,
+            fact,
+            reason: crate::DetachedBodyReason::Mismatch,
+        });
+    }
+    body.text_arc().map_err(|_| ReadError::DetachedBody {
+        seq,
+        fact,
+        reason: crate::DetachedBodyReason::WrongFact,
+    })
 }
 
 /// A root's log decoded onto the policy file its opening names: refused unless `policy_file`
@@ -209,12 +247,8 @@ pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: V
 /// Decode the batches that follow `log` in its root's log onto it, in order. Only the new
 /// batches are decoded: a batch never changes once it is accepted.
 pub(crate) fn extend(log: &mut Log, batches: Vec<Vec<u8>>) -> Result<(), ReadError> {
-    if !batches.is_empty() {
-        let data = std::sync::Arc::make_mut(&mut log.data);
-        for batch in batches {
-            let record = decode(data.basis, &batch)?;
-            push(data, record);
-        }
+    for batch in batches {
+        push_batch(log, &batch)?;
     }
     Ok(())
 }

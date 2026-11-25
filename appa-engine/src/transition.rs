@@ -856,6 +856,17 @@ impl EngineView {
         self.advance_with(batch, None)
     }
 
+    /// Attach verified inline text to any detached body in this view located at `at`.
+    /// Intended for local, per-call hydration; callers must not write hydrated views back into
+    /// shared caches.
+    pub fn attach_body(
+        &mut self,
+        at: crate::value::BodyAt,
+        text: std::sync::Arc<str>,
+    ) -> Result<bool, crate::value::BodyMismatch> {
+        self.projection.attach_body(at, text)
+    }
+
     /// Advance the cache by a batch the store accepted, detaching eligible bodies whose byte
     /// length is at least `threshold` so held views stay bounded after live appends.
     pub fn advance_detached(&mut self, batch: &ValidatedFactBatch, threshold: usize) -> Result<(), ViewMismatch> {

@@ -398,6 +398,45 @@ impl Projection {
         }
     }
 
+    /// Attach verified inline text to any detached body in this projection located at `at`.
+    /// Returns `Ok(true)` if at least one body was attached, `Ok(false)` if none matched `at`.
+    pub(crate) fn attach_body(
+        &mut self,
+        at: crate::value::BodyAt,
+        text: std::sync::Arc<str>,
+    ) -> Result<bool, crate::value::BodyMismatch> {
+        let mut attached = false;
+        for value in self.values.iter_mut() {
+            if let Some(body) = &mut value.body
+                && body.at() == Some(at)
+            {
+                *body = body.attach(std::sync::Arc::clone(&text))?;
+                attached = true;
+            }
+        }
+        let mut mismatch = None;
+        each_mut(&mut self.candidates, |candidate| {
+            if mismatch.is_some() {
+                return;
+            }
+            if let DerivedCandidate::Result { value, .. } = &mut candidate.derived
+                && value.body.at() == Some(at)
+            {
+                match value.body.attach(std::sync::Arc::clone(&text)) {
+                    Ok(hydrated) => {
+                        value.body = hydrated;
+                        attached = true;
+                    }
+                    Err(error) => mismatch = Some(error),
+                }
+            }
+        });
+        if let Some(error) = mismatch {
+            return Err(error);
+        }
+        Ok(attached)
+    }
+
     pub(crate) fn set_position(&mut self, position: u64) {
         self.position = position;
     }

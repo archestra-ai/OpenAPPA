@@ -46,7 +46,7 @@ use crate::embedded::{
     DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, NewEmbedded, ReadClaim, ReadTake,
     StoredEmbedded, TICKET_BOUND, TICKET_OPENING, classify_read, next_read_ticket, read_ticket, same_payload,
 };
-use crate::encoding::{SequenceGap, contiguous_from, open_log, opening_policy_key, push_batch};
+use crate::encoding::{SequenceGap, contiguous_from, decode_body, open_log, opening_policy_key, push_batch};
 use crate::held::{NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, SessionScope, StoredLease, StoredOperation, StoredOperationInput, StoredResult,
@@ -366,6 +366,10 @@ pub(crate) struct PostgresStore {
 /// bound is still read, from its first batch.
 const CACHED_FACTS: usize = 250_000;
 
+/// How many retained heap bytes the cached logs of one store hold at most, together.
+/// Matches SQLite's 32 MiB retention bound.
+const CACHE_BYTES: usize = 32 * 1024 * 1024;
+
 /// Target payload byte budget per chunk when streaming event batches from PostgreSQL.
 /// A single batch larger than this budget is fetched alone.
 const STREAM_CHUNK_BYTES: usize = 16 * 1024 * 1024;
@@ -390,11 +394,13 @@ struct CachedLogs {
     /// `(reader, root)` entries in the order they were last used, oldest first.
     order: std::collections::VecDeque<(ReaderId, String)>,
     facts: usize,
+    bytes: usize,
 }
 
 #[derive(Clone)]
 struct CachedLog {
     log: Log,
+    bytes: usize,
     /// SHA-256 of the plaintext of the log's last batch, avoiding retention of a multi-MiB tip.
     last_batch_digest: [u8; 32],
 }
@@ -441,6 +447,7 @@ impl LogCache {
         let mut entries = self.entries();
         if let Some(gone) = entries.logs.remove(&key) {
             entries.facts -= gone.log.facts().len();
+            entries.bytes -= gone.bytes;
             entries.order.retain(|cached| cached != &key);
         }
     }
@@ -450,8 +457,9 @@ impl LogCache {
     fn keep(&self, reader: ReaderId, log: &Log, last_batch_digest: [u8; 32]) {
         let key = (reader, log.root().as_str().to_owned());
         let size = log.facts().len();
+        let byte_size = log.retained_bytes();
         let mut entries = self.entries();
-        if size > CACHED_FACTS {
+        if size > CACHED_FACTS || byte_size > CACHE_BYTES {
             return;
         }
         if entries
@@ -466,9 +474,10 @@ impl LogCache {
         }
         if let Some(older) = entries.logs.remove(&key) {
             entries.facts -= older.log.facts().len();
+            entries.bytes -= older.bytes;
             entries.order.retain(|cached| cached != &key);
         }
-        while entries.facts + size > CACHED_FACTS {
+        while entries.facts + size > CACHED_FACTS || entries.bytes + byte_size > CACHE_BYTES {
             let Some(oldest) = entries.order.pop_front() else {
                 break;
             };
@@ -476,14 +485,17 @@ impl LogCache {
             debug_assert!(gone.is_some(), "every key in the order has a cached log");
             if let Some(gone) = gone {
                 entries.facts -= gone.log.facts().len();
+                entries.bytes -= gone.bytes;
             }
         }
         entries.order.push_back(key.clone());
         entries.facts += size;
+        entries.bytes += byte_size;
         entries.logs.insert(
             key,
             CachedLog {
                 log: log.clone(),
+                bytes: byte_size,
                 last_batch_digest,
             },
         );
@@ -1456,6 +1468,57 @@ impl PostgresStore {
         }
     }
 
+    pub(super) fn body(
+        &self,
+        root: &TrajectoryId,
+        at: appa_engine::value::BodyAt,
+        digest: appa_engine::value::RawResultDigest,
+    ) -> Result<Arc<str>, ReadError> {
+        match &self.lease {
+            Some(leased) => self.body_on(leased.lease.worker(), root, at, digest),
+            None => {
+                let lease = self.pool.checkout().map_err(PostgresError::from)?;
+                self.body_on(lease.worker(), root, at, digest)
+            }
+        }
+    }
+
+    fn body_on(
+        &self,
+        worker: &Worker,
+        root: &TrajectoryId,
+        at: appa_engine::value::BodyAt,
+        digest: appa_engine::value::RawResultDigest,
+    ) -> Result<Arc<str>, ReadError> {
+        let id = root.as_str().to_owned();
+        let seq = at.seq;
+        let raw: Option<Vec<u8>> = worker.run({
+            let id = id.clone();
+            move |state| {
+                let pos = stored_position(seq)?;
+                Ok(state
+                    .client
+                    .query_opt(
+                        "SELECT payload FROM openappa_events WHERE root = $1 AND seq = $2",
+                        &[&id, &pos],
+                    )?
+                    .map(|row| row.get(0)))
+            }
+        })?;
+        let Some(raw) = raw else {
+            return Err(ReadError::DetachedBody {
+                seq: at.seq,
+                fact: at.fact,
+                reason: DetachedBodyReason::Missing,
+            });
+        };
+        let plaintext = self
+            .cipher
+            .open_bytes(&event_field(&id, at.seq), &raw)
+            .map_err(PostgresError::from)?;
+        decode_body(at.seq, &plaintext, at.fact, digest)
+    }
+
     pub(super) fn log(&self, root: &TrajectoryId) -> Result<Log, ReadError> {
         match &self.lease {
             Some(leased) => self.log_on(leased.lease.worker(), root),
@@ -1707,6 +1770,14 @@ impl PostgresStep<'_> {
     /// The root's log as it stands while this step holds the root.
     pub(super) fn log(&self) -> Result<Log, ReadError> {
         self.store.log_on(self.worker(), &self.root)
+    }
+
+    pub(super) fn body(
+        &self,
+        at: appa_engine::value::BodyAt,
+        digest: appa_engine::value::RawResultDigest,
+    ) -> Result<Arc<str>, ReadError> {
+        self.store.body_on(self.worker(), &self.root, at, digest)
     }
 
     /// Append one batch at `basis` and end the step. A conflict writes nothing.
