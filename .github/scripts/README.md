@@ -73,6 +73,13 @@ same GitHub App with this updater's branch and release marker. Unrelated PRs
 remain open, and superseded branches are retained. For example, `v1.2.4` replaces
 a pending `v1.2.3` update. Closure failures can be repaired by retrying `v1.2.4`.
 
+Every run also closes the same App's open update PRs whose release Archestra
+main already contains, with a comment that names the installed revision. This
+happens when a maintainer pins Archestra to a newer OpenAPPA main commit by
+hand: the run has nothing to publish, and merging the older draft would
+downgrade the pin. If Archestra pins a commit that is not on OpenAPPA main, the
+updater closes no PR.
+
 Archestra runs **OpenAPPA Native Tests** on these PRs, including the real native
 addon and PostgreSQL ledger. A human reviews compatibility and dependency
 changes, marks the draft ready, and merges through the normal repository process.
