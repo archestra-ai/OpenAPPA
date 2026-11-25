@@ -67,8 +67,8 @@ fn decode(seq: u64, bytes: &[u8]) -> Result<Record, ReadError> {
 #[derive(Debug, thiserror::Error)]
 #[error("event sequence contains a gap: expected position {expected}, found {found}")]
 pub(crate) struct SequenceGap {
-    expected: u64,
-    found: i64,
+    pub(crate) expected: u64,
+    pub(crate) found: i64,
 }
 
 /// The batches of rows read in `seq` order from position `first`, refused unless their
@@ -85,6 +85,11 @@ pub(crate) fn contiguous_from(first: u64, rows: Vec<(i64, Vec<u8>)>) -> Result<V
         .collect()
 }
 
+/// The policy file key a log's opening batch names.
+pub(crate) fn opening_policy_key(root: &TrajectoryId, first: &[u8]) -> Result<PolicyFileKey, ReadError> {
+    Ok(opening(root, first)?.1.policy_file_key)
+}
+
 /// The policy file key a log's opening names. A log with no batch is an unknown root.
 pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<PolicyFileKey, ReadError> {
     let Some(first) = batches.first() else {
@@ -92,7 +97,7 @@ pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<Po
             root: root.as_str().to_string(),
         });
     };
-    Ok(opening(root, first)?.1.policy_file_key)
+    opening_policy_key(root, first)
 }
 
 /// A log's opening batch, and the opening record it begins with. An opening that names no
@@ -148,16 +153,10 @@ pub(crate) fn stamp_of(facts: &[Fact]) -> Option<PolicyRevision> {
     }
 }
 
-/// A root's log decoded onto the policy file its opening names: refused unless `policy_file`
-/// still hashes to that key.
-pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
-    let mut batches = batches.into_iter();
-    let Some(first) = batches.next() else {
-        return Err(ReadError::UnknownRoot {
-            root: root.as_str().to_string(),
-        });
-    };
-    let (record, opening) = opening(root, &first)?;
+/// Open a root's log from its first batch and the policy file it names: refused unless
+/// `policy_file` still hashes to that key.
+pub(crate) fn open_log(root: &TrajectoryId, first: &[u8], policy_file: Vec<u8>) -> Result<Log, ReadError> {
+    let (record, opening) = opening(root, first)?;
     if PolicyFileKey::of(&policy_file) != opening.policy_file_key {
         return Err(ReadError::PolicyFileMismatch {
             key: opening.policy_file_key.as_str().to_string(),
@@ -176,14 +175,35 @@ pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: V
         host: Vec::new(),
     };
     push(&mut data, record);
-    for batch in batches {
-        let record = decode(data.basis, &batch)?;
-        push(&mut data, record);
-    }
     Ok(Log {
         data: std::sync::Arc::new(data),
         lineage: None,
+        reader: crate::ReaderId::PLAIN,
     })
+}
+
+/// Decode one batch onto `log` at its current basis.
+pub(crate) fn push_batch(log: &mut Log, batch: &[u8]) -> Result<(), ReadError> {
+    let data = std::sync::Arc::make_mut(&mut log.data);
+    let record = decode(data.basis, batch)?;
+    push(data, record);
+    Ok(())
+}
+
+/// A root's log decoded onto the policy file its opening names: refused unless `policy_file`
+/// still hashes to that key.
+pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
+    let mut batches = batches.into_iter();
+    let Some(first) = batches.next() else {
+        return Err(ReadError::UnknownRoot {
+            root: root.as_str().to_string(),
+        });
+    };
+    let mut log = open_log(root, &first, policy_file)?;
+    for batch in batches {
+        push_batch(&mut log, &batch)?;
+    }
+    Ok(log)
 }
 
 /// Decode the batches that follow `log` in its root's log onto it, in order. Only the new

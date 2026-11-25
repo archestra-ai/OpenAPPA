@@ -871,9 +871,9 @@ struct HeldViews {
 
 #[derive(Default)]
 struct HeldFamilies {
-    views: std::collections::HashMap<TrajectoryId, HeldView>,
+    views: std::collections::HashMap<(appa_eventlog::ReaderId, TrajectoryId), HeldView>,
     /// Families in the order they were last used, oldest first.
-    order: std::collections::VecDeque<TrajectoryId>,
+    order: std::collections::VecDeque<(appa_eventlog::ReaderId, TrajectoryId)>,
 }
 
 struct HeldView {
@@ -897,9 +897,10 @@ impl HeldViews {
     /// log accepted since. `None` when no held view describes a prefix of `log`, or a batch
     /// is refused: the caller then rebuilds from the whole log.
     fn advanced(&self, engine: &Engine, log: &Log, earlier: &[&Engine]) -> Option<EngineView> {
+        let key = (log.reader(), log.root().clone());
         let (view, basis) = {
             let held = self.held();
-            let found = held.views.get(log.root())?;
+            let found = held.views.get(&key)?;
             let same_prefix = found.lineage.as_ref() == log.lineage()
                 && found.basis <= log.basis()
                 && found.facts <= log.facts().len()
@@ -913,15 +914,12 @@ impl HeldViews {
     }
 
     fn keep(&self, log: &Log, view: &EngineView) {
+        let key = (log.reader(), log.root().clone());
         let mut held = self.held();
         // The family was used now, whether or not this view replaces the held one.
-        held.order.retain(|family| family != log.root());
-        held.order.push_back(log.root().clone());
-        if held
-            .views
-            .get(log.root())
-            .is_none_or(|found| found.basis <= log.basis())
-        {
+        held.order.retain(|entry| entry != &key);
+        held.order.push_back(key.clone());
+        if held.views.get(&key).is_none_or(|found| found.basis <= log.basis()) {
             let fresh = HeldView {
                 view: view.clone(),
                 lineage: log.lineage().cloned(),
@@ -929,7 +927,7 @@ impl HeldViews {
                 facts: log.facts().len(),
                 last: log.facts().last().cloned(),
             };
-            held.views.insert(log.root().clone(), fresh);
+            held.views.insert(key, fresh);
         }
         while held.order.len() > HELD_VIEWS {
             if let Some(oldest) = held.order.pop_front() {

@@ -39,13 +39,14 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::encryption::{StorageCipher, field_context};
 use ::postgres::{Client, GenericClient};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use super::*;
 use crate::embedded::{
     DirectTake, EmbeddedClaim, EmbeddedError, EmbeddedRow, EmbeddedStatus, NewEmbedded, ReadClaim, ReadTake,
     StoredEmbedded, TICKET_BOUND, TICKET_OPENING, classify_read, next_read_ticket, read_ticket, same_payload,
 };
-use crate::encoding::{contiguous_from, decoded, extend, opening_key};
+use crate::encoding::{SequenceGap, contiguous_from, open_log, opening_policy_key, push_batch};
 use crate::held::{NewHeld, StoredNotice, millis, quota_limit};
 use crate::receipts::{
     Completion, SessionScope, StoredLease, StoredOperation, StoredOperationInput, StoredResult,
@@ -353,8 +354,11 @@ impl Drop for Lease {
 pub(crate) struct PostgresStore {
     pool: Arc<Pool>,
     lease: Option<LeasedPostgres>,
-    /// Shared with every lease of this store.
+    /// Shared with every view and lease of this store.
     logs: Arc<LogCache>,
+    /// Distinguishes logs read from this store from logs read from another store in the same
+    /// process when both are held by one runtime engine.
+    lineage: LogLineage,
     pub(crate) cipher: StorageCipher,
 }
 
@@ -362,10 +366,19 @@ pub(crate) struct PostgresStore {
 /// bound is still read, from its first batch.
 const CACHED_FACTS: usize = 250_000;
 
+/// Target payload byte budget per chunk when streaming event batches from PostgreSQL.
+/// A single batch larger than this budget is fetched alone.
+const STREAM_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
 /// The logs this process read last, so a later read of the same root decodes only the batches
 /// accepted since. Batches are append-only, so a cached log stays a true prefix; a read still
-/// fetches the cached log's last batch again and drops the entry when the stored bytes differ,
-/// which catches a log that was removed or rewritten behind the cache.
+/// fetches the cached log's last batch again, opens it with the caller's cipher, and drops the
+/// entry when its digest differs, which catches a log that was removed or rewritten behind the
+/// cache.
+///
+/// Every view of one store shares the cache, whatever its cipher. Each log is kept for the
+/// [`ReaderId`] that decrypted it, and only a view of that reader reads it back: a view with a
+/// different key or scope, or without a key, decodes the stored batches itself.
 #[derive(Default)]
 struct LogCache {
     entries: Mutex<CachedLogs>,
@@ -381,8 +394,34 @@ struct CachedLogs {
 
 #[derive(Clone)]
 struct CachedLog {
+    reader: ReaderId,
     log: Log,
-    last_batch: Vec<u8>,
+    /// SHA-256 of the plaintext of the log's last batch, avoiding retention of a multi-MiB tip.
+    last_batch_digest: [u8; 32],
+}
+
+fn batch_digest(plaintext: &[u8]) -> [u8; 32] {
+    Sha256::digest(plaintext).into()
+}
+
+/// Pack consecutive `(seq, byte_len)` rows into inclusive `seq` ranges whose total encoded byte
+/// length stays within `max_bytes` (taking at least one row when a single row exceeds it).
+fn plan_chunks(rows: &[(u64, usize)], max_bytes: usize) -> Vec<(u64, u64)> {
+    let mut chunks = Vec::new();
+    let mut index = 0;
+    while index < rows.len() {
+        let start = rows[index].0;
+        let mut end = start;
+        let mut bytes = rows[index].1;
+        index += 1;
+        while index < rows.len() && bytes.saturating_add(rows[index].1) <= max_bytes {
+            end = rows[index].0;
+            bytes = bytes.saturating_add(rows[index].1);
+            index += 1;
+        }
+        chunks.push((start, end));
+    }
+    chunks
 }
 
 impl LogCache {
@@ -392,8 +431,13 @@ impl LogCache {
             .expect("the log cache mutex is never poisoned: no panic runs while it is held")
     }
 
-    fn get(&self, root: &str) -> Option<CachedLog> {
-        self.entries().logs.get(root).cloned()
+    /// `root`'s cached log, when `reader` decrypted it.
+    fn get(&self, reader: ReaderId, root: &str) -> Option<CachedLog> {
+        self.entries()
+            .logs
+            .get(root)
+            .filter(|cached| cached.reader == reader)
+            .cloned()
     }
 
     fn forget(&self, root: &str) {
@@ -404,8 +448,9 @@ impl LogCache {
         }
     }
 
-    /// Keep `log` unless the cache already holds a later read of its root.
-    fn keep(&self, log: &Log, last_batch: &[u8]) {
+    /// Keep `log`, as `reader` decrypted it, unless the cache already holds a later read of its
+    /// root by the same reader.
+    fn keep(&self, reader: ReaderId, log: &Log, last_batch_digest: [u8; 32]) {
         let root = log.root().as_str();
         let size = log.facts().len();
         let mut entries = self.entries();
@@ -415,7 +460,7 @@ impl LogCache {
         if entries
             .logs
             .get(root)
-            .is_some_and(|cached| cached.log.basis() >= log.basis())
+            .is_some_and(|cached| cached.reader == reader && cached.log.basis() >= log.basis())
         {
             // A read the cache already answered still counts as a use.
             entries.order.retain(|cached| cached != root);
@@ -441,8 +486,9 @@ impl LogCache {
         entries.logs.insert(
             root.to_owned(),
             CachedLog {
+                reader,
                 log: log.clone(),
-                last_batch: last_batch.to_vec(),
+                last_batch_digest,
             },
         );
     }
@@ -502,15 +548,19 @@ impl PostgresStore {
             pool,
             lease: None,
             logs: Arc::default(),
+            lineage: LogLineage::default(),
             cipher: StorageCipher::Plain,
         })
     }
 
+    /// A view of this store whose reads and writes use `cipher`. It shares the store's pool and
+    /// decoded-log cache; the cache answers it only with logs its own reader decrypted.
     pub(crate) fn encrypted_view(&self, cipher: StorageCipher) -> Self {
         Self {
             pool: Arc::clone(&self.pool),
             lease: None,
-            logs: Arc::default(),
+            logs: Arc::clone(&self.logs),
+            lineage: self.lineage.clone(),
             cipher,
         }
     }
@@ -528,6 +578,7 @@ impl PostgresStore {
                 lease: self.pool.checkout()?,
             }),
             logs: Arc::clone(&self.logs),
+            lineage: self.lineage.clone(),
             cipher: self.cipher.clone(),
         })
     }
@@ -1421,7 +1472,7 @@ impl PostgresStore {
 
     /// Read `root`'s log on `worker`'s connection, decoding only what the cache lacks.
     fn log_on(&self, worker: &Worker, root: &TrajectoryId) -> Result<Log, ReadError> {
-        let cached = self.logs.get(root.as_str());
+        let cached = self.logs.get(self.cipher.reader(), root.as_str());
         match self.read_log(worker, root, cached)? {
             Some(log) => Ok(log),
             // The cached copy no longer matches what is stored: read the whole log once.
@@ -1445,7 +1496,7 @@ impl PostgresStore {
         let id = root.as_str().to_owned();
         // A cached log is read again from its last batch, which must still be the stored one.
         let from = cached.as_ref().map_or(0, |cached| cached.log.basis() - 1);
-        let (prefix, rows) = worker.run({
+        let (prefix, sizes) = worker.run({
             let id = id.clone();
             move |state| {
                 let start = stored_position(from)?;
@@ -1462,49 +1513,111 @@ impl PostgresStore {
                         .get(0),
                 };
                 let rows = state.client.query(
-                    "SELECT seq, payload FROM openappa_events WHERE root = $1 AND seq >= $2 ORDER BY seq",
+                    "SELECT seq, octet_length(payload) FROM openappa_events WHERE root = $1 AND seq >= $2 ORDER BY seq",
                     &[&id, &start],
                 )?;
-                let rows = contiguous_from(from, rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
-                    .map_err(|gap| PostgresError(gap.to_string()))?;
-                Ok((prefix as u64, rows))
+                let mut sizes = Vec::with_capacity(rows.len());
+                for (row, expected) in rows.into_iter().zip(from..) {
+                    let found: i64 = row.get(0);
+                    if u64::try_from(found) != Ok(expected) {
+                        return Err(PostgresError(SequenceGap { expected, found }.to_string()));
+                    }
+                    let len: i32 = row.get(1);
+                    sizes.push((expected, usize::try_from(len).unwrap_or(0)));
+                }
+                Ok((prefix as u64, sizes))
             }
         })?;
-        let rows = rows
-            .into_iter()
-            .enumerate()
-            .map(|(offset, bytes)| {
-                self.cipher
-                    .open_bytes(&event_field(&id, from + offset as u64), &bytes)
-                    .map_err(PostgresError::from)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let (log, last_batch) = match cached {
-            Some(CachedLog { mut log, last_batch }) if prefix == from && rows.first() == Some(&last_batch) => {
-                let batches = rows.into_iter().skip(1).collect::<Vec<_>>();
-                let last = batches.last().cloned().unwrap_or(last_batch);
-                extend(&mut log, batches)?;
-                (log, last)
+        if sizes.is_empty() {
+            return match cached {
+                Some(_) => Ok(None),
+                None => Err(ReadError::UnknownRoot { root: id }),
+            };
+        }
+        if cached.is_some() && prefix != from {
+            return Ok(None);
+        }
+
+        let chunks = plan_chunks(&sizes, STREAM_CHUNK_BYTES);
+        let mut state_log: Option<Log> = None;
+        let mut tip_digest = [0u8; 32];
+        let mut cached = cached;
+
+        for (chunk_start, chunk_end) in chunks {
+            let chunk_rows = worker.run({
+                let id = id.clone();
+                move |state| {
+                    let lo = stored_position(chunk_start)?;
+                    let hi = stored_position(chunk_end)?;
+                    let rows = state.client.query(
+                        "SELECT seq, payload FROM openappa_events WHERE root = $1 AND seq >= $2 AND seq <= $3 ORDER BY seq",
+                        &[&id, &lo, &hi],
+                    )?;
+                    let expected_len = (chunk_end - chunk_start + 1) as usize;
+                    if rows.len() != expected_len {
+                        let expected = chunk_start + rows.len() as u64;
+                        return Err(PostgresError(
+                            SequenceGap {
+                                expected,
+                                found: -1,
+                            }
+                            .to_string(),
+                        ));
+                    }
+                    contiguous_from(chunk_start, rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
+                        .map_err(|gap| PostgresError(gap.to_string()))
+                }
+            })?;
+
+            for (offset, raw) in chunk_rows.into_iter().enumerate() {
+                let seq = chunk_start + offset as u64;
+                let plaintext = self
+                    .cipher
+                    .open_bytes(&event_field(&id, seq), &raw)
+                    .map_err(PostgresError::from)?;
+                drop(raw);
+                let digest = batch_digest(&plaintext);
+                if seq == from {
+                    match cached.take() {
+                        Some(CachedLog {
+                            log, last_batch_digest, ..
+                        }) => {
+                            if digest != last_batch_digest {
+                                return Ok(None);
+                            }
+                            state_log = Some(log);
+                        }
+                        None => {
+                            let hash = opening_policy_key(root, &plaintext)?.as_str().to_owned();
+                            let lookup = hash.clone();
+                            let policy = worker
+                                .run(move |state| {
+                                    Ok(state
+                                        .client
+                                        .query_opt(
+                                            "SELECT bytes FROM openappa_policy_files WHERE hash = $1",
+                                            &[&lookup],
+                                        )?
+                                        .map(|row| row.get::<_, Vec<u8>>(0)))
+                                })?
+                                .ok_or(ReadError::PolicyFileMissing { key: hash })?;
+                            state_log = Some(open_log(root, &plaintext, policy)?);
+                        }
+                    }
+                } else {
+                    let log = state_log
+                        .as_mut()
+                        .expect("seq == from initializes state_log before later batches");
+                    push_batch(log, &plaintext)?;
+                }
+                tip_digest = digest;
             }
-            Some(_) => {
-                return Ok(None);
-            }
-            None => {
-                let hash = opening_key(root, &rows)?.as_str().to_owned();
-                let lookup = hash.clone();
-                let policy = worker
-                    .run(move |state| {
-                        Ok(state
-                            .client
-                            .query_opt("SELECT bytes FROM openappa_policy_files WHERE hash = $1", &[&lookup])?
-                            .map(|row| row.get::<_, Vec<u8>>(0)))
-                    })?
-                    .ok_or(ReadError::PolicyFileMissing { key: hash })?;
-                let last = rows.last().cloned().unwrap_or_default();
-                (decoded(root, rows, policy)?, last)
-            }
-        };
-        self.logs.keep(&log, &last_batch);
+        }
+
+        let mut log = state_log.expect("non-empty sizes produces a decoded log");
+        log.lineage = Some(self.lineage.clone());
+        log.reader = self.cipher.reader();
+        self.logs.keep(self.cipher.reader(), &log, tip_digest);
         Ok(Some(log))
     }
 
@@ -2289,4 +2402,68 @@ fn results_in_key_order(mut keys: Vec<ProcessedResultKey>) -> Vec<ProcessedResul
         ))
     });
     keys
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::{create, opening, root};
+    use crate::{Backend, LogStore};
+
+    fn log() -> Log {
+        let store = LogStore::open(Backend::Memory).expect("an in-memory store opens");
+        create(&store, opening(&root())).expect("a fresh root opens");
+        store.log(&root()).expect("the log reads")
+    }
+
+    fn keyed(key: u8, scope: &str) -> ReaderId {
+        StorageCipher::encrypted(&[key; 32], scope.into())
+            .expect("the test key is valid")
+            .reader()
+    }
+
+    #[test]
+    fn a_cached_log_answers_only_the_reader_that_decrypted_it() {
+        let cache = LogCache::default();
+        let log = log();
+        let root = log.root().as_str().to_owned();
+        let tip = batch_digest(b"last");
+        cache.keep(keyed(7, "conversation-a"), &log, tip);
+
+        let hit = cache
+            .get(keyed(7, "conversation-a"), &root)
+            .expect("the same key and scope read it back");
+        assert!(
+            Arc::ptr_eq(&hit.log.data, &log.data),
+            "the decoded log is shared, not copied"
+        );
+        assert_eq!(hit.last_batch_digest, tip);
+        for other in [keyed(8, "conversation-a"), keyed(7, "conversation-b"), ReaderId::PLAIN] {
+            assert!(
+                cache.get(other, &root).is_none(),
+                "{other:?} does not read another reader's log"
+            );
+        }
+    }
+
+    #[test]
+    fn another_readers_read_replaces_the_entry_instead_of_answering_it() {
+        let cache = LogCache::default();
+        let log = log();
+        let root = log.root().as_str().to_owned();
+        let tip = batch_digest(b"last");
+        cache.keep(keyed(7, "conversation-a"), &log, tip);
+        // A reader that decoded the stored batches itself holds the key that opens them now.
+        cache.keep(ReaderId::PLAIN, &log, tip);
+        assert!(cache.get(keyed(7, "conversation-a"), &root).is_none());
+        assert!(cache.get(ReaderId::PLAIN, &root).is_some());
+        assert_eq!(cache.entries().facts, log.facts().len(), "one entry per root");
+    }
+
+    #[test]
+    fn stream_chunks_pack_small_batches_and_isolate_oversized_ones() {
+        let rows = vec![(0, 100), (1, 200), (2, 1000), (3, 50), (4, 50)];
+        assert_eq!(plan_chunks(&rows, 500), vec![(0, 1), (2, 2), (3, 4)]);
+        assert_eq!(plan_chunks(&[], 500), Vec::<(u64, u64)>::new());
+    }
 }

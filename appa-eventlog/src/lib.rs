@@ -172,6 +172,31 @@ pub struct PolicyHead {
 pub struct Log {
     data: std::sync::Arc<LogData>,
     lineage: Option<LogLineage>,
+    reader: ReaderId,
+}
+
+/// Opaque identity of the reader that decrypted a [`Log`].
+///
+/// Plaintext reads share [`ReaderId::PLAIN`]. Encrypted PostgreSQL views derive a
+/// process-local keyed MAC of their key and scope so process caches never serve one
+/// reader's decrypted content to another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ReaderId(Reader);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Reader {
+    Plain,
+    #[cfg(feature = "postgres")]
+    Keyed([u8; 32]),
+}
+
+impl ReaderId {
+    pub(crate) const PLAIN: Self = Self(Reader::Plain);
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn keyed(tag: [u8; 32]) -> Self {
+        Self(Reader::Keyed(tag))
+    }
 }
 
 /// An append-only SQLite cache generation, invalidated when another writer can alter a prefix.
@@ -411,6 +436,10 @@ pub struct CallBinding<'a> {
 impl Log {
     pub fn lineage(&self) -> Option<&LogLineage> {
         self.lineage.as_ref()
+    }
+
+    pub fn reader(&self) -> ReaderId {
+        self.reader
     }
 
     pub fn root(&self) -> &TrajectoryId {
@@ -881,8 +910,9 @@ impl<'a> Batch<'a> {
 
 impl LogStore {
     /// A PostgreSQL view whose retained content uses this request's cipher.
-    /// It owns a separate projection cache, so a view without the key cannot
-    /// read a previously decrypted projection from another request.
+    /// It shares the store's decoded-log cache. The cache keeps each log for the key and scope
+    /// that decrypted it, so a view without that key cannot read a projection decrypted for
+    /// another request: it decodes the stored batches itself, which its own cipher must open.
     #[cfg(feature = "postgres")]
     pub fn encrypted_view(&self, cipher: encryption::StorageCipher) -> Result<LogStore, postgres::LeaseError> {
         match &self.store {
