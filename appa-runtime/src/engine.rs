@@ -3970,13 +3970,14 @@ struct Unanswered {
 /// decides; the rest are held for a host to show. A block nothing is offered for is a hard
 /// block.
 fn block_outcomes(block: &CoreBlocked) -> Outcomes {
-    let offered = block.offers.iter().filter_map(|(_, id)| {
-        block
-            .block
-            .plans
-            .iter()
-            .find_map(|plan| plan.executable().filter(|plan| plan.id == *id))
-    });
+    let executable: BTreeMap<PlanId, &ExecutableRemedyPlan> = block
+        .block
+        .plans
+        .iter()
+        .filter_map(RemedyPlan::executable)
+        .map(|plan| (plan.id, plan))
+        .collect();
+    let offered = block.offers.iter().filter_map(|(_, id)| executable.get(id));
     let redispatches = block
         .block
         .plans
