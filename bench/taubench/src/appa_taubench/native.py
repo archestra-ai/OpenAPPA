@@ -15,6 +15,20 @@ AppaError = appa_agent_python.AppaError
 REFUSAL_FIELDS = frozenset({"deciding", "outcomes", "retry"})
 
 
+def _unsettled(response: dict[str, object]) -> str | None:
+    """The safe content of a report that settled nothing: a fact its result needs was not
+    obtained. This harness does not retry it, so the caller abandons the call and the model
+    reads that content in place of the result."""
+    content = response.get("content")
+    if (
+        response.get("kind") == "unsettled"
+        and set(response) == {"kind", "content", "retry"}
+        and isinstance(content, str)
+    ):
+        return content
+    return None
+
+
 class NativeProtocolError(RuntimeError):
     """The native extension returned an invalid result envelope."""
 
@@ -147,6 +161,9 @@ class FrameworkSession:
             else self._session.report(content, error, call_id=call_id)
         )
         response = self._decode(response_json)
+        if (withheld := _unsettled(response)) is not None:
+            self.abandon(call_id)
+            return Reported(withheld, "sealed")
         if response.get("kind") == "delivered" and set(response) - REFUSAL_FIELDS == {
             "kind",
             "content",

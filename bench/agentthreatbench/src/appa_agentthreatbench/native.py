@@ -15,6 +15,20 @@ EXECUTE_REMEDY_PLAN = "execute_remedy_plan"
 REFUSAL_FIELDS = frozenset({"deciding", "outcomes", "retry"})
 
 
+def _unsettled(response: dict[str, object]) -> str | None:
+    """The safe content of a report that settled nothing: a fact its result needs was not
+    obtained. This harness does not retry it, so the caller abandons the call and the model
+    reads that content in place of the result."""
+    content = response.get("content")
+    if (
+        response.get("kind") == "unsettled"
+        and set(response) == {"kind", "content", "retry"}
+        and isinstance(content, str)
+    ):
+        return content
+    return None
+
+
 class NativeProtocolError(RuntimeError):
     """The native extension returned an invalid response envelope."""
 
@@ -203,10 +217,12 @@ class NativeSession:
     def report(self, content: str | None, error: bool) -> Reported:
         if not self._pending:
             raise NativeProtocolError("no native call is pending")
-        # A refused or unsettled report leaves the call pending, to report again or abandon.
+        # A refused report leaves the call pending, to report again or abandon.
         response = self._decode(self._session.report(content, error))
-        if response.get("kind") != "unsettled":
-            self._pending = False
+        if (withheld := _unsettled(response)) is not None:
+            self.abandon()
+            return Reported(withheld, "sealed")
+        self._pending = False
         if response.get("kind") == "delivered" and set(response) - REFUSAL_FIELDS == {
             "kind",
             "content",
@@ -300,10 +316,12 @@ class NativeChildSession:
         pending = self._pending
         if pending is None:
             raise NativeProtocolError("no native child call is pending")
-        # A refused or unsettled report leaves the call pending, to report again or abandon.
+        # A refused report leaves the call pending, to report again or abandon.
         response = NativeSession._decode(self._child.report(content, error))
-        if response.get("kind") != "unsettled":
-            self._pending = None
+        if (withheld := _unsettled(response)) is not None:
+            self.abandon()
+            return Reported(withheld, "sealed")
+        self._pending = None
         if response.get("kind") == "delivered" and set(response) - REFUSAL_FIELDS == {
             "kind",
             "content",
