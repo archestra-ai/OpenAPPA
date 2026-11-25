@@ -317,8 +317,8 @@ APPA_GATE=1 APPA_RUNTIME_URL=http://127.0.0.1:8788 claude
 That runs the checkout's runtime behind the installed binary's hooks. To run
 the checkout's hook client as well, install the build (`cargo install --locked --path
 appa-runtime --force && appa plugin install claude-code`), or run
-`live-gate-check.py`, which launches the harness with `--settings` entries
-naming the built binary.
+`live-gate-check.py`, which installs the build into homes of its own and
+launches the harness through their `clappa`.
 
 The start leaves a runtime at a URL of your own alone, stale or not, and
 starts nothing there when nothing answers:
@@ -348,40 +348,57 @@ release build ignores `APPA_ENDPOINT`.
 
 ## Harness conformance check
 
-`live-gate-check.py` runs two real headless `claude` sessions against a
-runtime process it starts itself, under a policy that states one flow:
-reading a file narrows its content to the session, and writing a file
-releases content to the outside world. By default, Claude Code talks to a
-deterministic local model fixture, so the check needs no Claude account and
-consumes no model usage.
+`live-gate-check.py` runs three real headless `clappa` sessions. Each session
+gets a new home, config and data directory, and `appa plugin install
+claude-code` writes its hook entries, MCP registration, skill and `clappa`
+there. By default, Claude Code talks to a deterministic local model fixture,
+so the check needs no Claude account and consumes no model usage.
+
+It needs:
+
+- a debug build of appa, `target/debug/appa` or `APPA_BIN`. Each deployment
+  gets its own port through `APPA_ENDPOINT`, which only a debug build reads.
+- your change committed, and the build made from that commit. The install
+  exports the build's commit, so an uncommitted battery change is not what
+  the check runs.
+- the `claude` CLI on `PATH`, or `CLAUDE_BIN`. The check resolves a mise shim
+  before it changes `HOME`.
+- `bubblewrap` and `socat`, which Claude Code's sandbox runs on Linux. On
+  Ubuntu 24.04 and later, AppArmor blocks the nested user namespace the
+  sandbox needs; CI runs `.github/tools/claude-code/install-sandbox.sh` to
+  lift that on its throwaway runner. Without the sandbox, `clappa` prints that
+  shell commands run as SafeBash, and the shell session fails for that reason,
+  not for the policy.
 
 ```sh
 uv run marketplace/plugins/claude-code/live-gate-check.py
 ```
 
-It launches the harness with `--settings` hook entries naming the appa
-binary, the shape the install writes, and registers the runtime's MCP
-server for the session. It judges the gate on what reached the disk and
-the runtime's supported trajectory-status projection. One session writes
-words of the model's own and the file lands. The other reads a private
-file, narrows the trajectory to `session`, proposes the write, and that
-line then appears in no file under any name. The allowed write is what
-stops a runtime that is down from passing as a refusal: the hooks fail
-closed, so a gate that is not answering blocks both sessions rather than
-one.
+The check judges the gate on what reached the disk, the labels
+`appa file-tracker labels` prints, what the harness refused, and the
+runtime's supported trajectory-status projection:
 
-The check does not depend on APPA's internal event-log encoding. It needs the
-`claude` CLI on `PATH` and an appa binary: a local build, an installed one, or
-`APPA_BIN`. Set `CLAUDE_BIN` to use a specific Claude Code binary.
+| Session | Policy | Runtime | What must hold |
+|---|---|---|---|
+| Write the model's own words | One flow: reading a file narrows its content to `session`, and writing a file releases content to the outside world | Cold: the session's start hook starts it | The file lands |
+| Copy a read file | The same | Running before the session | The read narrows the trajectory to `session`, the write is refused, and the private line is in no other file |
+| Copy `.env` with Bash, then upload the copy | The shipped one, with the `file-tracker` battery | Running before the session | Bash carries the file-tracker's lists, the copy lands with an `audience self` label, and the upload is refused. No remedy releases the upload |
 
-Use the same scenarios as a small compatibility canary against the configured
-Claude account:
+The legal flows stop a runtime that is down from passing as a refusal: the
+hooks fail closed, so a gate that does not answer blocks every session. Two
+sessions start with the runtime running because a cold-started session can
+miss APPA's MCP tools, and with them the remedy tool. The check does not
+depend on APPA's internal event-log encoding.
+
+Use the same scenarios as a small compatibility canary against a real model:
 
 ```sh
 uv run marketplace/plugins/claude-code/live-gate-check.py --model live
 ```
 
-Only this explicit live mode consumes Claude usage.
+Only this explicit live mode consumes Claude usage. Each home is new, so the
+credentials come from the environment: `ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN`.
 
 ## Upgrade
 
