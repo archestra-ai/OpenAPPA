@@ -1046,7 +1046,12 @@ fn worst_case_plan_alternatives(
             let mandate = annotators
                 .get(annotator)
                 .expect("an annotated declaration names a registered annotator");
-            for effect in mandate.effects() {
+            // Only an effect some authority waives a `prior` on can add a competent authority.
+            let prior_waived: BTreeSet<&EffectKind> = authorities
+                .iter()
+                .flat_map(|authority| &authority.mandate.prior_waivers)
+                .collect();
+            for effect in mandate.effects().filter(|effect| prior_waived.contains(effect)) {
                 multiply(covering(&Gap::Prior(effect.clone())));
             }
             let dynamic_marks: Vec<MarkName> = attention_marks
