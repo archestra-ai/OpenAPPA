@@ -3,9 +3,12 @@
 The offline trace checks that a memory read makes the trajectory internal and
 keeps its trust, that text and structured writes, schema decisions, and
 instance creation run from trusted data before and after a read, that once a
-web fetch lowers the trust a write and a metadata change ask the authority, and
-that a schema migration and an instance deletion are reviewed. The root uses a fictional fixed audience. Its review authority
-cannot expand an audience.
+web fetch lowers the trust a write and a metadata change ask the authority,
+and that a schema migration and an instance deletion are reviewed. It also
+checks that a membership edit and a new API key are reviewed, and that memory
+cannot take the new key's `self` result.
+The root uses fictional fixed audiences: the session acts for Alice, and the
+organisation is Alice and Bob. Its review authority cannot expand an audience.
 
 ```sh
 appa replay \

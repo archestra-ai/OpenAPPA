@@ -533,13 +533,12 @@ impl<'de> Deserialize<'de> for AnnotationEvidence {
     }
 }
 
-/// An Annotator's produced answer pinned to the exact call it judged: the annotator that
-/// produced it, the canonical digest of the rendered call it saw, and the produced semantic
-/// fields. What a proposal carries for an Annotator-routed tool, and what a dispatch record
-/// persists for replay: replay validates the same binding — annotator, digest, mandate
-/// vocabulary — and never re-runs an implementation. The declaration's operational metadata
-/// is not here: replay reads it from the registry, fixed byte-for-byte by the opening's
-/// policy identity.
+/// A call's pinned annotation for an Annotator-routed tool: either an Annotator's produced
+/// answer (naming the Annotator that judged it) or the route's declared `on_no_answer`
+/// fallback (naming no Annotator, since none answered). Both bind the exact call by canonical
+/// digest, so a rewrite is annotated afresh and replay never consults again. The declaration's
+/// operational metadata is not here: replay reads it from the registry, fixed byte-for-byte by
+/// the opening's policy identity.
 /// The parts live behind one box: a pin rides proposals, evidence, and dispatch records,
 /// and the parts inline would bloat every enum that carries them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -547,12 +546,20 @@ impl<'de> Deserialize<'de> for AnnotationEvidence {
 pub struct PinnedAnnotation(Box<PinnedParts>);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct PinnedParts {
-    annotator: AnnotatorName,
-    call: crate::value::CanonicalDigest,
-    produced: ProducedAnnotation,
-    #[serde(default, skip_serializing_if = "AnnotationContext::is_empty")]
-    context: AnnotationContext,
+enum PinnedParts {
+    Annotator {
+        annotator: AnnotatorName,
+        call: crate::value::CanonicalDigest,
+        produced: ProducedAnnotation,
+        #[serde(default, skip_serializing_if = "AnnotationContext::is_empty")]
+        context: AnnotationContext,
+    },
+    NoAnswerFallback {
+        call: crate::value::CanonicalDigest,
+        produced: ProducedAnnotation,
+        #[serde(default, skip_serializing_if = "AnnotationContext::is_empty")]
+        context: AnnotationContext,
+    },
 }
 
 /// What the deployment's context providers answered about a call before its Annotator judged
@@ -587,8 +594,18 @@ impl AnnotationContext {
 
 impl PinnedAnnotation {
     pub fn new(annotator: AnnotatorName, call: crate::value::CanonicalDigest, produced: ProducedAnnotation) -> Self {
-        PinnedAnnotation(Box::new(PinnedParts {
+        PinnedAnnotation(Box::new(PinnedParts::Annotator {
             annotator,
+            call,
+            produced,
+            context: AnnotationContext::default(),
+        }))
+    }
+
+    /// A static `on_no_answer` fallback pinned to the exact call whose Annotator gave no
+    /// usable answer. Carries no Annotator name because none produced it.
+    pub fn no_answer_fallback(call: crate::value::CanonicalDigest, produced: ProducedAnnotation) -> Self {
+        PinnedAnnotation(Box::new(PinnedParts::NoAnswerFallback {
             call,
             produced,
             context: AnnotationContext::default(),
@@ -597,27 +614,41 @@ impl PinnedAnnotation {
 
     /// The same pin, recording the context its Annotator was given.
     pub fn with_context(mut self, context: AnnotationContext) -> Self {
-        self.0.context = context;
+        match &mut *self.0 {
+            PinnedParts::Annotator { context: slot, .. } | PinnedParts::NoAnswerFallback { context: slot, .. } => {
+                *slot = context;
+            }
+        }
         self
     }
 
-    /// What the context providers answered about the call before the Annotator judged it.
+    /// What the context providers answered about the call before the Annotator was asked.
     pub fn context(&self) -> &AnnotationContext {
-        &self.0.context
+        match &*self.0 {
+            PinnedParts::Annotator { context, .. } | PinnedParts::NoAnswerFallback { context, .. } => context,
+        }
     }
 
-    /// The Annotator that produced this pin.
-    pub fn annotator(&self) -> &AnnotatorName {
-        &self.0.annotator
+    /// The Annotator that produced this pin, or `None` when this pin is a route's static
+    /// `on_no_answer` fallback.
+    pub fn annotator(&self) -> Option<&AnnotatorName> {
+        match &*self.0 {
+            PinnedParts::Annotator { annotator, .. } => Some(annotator),
+            PinnedParts::NoAnswerFallback { .. } => None,
+        }
     }
 
-    /// The canonical digest of the exact rendered call the Annotator judged.
+    /// The canonical digest of the exact rendered call this pin binds.
     pub fn call(&self) -> &crate::value::CanonicalDigest {
-        &self.0.call
+        match &*self.0 {
+            PinnedParts::Annotator { call, .. } | PinnedParts::NoAnswerFallback { call, .. } => call,
+        }
     }
 
     pub fn produced(&self) -> &ProducedAnnotation {
-        &self.0.produced
+        match &*self.0 {
+            PinnedParts::Annotator { produced, .. } | PinnedParts::NoAnswerFallback { produced, .. } => produced,
+        }
     }
 
     /// The one complete annotation this pin gives the call under its declaration: the
@@ -626,7 +657,7 @@ impl PinnedAnnotation {
     /// higher trust floor, every audience requirement of both, and the lower delta trust.
     /// Derived on demand — never stored — so a record cannot disagree with its own registry.
     pub(crate) fn tool_annotation(&self, declaration: &ToolDeclaration, called: &ToolName) -> ToolAnnotation {
-        let produced = &self.0.produced;
+        let produced = self.produced();
         let mut delta = produced.delta.clone();
         let mut requires = produced.requires.clone();
         if let ToolDeclaration::Annotated {
@@ -679,6 +710,9 @@ pub enum ToolDeclaration {
         /// The highest trust its result carries, whatever the Annotator answers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         delta_trust: Option<Trust>,
+        /// Static semantics used when the routed Annotator produces no usable answer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_no_answer: Option<ProducedAnnotation>,
     },
 }
 
@@ -726,6 +760,14 @@ impl ToolDeclaration {
         }
     }
 
+    /// The static fallback annotation used when the routed Annotator gives no answer.
+    pub fn on_no_answer(&self) -> Option<&ProducedAnnotation> {
+        match self {
+            ToolDeclaration::Annotated { on_no_answer, .. } => on_no_answer.as_ref(),
+            ToolDeclaration::Declared(_) => None,
+        }
+    }
+
     /// The static annotation, when the declaration is one.
     pub fn declared(&self) -> Option<&ToolAnnotation> {
         match self {
@@ -766,6 +808,7 @@ mod tests {
             annotator: AnnotatorName::new("bash-classifier"),
             requires: Default::default(),
             delta_trust: None,
+            on_no_answer: None,
         };
         assert_eq!(annotated.annotator().map(|name| name.as_str()), Some("bash-classifier"));
         assert!(annotated.declared().is_none());
@@ -904,6 +947,7 @@ mod tests {
             annotator: AnnotatorName::new("bash-classifier"),
             requires: Default::default(),
             delta_trust: None,
+            on_no_answer: None,
         };
         let produced = ProducedAnnotation {
             evidence: None,
@@ -957,6 +1001,7 @@ mod tests {
                 audience: vec![readers("policy")],
             },
             delta_trust: Some(Trust::new(1)),
+            on_no_answer: None,
         };
         let answer = |delta: u8, floor: u8| ProducedAnnotation {
             evidence: None,
@@ -1029,7 +1074,24 @@ mod tests {
             pinned
         );
         assert_eq!(pinned.call(), &digest);
-        assert_eq!(pinned.annotator().as_str(), "bash-classifier");
+        assert_eq!(pinned.annotator().map(AnnotatorName::as_str), Some("bash-classifier"));
+
+        let fallback = PinnedAnnotation::no_answer_fallback(digest, pinned.produced().clone());
+        let fallback_wire = serde_json::to_value(&fallback).expect("a fallback pin serializes");
+        assert!(
+            fallback_wire.get("NoAnswerFallback").is_some(),
+            "a fallback pin uses its own variant: {fallback_wire}"
+        );
+        assert!(
+            fallback_wire["NoAnswerFallback"].get("annotator").is_none(),
+            "a fallback pin names no annotator"
+        );
+        assert_eq!(
+            serde_json::from_value::<PinnedAnnotation>(fallback_wire).expect("a fallback pin reads back"),
+            fallback
+        );
+        assert_eq!(fallback.call(), &digest);
+        assert!(fallback.annotator().is_none());
     }
 
     #[test]
@@ -1047,9 +1109,12 @@ mod tests {
         };
         let bare = PinnedAnnotation::new(AnnotatorName::new("bash-classifier"), digest, produced);
         let bare_wire = serde_json::to_value(&bare).expect("a pinned annotation serializes");
-        assert!(bare_wire.get("context").is_none(), "an empty context is not written");
         assert!(
-            bare_wire["produced"].get("forwards").is_none(),
+            bare_wire["Annotator"].get("context").is_none(),
+            "an empty context is not written"
+        );
+        assert!(
+            bare_wire["Annotator"]["produced"].get("forwards").is_none(),
             "a pin forwarding nothing is not written a forwards"
         );
 
@@ -1069,7 +1134,7 @@ mod tests {
         let pinned = bare.clone().with_context(context.clone());
         let wire = serde_json::to_value(&pinned).expect("a pinned annotation serializes");
         assert_eq!(
-            wire["context"],
+            wire["Annotator"]["context"],
             serde_json::json!({
                 "databricks": {"error": "timeout"},
                 "github": {"answer": {"repo": {"visibility": "public"}}},

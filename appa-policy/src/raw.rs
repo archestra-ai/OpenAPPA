@@ -149,9 +149,25 @@ pub(crate) struct RawTool {
     /// The registered `[[annotator]]` that produces this tool's semantics per call. Replaces
     /// the static `delta`/`forwards`/`requires`/`effects` — a declaration carries one recipe.
     pub(crate) annotator: Option<String>,
+    /// Static semantics used only when the routed Annotator gives no usable answer. It must
+    /// state `forwards` and require at least one attention mark so an outage never silently
+    /// releases a call.
+    pub(crate) on_no_answer: Option<RawAnnotationFallback>,
     /// The `[externals.recorders]` entry that receives the label each released call of this
     /// declaration publishes. Routing only: it changes no decision.
     pub(crate) recorder: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAnnotationFallback {
+    pub(crate) delta: Option<RawDelta>,
+    /// Required: the fallback must say what it forwards. `forwards = {}` states that the call
+    /// sends only its arguments.
+    pub(crate) forwards: RawDelta,
+    pub(crate) requires: RawRequires,
+    #[serde(default)]
+    pub(crate) effects: Vec<String>,
 }
 
 #[derive(Deserialize)]

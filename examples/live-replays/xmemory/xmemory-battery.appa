@@ -73,6 +73,17 @@ mcp/xmemory/decide_suggestions {
 }
 expect allow
 
+# The context pack and the membership list keep the trust.
+mcp/xmemory/get_context_pack {
+  include_live_state: true
+}
+expect allow
+
+mcp/xmemory/admin_list_instance_memberships {
+  instance_id: "00000000-0000-0000-0000-000000000000"
+}
+expect allow
+
 # Outside text lowers the trajectory's trust.
 mcp/web/fetch {
   url: "https://example.com/launch"
@@ -103,3 +114,24 @@ mcp/xmemory/admin_delete_instance_by_id {
   instance_id: "00000000-0000-0000-0000-000000000000"
 }
 expect authority xmemory-operator
+
+# A membership edit changes who can read the instance and is reviewed.
+mcp/xmemory/admin_edit_instance_memberships {
+  expected_revision: 3
+  additions: [{"instance_id": "00000000-0000-0000-0000-000000000000", "cluster_id": "00000000-0000-0000-0000-00000000c002"}]
+}
+expect authority xmemory-operator
+
+# A new API key is reviewed; its secret is for the caller alone.
+mcp/xmemory/admin_create_api_key {
+  name: "ci"
+  role: "Data writer"
+  cluster: "00000000-0000-0000-0000-00000000c001"
+}
+expect authority xmemory-operator
+
+# So memory cannot take it: the review authority cannot widen `self`.
+mcp/xmemory/write_async {
+  text: "The CI key belongs to Alice."
+}
+expect deny

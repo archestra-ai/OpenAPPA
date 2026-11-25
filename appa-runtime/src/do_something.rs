@@ -47,6 +47,7 @@ pub(crate) fn declarations() -> (ToolDeclaration, AnnotatorDeclaration) {
         annotator: annotator.clone(),
         requires: Default::default(),
         delta_trust: None,
+        on_no_answer: None,
     };
     let mandate = AnnotatorDeclaration {
         name: annotator,

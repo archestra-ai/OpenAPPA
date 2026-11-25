@@ -172,7 +172,7 @@ jobs:
     steps:
       - name: Generate release PR push token
         id: release-pr-token
-        uses: archestra-ai/.github/actions/github-app-token@v1.25.2
+        uses: archestra-ai/.github/actions/github-app-token@v1.31.1
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}

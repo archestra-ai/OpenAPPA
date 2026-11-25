@@ -1,6 +1,6 @@
 module github.com/archestra-ai/OpenAPPA/integrations/kagent/appa-kagent-adk-go
 
-go 1.26.7
+go 1.26.10
 
 require (
 	github.com/a2aproject/a2a-go v0.3.15
@@ -8,7 +8,7 @@ require (
 	github.com/go-logr/zapr v1.3.0
 	go.uber.org/zap v1.28.0
 	google.golang.org/adk/v2 v2.3.0
-	google.golang.org/genai v1.74.0
+	google.golang.org/genai v1.77.0
 )
 
 require (
@@ -83,7 +83,7 @@ require (
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.47.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.70.0 // indirect
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0
 	go.opentelemetry.io/otel v1.47.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.21.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp v0.23.0 // indirect

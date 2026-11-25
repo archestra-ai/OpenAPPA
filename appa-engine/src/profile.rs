@@ -392,6 +392,7 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
             annotator,
             requires,
             delta_trust,
+            on_no_answer,
         } => {
             let mut rendered = serde_json::json!({
                 "name": name,
@@ -410,6 +411,19 @@ fn identity_document_from_registry(registry: &Registry) -> serde_json::Value {
             }
             if let Some(trust) = delta_trust {
                 rendered["delta_trust"] = serde_json::json!(trust);
+            }
+            if let Some(fallback) = on_no_answer {
+                rendered["on_no_answer"] = serde_json::json!({
+                    "delta": fallback.delta,
+                    "forwards": fallback.forwards,
+                    "emits": fallback.emits,
+                    "requires": {
+                        "trust_floor": fallback.requires.label.trust_floor,
+                        "audience": sorted_set(&fallback.requires.label.audience),
+                        "history": sorted_set(&fallback.requires.history),
+                        "attention": sorted_set(&fallback.requires.attention),
+                    },
+                });
             }
             rendered
         }
@@ -739,6 +753,7 @@ mod tests {
             annotator: AnnotatorName::new("classifier"),
             requires: Default::default(),
             delta_trust: None,
+            on_no_answer: None,
         }
     }
 
@@ -1412,6 +1427,38 @@ mod tests {
         };
         let annotated_edit = routed(None);
         assert_ne!(identity(&annotated_edit, &profile), base);
+        let with_fallback = |forwards: Delta| {
+            let mut cfg = routed(None);
+            let ToolDeclaration::Annotated { on_no_answer, .. } = &mut cfg.tools[0] else {
+                unreachable!("the helper returns an annotated tool");
+            };
+            *on_no_answer = Some(crate::contract::ProducedAnnotation {
+                evidence: None,
+                delta: Delta::NONE,
+                forwards,
+                emits: EffectSet::default(),
+                requires: Requires {
+                    attention: vec![crate::names::MarkName::new("annotator-unavailable")],
+                    ..Requires::default()
+                },
+            });
+            cfg
+        };
+        let fallback_edit = with_fallback(Delta::NONE);
+        assert_ne!(
+            identity(&fallback_edit, &profile),
+            identity(&annotated_edit, &profile),
+            "a no-answer fallback is policy"
+        );
+        let fallback_forwards_edit = with_fallback(Delta {
+            trust: Some(Trust::new(0)),
+            audience: None,
+        });
+        assert_ne!(
+            identity(&fallback_forwards_edit, &profile),
+            identity(&fallback_edit, &profile),
+            "a fallback's forwards is policy"
+        );
         assert_ne!(
             identity(
                 &routed(Some(std::collections::BTreeSet::from([Trust::new(0)]))),
