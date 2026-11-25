@@ -1652,7 +1652,7 @@ impl WireDecision {
                 text: required("text", self.text)?,
             },
             DecisionName::Refuse => {
-                let retry = match stated(false)? {
+                let retry = match unremedied()? {
                     None | Some(Outcomes::Integrity) => None,
                     Some(Outcomes::MissingFact(retry)) => Some(retry),
                     Some(_) => {
@@ -1756,6 +1756,11 @@ mod tests {
         assert_eq!(json["outcomes"], serde_json::json!(["missing_fact"]));
         assert_eq!(json["retry"], "later");
         assert_eq!(round_trip(&unobtained), unobtained);
+        let remedied: WireDecision = serde_json::from_str(
+            r#"{"protocol":1,"decision":"refuse","class":"contended","detail":"d","outcomes":["missing_fact"],"deciding":"missing_fact","retry":"later","offers":[{"offer_id":"o1"}]}"#,
+        )
+        .expect("reads");
+        assert!(matches!(remedied.into_decision(), Err(ParseRefusal::Malformed { .. })));
 
         let unstated: WireDecision =
             serde_json::from_str(r#"{"protocol":1,"decision":"deny_call","feedback":"no"}"#).expect("reads");
