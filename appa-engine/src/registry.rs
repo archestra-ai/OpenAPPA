@@ -1039,20 +1039,21 @@ fn worst_case_plan_alternatives(
         // any slot its mandate allows, so the lint takes the worst case on every slot at once —
         // a produced trust floor, a produced `contains`, any declared mark an authority
         // covers — under a catch-all, the whole vocabulary but the reserved denial — and a
-        // `prior` on every effect the Annotator's mandate allows.
+        // `prior` and a `no_prior` on every effect the Annotator's mandate allows.
         ToolDeclaration::Annotated { annotator, .. } => {
             multiply(trust_cap_competent());
             multiply(reader_cap_competent());
             let mandate = annotators
                 .get(annotator)
                 .expect("an annotated declaration names a registered annotator");
-            // Only an effect some authority waives a `prior` on can add a competent authority.
-            let prior_waived: BTreeSet<&EffectKind> = authorities
+            // Only an effect some authority waives can add a competent authority.
+            let waived: BTreeSet<&EffectKind> = authorities
                 .iter()
-                .flat_map(|authority| &authority.mandate.prior_waivers)
+                .flat_map(|authority| authority.mandate.prior_waivers.iter().chain(&authority.mandate.waivers))
                 .collect();
-            for effect in mandate.effects().filter(|effect| prior_waived.contains(effect)) {
+            for effect in mandate.effects().filter(|effect| waived.contains(effect)) {
                 multiply(covering(&Gap::Prior(effect.clone())));
+                multiply(covering(&Gap::NoPrior(effect.clone())));
             }
             let dynamic_marks: Vec<MarkName> = attention_marks
                 .iter()
@@ -3984,6 +3985,38 @@ mod tests {
         assert!(one > 0, "three waivers of one required prior multiply the menu");
         assert_eq!(both, 4 * one, "(3 × 3 − 1) = 4 × (3 − 1)");
         assert_eq!(count(None, &effects, 3), count(Some(&effects), &effects, 3));
+
+        // A `no_prior` waiver on the same effects is an independent dimension.
+        let mixed = |no_prior_waivers: usize| {
+            let mut cfg = base();
+            cfg.tools = vec![annotated("lookup", "classifier")];
+            cfg.annotators = vec![AnnotatorDeclaration {
+                effects: Some(effects[..1].iter().copied().map(EffectKind::new).collect()),
+                ..annotator("classifier")
+            }];
+            cfg.authorities = (0..3)
+                .map(|index| Authority {
+                    except: Vec::new(),
+                    name: AuthorityName::new(format!("a{index}")),
+                    mandate: Mandate {
+                        prior_waivers: vec![EffectKind::new("e0")],
+                        waivers: match index < no_prior_waivers {
+                            true => vec![EffectKind::new("e0")],
+                            false => Vec::new(),
+                        },
+                        ..Mandate::default()
+                    },
+                    scope: Scope::default(),
+                    hint: None,
+                })
+                .collect();
+            match Registry::build_covered_with_cap(cfg, PlannerCap::new(1).expect("nonzero")) {
+                Err(LoadError::TooManyPlanAlternatives { count, ref tool, .. }) if tool == "lookup" => count,
+                other => panic!("the annotated tool exceeds a cap of one, got {other:?}"),
+            }
+        };
+        assert!(mixed(3) > mixed(1), "no_prior waivers widen the bound");
+        assert_eq!(mixed(3) - mixed(1), 2 * (mixed(2) - mixed(1)));
 
         let mut cfg = base();
         cfg.tools = vec![annotated("lookup", "classifier")];
