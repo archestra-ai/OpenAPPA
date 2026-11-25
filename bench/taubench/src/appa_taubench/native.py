@@ -104,7 +104,7 @@ class FrameworkSession:
                     and all(isinstance(offer, str) for offer in offer_ids)
                 ):
                     return Blocked(feedback, self._has_next_step(feedback, offer_ids), tuple(offer_ids))
-            case "control" if set(response) == {"kind", "reply"}:
+            case "control" if set(response) == {"kind", "reply", "retry"}:
                 # The engine's own control tool answered. This contract mints no
                 # offers, so the reply is a refusal's next step rather than an
                 # authorization; hand it back as feedback the model can act on.

@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 use serde::Serialize;
 
-const BINDING_IDENTITY: &str = "appa-agent-python-v9";
+const BINDING_IDENTITY: &str = "appa-agent-python-v10";
 const ATTEST_SCHEMA: &str = "attest-schema";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_BODY_BYTES: usize = 256 * 1024;
@@ -54,15 +54,13 @@ enum DispatchResponse {
         refused: Refused,
     },
     Control {
-        reply: String,
+        #[serde(flatten)]
+        control: ControlReply,
     },
     /// The report settled nothing: a fact its result needs was not obtained. The call stays
     /// pending with the outcome already reported; report it again to resubmit that outcome,
     /// or abandon it. `content` is what the model may read meanwhile.
-    Unsettled {
-        content: String,
-        retry: RetryHint,
-    },
+    Unsettled { content: String, retry: RetryHint },
 }
 
 #[derive(Serialize)]
@@ -85,7 +83,8 @@ enum CheckResponse {
         spawn_binding: Option<String>,
     },
     Control {
-        reply: String,
+        #[serde(flatten)]
+        control: ControlReply,
     },
 }
 
@@ -97,6 +96,20 @@ struct Refused {
     deciding: Option<Outcome>,
     outcomes: Option<Vec<Outcome>>,
     retry: Option<RetryHint>,
+}
+
+/// What a control call answered. `retry` is set when the offer stands on a fact not
+/// obtained: what executing it again can do.
+#[derive(Serialize)]
+struct ControlReply {
+    reply: String,
+    retry: Option<RetryHint>,
+}
+
+impl ControlReply {
+    fn of(reply: String) -> Self {
+        Self { reply, retry: None }
+    }
 }
 
 impl Refused {
@@ -127,7 +140,8 @@ enum SpawnResponse {
         dispatched_arguments: serde_json::Value,
     },
     Control {
-        reply: String,
+        #[serde(flatten)]
+        control: ControlReply,
     },
 }
 
@@ -474,18 +488,16 @@ impl SessionInner {
                 offers,
                 outcomes,
             }),
-            HookDecision::PassControl => Ok(Decision::Control {
-                reply: self.execute_remedy(child, &call),
-            }),
+            HookDecision::PassControl => Ok(Decision::Control(self.execute_remedy(child, &call))),
             other => failed(format!("the runtime answered a proposed call with {other:?}")),
         }
     }
 
-    fn execute_remedy(&self, child: Option<&TrajectoryId>, call: &ProposedCall) -> String {
+    fn execute_remedy(&self, child: Option<&TrajectoryId>, call: &ProposedCall) -> ControlReply {
         let Ok((offer, arguments)) = appa_runtime::api::parse_control_arguments(call.arguments.get()) else {
-            return format!(
+            return ControlReply::of(format!(
                 "{ADVERTISED_CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it."
-            );
+            ));
         };
         // A call that quotes no offer declares the next subagent call's return.
         let actor = self.actor(child);
@@ -499,15 +511,15 @@ impl SessionInner {
             ),
         };
         match outcome {
-            RemedyOutcome::Authorized { call } => format!(
+            RemedyOutcome::Authorized { call } => ControlReply::of(format!(
                 "Authorized. Call the {} tool with exactly these arguments to run it: {}",
                 call.tool,
                 call.arguments.get(),
-            ),
-            RemedyOutcome::Returned { value } => value,
-            RemedyOutcome::Declined { presentation } => presentation.feedback,
-            RemedyOutcome::NoAnswer { feedback, .. } => feedback,
-            RemedyOutcome::Refused { reason } => reason.detail().to_string(),
+            )),
+            RemedyOutcome::Returned { value } => ControlReply::of(value),
+            RemedyOutcome::Declined { presentation } => ControlReply::of(presentation.feedback),
+            RemedyOutcome::NoAnswer { feedback, retry } => ControlReply { reply: feedback, retry },
+            RemedyOutcome::Refused { reason } => ControlReply::of(reason.detail().to_string()),
         }
     }
 
@@ -529,7 +541,7 @@ impl SessionInner {
                 offer_ids: ids(offers),
                 refused: Refused::of(outcomes.as_ref()),
             },
-            Decision::Control { reply } => CheckResponse::Control { reply },
+            Decision::Control(control) => CheckResponse::Control { control },
             Decision::Allowed { call, binding } => CheckResponse::Allowed {
                 dispatched_tool: call.tool.clone(),
                 dispatched_arguments: arguments_value(&call),
@@ -554,7 +566,7 @@ impl SessionInner {
                 offer_ids: ids(offers),
                 refused: Refused::of(outcomes.as_ref()),
             }),
-            Decision::Control { reply } => encode(DispatchResponse::Control { reply }),
+            Decision::Control(control) => encode(DispatchResponse::Control { control }),
             Decision::Allowed { call, .. } => {
                 let outcome = self
                     .tokio
@@ -777,7 +789,7 @@ impl SessionInner {
                 offer_ids: ids(offers),
                 refused: Refused::of(outcomes.as_ref()),
             }),
-            Decision::Control { reply } => encode(SpawnResponse::Control { reply }),
+            Decision::Control(control) => encode(SpawnResponse::Control { control }),
             Decision::Allowed { call, binding: None } => {
                 // The release prepared no fork, so no child exists to open. The
                 // parent still owes this dispatch an outcome; a close that fails
@@ -963,9 +975,7 @@ enum Decision {
         call: ProposedCall,
         binding: Option<SpawnBinding>,
     },
-    Control {
-        reply: String,
-    },
+    Control(ControlReply),
 }
 
 fn ids(offers: Vec<OfferedRemedy>) -> Vec<String> {

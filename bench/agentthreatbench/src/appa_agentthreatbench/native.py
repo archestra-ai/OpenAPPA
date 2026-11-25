@@ -152,7 +152,7 @@ class NativeSession:
                 blocked = _blocked(response)
                 if blocked is not None:
                     return blocked, None
-            case "control" if set(response) == {"kind", "reply"}:
+            case "control" if set(response) == {"kind", "reply", "retry"}:
                 reply = response["reply"]
                 if isinstance(reply, str) and child is None:
                     return Control(reply), None
@@ -193,7 +193,7 @@ class NativeSession:
                 blocked = _blocked(response)
                 if blocked is not None:
                     return blocked
-            case "control" if set(response) == {"kind", "reply"}:
+            case "control" if set(response) == {"kind", "reply", "retry"}:
                 reply = response["reply"]
                 if isinstance(reply, str):
                     return Control(reply)
@@ -285,7 +285,7 @@ class NativeChildSession:
                 blocked = _blocked(response)
                 if blocked is not None:
                     return blocked
-            case "control" if set(response) == {"kind", "reply"}:
+            case "control" if set(response) == {"kind", "reply", "retry"}:
                 reply = response["reply"]
                 if isinstance(reply, str):
                     return Control(reply)
