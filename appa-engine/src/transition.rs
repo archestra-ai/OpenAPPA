@@ -1669,13 +1669,7 @@ impl<'a> Sequence<'a> {
             {
                 Err(TransitionRefusal::ForgedEvidence)
             }
-            (CloseOutcome::SuccessAbandoned, false) => Err(TransitionRefusal::ForgedEvidence),
-            (CloseOutcome::SuccessAbandoned, true)
-                if views.bound_sanitizer(dispatch).is_none()
-                    || views
-                        .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
-                        .is_some() =>
-            {
+            (CloseOutcome::SuccessAbandoned, checkpointed) if !checkpointed || !views.awaits_derivation(dispatch) => {
                 Err(TransitionRefusal::ForgedEvidence)
             }
             (CloseOutcome::Success { effects }, true) if effects != &EffectSet::default() => {

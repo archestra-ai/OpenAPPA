@@ -89,11 +89,7 @@ impl Engine {
             // A success checkpointed for a derivation never obtained, abandoned: it closes
             // withheld, its effects committed and nothing of it crossing.
             (Some(_), None)
-                if matches!(report.outcome, ToolOutcome::Indeterminate)
-                    && views.bound_sanitizer(dispatch).is_some()
-                    && views
-                        .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
-                        .is_none() =>
+                if matches!(report.outcome, ToolOutcome::Indeterminate) && views.awaits_derivation(dispatch) =>
             {
                 return self.admitting_outcome(view, &views, dispatch, &call, ResultAdmission::SuccessAbandoned, act);
             }

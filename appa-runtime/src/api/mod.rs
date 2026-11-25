@@ -312,7 +312,7 @@ impl ToolCallDecision {
     pub(crate) fn missing_fact(error: &EventError) -> Option<ToolCallDecision> {
         error.missing_fact().map(|missing| ToolCallDecision::Deny {
             feedback: crate::engine::MissingIn::Call.model_text().to_string(),
-            outcomes: appa_runtime_api::Outcomes::MissingFact(missing.retry),
+            outcomes: appa_runtime_api::Outcomes::MissingFact(missing),
             offers: Vec::new(),
             display: Vec::new(),
             review: Vec::new(),
@@ -507,14 +507,6 @@ pub enum RemedyOutcome {
     Declined { presentation: RemedyPresentation },
     NoAnswer { feedback: String },
     Refused { reason: RemedyRefusal },
-}
-
-/// A family log other writers kept contended: nothing was decided, and asking again later
-/// may decide it.
-fn contended() -> crate::engine::Unobtained {
-    crate::engine::Unobtained {
-        retry: appa_runtime_api::RetryHint::Later,
-    }
 }
 
 impl From<EventError> for RemedyOutcome {
@@ -864,14 +856,13 @@ impl EventError {
 
     /// The fact the check reads and could not obtain, where that is the failure: an
     /// Annotator that gave no answer, or a family log other writers kept contended.
-    pub(crate) fn missing_fact(&self) -> Option<crate::engine::Unobtained> {
+    pub(crate) fn missing_fact(&self) -> Option<appa_runtime_api::RetryHint> {
         match self {
             EventError::AnnotationRefused {
                 no_answer: Some(class), ..
-            } => Some(crate::engine::Unobtained {
-                retry: crate::engine::retry_hint(*class),
-            }),
-            EventError::Contended { .. } => Some(contended()),
+            } => Some(crate::engine::retry_hint(*class)),
+            // Nothing was decided, and asking again later may decide it.
+            EventError::Contended { .. } => Some(appa_runtime_api::RetryHint::Later),
             _ => None,
         }
     }

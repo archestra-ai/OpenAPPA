@@ -49,9 +49,7 @@ use crate::check::{self, CallReads, CheckOutcome, Gap, Narrowing, RawBlock};
 use crate::contract::{NotStatic, StaticAnnotation, ToolAnnotation};
 use crate::engine::Engine;
 use crate::fact::EffectKind;
-use crate::label::{
-    Audience, Evaluation, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions,
-};
+use crate::label::{Audience, Expansions, Label, MembershipContext, MembershipNeeded, SymbolicAtom, WithinAssertions};
 use crate::names::{AuthorityName, SanitizerName};
 use crate::plan::{self, ExecutableRemedyPlan, GapPower, RemedyStep, RulingPower};
 use crate::projection::Views;
@@ -626,7 +624,7 @@ impl<'a> Search<'a> {
             self.registry
                 .authorities()
                 .iter()
-                .any(|authority| plan::gap_cover(authority, gap, &tool.tags, &membership) == Evaluation::Holds)
+                .any(|authority| plan::covers_gap(authority, gap, &tool.tags, &membership))
         };
         let call_bound = eval.requirement_gaps.iter().any(|gap| !matches!(gap, Gap::Prior(_)));
         if call_bound || (!eval.requirement_gaps.is_empty() && eval.requirement_gaps.iter().all(waived)) {

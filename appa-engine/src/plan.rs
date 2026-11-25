@@ -150,14 +150,12 @@ impl ExecutableRemedyPlan {
     /// declares no return; under [`AutoApply::RulingsOnly`] it also accepts no narrowing. So
     /// executing it settles nothing the agent would otherwise choose.
     pub fn auto_applies(&self, auto_apply: AutoApply, rules: impl Fn(&AuthorityName) -> bool) -> bool {
-        !self.steps.is_empty() && self.steps.iter().all(|step| match (step, auto_apply) {
-            (RemedyStep::Authorize(authority), _) => rules(authority),
-            (RemedyStep::Accept(_), AutoApply::RulingsAndAccept) => true,
-            (RemedyStep::Accept(_), AutoApply::RulingsOnly)
-            | (RemedyStep::Withhold | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_), _) => {
-                false
-            }
-        })
+        !self.steps.is_empty()
+            && self.steps.iter().all(|step| match step {
+                RemedyStep::Authorize(authority) => rules(authority),
+                RemedyStep::Accept(_) => auto_apply == AutoApply::RulingsAndAccept,
+                RemedyStep::Withhold | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => false,
+            })
     }
 
     /// The narrowing this plan asks the agent to accept, where its route carries one.
@@ -526,10 +524,7 @@ fn narrowing_impact(
         };
         let covered = |needs: &mut NeededAtoms| {
             // Every gap and authority is read, so an undecided cover drops the variant whatever the order.
-            gaps.iter().fold(true, |all, gap| {
-                let held = held(gap, needs);
-                all && held
-            })
+            gaps.iter().fold(true, |all, gap| held(gap, needs) & all)
         };
         // An input hop, or another tool's call for a `prior` gap no authority waives, is a route
         // outside this one-stage view.

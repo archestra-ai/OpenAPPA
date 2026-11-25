@@ -997,6 +997,12 @@ fn worst_case_plan_alternatives(
     let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
     // An Annotator-produced floor or requirement is unknown at load, so its competent-authority
     // count is the mandate-dimension approximation — computed only where one may appear.
+    let covering = |gap: &Gap| {
+        authorities
+            .iter()
+            .filter(|authority| covers_gap(authority, gap, tags, context))
+            .count()
+    };
     let trust_cap_competent = || {
         authorities
             .iter()
@@ -1041,13 +1047,7 @@ fn worst_case_plan_alternatives(
                 .get(annotator)
                 .expect("an annotated declaration names a registered annotator");
             for effect in mandate.effects() {
-                let gap = Gap::Prior(effect.clone());
-                multiply(
-                    authorities
-                        .iter()
-                        .filter(|authority| covers_gap(authority, &gap, tags, context))
-                        .count(),
-                );
+                multiply(covering(&Gap::Prior(effect.clone())));
             }
             let dynamic_marks: Vec<MarkName> = attention_marks
                 .iter()
@@ -1104,16 +1104,10 @@ fn worst_case_plan_alternatives(
                     continue;
                 }
                 seen_history.push(requirement);
-                let gap = match requirement {
+                multiply(covering(&match requirement {
                     HistoryRequirement::NoPrior(kind) => Gap::NoPrior(kind.clone()),
                     HistoryRequirement::Prior(kind) => Gap::Prior(kind.clone()),
-                };
-                multiply(
-                    authorities
-                        .iter()
-                        .filter(|authority| covers_gap(authority, &gap, tags, context))
-                        .count(),
-                );
+                }));
             }
             let mut seen_marks: Vec<&crate::names::MarkName> = Vec::new();
             for mark in tool.requires.attention_marks() {

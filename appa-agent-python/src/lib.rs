@@ -443,16 +443,14 @@ impl SessionInner {
             declares: None,
         })? {
             HookDecision::AllowCall { spawn: binding } => {
-                let pending = Pending {
-                    call: call.clone(),
-                    unsettled: None,
-                };
-                match call_id {
-                    Some(call_id) => {
-                        self.identified.insert(call_id.to_string(), pending);
-                    }
-                    None => *self.slot(child)? = Some(pending),
-                }
+                self.keep_pending(
+                    child,
+                    call_id,
+                    Pending {
+                        call: call.clone(),
+                        unsettled: None,
+                    },
+                )?;
                 Ok(Decision::Allowed { call, binding })
             }
             HookDecision::DenyCall {
@@ -759,21 +757,12 @@ impl SessionInner {
         if self.children.contains_key(&child) {
             return failed(format!("the child branch {} is already open in this session", child.0));
         }
-        let decision = match self.decide(None, &tool, arguments_json, true, None)? {
-            Decision::Blocked {
-                feedback,
-                offers,
-                outcomes,
-            } => match self.declare_return(&offers, return_schema)? {
-                Some(declared) => self.decide(None, &tool, declared.arguments.get(), true, None)?,
-                None => Decision::Blocked {
-                    feedback,
-                    offers,
-                    outcomes,
-                },
-            },
-            decision => decision,
-        };
+        let mut decision = self.decide(None, &tool, arguments_json, true, None)?;
+        if let Decision::Blocked { offers, .. } = &decision
+            && let Some(declared) = self.declare_return(offers, return_schema)?
+        {
+            decision = self.decide(None, &tool, declared.arguments.get(), true, None)?;
+        }
         match decision {
             Decision::Blocked {
                 feedback,

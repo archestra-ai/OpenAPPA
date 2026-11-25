@@ -826,10 +826,6 @@ impl Remediable {
         remediable
     }
 
-    pub fn deciding(&self) -> Remedy {
-        self.deciding
-    }
-
     /// Every remedy kind held, from the most the agent must do itself.
     pub fn held(&self) -> impl Iterator<Item = Remedy> {
         [

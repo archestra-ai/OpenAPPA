@@ -1515,6 +1515,14 @@ impl Views<'_> {
         matches!(self.projection.closed.get(dispatch), Some(CloseKind::Success))
     }
 
+    /// A checkpointed result bound to an output sanitizer whose derivation was never obtained.
+    pub(crate) fn awaits_derivation(&self, dispatch: &DispatchId) -> bool {
+        self.bound_sanitizer(dispatch).is_some()
+            && self
+                .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+                .is_none()
+    }
+
     pub(crate) fn closed_abandoned(&self, dispatch: &DispatchId) -> bool {
         matches!(self.projection.closed.get(dispatch), Some(CloseKind::SuccessAbandoned))
     }

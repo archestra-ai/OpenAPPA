@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_runtime_api::{
-    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, Outcome, OutcomeBody, Outcomes,
+    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, OutcomeBody, Outcomes,
     ProposedCall, ToolOutcome, TrajectoryId,
 };
 use serde::Serialize;
@@ -684,17 +684,15 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
         // A fact the check could not obtain leaves the step unjudged, never a deny.
         HookDecision::DenyCall {
             feedback,
-            offers,
-            outcomes: Some(outcomes),
+            outcomes: Some(Outcomes::MissingFact(_)),
             ..
-        } => match outcomes.deciding() {
-            Outcome::MissingFact => Proposed::CannotRun(feedback),
-            Outcome::Integrity
-            | Outcome::HardBlock
-            | Outcome::AgentChoice
-            | Outcome::WaivableGap
-            | Outcome::Consent => Proposed::Denied { feedback, offers },
-        },
+        } => Proposed::CannotRun(feedback),
+        HookDecision::DenyCall {
+            feedback,
+            offers,
+            outcomes: Some(_),
+            ..
+        } => Proposed::Denied { feedback, offers },
         HookDecision::Refuse { detail, .. } => Proposed::CannotRun(detail),
         other => Proposed::CannotRun(format!("the call answered {other:?}")),
     }

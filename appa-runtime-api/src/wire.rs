@@ -635,20 +635,18 @@ fn refusal_outcomes(
         (_, _, Some(_), _) => {
             return Err("a retry hint on anything but a missing fact alone, with no offers or reviews");
         }
-        (_, deciding, None, _) => {
-            let deciding = deciding
-                .remedy()
-                .ok_or("an integrity fault, a hard block or a missing fact beside other outcomes")?;
-            let held = held
-                .iter()
+        (_, deciding, None, _) => match (
+            deciding.remedy(),
+            held.iter()
                 .map(|outcome| outcome.remedy())
-                .collect::<Option<Vec<Remedy>>>()
-                .ok_or("an integrity fault, a hard block or a missing fact beside other outcomes")?;
-            if !held.contains(&deciding) {
-                return Err("a deciding outcome its outcomes do not hold");
+                .collect::<Option<Vec<Remedy>>>(),
+        ) {
+            (Some(deciding), Some(held)) if held.contains(&deciding) => {
+                Outcomes::Remediable(Remediable::new(deciding, held))
             }
-            Outcomes::Remediable(Remediable::new(deciding, held))
-        }
+            (Some(_), Some(_)) => return Err("a deciding outcome its outcomes do not hold"),
+            _ => return Err("an integrity fault, a hard block or a missing fact beside other outcomes"),
+        },
     }))
 }
 

@@ -31,7 +31,8 @@ const LINE_VARIANT_MAX_BYTES: usize = 64;
 
 /// The host's opaque name for the authority line it composed for a family, such as `observe`
 /// or `enforce`: 1 to 64 ASCII letters, digits, `-`, `_` or `.`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "String")]
 pub struct LineVariant(String);
 
 /// Why a spelling is no [`LineVariant`].
@@ -70,22 +71,13 @@ impl LineVariant {
             _ => Ok(Self(text.to_string())),
         }
     }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
-impl serde::Serialize for LineVariant {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
-}
+impl TryFrom<String> for LineVariant {
+    type Error = LineVariantError;
 
-impl<'de> serde::Deserialize<'de> for LineVariant {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        LineVariant::parse(&text).map_err(serde::de::Error::custom)
+    fn try_from(text: String) -> Result<Self, Self::Error> {
+        Self::parse(&text)
     }
 }
 

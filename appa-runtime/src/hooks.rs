@@ -5,8 +5,8 @@ use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
     Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcomes, ParseRefusal, PeerAddress, PeerFrame,
-    PrincipalSource, PromptKey, ProposedCall, Ruling, SessionSettings, SessionTitle, SpawnKind, SpawnRef, StartKind,
-    ToolOutcome, TrajectoryId, WireDecision, WireEvent,
+    PrincipalSource, PromptKey, ProposedCall, RetryHint, Ruling, SessionSettings, SessionTitle, SpawnKind, SpawnRef,
+    StartKind, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
@@ -15,7 +15,7 @@ use crate::api::{
     LaunchedStart, Quoted, RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision,
     ToolResultDecision, is_control_tool,
 };
-use crate::engine::{MissingIn, Unobtained, ValueKind};
+use crate::engine::{MissingIn, ValueKind};
 use appa_eventlog::EndKind;
 
 fn wire(decision: &HookDecision) -> serde_json::Value {
@@ -386,7 +386,7 @@ fn observed(
 fn refused_hook(runtime: &Runtime, root: &TrajectoryId, event: &HookEvent, error: EventError) -> Answered {
     let (kind, tool) = hook_shape(event);
     let (status, decision) = match (event, error.missing_fact()) {
-        (HookEvent::ToolCall { .. }, Some(missing)) => (200, missing_call(&missing)),
+        (HookEvent::ToolCall { .. }, Some(retry)) => (200, missing_call(retry)),
         _ => (409, refuse(error)),
     };
     runtime.record(Some(root), bare_hook(kind, hook_result(&decision).0, tool));
@@ -413,15 +413,7 @@ fn names_a_childs_transcript(
             None => Ok(None),
         });
     let (status, decision) = match named {
-        Ok(Some((_, Some(feedback)))) => (
-            200,
-            HookDecision::DenyCall {
-                feedback,
-                offers: Vec::new(),
-                review: Vec::new(),
-                outcomes: Some(Outcomes::Integrity),
-            },
-        ),
+        Ok(Some((_, Some(feedback)))) => (200, deny_call(feedback, Outcomes::Integrity)),
         Ok(Some((child, None))) => {
             tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
             (200, denied(NAMED_TRANSCRIPT.to_string(), Outcomes::HardBlock))
@@ -1556,8 +1548,8 @@ enum Refusal {
 
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
     match (error.missing_fact(), error.is_operational(), refusal) {
-        (Some(missing), _, Refusal::Deny) => missing_call(&missing),
-        (Some(missing), _, Refusal::Block) => missing_return(&missing),
+        (Some(retry), _, Refusal::Deny) => missing_call(retry),
+        (Some(retry), _, Refusal::Block) => missing_return(retry),
         (_, true, _) => refuse(error),
         (_, false, Refusal::Deny) => deny(error.to_string()),
         (_, false, Refusal::Block | Refusal::Settle) => block(error.to_string(), Outcomes::Integrity),
@@ -1572,8 +1564,12 @@ fn deny(feedback: String) -> HookDecision {
 }
 
 fn denied(feedback: String, outcomes: Outcomes) -> HookDecision {
+    deny_call(format!("[appa] {feedback}"), outcomes)
+}
+
+fn deny_call(feedback: String, outcomes: Outcomes) -> HookDecision {
     HookDecision::DenyCall {
-        feedback: format!("[appa] {feedback}"),
+        feedback,
         offers: Vec::new(),
         review: Vec::new(),
         outcomes: Some(outcomes),
@@ -1581,20 +1577,15 @@ fn denied(feedback: String, outcomes: Outcomes) -> HookDecision {
 }
 
 /// A call denied on a fact not obtained, in the one text a call reads.
-fn missing_call(missing: &Unobtained) -> HookDecision {
-    HookDecision::DenyCall {
-        feedback: MissingIn::Call.model_text().to_string(),
-        offers: Vec::new(),
-        review: Vec::new(),
-        outcomes: Some(Outcomes::MissingFact(missing.retry)),
-    }
+fn missing_call(retry: RetryHint) -> HookDecision {
+    deny_call(MissingIn::Call.model_text().to_string(), Outcomes::MissingFact(retry))
 }
 
 /// A return blocked on a fact not obtained, in the one text a return reads.
-fn missing_return(missing: &Unobtained) -> HookDecision {
+fn missing_return(retry: RetryHint) -> HookDecision {
     block(
         MissingIn::Value(ValueKind::Return).model_text().to_string(),
-        Outcomes::MissingFact(missing.retry),
+        Outcomes::MissingFact(retry),
     )
 }
 
