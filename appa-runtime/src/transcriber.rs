@@ -17,6 +17,19 @@ pub trait ConsultTranscriber: Send + Sync {
     fn record(&self, record: ConsultRecord);
 }
 
+/// Two transcribers, each handed every record.
+pub(crate) struct Both(
+    pub(crate) std::sync::Arc<dyn ConsultTranscriber>,
+    pub(crate) std::sync::Arc<dyn ConsultTranscriber>,
+);
+
+impl ConsultTranscriber for Both {
+    fn record(&self, record: ConsultRecord) {
+        self.0.record(record.clone());
+        self.1.record(record);
+    }
+}
+
 /// Which transport served a recorded consult. The stock `approve` authority is recorded: its
 /// ruling releases a call, and the record is the only account of what it let through. Stock
 /// sanitizers, inline rosters and `appa replay`'s stand-in answer in process and are never

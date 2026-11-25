@@ -13,7 +13,8 @@ use std::process::Command;
 use appa_runtime::api::{OfferKind, Remedies, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime::replay::{
-    Expect, Got, StepOutcome, Summary, Taken, Trace, TraceReport, Verdict, collect, parse, render, render_json, run,
+    Expect, Got, StepOutcome, Summary, Taken, Trace, TraceReport, Unanswered, Verdict, collect, parse, render,
+    render_json, run,
 };
 use axum::Router;
 use axum::routing::post;
@@ -628,6 +629,66 @@ async fn only_a_missing_fact_leaves_a_deny_step_unjudged() {
     assert_eq!(reports[0].verdict(), Verdict::CannotRun);
     assert_eq!(outcomes(&reports[1]), vec![(1, &DENIED)]);
     assert_eq!(outcomes(&reports[2]), vec![(1, &DENIED)]);
+}
+
+/// A step that cannot run reports the externals its own consults asked without an answer:
+/// in one trace an Annotator, in the other an audience source, each on its second step, after
+/// a first step that consulted nothing.
+#[tokio::test]
+async fn a_step_that_cannot_run_names_the_externals_it_went_unanswered_by() {
+    let router = Router::new()
+        .route(
+            "/annotate",
+            post(|_body: String| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        )
+        .route(
+            "/audience",
+            post(|_body: String| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        );
+    let url = serve(router).await;
+    let policy = format!(
+        "{ANNOTATED_POLICY}\n[policy.audience.group.direct]\nfrom = [\"slack:user-group/direct\"]\n\n\
+         [[policy.tool]]\nname = \"mcp/files/read\"\ndelta = {{ audience = [\"alice@corp.example\"] }}\n\n\
+         [[policy.tool]]\nname = \"mcp/chat/post\"\nrequires = {{ audience = {{ contains = [\"@slack:user-group/direct\"] }} }}\n\
+         delta = {{}}\n"
+    );
+    let bindings = format!(
+        "\n[externals.annotators.classifier]\nurl = \"{url}/annotate\"\n\n[externals.audience.slack]\n\
+         url = \"{url}/audience\"\nselectors = [{{ template = \"user-group/<handle>\" }}]\n"
+    );
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = runtime(&dir, &policy, &bindings);
+    let read = "mcp/files/read {}\nexpect allow\n\n";
+    let reports = run(
+        &runtime,
+        &[
+            trace(
+                "annotated.appa",
+                &format!("{read}mcp/web/fetch {{\n  url: \"https://example.com\"\n}}\nexpect allow\n"),
+            ),
+            trace("audience.appa", &format!("{read}mcp/chat/post {{}}\nexpect allow\n")),
+        ],
+    )
+    .await;
+    for (report, role, name) in [
+        (&reports[0], appa_runtime::api::ExternalRole::Annotator, "classifier"),
+        (&reports[1], appa_runtime::api::ExternalRole::AudienceSource, "slack"),
+    ] {
+        let [first, second] = report.steps.as_slice() else {
+            panic!("two steps ran: {report:?}");
+        };
+        assert_eq!(first.outcome, taken(OfferKind::Accept), "{report:?}");
+        assert_eq!(first.unanswered, [], "{report:?}");
+        assert!(matches!(second.outcome, StepOutcome::CannotRun(_)), "{report:?}");
+        assert_eq!(
+            second.unanswered,
+            [Unanswered {
+                role,
+                name: name.to_string()
+            }],
+            "{report:?}"
+        );
+    }
 }
 
 /// A taken output-sanitizer offer releases the read, but its live sanitizer never answers for

@@ -1700,6 +1700,16 @@ impl Runtime {
         self.view(|view| view.transcriber = Some(transcriber))
     }
 
+    /// This view with every consult record handed to `observer` as well as to the
+    /// transcriber this view already hands them to.
+    pub(crate) fn also_transcribing(&self, observer: Arc<dyn ConsultTranscriber>) -> Runtime {
+        let transcriber: Arc<dyn ConsultTranscriber> = match self.inner.transcriber.clone() {
+            None => observer,
+            Some(host) => Arc::new(crate::transcriber::Both(host, observer)),
+        };
+        self.transcribing(transcriber)
+    }
+
     /// A request-scoped opaque context returned only to the host's archestra
     /// endpoint. It is never part of a consult artifact, record, or trajectory.
     #[cfg(feature = "archestra")]

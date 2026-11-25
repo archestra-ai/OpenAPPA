@@ -527,6 +527,41 @@ pub struct StepReport {
     pub tool: StepTool,
     pub check: Check,
     pub outcome: StepOutcome,
+    /// For a step that could not run, the externals its own consults asked without an
+    /// answer, each once, in the order first asked. Empty for every other step.
+    pub unanswered: Vec<Unanswered>,
+}
+
+/// An external a step consulted that gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unanswered {
+    pub role: crate::api::ExternalRole,
+    pub name: String,
+}
+
+/// The externals one trace's consults asked without an answer, since the last step took them.
+#[derive(Default)]
+struct UnansweredConsults(std::sync::Mutex<Vec<Unanswered>>);
+
+impl UnansweredConsults {
+    fn take(&self) -> Vec<Unanswered> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
+impl crate::api::ConsultTranscriber for UnansweredConsults {
+    fn record(&self, record: crate::api::ConsultRecord) {
+        if let crate::api::ExternalOutcome::NoAnswer(_) = record.outcome {
+            let unanswered = Unanswered {
+                role: record.role,
+                name: record.external_name,
+            };
+            let mut asked = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !asked.contains(&unanswered) {
+                asked.push(unanswered);
+            }
+        }
+    }
 }
 
 /// What one file got: every step up to and including the one that ended it.
@@ -564,6 +599,8 @@ pub async fn run(runtime: &Runtime, traces: &[Trace]) -> Vec<TraceReport> {
 }
 
 async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> TraceReport {
+    let consults = std::sync::Arc::new(UnansweredConsults::default());
+    let runtime = &runtime.also_transcribing(consults.clone());
     let actor = Actor {
         root: root.clone(),
         child: None,
@@ -600,11 +637,16 @@ async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> Trac
     for step in &trace.steps {
         let outcome = run_step(runtime, &actor, step).await;
         let ended = outcome.ends_file();
+        let unanswered = match (&outcome, consults.take()) {
+            (StepOutcome::CannotRun(_), unanswered) => unanswered,
+            (_, _) => Vec::new(),
+        };
         report.steps.push(StepReport {
             line: step.line,
             tool: step.tool.clone(),
             check: step.check.clone(),
             outcome,
+            unanswered,
         });
         if ended {
             break;
@@ -1637,6 +1679,7 @@ mod tests {
                             got: Got::Blocked(BTreeSet::from([OfferKind::Accept])),
                             taken: Some(taken(OfferKind::Accept)),
                         },
+                        unanswered: Vec::new(),
                     },
                     StepReport {
                         line: 8,
@@ -1649,6 +1692,7 @@ mod tests {
                             want: Expect::Deny,
                             feedback: None,
                         },
+                        unanswered: Vec::new(),
                     },
                 ],
             },
@@ -1667,6 +1711,7 @@ mod tests {
                             names: vec!["hitl".into()],
                         })),
                     },
+                    unanswered: Vec::new(),
                 }],
             },
         ];
@@ -1703,6 +1748,7 @@ mod tests {
             tool: canonical(tool),
             check: Check::Observe,
             outcome: StepOutcome::Observed { got, taken },
+            unanswered: Vec::new(),
         };
         vec![
             TraceReport {
@@ -1727,6 +1773,7 @@ mod tests {
                             want: Expect::Allow,
                             feedback: Some("ask hitl".into()),
                         },
+                        unanswered: Vec::new(),
                     },
                 ],
             },
