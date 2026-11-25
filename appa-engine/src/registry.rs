@@ -1045,8 +1045,13 @@ fn worst_case_plan_alternatives(
         // any slot its mandate allows, so the lint takes the worst case on every slot at once —
         // a produced trust floor, a produced `contains`, any declared mark an authority
         // covers — under a catch-all, the whole vocabulary but the reserved denial — and a
-        // `prior` and a `no_prior` on every effect the Annotator's mandate allows.
-        ToolDeclaration::Annotated { annotator, .. } => {
+        // `prior` and a `no_prior` on every effect the Annotator's mandate allows or the route's
+        // `on_no_answer` fallback requires.
+        ToolDeclaration::Annotated {
+            annotator,
+            on_no_answer,
+            ..
+        } => {
             multiply(trust_cap_competent());
             multiply(reader_cap_competent());
             let mandate = annotators
@@ -1057,7 +1062,14 @@ fn worst_case_plan_alternatives(
                 .iter()
                 .flat_map(|authority| authority.mandate.prior_waivers.iter().chain(&authority.mandate.waivers))
                 .collect();
-            for effect in mandate.effects().filter(|effect| waived.contains(effect)) {
+            let fallback = on_no_answer
+                .iter()
+                .flat_map(|fallback| &fallback.requires.history)
+                .map(|requirement| match requirement {
+                    HistoryRequirement::Prior(kind) | HistoryRequirement::NoPrior(kind) => kind,
+                });
+            let effects: BTreeSet<&EffectKind> = mandate.effects().chain(fallback).collect();
+            for effect in effects.into_iter().filter(|effect| waived.contains(effect)) {
                 multiply(covering(&Gap::Prior(effect.clone())));
                 multiply(covering(&Gap::NoPrior(effect.clone())));
             }
@@ -4128,6 +4140,47 @@ mod tests {
         };
         assert!(mixed(3) > mixed(1), "no_prior waivers widen the bound");
         assert_eq!(mixed(3) - mixed(1), 2 * (mixed(2) - mixed(1)));
+
+        // A fallback's required prior outside the Annotator's bound is counted too.
+        let fallback = |waived: &str| {
+            let mut cfg = base();
+            cfg.tools = vec![fallback_route(
+                "lookup",
+                produced_fallback(
+                    Delta::NONE,
+                    EffectSet::new([]).expect("no kinds"),
+                    Requires {
+                        attention: vec![MarkName::new("review")],
+                        history: vec![HistoryRequirement::Prior(EffectKind::new("e1"))],
+                        ..Requires::default()
+                    },
+                ),
+            )];
+            cfg.annotators = vec![AnnotatorDeclaration {
+                effects: Some(effects[..1].iter().copied().map(EffectKind::new).collect()),
+                ..annotator("classifier")
+            }];
+            cfg.authorities = (0..3)
+                .map(|index| Authority {
+                    except: Vec::new(),
+                    name: AuthorityName::new(format!("a{index}")),
+                    mandate: Mandate {
+                        prior_waivers: vec![EffectKind::new(waived)],
+                        ..Mandate::default()
+                    },
+                    scope: Scope::default(),
+                    hint: None,
+                })
+                .collect();
+            match Registry::build_covered_with_cap(cfg, PlannerCap::new(1).expect("nonzero")) {
+                Err(LoadError::TooManyPlanAlternatives { count, ref tool, .. }) if tool == "lookup" => count,
+                other => panic!("the annotated tool exceeds a cap of one, got {other:?}"),
+            }
+        };
+        assert!(
+            fallback("e1") > fallback("unrelated"),
+            "the fallback's prior widens the bound"
+        );
 
         let mut cfg = base();
         cfg.tools = vec![annotated("lookup", "classifier")];
