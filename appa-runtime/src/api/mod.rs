@@ -339,10 +339,19 @@ pub(crate) enum ToolResultDecision {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RemedyDecision {
-    Authorized { call: ExactCall },
-    Returned { value: String },
-    Declined { presentation: RemedyPresentation },
-    NoAnswer { feedback: String },
+    Authorized {
+        call: ExactCall,
+    },
+    Returned {
+        value: String,
+    },
+    Declined {
+        presentation: RemedyPresentation,
+    },
+    NoAnswer {
+        feedback: String,
+        retry: Option<appa_runtime_api::RetryHint>,
+    },
 }
 
 /// How a deferred return stands after its parent's control call: decided now, or read back
@@ -502,11 +511,24 @@ impl RemedyAttempt {
 /// never an engine decision.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
-    Authorized { call: ProposedCall },
-    Returned { value: String },
-    Declined { presentation: RemedyPresentation },
-    NoAnswer { feedback: String },
-    Refused { reason: RemedyRefusal },
+    Authorized {
+        call: ProposedCall,
+    },
+    Returned {
+        value: String,
+    },
+    Declined {
+        presentation: RemedyPresentation,
+    },
+    /// The offer stands. `retry` is set when a fact the remedy needs was not obtained: what
+    /// executing it again can do.
+    NoAnswer {
+        feedback: String,
+        retry: Option<appa_runtime_api::RetryHint>,
+    },
+    Refused {
+        reason: RemedyRefusal,
+    },
 }
 
 impl From<EventError> for RemedyOutcome {
@@ -516,6 +538,7 @@ impl From<EventError> for RemedyOutcome {
             EventError::Contended { .. } => {
                 return RemedyOutcome::NoAnswer {
                     feedback: crate::engine::MissingIn::Remedy.model_text().to_string(),
+                    retry: Some(appa_runtime_api::RetryHint::Later),
                 };
             }
             EventError::AnnotationRefused {
@@ -3438,7 +3461,7 @@ impl Runtime {
             )),
             RemedyOutcome::Returned { value } => answer(value),
             RemedyOutcome::Declined { presentation } => answer(presentation.feedback),
-            RemedyOutcome::NoAnswer { feedback } => answer(feedback),
+            RemedyOutcome::NoAnswer { feedback, .. } => answer(feedback),
             RemedyOutcome::Refused { reason } => RemedyReply {
                 text: reason.detail().to_string(),
                 is_error: true,
@@ -4011,7 +4034,7 @@ impl Runtime {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
             Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
-            Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
+            Ok(RemedyDecision::NoAnswer { feedback, retry }) => RemedyOutcome::NoAnswer { feedback, retry },
             Err(error) => error.into(),
         }
     }

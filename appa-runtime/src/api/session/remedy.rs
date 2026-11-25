@@ -264,7 +264,9 @@ impl Session {
                     display: Vec::new(),
                 },
             }),
-            Next::PresentToModel(Presentation::NoAnswer { feedback }) => Ok(RemedyDecision::NoAnswer { feedback }),
+            Next::PresentToModel(Presentation::NoAnswer { feedback, retry }) => {
+                Ok(RemedyDecision::NoAnswer { feedback, retry })
+            }
             Next::PresentToModel(Presentation::Blocked {
                 feedback,
                 outcomes,

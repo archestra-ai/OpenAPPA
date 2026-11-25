@@ -765,7 +765,7 @@ async fn take_offer(
                 presentation.feedback
             ));
         }
-        RemedyOutcome::NoAnswer { feedback } => {
+        RemedyOutcome::NoAnswer { feedback, .. } => {
             return Err(format!("taking the offer did not release the call: {feedback}"));
         }
         RemedyOutcome::Refused { reason } => return Err(reason.detail().to_string()),

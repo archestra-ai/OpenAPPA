@@ -2429,12 +2429,27 @@ async fn an_input_sanitizers_failure_class_never_reaches_the_model() {
                 .expect("the hop is answered"),
         );
     }
-    assert!(
-        matches!(replies[0], RemedyDecision::NoAnswer { .. }),
-        "{:?}",
-        replies[0]
+    let [
+        RemedyDecision::NoAnswer {
+            feedback: forbidden,
+            retry: after_repair,
+        },
+        RemedyDecision::NoAnswer {
+            feedback: unavailable,
+            retry: later,
+        },
+    ] = replies.as_slice()
+    else {
+        panic!("both offers stand: {replies:?}");
+    };
+    assert_eq!(forbidden, unavailable);
+    assert_eq!(
+        (*after_repair, *later),
+        (
+            Some(appa_runtime_api::RetryHint::AfterRepair),
+            Some(appa_runtime_api::RetryHint::Later)
+        )
     );
-    assert_eq!(replies[0], replies[1]);
 }
 
 #[tokio::test]

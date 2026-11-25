@@ -390,6 +390,8 @@ pub enum Presentation {
     },
     NoAnswer {
         feedback: String,
+        /// Set when a fact the remedy needs was not obtained: what executing it again can do.
+        retry: Option<RetryHint>,
     },
     NoValue,
     /// A child's return frozen for its parent's decision: nothing crossed.
@@ -2303,7 +2305,7 @@ impl RuntimeEngine {
                 AuthorityOutcome::Consult(requests) => {
                     return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                 }
-                AuthorityOutcome::NoAnswer(feedback) => return Ok(no_answer(feedback)),
+                AuthorityOutcome::NoAnswer(feedback) => return Ok(no_answer(feedback, None)),
             },
         };
         let denied_by = match &outcome {
@@ -2338,15 +2340,19 @@ impl RuntimeEngine {
                 return Ok(no_answer(
                     "[appa] the sanitizer's derivation was not usable; the offer stands and may be executed again"
                         .to_string(),
+                    None,
                 ));
             }
             // A return declaration the engine will not hold a child to: the floor is not one
             // this trajectory can set, or the declaration does not fit the plan. The offer
             // stands for a corrected declaration.
             AudienceRound::Failed(TransitionError::ReturnPolicy(refusal)) => {
-                return Ok(no_answer(format!(
-                    "[appa] the return declaration is refused: {refusal}; the offer stands and may be executed again"
-                )));
+                return Ok(no_answer(
+                    format!(
+                        "[appa] the return declaration is refused: {refusal}; the offer stands and may be executed again"
+                    ),
+                    None,
+                ));
             }
             AudienceRound::Failed(error) => return Err(offer_refusal(error)),
         };
@@ -3748,20 +3754,9 @@ fn sanitizer_unobtained(
 
 /// What asking again can do for a fact whose consult failed for `reason`.
 pub(crate) fn retry_hint(reason: crate::events::NoAnswerClass) -> RetryHint {
-    use crate::events::NoAnswerClass;
-    match reason {
-        NoAnswerClass::Unreachable | NoAnswerClass::Timeout | NoAnswerClass::Transport => RetryHint::Later,
-        NoAnswerClass::NonSuccess { .. } if reason.is_transient() => RetryHint::Later,
-        // Neither throttled nor a server fault: nothing says asking again helps.
-        NoAnswerClass::NonSuccess { .. } => RetryHint::AfterRepair,
-        NoAnswerClass::Unregistered
-        | NoAnswerClass::Malformed
-        | NoAnswerClass::Oversized
-        | NoAnswerClass::UnsupportedVersion
-        | NoAnswerClass::ModuleError
-        | NoAnswerClass::ModulePanicked => RetryHint::AfterRepair,
-        #[cfg(feature = "daemon")]
-        NoAnswerClass::Dismissed => RetryHint::AfterRepair,
+    match reason.is_transient() {
+        true => RetryHint::Later,
+        false => RetryHint::AfterRepair,
     }
 }
 
@@ -3819,7 +3814,7 @@ impl UnresolvedAudience<'_> {
             UnresolvedAudience::Withheld(kind) => EngineDecision::deliver(Next::PresentToModel(
                 blocked_without_offers(MissingIn::Value(kind).model_text().to_string(), missing),
             )),
-            UnresolvedAudience::OfferStands => no_answer(MissingIn::Remedy.model_text().to_string()),
+            UnresolvedAudience::OfferStands => no_answer(MissingIn::Remedy.model_text().to_string(), Some(retry)),
         }
     }
 
@@ -4030,8 +4025,8 @@ fn declined(feedback: String) -> EngineDecision {
     EngineDecision::deliver(Next::PresentToModel(Presentation::Declined { feedback }))
 }
 
-fn no_answer(feedback: String) -> EngineDecision {
-    EngineDecision::deliver(Next::PresentToModel(Presentation::NoAnswer { feedback }))
+fn no_answer(feedback: String, retry: Option<RetryHint>) -> EngineDecision {
+    EngineDecision::deliver(Next::PresentToModel(Presentation::NoAnswer { feedback, retry }))
 }
 
 fn engine_nonce(entropy: &OfferNonce) -> EngineOfferNonce {

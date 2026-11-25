@@ -827,7 +827,7 @@ impl Run<'_> {
                 },
                 presentation.feedback,
             ),
-            RemedyOutcome::NoAnswer { feedback } => (
+            RemedyOutcome::NoAnswer { feedback, .. } => (
                 Record::OfferRefused {
                     call: id,
                     feedback: feedback.clone(),

@@ -294,7 +294,7 @@ async fn the_declared_remedy_entry(runtime: &Runtime, acting: &Actor, offer: Off
             let _: Vec<appa_runtime_api::OfferedRemedy> = presentation.offers;
             let _: Vec<appa_runtime_api::Review> = presentation.review;
         }
-        RemedyOutcome::NoAnswer { feedback } => {
+        RemedyOutcome::NoAnswer { feedback, .. } => {
             let _: String = feedback;
         }
         RemedyOutcome::Refused { reason } => {
