@@ -506,7 +506,7 @@ impl SessionInner {
             ),
             RemedyOutcome::Returned { value } => value,
             RemedyOutcome::Declined { presentation } => presentation.feedback,
-            RemedyOutcome::NoAnswer { feedback } => feedback,
+            RemedyOutcome::NoAnswer { feedback, .. } => feedback,
             RemedyOutcome::Refused { reason } => reason.detail().to_string(),
         }
     }
@@ -612,20 +612,7 @@ impl SessionInner {
                 .take()
                 .ok_or_else(|| "no call is pending".to_string())?,
         };
-        let outcome = pending.unsettled.clone().unwrap_or(outcome);
-        let (produced, as_produced) = match &outcome {
-            ToolOutcome::Success {
-                body: OutcomeBody::Available(body),
-            } => (body.clone(), true),
-            ToolOutcome::Success {
-                body: OutcomeBody::TooLarge { .. },
-            } => ("The tool ran; its result was too large to carry.".to_string(), false),
-            ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
-            } => ("The tool ran; it returned no result.".to_string(), false),
-            ToolOutcome::Failure { .. } => ("The tool call failed.".to_string(), false),
-            ToolOutcome::Indeterminate => ("The tool's outcome is unknown; it may have run.".to_string(), false),
-        };
+        let outcome = pending.unsettled.take().unwrap_or(outcome);
         let decision = match self.event(HookEvent::ToolResult {
             actor: self.actor(child),
             call: pending.call.clone(),
@@ -650,8 +637,10 @@ impl SessionInner {
                 self.keep_pending(child, call_id, pending)?;
                 return encode(DispatchResponse::Unsettled { content: output, retry });
             }
-            HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted, None),
-            HookDecision::Ack => (produced, DeliveryDisposition::Sealed, None),
+            HookDecision::Ack => {
+                let (content, disposition) = acknowledged(outcome);
+                (content, disposition, None)
+            }
             // `DeliverValue` carries what the engine admitted in place of the
             // raw result, so it is sealed for the reason `ChildReturn` is
             // substituted: the model reads it, and the tool did not write it.
@@ -860,7 +849,9 @@ impl SessionInner {
                 "the return declaration was not taken: {}",
                 presentation.feedback
             )),
-            RemedyOutcome::NoAnswer { feedback } => failed(format!("the return declaration was not taken: {feedback}")),
+            RemedyOutcome::NoAnswer { feedback, .. } => {
+                failed(format!("the return declaration was not taken: {feedback}"))
+            }
             RemedyOutcome::Refused { reason } => {
                 failed(format!("the return declaration was refused: {}", reason.detail()))
             }
@@ -979,6 +970,24 @@ enum Decision {
 
 fn ids(offers: Vec<OfferedRemedy>) -> Vec<String> {
     offers.into_iter().map(|offer| offer.id).collect()
+}
+
+/// What the model reads of an outcome the runtime acknowledged as reported.
+fn acknowledged(outcome: ToolOutcome) -> (String, DeliveryDisposition) {
+    let sealed = |content: &str| (content.to_string(), DeliveryDisposition::Sealed);
+    match outcome {
+        ToolOutcome::Success {
+            body: OutcomeBody::Available(body),
+        } => (body, DeliveryDisposition::Admitted),
+        ToolOutcome::Success {
+            body: OutcomeBody::TooLarge { .. },
+        } => sealed("The tool ran; its result was too large to carry."),
+        ToolOutcome::Success {
+            body: OutcomeBody::Unavailable,
+        } => sealed("The tool ran; it returned no result."),
+        ToolOutcome::Failure { .. } => sealed("The tool call failed."),
+        ToolOutcome::Indeterminate => sealed("The tool's outcome is unknown; it may have run."),
+    }
 }
 
 fn arguments_value(call: &ProposedCall) -> serde_json::Value {
