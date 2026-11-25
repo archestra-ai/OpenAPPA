@@ -313,6 +313,38 @@ def publish(args):
     supersede(api, candidate, args.bot_login, pr["number"])
 
 
+def sweep(args):
+    """Close open update PRs whose release Archestra main already contains.
+
+    A maintainer can pin Archestra to a newer OpenAPPA main commit by hand.
+    The release run then has nothing to publish, and its open draft would
+    downgrade the pin if merged.
+    """
+    api = GitHub(os.environ["GH_TOKEN"])
+    installed = pin(api.content(MANIFEST, "main"))
+    git(args.source, "fetch", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main")
+    if not known(args.source, installed):
+        print(f"Archestra pins {installed}, which is not on OpenAPPA main; no update PR closed")
+        return
+    for pr in api.pulls():
+        managed = managed_pr(pr, args.bot_login)
+        if not managed or not known(args.source, managed["sha"]):
+            continue
+        if managed["sha"] == installed or ancestor(args.source, managed["sha"], installed):
+            # Close before commenting so that a retry does not comment twice.
+            api.request(f'/repos/{TARGET}/pulls/{managed["number"]}', {"state": "closed"}, method="PATCH")
+            api.request(f'/repos/{TARGET}/issues/{managed["number"]}/comments', {"body": (
+                f'Archestra main already pins OpenAPPA [`{installed}`](https://github.com/{SOURCE}/commit/{installed}), '
+                f'which contains {managed["tag"]} (`{managed["sha"]}`). Merging this update would downgrade that pin, '
+                'so the updater closed it. The branch is kept.')}, method="POST")
+            print(f'Closed update PR #{managed["number"]}: Archestra main already contains {managed["tag"]}')
+
+
+def known(source: Path, commit: str) -> bool:
+    return subprocess.run(["git", "-C", str(source), "cat-file", "-e", f"{sha(commit)}^{{commit}}"],
+                          capture_output=True).returncode == 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -331,6 +363,10 @@ def main():
             command.add_argument("--expected-sha", default="")
         else:
             command.add_argument("--bot-login", required=True)
+    stale = sub.add_parser("sweep")
+    stale.add_argument("--source", type=Path, required=True)
+    stale.add_argument("--bot-login", required=True)
+    stale.set_defaults(run=sweep)
     args = parser.parse_args()
     try:
         args.run(args)
