@@ -1323,6 +1323,116 @@ async fn a_suspicious_result_blocks_a_trusted_floor_sink() {
     assert!(runtime.open_dispatches(&root(), &root()).pop().is_none());
 }
 
+/// A block holds what its offered plans settle: accepting a narrowing is the agent's consent,
+/// declaring a spawn's return its own choice, and an authority's ruling a waivable gap. A
+/// narrowing below the floor, which nothing offers to accept, is a hard block.
+#[tokio::test]
+async fn a_block_holds_what_its_offered_plans_settle() {
+    use appa_runtime_api::Outcome;
+    let policy = format!(
+        "{FETCH_AND_SEND}\n[[policy.authority]]\nname = \"approver\"\n[policy.authority.permits]\ntrust_below = \"trusted\"\n"
+    );
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime =
+        Runtime::open(config_with(&policy, None), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let held = |decision: Result<ToolCallDecision, EventError>| match decision.expect("the call is judged") {
+        ToolCallDecision::Deny { outcomes, offers, .. } => {
+            assert_eq!(outcomes.held().count(), 1, "one plan kind each: {outcomes:?}");
+            (outcomes.deciding(), offers.len())
+        }
+        allowed => panic!("the call is blocked, got {allowed:?}"),
+    };
+
+    let narrowing = session.on_tool_call(taint(serde_json::json!({"a": 1})), false).await;
+    assert_eq!(held(narrowing), (Outcome::Consent, 1));
+
+    let spawn = fetch(serde_json::json!({"a": 9}));
+    let (deciding, offers) = held(session.on_tool_call(spawn.clone(), true).await);
+    assert_eq!(deciding, Outcome::AgentChoice);
+    assert!(offers > 0);
+
+    let child = open_child(&mut session, spawn.clone(), TrajectoryId("cc:root:child".to_string())).await;
+    let below = child.on_tool_call(taint(serde_json::json!({"a": 2})), false).await;
+    assert_eq!(held(below), (Outcome::HardBlock, 0));
+    child.on_child_end(None).await.expect("the child ends with no return");
+    session
+        .on_tool_result(
+            spawn,
+            ToolOutcome::Success {
+                body: OutcomeBody::Unavailable,
+            },
+        )
+        .await
+        .expect("the spawn dispatch closes");
+
+    admit_success(&runtime, &mut session, taint(serde_json::json!({"a": 1}))).await;
+    let gap = session.on_tool_call(trusted_send(), false).await;
+    assert_eq!(held(gap), (Outcome::WaivableGap, 1));
+}
+
+/// A missing required prior is a gap an authority's `prior_effects_containing` waives by
+/// effect name; a `no_prior` waiver or another effect's name leaves it with no remedy.
+#[tokio::test]
+async fn a_prior_waiver_makes_a_missing_prior_a_waivable_gap() {
+    use appa_runtime_api::{Outcome, Outcomes, ReviewRequirement, ReviewScopeItem};
+    let decide = |permits: &str| {
+        let text = format!(
+            "[policy]\nversion = 2\n[[policy.tool]]\nname = \"deploy\"\ndelta = {{}}\n\
+             requires = {{ effects = {{ contains = [\"reviewed\"] }} }}\n\
+             [[policy.authority]]\nname = \"desk\"\n[policy.authority.permits]\n{permits}\n\
+             [externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\
+             [externals.authorities.desk]\nbuiltin = \"hitl\"\n"
+        );
+        async move {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime =
+                Runtime::open(config_from(&text), dir.path().join("appa.db"), None).expect("the deployment opens");
+            let session = runtime.create_session(root(), None).expect("a fresh id opens");
+            let deploy = ProposedCall {
+                tool: "deploy".to_string(),
+                arguments: raw(serde_json::json!({})),
+                cwd: None,
+            };
+            match session.on_tool_call(deploy, false).await.expect("the call is judged") {
+                ToolCallDecision::Deny {
+                    outcomes,
+                    offers,
+                    review,
+                    ..
+                } => (outcomes, offers.len(), review),
+                allowed => panic!("the missing prior blocks, got {allowed:?}"),
+            }
+        }
+    };
+
+    let (outcomes, offers, review) = decide("prior_effects_containing = [\"reviewed\"]").await;
+    assert_eq!(outcomes.deciding(), Outcome::WaivableGap);
+    assert_eq!(outcomes.held().collect::<Vec<_>>(), [Outcome::WaivableGap]);
+    assert_eq!(offers, 1);
+    let [review] = review.as_slice() else {
+        panic!("one offer asks the desk: {review:?}");
+    };
+    assert!(
+        matches!(
+            review.scope.as_deref(),
+            Some([ReviewScopeItem::Requirement {
+                requirement: ReviewRequirement::Prior { contains },
+                ..
+            }]) if contains == "reviewed"
+        ),
+        "{review:?}"
+    );
+
+    for permits in [
+        "effects_containing = [\"reviewed\"]",
+        "prior_effects_containing = [\"approved\"]",
+    ] {
+        let (outcomes, offers, _) = decide(permits).await;
+        assert_eq!((outcomes, offers), (Outcomes::HardBlock, 0), "{permits}");
+    }
+}
+
 #[tokio::test]
 async fn a_subject_a_concurrent_event_moved_reads_as_lifecycle_not_a_fault() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -2287,6 +2397,61 @@ async fn an_input_substitution_approves_the_replaced_call_and_the_proposal_of_it
     );
 }
 
+/// An input sanitizer that answers 403 and one that answers 503 leave the offer standing in
+/// the same words: only the host's typed hint may differ.
+#[tokio::test]
+async fn an_input_sanitizers_failure_class_never_reaches_the_model() {
+    let mut replies = Vec::new();
+    for status in [
+        axum::http::StatusCode::FORBIDDEN,
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+    ] {
+        let app = axum::Router::new().route("/", axum::routing::post(move || async move { (status, "no") }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback stub binds");
+        let addr = listener.local_addr().expect("the stub has an address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("the stub serves");
+        });
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let config = config_from(&format!(
+            "[policy]\n{SUBSTITUTED_SEND}\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\
+             [externals.sanitizers.redactor]\nurl = \"http://{addr}/\"\n"
+        ));
+        let runtime = Runtime::open(config, dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+        let hop = narrowed_and_blocked(&runtime, &mut session).await;
+        replies.push(
+            session
+                .on_remedy(hop, RemedyArguments::default(), None, None)
+                .await
+                .expect("the hop is answered"),
+        );
+    }
+    let [
+        RemedyDecision::NoAnswer {
+            feedback: forbidden,
+            retry: after_repair,
+        },
+        RemedyDecision::NoAnswer {
+            feedback: unavailable,
+            retry: later,
+        },
+    ] = replies.as_slice()
+    else {
+        panic!("both offers stand: {replies:?}");
+    };
+    assert_eq!(forbidden, unavailable);
+    assert_eq!(
+        (*after_repair, *later),
+        (
+            Some(appa_runtime_api::RetryHint::AfterRepair),
+            Some(appa_runtime_api::RetryHint::Later)
+        )
+    );
+}
+
 #[tokio::test]
 async fn an_unusable_derivation_leaves_the_offer_standing() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -2868,6 +3033,39 @@ async fn a_sanitizer_with_no_answer_withholds_the_crossing_and_keeps_the_child_l
     );
 }
 
+/// A return sanitizer the deciding revision no longer registers cannot apply, and no answer
+/// changes that: the return is a hard block, and the child stays live to return again.
+#[tokio::test]
+async fn a_return_sanitizer_a_revision_dropped_is_a_hard_block() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let runtime =
+        Runtime::open(sanitized_config(Some(&url)), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let (mut session, child_id) = sanitized_child(&runtime);
+    let child = open_child_via(
+        &mut session,
+        fetch(serde_json::json!({})),
+        child_id.clone(),
+        "scrub",
+        crate::engine::LabelSpelling::default(),
+    )
+    .await;
+    runtime
+        .reload(config_from(
+            "[policy]\nversion = 2\n\n[[policy.tool]]\nname = \"fetch\"\n\n[policy.deployment]\ncontext_control = true\n",
+        ))
+        .expect("the revision loads");
+    let blocked = child
+        .on_child_end(Some("raw with pii".to_string()))
+        .await
+        .expect("the withheld return is delivered");
+    let crate::api::ChildReturnDecision::Blocked { outcomes, .. } = blocked else {
+        panic!("an unapplicable sanitizer must withhold the crossing, got {blocked:?}");
+    };
+    assert_eq!(outcomes, appa_runtime_api::Outcomes::HardBlock);
+    assert!(runtime.live(&root(), &child_id).is_ok());
+}
+
 const ATTESTED_CHILD: &str = r#"
 version = 2
 
@@ -3207,6 +3405,110 @@ async fn a_partly_cleared_derivation_is_staged_with_its_own_remedies() {
     let presentation = presentation.expect("a result-time block preserves its remedy state");
     assert!(!presentation.offers.is_empty());
     assert_eq!(presentation.feedback, placeholder);
+    assert_eq!(
+        presentation.outcomes.map(|outcomes| outcomes.deciding()),
+        Some(appa_runtime_api::Outcome::Consent),
+        "the staged result waits for the narrowing's acceptance"
+    );
+}
+
+/// The sanitize offer a block on `trajectory` surfaced, taken and the call run to its result.
+async fn sanitized_result(runtime: &Runtime, session: &Session, trajectory: &TrajectoryId) -> ToolResultDecision {
+    let quoted = runtime
+        .minted_offers(&root(), trajectory)
+        .into_iter()
+        .find(|offer| {
+            matches!(
+                runtime.offer_kind(&root(), offer),
+                Some(crate::api::OfferKind::Sanitizer { .. })
+            )
+        })
+        .expect("the block surfaced a sanitize offer");
+    let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+    assert!(matches!(
+        session.on_remedy(offer, RemedyArguments::default(), None, None).await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    assert!(matches!(
+        session.on_tool_call(leak(), false).await,
+        Ok(ToolCallDecision::Allow { spawn: None, .. })
+    ));
+    session
+        .on_tool_result(
+            leak(),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("raw with pii".to_string()),
+            },
+        )
+        .await
+        .expect("the outcome is delivered")
+}
+
+/// A child floored at `trusted` cannot accept the trust `scrub` leaves lowered, and no other
+/// hop lifts it: the staged result offers nothing and is a hard block.
+#[tokio::test]
+async fn a_staged_result_its_floor_refuses_is_a_hard_block() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let text = format!(
+        "[policy]\n{}\ncontext_control = true\n\n[[policy.tool]]\nname = \"fetch\"\n\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n",
+        PARTLY_CLEARED.trim_end()
+    );
+    let runtime = Runtime::open(config_from(&text), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let child_id = TrajectoryId("cc:child".to_string());
+    let child = open_child_floored(
+        &mut session,
+        fetch(serde_json::json!({})),
+        child_id.clone(),
+        floor_trust("trusted"),
+    )
+    .await;
+    assert!(matches!(
+        child.on_tool_call(leak(), false).await,
+        Ok(ToolCallDecision::Deny { .. })
+    ));
+    let ToolResultDecision::Replace { presentation, .. } = sanitized_result(&runtime, &child, &child_id).await else {
+        panic!("the staged derivation is replaced, not kept");
+    };
+    let presentation = presentation.expect("a result-time block preserves its remedy state");
+    assert!(presentation.offers.is_empty(), "the floor drops the acceptance");
+    assert_eq!(presentation.outcomes, Some(appa_runtime_api::Outcomes::HardBlock));
+}
+
+/// A second sanitizer lifts what the first left: the stage offers its hop beside the
+/// acceptance, decides on consent, and holds the agent's choice too.
+#[tokio::test]
+async fn a_staged_result_with_a_hop_and_its_acceptance_holds_both() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let text = format!(
+        "[policy]\n{PARTLY_CLEARED}\n[[policy.sanitizer]]\nname = \"vet\"\non = [\"tool_output\"]\n[policy.sanitizer.permits]\ntrust = {{ from = \"suspicious\", to = \"trusted\" }}\n\n[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n[externals.sanitizers.vet]\nurl = \"{url}\"\n"
+    );
+    let runtime = Runtime::open(config_from(&text), dir.path().join("appa.db"), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    assert!(matches!(
+        session.on_tool_call(leak(), false).await,
+        Ok(ToolCallDecision::Deny { .. })
+    ));
+    let ToolResultDecision::Replace { presentation, .. } = sanitized_result(&runtime, &session, &root()).await else {
+        panic!("the staged derivation is replaced, not kept");
+    };
+    let presentation = presentation.expect("a result-time block preserves its remedy state");
+    assert_eq!(
+        presentation.offers.len(),
+        2,
+        "the other sanitizer's hop and the acceptance"
+    );
+    assert_eq!(
+        presentation.outcomes,
+        Some(appa_runtime_api::Outcomes::Remediable(
+            appa_runtime_api::Remediable::new(
+                appa_runtime_api::Remedy::Consent,
+                [appa_runtime_api::Remedy::AgentChoice],
+            )
+        ))
+    );
 }
 
 const PARTLY_CLEARED_CHILD: &str = r#"
@@ -3311,13 +3613,28 @@ async fn a_parent_that_declared_a_lower_floor_takes_the_sanitized_return_and_nar
     );
 }
 
+/// [`NARROWING`] without its sanitizer.
+const UNSANITIZED: &str = r#"
+version = 2
+
+[[policy.tool]]
+name = "leak"
+parameters = { type = "object", properties = { q = { type = "string" } } }
+delta = { audience = ["insider"] }
+
+[policy.deployment]
+confined_results = ["leak"]
+"#;
+
+/// A revision that drops the output sanitizer a dispatch was released under leaves nothing
+/// that reaches its result: the withheld result is a hard block, not an ordinary replacement.
 #[tokio::test]
-async fn a_bound_sanitizer_no_answer_withholds_and_stays_retryable() {
+async fn a_result_whose_bound_sanitizer_a_revision_dropped_is_a_hard_block() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
-    let url = stub(serde_json::json!(42)).await;
+    let url = stub(serde_json::json!({"body": "unused"})).await;
     let runtime =
         Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
-    let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
     assert!(matches!(
         session
             .on_tool_call(leak(), false)
@@ -3325,14 +3642,209 @@ async fn a_bound_sanitizer_no_answer_withholds_and_stays_retryable() {
             .expect("the block is delivered"),
         ToolCallDecision::Deny { .. },
     ));
-    let decision = run_sanitize_offer(&runtime, &mut session).await;
-    let ToolResultDecision::Replace { placeholder, .. } = decision else {
+    let quoted = runtime
+        .minted_offers(&root(), &root())
+        .into_iter()
+        .find(|offer| {
+            matches!(
+                runtime.offer_kind(&root(), offer),
+                Some(crate::api::OfferKind::Sanitizer { .. })
+            )
+        })
+        .expect("the block surfaced a sanitize offer");
+    let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+    assert!(matches!(
+        session
+            .on_remedy(offer, RemedyArguments::default(), None, None)
+            .await
+            .expect("the offer executes"),
+        RemedyDecision::Authorized { .. }
+    ));
+    assert!(matches!(
+        session
+            .on_tool_call(leak(), false)
+            .await
+            .expect("the re-proposal resumes"),
+        ToolCallDecision::Allow { spawn: None, .. }
+    ));
+    runtime
+        .reload(config_from(&format!("[policy]\n{UNSANITIZED}")))
+        .expect("the revision loads");
+    let ToolResultDecision::Replace { presentation, .. } = session
+        .on_tool_result(
+            leak(),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("raw with pii".to_string()),
+            },
+        )
+        .await
+        .expect("the result closes")
+    else {
         panic!("the raw must be withheld");
     };
-    assert!(!placeholder.contains("pii"), "the raw body never reaches the model");
-    assert!(
-        runtime.open_dispatches(&root(), &root()).pop().is_some(),
-        "a no-answer sanitizer leaves the dispatch open so the return may be retried",
+    assert_eq!(
+        presentation.and_then(|presentation| presentation.outcomes),
+        Some(appa_runtime_api::Outcomes::HardBlock),
+    );
+}
+
+/// A result its bound sanitizer never derived stays open, and the host may give up on it:
+/// abandoned, it closes withheld. A crash that lost the acknowledgement replays the same
+/// abandonment, which re-answers the recorded close; a report that contradicts it does not.
+#[tokio::test]
+async fn a_result_left_on_a_missing_derivation_is_abandoned_once_and_replays_its_close() {
+    let url = stub(serde_json::json!(42)).await;
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let db = dir.path().join("appa.db");
+    let runtime = Runtime::open(narrowing_config(&url), db.clone(), None).expect("the deployment opens");
+    let session = runtime.create_session(root(), None).expect("a fresh id opens");
+    let id = || Some("toolu-1".to_string());
+    let raw = || ToolOutcome::Success {
+        body: OutcomeBody::Available("raw with pii".to_string()),
+    };
+    assert!(matches!(
+        session
+            .on_tool_call(leak(), false)
+            .await
+            .expect("the block is delivered"),
+        ToolCallDecision::Deny { .. },
+    ));
+    let quoted = runtime
+        .minted_offers(&root(), &root())
+        .into_iter()
+        .find(|offer| {
+            matches!(
+                runtime.offer_kind(&root(), offer),
+                Some(crate::api::OfferKind::Sanitizer { .. })
+            )
+        })
+        .expect("the block surfaced a sanitize offer");
+    let offer = runtime.resolve_in(&root(), &quoted).expect("the quoted id resolves").0;
+    assert!(matches!(
+        session
+            .on_remedy(offer, RemedyArguments::default(), None, None)
+            .await
+            .expect("the offer executes"),
+        RemedyDecision::Authorized { .. }
+    ));
+    assert!(matches!(
+        session
+            .on_tool_call_identified(leak(), id(), None, None)
+            .await
+            .expect("the re-proposal resumes"),
+        ToolCallDecision::Allow { spawn: None, .. }
+    ));
+    let ToolResultDecision::Replace { presentation, .. } = session
+        .on_tool_result_identified(leak(), id(), raw())
+        .await
+        .expect("the outcome is delivered")
+    else {
+        panic!("the raw must be withheld");
+    };
+    assert!(matches!(
+        presentation.and_then(|presentation| presentation.outcomes),
+        Some(appa_runtime_api::Outcomes::MissingFact(_))
+    ));
+    assert_eq!(runtime.open_dispatches(&root(), &root()).len(), 1);
+    let abandoned = session
+        .on_tool_result_identified(leak(), id(), ToolOutcome::Indeterminate)
+        .await
+        .expect("the abandon closes the dispatch");
+    assert_eq!(abandoned, ToolResultDecision::Keep);
+    assert!(runtime.open_dispatches(&root(), &root()).is_empty());
+    drop(session);
+    drop(runtime);
+
+    let runtime = Runtime::open(narrowing_config(&url), db, None).expect("the deployment reopens");
+    let session = runtime.session(&root(), &root()).expect("the session reattaches");
+    let closes = || {
+        runtime
+            .log_facts(&root())
+            .into_iter()
+            .filter(|fact| matches!(fact, appa_engine::fact::Fact::DispatchClosed { .. }))
+            .count()
+    };
+    assert_eq!(
+        session
+            .on_tool_result_identified(leak(), id(), ToolOutcome::Indeterminate)
+            .await
+            .expect("the replayed abandonment re-answers its close"),
+        abandoned
+    );
+    assert_eq!(closes(), 1);
+    assert!(matches!(
+        session
+            .on_tool_result_identified(
+                leak(),
+                id(),
+                ToolOutcome::Failure {
+                    message: "no".to_string()
+                }
+            )
+            .await,
+        Err(EventError::OutcomeMismatch)
+    ));
+    assert!(matches!(
+        session
+            .on_tool_result_identified(
+                leak(),
+                id(),
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available("other bytes".to_string()),
+                },
+            )
+            .await,
+        Err(EventError::OutcomeMismatch)
+    ));
+    assert_eq!(closes(), 1);
+}
+
+#[tokio::test]
+async fn a_bound_sanitizer_no_answer_withholds_alike_for_every_class() {
+    let malformed = stub(serde_json::json!(42)).await;
+    let unreachable = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        format!("http://{}/", listener.local_addr().expect("the port has an address"))
+    };
+    let mut seen = Vec::new();
+    for url in [malformed, unreachable] {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime =
+            Runtime::open(narrowing_config(&url), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let mut session = runtime.create_session(root(), None).expect("a fresh id opens");
+        assert!(matches!(
+            session
+                .on_tool_call(leak(), false)
+                .await
+                .expect("the block is delivered"),
+            ToolCallDecision::Deny { .. },
+        ));
+        let ToolResultDecision::Replace {
+            placeholder,
+            presentation,
+        } = run_sanitize_offer(&runtime, &mut session).await
+        else {
+            panic!("the raw must be withheld");
+        };
+        assert!(
+            runtime.open_dispatches(&root(), &root()).pop().is_some(),
+            "a no-answer sanitizer leaves the dispatch open so the return may be retried",
+        );
+        seen.push((placeholder, presentation.and_then(|presentation| presentation.outcomes)));
+    }
+    let [(malformed, malformed_outcomes), (unreachable, unreachable_outcomes)] = &seen[..] else {
+        panic!("both classes were presented");
+    };
+    assert_eq!(
+        malformed_outcomes,
+        &Some(appa_runtime_api::Outcomes::MissingFact(
+            appa_runtime_api::RetryHint::AfterRepair
+        )),
+    );
+    assert_eq!(
+        (malformed, malformed_outcomes),
+        (unreachable, unreachable_outcomes),
+        "the failure class of a confined value's sanitizer reaches the model as nothing",
     );
 }
 
@@ -3643,7 +4155,7 @@ fn root_fork_id(name: &str) -> TrajectoryId {
 /// Open `fork` as an independent root fork of `parent`, and a session on it.
 fn open_root_fork_session(runtime: &Runtime, parent: &TrajectoryId, fork: &TrajectoryId) -> Session {
     runtime
-        .open_root_fork(parent, parent, fork)
+        .open_root_fork(parent, parent, fork, Default::default())
         .expect("the root fork opens");
     runtime.session(fork, fork).expect("the root fork reopens")
 }
@@ -3658,7 +4170,7 @@ async fn a_root_fork_starts_at_its_parents_label() {
 
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &root(), &fork)
+        .open_root_fork(&root(), &root(), &fork, Default::default())
         .expect("the root fork opens");
 
     assert_eq!(
@@ -3680,8 +4192,12 @@ async fn root_forks_and_their_parent_continue_apart() {
         .expect("the deployment opens");
     let mut parent = runtime.create_session(root(), None).expect("a fresh id opens");
     let (a, b) = (root_fork_id("fork-a"), root_fork_id("fork-b"));
-    runtime.open_root_fork(&root(), &root(), &a).expect("root fork a opens");
-    runtime.open_root_fork(&root(), &root(), &b).expect("root fork b opens");
+    runtime
+        .open_root_fork(&root(), &root(), &a, Default::default())
+        .expect("root fork a opens");
+    runtime
+        .open_root_fork(&root(), &root(), &b, Default::default())
+        .expect("root fork b opens");
 
     let mut fork_a = runtime.session(&a, &a).expect("fork a reopens");
     taint_in(&runtime, &a, &mut fork_a).await;
@@ -3728,7 +4244,7 @@ async fn a_parents_open_call_survives_its_root_forks_turn() {
 
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &root(), &fork)
+        .open_root_fork(&root(), &root(), &fork, Default::default())
         .expect("the root fork opens");
     let forked = runtime.session(&fork, &fork).expect("the fork reopens");
     forked.on_turn_end().await.expect("the fork's turn ends");
@@ -3757,13 +4273,13 @@ async fn a_root_fork_of_a_root_fork_starts_where_its_own_parent_stands() {
     runtime.create_session(root(), None).expect("a fresh id opens");
     let (first, second) = (root_fork_id("first"), root_fork_id("second"));
     runtime
-        .open_root_fork(&root(), &root(), &first)
+        .open_root_fork(&root(), &root(), &first, Default::default())
         .expect("the first root fork opens");
     let mut forked = runtime.session(&first, &first).expect("the first fork reopens");
     taint_in(&runtime, &first, &mut forked).await;
 
     runtime
-        .open_root_fork(&first, &first, &second)
+        .open_root_fork(&first, &first, &second, Default::default())
         .expect("a root fork opens from another root fork");
 
     assert_eq!(
@@ -3781,10 +4297,10 @@ async fn opening_a_root_fork_again_is_harmless_and_an_unrelated_root_is_refused(
     runtime.create_session(root(), None).expect("a fresh id opens");
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &root(), &fork)
+        .open_root_fork(&root(), &root(), &fork, Default::default())
         .expect("the root fork opens");
     runtime
-        .open_root_fork(&root(), &root(), &fork)
+        .open_root_fork(&root(), &root(), &fork, Default::default())
         .expect("opening the same root fork again is not an error");
 
     let unrelated = root_fork_id("unrelated");
@@ -3792,17 +4308,17 @@ async fn opening_a_root_fork_again_is_harmless_and_an_unrelated_root_is_refused(
         .create_session(unrelated.clone(), None)
         .expect("an unrelated root opens");
     assert_eq!(
-        runtime.open_root_fork(&unrelated, &root(), &fork),
+        runtime.open_root_fork(&unrelated, &root(), &fork, Default::default()),
         Err(super::super::RootForkRefusal::RootIdConflict),
         "a standing fork cannot be reopened under another parent family"
     );
     assert_eq!(
-        runtime.open_root_fork(&root(), &unrelated, &fork),
+        runtime.open_root_fork(&root(), &unrelated, &fork, Default::default()),
         Err(super::super::RootForkRefusal::RootIdConflict),
         "a standing fork cannot be reopened from another parent trajectory"
     );
     assert_eq!(
-        runtime.open_root_fork(&root(), &root(), &unrelated),
+        runtime.open_root_fork(&root(), &root(), &unrelated, Default::default()),
         Err(super::super::RootForkRefusal::RootIdConflict),
         "a root that governs its own trajectory never becomes a fork"
     );
@@ -3810,12 +4326,13 @@ async fn opening_a_root_fork_again_is_harmless_and_an_unrelated_root_is_refused(
         runtime.open_root_fork(
             &root_fork_id("missing"),
             &root_fork_id("missing"),
-            &root_fork_id("orphan")
+            &root_fork_id("orphan"),
+            Default::default()
         ),
         Err(super::super::RootForkRefusal::ParentUnavailable)
     );
     assert_eq!(
-        runtime.open_root_fork(&root(), &root(), &root()),
+        runtime.open_root_fork(&root(), &root(), &root(), Default::default()),
         Err(super::super::RootForkRefusal::RootIdConflict)
     );
 }
@@ -3832,15 +4349,15 @@ async fn opening_a_root_fork_again_holds_after_its_parent_ended() {
     let spawned = open_child(&mut session, fetch(serde_json::json!({"a": 1})), child_id.clone()).await;
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &child_id, &fork)
+        .open_root_fork(&root(), &child_id, &fork, Default::default())
         .expect("a root fork opens from a spawned child");
     spawned.on_child_end(None).await.expect("the child ends with no return");
 
     runtime
-        .open_root_fork(&root(), &child_id, &fork)
+        .open_root_fork(&root(), &child_id, &fork, Default::default())
         .expect("the standing root fork is recognized though its parent ended");
     assert_eq!(
-        runtime.open_root_fork(&root(), &child_id, &root_fork_id("late")),
+        runtime.open_root_fork(&root(), &child_id, &root_fork_id("late"), Default::default()),
         Err(super::super::RootForkRefusal::ParentUnavailable),
         "an ended trajectory takes no new fork"
     );
@@ -4058,7 +4575,7 @@ async fn a_root_fork_of_a_spawned_child_starts_at_the_childs_label() {
 
     let fork = root_fork_id("fork");
     runtime
-        .open_root_fork(&root(), &child_id, &fork)
+        .open_root_fork(&root(), &child_id, &fork, Default::default())
         .expect("a root fork opens from a spawned child");
     assert_eq!(
         runtime.status(&fork).expect("the fork is a root of its own").trust,
@@ -5945,6 +6462,85 @@ async fn a_permanently_contended_log_refuses_the_event() {
     );
 }
 
+/// At the hook, the same contention denies the call on a fact a later proposal may obtain.
+#[tokio::test]
+async fn a_permanently_contended_proposal_is_denied_on_a_missing_fact() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open_runtime(&dir);
+    runtime.create_session(root(), None).expect("a fresh id opens");
+    runtime.store().contend_next_appends(REPLAY_LIMIT as u64);
+    let decision = crate::hooks::handle(
+        &runtime,
+        appa_runtime_api::HookEvent::ToolCall {
+            actor: Actor {
+                root: root(),
+                child: None,
+            },
+            call: fetch(serde_json::json!({"a": 1})),
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: None,
+            declares: None,
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            decision,
+            appa_runtime_api::HookDecision::DenyCall {
+                outcomes: Some(appa_runtime_api::Outcomes::MissingFact(
+                    appa_runtime_api::RetryHint::Later
+                )),
+                ..
+            }
+        ),
+        "{decision:?}"
+    );
+}
+
+/// So does the inventory a contended proposal carries: it cannot land, and the call is
+/// denied on the same missing fact rather than refused as a fault.
+#[tokio::test]
+async fn a_contended_proposals_inventory_denies_it_on_a_missing_fact() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open_runtime(&dir);
+    let adapter = appa_adapter_claude_code::adapter();
+    let inventory = |tool: &str| {
+        format!(
+            r#""inventory":{{"tools":[{{"name":"{tool}","tool":"{tool}"}}],"sources":[{{"server":"builtin","status":"complete","dynamic":false}}]}}"#
+        )
+    };
+    let opening = format!(
+        r#"{{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"busy",{}}}"#,
+        inventory("Bash")
+    );
+    let answer = |body: String| {
+        let runtime = &runtime;
+        let adapter = &adapter;
+        async move {
+            crate::hooks::answer(
+                runtime,
+                adapter,
+                appa_runtime_api::PrincipalSource::None,
+                body.as_bytes(),
+            )
+            .await
+        }
+    };
+    assert_eq!(answer(opening).await.0, 200);
+    runtime.store().contend_next_appends(REPLAY_LIMIT as u64 * 4);
+    let (status, reply) = answer(format!(
+        r#"{{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"busy","call_id":"toolu-1","tool":"Read","spawn":false,"arguments":{{"file_path":"a"}},{}}}"#,
+        inventory("Read")
+    ))
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(reply["decision"], "deny_call", "{reply}");
+    assert_eq!(reply["deciding"], "missing_fact", "{reply}");
+    assert_eq!(reply["retry"], "later", "{reply}");
+}
+
 fn control_call(name: &str) -> ProposedCall {
     ProposedCall {
         tool: name.to_string(),
@@ -6705,6 +7301,10 @@ async fn a_panicking_transcriber_leaves_the_consult_outcome_standing() {
 /// appended twice, no offer or binding is re-minted, and a repeat that disagrees with
 /// the record is refused without reaching the model.
 mod replay;
+
+/// The settings a family's first opening pins, and the remedies they let the runtime apply at
+/// a block.
+mod settings;
 
 #[tokio::test]
 async fn an_empty_crossing_child_turn_stays_open_and_a_root_cannot_end_as_a_child() {

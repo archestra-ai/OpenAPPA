@@ -93,6 +93,7 @@ async fn start(runtime: &Arc<Runtime>, root: &TrajectoryId) {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;

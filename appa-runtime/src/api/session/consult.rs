@@ -140,7 +140,7 @@ impl Session {
         ruling: Option<appa_runtime_api::Ruling>,
         occasion: Occasion<'_>,
     ) -> ExternalEvidence {
-        match &request {
+        let evidence = match &request {
             ExternalRequest::Authority {
                 authority,
                 declaration,
@@ -184,8 +184,10 @@ impl Session {
                     },
                 };
                 let derived = match self.timed_consult(&consult, None, None, occasion, None).await {
-                    ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer).map(|answer| answer.body),
-                    ConsultOutcome::NoAnswer(_) => None,
+                    ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer)
+                        .map(|answer| answer.body)
+                        .ok_or(crate::events::NoAnswerClass::Malformed),
+                    ConsultOutcome::NoAnswer(reason) => Err((&reason).into()),
                 };
                 ExternalEvidence::Sanitizer {
                     sanitizer: sanitizer.clone(),
@@ -229,7 +231,7 @@ impl Session {
                     ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };
                 // Record no-answer as evidence and let the engine decide between a route's
-                // declared `on_no_answer` fallback and an operational refusal.
+                // declared `on_no_answer` fallback and a deny on the missing fact.
                 match answer {
                     Ok(answer) => ExternalEvidence::Annotation {
                         annotator: annotator.clone(),
@@ -295,6 +297,10 @@ impl Session {
                     principal,
                 }
             }
+        };
+        if let (Some(unanswered), Some(external)) = (&self.inner.unanswered, evidence.unanswered()) {
+            unanswered.note(external);
         }
+        evidence
     }
 }

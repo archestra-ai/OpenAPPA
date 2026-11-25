@@ -157,6 +157,7 @@ async fn a_battery_rule_reaches_the_server_the_host_aliased_and_speaks_its_spell
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -245,6 +246,7 @@ async fn identified_delivery_retries_replay_denied_calls_released_calls_and_clos
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -389,6 +391,7 @@ async fn a_target_policy_variant_decides_before_the_base() {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;

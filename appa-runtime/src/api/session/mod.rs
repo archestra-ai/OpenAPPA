@@ -9,7 +9,7 @@ use crate::consult::{
     AnnotationAnswer, AnnotationArtifact, Consult, ConsultBody, LookupAnswer, MembersAnswer, SanitizerAnswer,
 };
 use crate::engine::{
-    Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Feedback,
+    Abstention, AuthorityVerdict, EngineDecision, EngineEvent, EngineView, ExternalEvidence, ExternalRequest,
     ForkStatus, Liveness, Next, OfferNonce, OpenDispatch, PendingReview, Presentation, RemedyArguments,
 };
 use crate::external::ConsultOutcome;
@@ -242,6 +242,11 @@ impl Session {
     /// The reader this session's family acts for, as its opening pinned it.
     pub(crate) fn principal(&self) -> Result<Option<ReaderId>, EventError> {
         self.with_view(|context| Ok(context.view.principal().cloned()))
+    }
+
+    /// The settings this session's family opening pinned, read from the opening as stored.
+    pub(crate) fn settings(&self) -> Result<appa_runtime_api::SessionSettings, EventError> {
+        Ok(crate::api::pinned_settings(&self.inner.log(&self.root)?).clone())
     }
 
     /// The host call ids of the calls in `closing` that `answered` does not name: calls a

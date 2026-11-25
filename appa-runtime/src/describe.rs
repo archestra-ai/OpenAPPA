@@ -56,6 +56,7 @@ struct AuthorityDescription {
     trust_below: Option<String>,
     audience_missing: Option<String>,
     effects_containing: Vec<String>,
+    prior_effects_containing: Vec<String>,
     attention: Vec<String>,
 }
 
@@ -210,6 +211,12 @@ fn authority_descriptions(compiled: &appa_policy::Config, bindings: Bindings<'_>
             effects_containing: authority
                 .mandate
                 .waivers
+                .iter()
+                .map(|effect| effect.as_str().to_string())
+                .collect(),
+            prior_effects_containing: authority
+                .mandate
+                .prior_waivers
                 .iter()
                 .map(|effect| effect.as_str().to_string())
                 .collect(),
@@ -484,6 +491,12 @@ pub fn render(path: &Path, battery_dirs: &[PathBuf], adapter: AdapterName, sessi
                 permits.push(format!(
                     "effects_containing=[{}]",
                     authority.effects_containing.join(", ")
+                ));
+            }
+            if !authority.prior_effects_containing.is_empty() {
+                permits.push(format!(
+                    "prior_effects_containing=[{}]",
+                    authority.prior_effects_containing.join(", ")
                 ));
             }
             if !authority.attention.is_empty() {
@@ -860,6 +873,7 @@ mod tests {
                 trust_below: Some("trusted".to_string()),
                 audience_missing: Some("public".to_string()),
                 effects_containing: vec!["mail.sent".to_string()],
+                prior_effects_containing: vec![],
                 attention: vec!["hitl".to_string()],
             }]
         );
@@ -897,6 +911,34 @@ mod tests {
             rendered
                 .contains("slack: viewer, full-members, user-group/<handle> (binding configured; lookups via people)"),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn an_authority_describes_its_prior_waivers_apart_from_its_no_prior_waivers() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("appa.toml");
+        std::fs::write(
+            &path,
+            "[policy]\nversion = 2\n[[policy.authority]]\nname = \"desk\"\n[policy.authority.permits]\n\
+             effects_containing = [\"deploy\"]\nprior_effects_containing = [\"reviewed\"]\n",
+        )
+        .expect("config");
+
+        let (config, policy, _) = inspect(&path, &[]);
+
+        assert_eq!(config.state, ConfigState::Loadable);
+        assert_eq!(
+            policy.authorities,
+            [AuthorityDescription {
+                name: "desk".to_string(),
+                implementation: AuthorityImplementation::Unbound,
+                trust_below: None,
+                audience_missing: None,
+                effects_containing: vec!["deploy".to_string()],
+                prior_effects_containing: vec!["reviewed".to_string()],
+                attention: Vec::new(),
+            }]
         );
     }
 

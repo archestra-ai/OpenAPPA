@@ -283,6 +283,7 @@ async fn a_bound_secret_masker_delivers_the_masked_shell_output() {
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -320,9 +321,14 @@ async fn a_bound_secret_masker_delivers_the_masked_shell_output() {
         },
     )
     .await;
-    let HookDecision::ReplaceOutput { output } = delivered else {
+    let HookDecision::ReplaceOutput { output, outcomes } = delivered else {
         panic!("the masked output carries `internal`, a residual on a public session, got {delivered:?}");
     };
+    assert_eq!(
+        outcomes.map(|outcomes| outcomes.deciding()),
+        Some(appa_runtime_api::Outcome::Consent),
+        "the host learns the staged residual waits on consent"
+    );
     assert!(output.contains("public -> internal"), "never `self`: {output}");
     let RemedyOutcome::Returned { value } = runtime.execute_remedy(&actor(), last_offer(&output)).await else {
         panic!("accepting the residual returns the masked output");
@@ -575,6 +581,7 @@ async fn the_coding_battery_judges_relative_credentials_and_offers_review_for_pu
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -594,6 +601,7 @@ async fn the_coding_battery_judges_relative_credentials_and_offers_review_for_pu
             feedback,
             offers,
             review,
+            ..
         } = blocked
         else {
             panic!("`{command}` is blocked with the narrowing offered, got {blocked:?}");
@@ -685,6 +693,7 @@ async fn the_coding_battery_judges_relative_credentials_and_offers_review_for_pu
         feedback,
         offers,
         review,
+        ..
     } = publication
     else {
         panic!("a trajectory narrowed to `self` requires a remedy before publishing: {publication:?}");
@@ -760,6 +769,7 @@ async fn the_slack_battery_allows_public_writes_and_blocks_leaking_self_secrets(
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -864,6 +874,7 @@ command = ["appa", "file-tracker", "record"]
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -910,6 +921,7 @@ async fn the_coding_battery_covers_grep_write_and_edit_of_the_requesters_secrets
                 title: None,
                 start: None,
                 launch: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -996,6 +1008,7 @@ async fn the_coding_battery_covers_grep_write_and_edit_of_the_requesters_secrets
         feedback,
         offers,
         review,
+        ..
     } = refused
     else {
         panic!("a session that read untrusted content does not write a credential path, got {refused:?}");

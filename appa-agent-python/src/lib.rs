@@ -10,9 +10,9 @@ use appa_runtime::api::{
 use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OpenCalls, OutcomeBody, ProposedCall,
-    RefusalClass, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name,
-    is_reserved_tool_name,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes,
+    ProposedCall, RefusalClass, RetryHint, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
+    canonical_tool_name, is_reserved_tool_name,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyString;
 use serde::Serialize;
 
-const BINDING_IDENTITY: &str = "appa-agent-python-v9";
+const BINDING_IDENTITY: &str = "appa-agent-python-v10";
 const ATTEST_SCHEMA: &str = "attest-schema";
 const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_BODY_BYTES: usize = 256 * 1024;
@@ -29,6 +29,7 @@ const CONSULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const OFFER_ARGUMENT: &str = "offer_id";
 const REFUSAL_CLASS: &str = "refusal_class";
+const REFUSAL_RETRY: &str = "retry";
 
 create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 
@@ -40,16 +41,26 @@ enum DispatchResponse {
         /// The ids of the offers `feedback` quotes, for a host that takes one
         /// without reading the text.
         offer_ids: Vec<String>,
+        #[serde(flatten)]
+        refused: Refused,
     },
     Delivered {
         content: String,
         dispatched_tool: String,
         dispatched_arguments: serde_json::Value,
         disposition: DeliveryDisposition,
+        /// What kind of refusal sealed the result in place of the tool's bytes, where one did.
+        #[serde(flatten)]
+        refused: Refused,
     },
     Control {
-        reply: String,
+        #[serde(flatten)]
+        control: ControlReply,
     },
+    /// The report settled nothing: a fact its result needs was not obtained. The call stays
+    /// pending with the outcome already reported; report it again to resubmit that outcome,
+    /// or abandon it. `content` is what the model may read meanwhile.
+    Unsettled { content: String, retry: RetryHint },
 }
 
 #[derive(Serialize)]
@@ -60,6 +71,8 @@ enum CheckResponse {
         /// The ids of the offers `feedback` quotes, for a host that takes one
         /// without reading the text.
         offer_ids: Vec<String>,
+        #[serde(flatten)]
+        refused: Refused,
     },
     Allowed {
         dispatched_tool: String,
@@ -70,8 +83,43 @@ enum CheckResponse {
         spawn_binding: Option<String>,
     },
     Control {
-        reply: String,
+        #[serde(flatten)]
+        control: ControlReply,
     },
+}
+
+/// What kind of refusal a block is, as the wire spells it: what decides it, every outcome
+/// it holds, and whether asking again can obtain a missing fact. Absent on a block that
+/// states none.
+#[derive(Serialize)]
+struct Refused {
+    deciding: Option<Outcome>,
+    outcomes: Option<Vec<Outcome>>,
+    retry: Option<RetryHint>,
+}
+
+/// What a control call answered. `retry` is set when the offer stands on a fact not
+/// obtained: what executing it again can do.
+#[derive(Serialize)]
+struct ControlReply {
+    reply: String,
+    retry: Option<RetryHint>,
+}
+
+impl ControlReply {
+    fn of(reply: String) -> Self {
+        Self { reply, retry: None }
+    }
+}
+
+impl Refused {
+    fn of(outcomes: Option<&Outcomes>) -> Self {
+        Self {
+            deciding: outcomes.map(Outcomes::deciding),
+            outcomes: outcomes.map(|outcomes| outcomes.held().collect()),
+            retry: outcomes.and_then(Outcomes::retry),
+        }
+    }
 }
 
 /// The answer to a spawn proposal that also opened the child.
@@ -83,6 +131,8 @@ enum SpawnResponse {
         /// The ids of the offers `feedback` quotes, for a host that takes one
         /// without reading the text.
         offer_ids: Vec<String>,
+        #[serde(flatten)]
+        refused: Refused,
     },
     Opened {
         child_id: String,
@@ -90,7 +140,8 @@ enum SpawnResponse {
         dispatched_arguments: serde_json::Value,
     },
     Control {
-        reply: String,
+        #[serde(flatten)]
+        control: ControlReply,
     },
 }
 
@@ -100,6 +151,8 @@ enum SpawnResponse {
 enum ReturnResponse {
     Blocked {
         feedback: String,
+        #[serde(flatten)]
+        refused: Refused,
     },
     Returned {
         value: Option<String>,
@@ -134,6 +187,10 @@ enum DeliveryDisposition {
 
 struct Pending {
     call: ProposedCall,
+    /// The outcome a report already submitted that settled nothing: a fact its result needs
+    /// was not obtained, or the runtime refused the report. Reporting again resubmits it, so
+    /// the tool never runs twice.
+    unsettled: Option<ToolOutcome>,
 }
 
 /// One child branch this session opened. `spawn` is the parent call whose
@@ -168,7 +225,11 @@ struct SessionInner {
 /// class the caller can branch on, or the session refused the operation.
 #[derive(Debug)]
 enum Failure {
-    Refused { class: RefusalClass, detail: String },
+    Refused {
+        class: RefusalClass,
+        detail: String,
+        retry: Option<RetryHint>,
+    },
     Session(String),
 }
 
@@ -264,6 +325,7 @@ impl SessionInner {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         })?;
         inner.event(HookEvent::Prompt {
             actor: inner.actor(None),
@@ -336,7 +398,7 @@ impl SessionInner {
 
     fn event(&self, event: HookEvent) -> Result<HookDecision, Failure> {
         match self.tokio.block_on(hooks::handle(&self.runtime, event)) {
-            HookDecision::Refuse { class, detail } => Err(Failure::Refused { class, detail }),
+            HookDecision::Refuse { class, detail, retry } => Err(Failure::Refused { class, detail, retry }),
             decision => Ok(decision),
         }
     }
@@ -406,28 +468,36 @@ impl SessionInner {
             declares: None,
         })? {
             HookDecision::AllowCall { spawn: binding } => {
-                let pending = Pending { call: call.clone() };
-                match call_id {
-                    Some(call_id) => {
-                        self.identified.insert(call_id.to_string(), pending);
-                    }
-                    None => *self.slot(child)? = Some(pending),
-                }
+                self.keep_pending(
+                    child,
+                    call_id,
+                    Pending {
+                        call: call.clone(),
+                        unsettled: None,
+                    },
+                )?;
                 Ok(Decision::Allowed { call, binding })
             }
-            HookDecision::DenyCall { feedback, offers, .. } => Ok(Decision::Blocked { feedback, offers }),
-            HookDecision::PassControl => Ok(Decision::Control {
-                reply: self.execute_remedy(child, &call),
+            HookDecision::DenyCall {
+                feedback,
+                offers,
+                outcomes,
+                ..
+            } => Ok(Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
             }),
+            HookDecision::PassControl => Ok(Decision::Control(self.execute_remedy(child, &call))),
             other => failed(format!("the runtime answered a proposed call with {other:?}")),
         }
     }
 
-    fn execute_remedy(&self, child: Option<&TrajectoryId>, call: &ProposedCall) -> String {
+    fn execute_remedy(&self, child: Option<&TrajectoryId>, call: &ProposedCall) -> ControlReply {
         let Ok((offer, arguments)) = appa_runtime::api::parse_control_arguments(call.arguments.get()) else {
-            return format!(
+            return ControlReply::of(format!(
                 "{ADVERTISED_CONTROL_TOOL} needs an {OFFER_ARGUMENT}, quoted exactly as the feedback surfaced it."
-            );
+            ));
         };
         // A call that quotes no offer declares the next subagent call's return.
         let actor = self.actor(child);
@@ -441,15 +511,21 @@ impl SessionInner {
             ),
         };
         match outcome {
-            RemedyOutcome::Authorized { call } => format!(
+            RemedyOutcome::Authorized { call } => ControlReply::of(format!(
                 "Authorized. Call the {} tool with exactly these arguments to run it: {}",
                 call.tool,
                 call.arguments.get(),
-            ),
-            RemedyOutcome::Returned { value } => value,
-            RemedyOutcome::Declined { presentation } => presentation.feedback,
-            RemedyOutcome::NoAnswer { feedback } => feedback,
-            RemedyOutcome::Refused { reason } => reason.detail().to_string(),
+            )),
+            RemedyOutcome::Returned { value } => ControlReply::of(value),
+            RemedyOutcome::Declined { presentation } => ControlReply {
+                retry: presentation.outcomes.as_ref().and_then(Outcomes::retry),
+                reply: presentation.feedback,
+            },
+            RemedyOutcome::NoAnswer { feedback, retry } => ControlReply { reply: feedback, retry },
+            RemedyOutcome::Refused { reason } => ControlReply {
+                reply: reason.detail().to_string(),
+                retry: reason.retry(),
+            },
         }
     }
 
@@ -462,11 +538,16 @@ impl SessionInner {
         call_id: Option<&str>,
     ) -> Result<String, Failure> {
         encode(match self.decide(child, tool, arguments_json, spawn, call_id)? {
-            Decision::Blocked { feedback, offers } => CheckResponse::Blocked {
+            Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
+            } => CheckResponse::Blocked {
                 feedback,
                 offer_ids: ids(offers),
+                refused: Refused::of(outcomes.as_ref()),
             },
-            Decision::Control { reply } => CheckResponse::Control { reply },
+            Decision::Control(control) => CheckResponse::Control { control },
             Decision::Allowed { call, binding } => CheckResponse::Allowed {
                 dispatched_tool: call.tool.clone(),
                 dispatched_arguments: arguments_value(&call),
@@ -482,11 +563,16 @@ impl SessionInner {
             );
         };
         match self.decide(None, tool, arguments_json, false, None)? {
-            Decision::Blocked { feedback, offers } => encode(DispatchResponse::Blocked {
+            Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
+            } => encode(DispatchResponse::Blocked {
                 feedback,
                 offer_ids: ids(offers),
+                refused: Refused::of(outcomes.as_ref()),
             }),
-            Decision::Control { reply } => encode(DispatchResponse::Control { reply }),
+            Decision::Control(control) => encode(DispatchResponse::Control { control }),
             Decision::Allowed { call, .. } => {
                 let outcome = self
                     .tokio
@@ -533,7 +619,7 @@ impl SessionInner {
         if child.is_none() {
             self.refuse_closing_a_spawn()?;
         }
-        let pending = match call_id {
+        let mut pending = match call_id {
             Some(call_id) if child.is_none() => self
                 .identified
                 .remove(call_id)
@@ -544,35 +630,41 @@ impl SessionInner {
                 .take()
                 .ok_or_else(|| "no call is pending".to_string())?,
         };
-        let (produced, as_produced) = match &outcome {
-            ToolOutcome::Success {
-                body: OutcomeBody::Available(body),
-            } => (body.clone(), true),
-            ToolOutcome::Success {
-                body: OutcomeBody::TooLarge { .. },
-            } => ("The tool ran; its result was too large to carry.".to_string(), false),
-            ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
-            } => ("The tool ran; it returned no result.".to_string(), false),
-            ToolOutcome::Failure { .. } => ("The tool call failed.".to_string(), false),
-            ToolOutcome::Indeterminate => ("The tool's outcome is unknown; it may have run.".to_string(), false),
-        };
-        let decision = self.event(HookEvent::ToolResult {
+        let outcome = pending.unsettled.take().unwrap_or(outcome);
+        let decision = match self.event(HookEvent::ToolResult {
             actor: self.actor(child),
             call: pending.call.clone(),
             call_id: call_id.map(str::to_string),
-            outcome,
-        })?;
-        let (content, disposition) = match decision {
-            HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted),
-            HookDecision::Ack => (produced, DeliveryDisposition::Sealed),
+            outcome: outcome.clone(),
+        }) {
+            Ok(decision) => decision,
+            // A refused report settles nothing: the call stays pending for the host to
+            // report again.
+            Err(failure) => {
+                pending.unsettled = Some(outcome);
+                self.keep_pending(child, call_id, pending)?;
+                return Err(failure);
+            }
+        };
+        let (content, disposition, outcomes) = match decision {
+            HookDecision::ReplaceOutput {
+                output,
+                outcomes: Some(Outcomes::MissingFact(retry)),
+            } => {
+                pending.unsettled = Some(outcome);
+                self.keep_pending(child, call_id, pending)?;
+                return encode(DispatchResponse::Unsettled { content: output, retry });
+            }
+            HookDecision::Ack => {
+                let (content, disposition) = acknowledged(outcome);
+                (content, disposition, None)
+            }
             // `DeliverValue` carries what the engine admitted in place of the
             // raw result, so it is sealed for the reason `ChildReturn` is
             // substituted: the model reads it, and the tool did not write it.
-            HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
-                (output, DeliveryDisposition::Sealed)
-            }
-            HookDecision::Block { reason } => (reason, DeliveryDisposition::Sealed),
+            HookDecision::ReplaceOutput { output, outcomes } => (output, DeliveryDisposition::Sealed, outcomes),
+            HookDecision::DeliverValue { value: output } => (output, DeliveryDisposition::Sealed, None),
+            HookDecision::Block { reason, outcomes } => (reason, DeliveryDisposition::Sealed, outcomes),
             other => return failed(format!("the runtime answered a tool outcome with {other:?}")),
         };
         encode(DispatchResponse::Delivered {
@@ -580,7 +672,23 @@ impl SessionInner {
             dispatched_tool: pending.call.tool.clone(),
             dispatched_arguments: arguments_value(&pending.call),
             disposition,
+            refused: Refused::of(outcomes.as_ref()),
         })
+    }
+
+    fn keep_pending(
+        &mut self,
+        child: Option<&TrajectoryId>,
+        call_id: Option<&str>,
+        pending: Pending,
+    ) -> Result<(), Failure> {
+        match call_id {
+            Some(call_id) => {
+                self.identified.insert(call_id.to_string(), pending);
+            }
+            None => *self.slot(child)? = Some(pending),
+        }
+        Ok(())
     }
 
     fn abandon(&mut self, child: Option<&TrajectoryId>, call_id: Option<&str>) -> Result<(), Failure> {
@@ -598,12 +706,15 @@ impl SessionInner {
                 .take()
                 .ok_or_else(|| "no call is pending".to_string())?,
         };
-        self.event(HookEvent::ToolResult {
+        if let Err(failure) = self.event(HookEvent::ToolResult {
             actor: self.actor(child),
-            call: pending.call,
+            call: pending.call.clone(),
             call_id: call_id.map(str::to_string),
             outcome: ToolOutcome::Indeterminate,
-        })?;
+        }) {
+            self.keep_pending(child, call_id, pending)?;
+            return Err(failure);
+        }
         Ok(())
     }
 
@@ -668,19 +779,23 @@ impl SessionInner {
         if self.children.contains_key(&child) {
             return failed(format!("the child branch {} is already open in this session", child.0));
         }
-        let decision = match self.decide(None, &tool, arguments_json, true, None)? {
-            Decision::Blocked { feedback, offers } => match self.declare_return(&offers, return_schema)? {
-                Some(declared) => self.decide(None, &tool, declared.arguments.get(), true, None)?,
-                None => Decision::Blocked { feedback, offers },
-            },
-            decision => decision,
-        };
+        let mut decision = self.decide(None, &tool, arguments_json, true, None)?;
+        if let Decision::Blocked { offers, .. } = &decision
+            && let Some(declared) = self.declare_return(offers, return_schema)?
+        {
+            decision = self.decide(None, &tool, declared.arguments.get(), true, None)?;
+        }
         match decision {
-            Decision::Blocked { feedback, offers } => encode(SpawnResponse::Blocked {
+            Decision::Blocked {
+                feedback,
+                offers,
+                outcomes,
+            } => encode(SpawnResponse::Blocked {
                 feedback,
                 offer_ids: ids(offers),
+                refused: Refused::of(outcomes.as_ref()),
             }),
-            Decision::Control { reply } => encode(SpawnResponse::Control { reply }),
+            Decision::Control(control) => encode(SpawnResponse::Control { control }),
             Decision::Allowed { call, binding: None } => {
                 // The release prepared no fork, so no child exists to open. The
                 // parent still owes this dispatch an outcome; a close that fails
@@ -752,7 +867,9 @@ impl SessionInner {
                 "the return declaration was not taken: {}",
                 presentation.feedback
             )),
-            RemedyOutcome::NoAnswer { feedback } => failed(format!("the return declaration was not taken: {feedback}")),
+            RemedyOutcome::NoAnswer { feedback, .. } => {
+                failed(format!("the return declaration was not taken: {feedback}"))
+            }
             RemedyOutcome::Refused { reason } => {
                 failed(format!("the return declaration was refused: {}", reason.detail()))
             }
@@ -788,7 +905,12 @@ impl SessionInner {
                 other => return failed(format!("the runtime answered the echoed return with {other:?}")),
             },
             // A held return keeps the branch live: the child may return again.
-            HookDecision::Block { reason } => return encode(ReturnResponse::Blocked { feedback: reason }),
+            HookDecision::Block { reason, outcomes } => {
+                return encode(ReturnResponse::Blocked {
+                    feedback: reason,
+                    refused: Refused::of(outcomes.as_ref()),
+                });
+            }
             other => return failed(format!("the runtime answered a child return with {other:?}")),
         };
         let decision = self.event(HookEvent::SpawnResult {
@@ -816,7 +938,10 @@ impl SessionInner {
                     disposition,
                 }
             }
-            HookDecision::Block { reason } => ReturnResponse::Blocked { feedback: reason },
+            HookDecision::Block { reason, outcomes } => ReturnResponse::Blocked {
+                feedback: reason,
+                refused: Refused::of(outcomes.as_ref()),
+            },
             other => return failed(format!("the runtime answered a spawn result with {other:?}")),
         })
     }
@@ -850,18 +975,35 @@ enum Decision {
     Blocked {
         feedback: String,
         offers: Vec<OfferedRemedy>,
+        outcomes: Option<Outcomes>,
     },
     Allowed {
         call: ProposedCall,
         binding: Option<SpawnBinding>,
     },
-    Control {
-        reply: String,
-    },
+    Control(ControlReply),
 }
 
 fn ids(offers: Vec<OfferedRemedy>) -> Vec<String> {
     offers.into_iter().map(|offer| offer.id).collect()
+}
+
+/// What the model reads of an outcome the runtime acknowledged as reported.
+fn acknowledged(outcome: ToolOutcome) -> (String, DeliveryDisposition) {
+    let sealed = |content: &str| (content.to_string(), DeliveryDisposition::Sealed);
+    match outcome {
+        ToolOutcome::Success {
+            body: OutcomeBody::Available(body),
+        } => (body, DeliveryDisposition::Admitted),
+        ToolOutcome::Success {
+            body: OutcomeBody::TooLarge { .. },
+        } => sealed("The tool ran; its result was too large to carry."),
+        ToolOutcome::Success {
+            body: OutcomeBody::Unavailable,
+        } => sealed("The tool ran; it returned no result."),
+        ToolOutcome::Failure { .. } => sealed("The tool call failed."),
+        ToolOutcome::Indeterminate => sealed("The tool's outcome is unknown; it may have run."),
+    }
 }
 
 fn arguments_value(call: &ProposedCall) -> serde_json::Value {
@@ -1087,14 +1229,18 @@ fn with<T>(inner: &Arc<Mutex<SessionInner>>, act: impl FnOnce(&mut SessionInner)
 }
 
 /// The `AppaError` a failure raises. A refusal carries its class as
-/// `refusal_class`, the serde spelling; any other failure leaves the
-/// class attribute's `None`.
+/// `refusal_class` and, on a fact not obtained, what sending it again can do
+/// as `retry`, both serde spellings; any other failure leaves both `None`.
 fn raised(failure: Failure) -> PyErr {
     match failure {
         Failure::Session(message) => AppaError::new_err(message),
-        Failure::Refused { class, detail } => Python::attach(|py| {
+        Failure::Refused { class, detail, retry } => Python::attach(|py| {
             let error = AppaError::new_err(detail);
-            match error.value(py).setattr(REFUSAL_CLASS, spelling(class)) {
+            let value = error.value(py);
+            match value
+                .setattr(REFUSAL_CLASS, spelling(class))
+                .and_then(|()| value.setattr(REFUSAL_RETRY, retry.map(spelling)))
+            {
                 Ok(()) => error,
                 Err(unset) => unset,
             }
@@ -1102,8 +1248,8 @@ fn raised(failure: Failure) -> PyErr {
     }
 }
 
-fn spelling(class: RefusalClass) -> String {
-    match serde_json::to_value(class) {
+fn spelling(unit: impl Serialize) -> String {
+    match serde_json::to_value(unit) {
         Ok(serde_json::Value::String(spelling)) => spelling,
         _ => unreachable!("a unit variant serializes as its serde name"),
     }
@@ -1317,6 +1463,7 @@ fn appa_agent_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ChildSession>()?;
     let error = module.py().get_type::<AppaError>();
     error.setattr(REFUSAL_CLASS, module.py().None())?;
+    error.setattr(REFUSAL_RETRY, module.py().None())?;
     module.add("AppaError", error)?;
     module.add("BINDING_IDENTITY", BINDING_IDENTITY)?;
     Ok(())

@@ -2,7 +2,7 @@
 use crate::common;
 
 use appa_runtime::api::{AuditEvent, RemedyOutcome, Runtime};
-use appa_runtime_api::{HookDecision, ProposedCall};
+use appa_runtime_api::{HookDecision, Outcome, ProposedCall};
 use common::{actor, battery_runtime, members_source, propose, ran, raw, root, unsanitized_offer_of};
 use std::sync::Arc;
 
@@ -97,10 +97,24 @@ async fn a_read_is_internal_and_suspicious() {
     let blocked = propose(&runtime, read.clone()).await;
     // The read is confined, so the battery's sanitizers stand beside the plain narrowing:
     // one keeps the session's trust, the other its `public` audience.
-    let HookDecision::DenyCall { feedback, offers, .. } = &blocked else {
+    let HookDecision::DenyCall {
+        feedback,
+        offers,
+        outcomes,
+        ..
+    } = &blocked
+    else {
         panic!("an incident read narrows the trajectory, got {blocked:?}");
     };
     assert_eq!(offers.len(), 3, "the narrowing and two sanitizers: {feedback}");
+    // Accepting the narrowing is the cheapest way through; the sanitizers are the agent's
+    // own choice beside it.
+    let outcomes = outcomes.expect("the runtime states a denial's outcomes");
+    assert_eq!(outcomes.deciding(), Outcome::Consent);
+    assert_eq!(
+        outcomes.held().collect::<Vec<_>>(),
+        vec![Outcome::AgentChoice, Outcome::Consent]
+    );
     for sanitizer in ["pagerduty.strip-instructions", "pagerduty.redact-for-public"] {
         assert!(
             feedback.contains(&format!("Use sanitizer {sanitizer}'s result")),
@@ -181,7 +195,15 @@ async fn a_write_needs_review_and_records_its_effect() {
         let dir = tempfile::tempdir().unwrap();
         let runtime = runtime(&dir).await;
         let decision = propose(&runtime, write.clone()).await;
-        assert!(!matches!(decision, HookDecision::AllowCall { .. }), "{}", write.tool);
+        let HookDecision::DenyCall {
+            outcomes: Some(outcomes),
+            ..
+        } = &decision
+        else {
+            panic!("{} waits for review, got {decision:?}", write.tool);
+        };
+        // Every plan asks the reviewer; the plain one asks nothing more of the agent.
+        assert_eq!(outcomes.deciding(), Outcome::WaivableGap, "{}", write.tool);
         assert!(matches!(
             runtime.execute_remedy(&actor(), unsanitized_offer_of(&decision)).await,
             RemedyOutcome::Authorized { .. }

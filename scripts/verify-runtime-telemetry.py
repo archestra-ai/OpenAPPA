@@ -327,7 +327,8 @@ def exercise(
                 ),
                 "allow",
             )
-            # Both failures render as host denials, but neither is a policy denial.
+            # An undeclared tool refuses the hook and a failed annotator denies the call on
+            # a missing fact; neither is a policy denial.
             answers["undeclared"] = hook(
                 binary,
                 env,
@@ -348,7 +349,7 @@ def exercise(
                     tool_use_id="call-failed-private-id",
                     tool_input={},
                 ),
-                "refuse",
+                "deny",
             )
             status, denied = direct_hook(
                 url,

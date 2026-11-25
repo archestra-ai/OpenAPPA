@@ -103,6 +103,7 @@ async fn opened(config: Config) -> Arc<Runtime> {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,

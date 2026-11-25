@@ -4,9 +4,9 @@
 use appa_engine::label::ReaderId;
 use appa_engine::value::DispatchId as EngineDispatchId;
 use appa_runtime_api::{
-    Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, ParseRefusal, PeerAddress, PeerFrame,
-    PrincipalSource, PromptKey, ProposedCall, Ruling, SessionTitle, SpawnKind, SpawnRef, StartKind, ToolOutcome,
-    TrajectoryId, WireDecision, WireEvent,
+    Accepted, Actor, Adapter, HookDecision, HookEvent, OpenCalls, Outcomes, ParseRefusal, PeerAddress, PeerFrame,
+    PrincipalSource, PromptKey, ProposedCall, RetryHint, Ruling, SessionSettings, SessionTitle, SpawnKind, SpawnRef,
+    StartKind, ToolOutcome, TrajectoryId, WireDecision, WireEvent,
 };
 
 use crate::api::peer::{PeerSend, Received, SEND_MESSAGE};
@@ -15,6 +15,7 @@ use crate::api::{
     LaunchedStart, Quoted, RemedyPresentation, Runtime, Session, SpawnResultDecision, Stop, ToolCallDecision,
     ToolResultDecision, is_control_tool,
 };
+use crate::engine::{MissingIn, ValueKind};
 use appa_eventlog::EndKind;
 
 fn wire(decision: &HookDecision) -> serde_json::Value {
@@ -55,8 +56,10 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
     // A launched start decides from this alias lookup through the identity it records.
     let deciding = match &event {
         HookEvent::SessionStart {
-            launch: Some(launch), ..
-        } => match runtime.decide_launch(launch.clone()) {
+            launch: Some(launch),
+            settings,
+            ..
+        } => match runtime.decide_launch(launch.clone(), settings) {
             Ok(deciding) => Some(deciding),
             Err(error) => return unfiled(&event, error),
         },
@@ -75,7 +78,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
     {
         return answered;
     }
-    if let Some(answered) = names_a_childs_transcript(runtime, &event, &root, &names_children) {
+    if !refused_at_dispatch && let Some(answered) = names_a_childs_transcript(runtime, &event, &root, &names_children) {
         return answered;
     }
     let presentation = EmbeddedPresentationOptions {
@@ -101,6 +104,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
                 address,
                 title,
                 start,
+                settings,
                 ..
             },
             deciding,
@@ -113,7 +117,7 @@ pub async fn answer(runtime: &Runtime, adapter: &Adapter, principal: PrincipalSo
                 options: &presentation,
                 call_ids,
             }
-            .session_start(root, principal, address, title, start, deciding);
+            .session_start(root, principal, settings, address, title, start, deciding);
             handled((crate::events::HookKind::SessionStart, None), dispatch, shown, decision)
         }
         (event, None) => handle_internal(runtime, event, presentation, call_ids).await,
@@ -185,6 +189,7 @@ fn continued(
             title,
             start,
             launch,
+            settings,
         } => HookEvent::SessionStart {
             root: id(root),
             principal,
@@ -192,6 +197,7 @@ fn continued(
             title,
             start,
             launch,
+            settings,
         },
         HookEvent::Prompt {
             actor: who,
@@ -337,22 +343,31 @@ fn observed(
         HookEvent::ToolCall { actor, .. } => actor.clone(),
         _ => unreachable!("wire validation restricts inventory to starts and tool calls"),
     };
-    // A start's principal is held to its shape and to the root it continues before the
-    // inventory lands, so a refused start leaves no root behind and changes no stored one.
-    let principal = match event {
-        HookEvent::SessionStart { principal, .. } => {
-            session_principal(principal.as_deref()).map_err(|error| refused_hook(runtime, root, event, error))?
-        }
-        _ => None,
+    // A start's principal and settings are held to their shape and to the root they continue
+    // before the inventory lands, so a refused start leaves no root behind and changes no
+    // stored one.
+    let (principal, settings) = match event {
+        HookEvent::SessionStart {
+            principal, settings, ..
+        } => (
+            session_principal(principal.as_deref()).map_err(|error| refused_hook(runtime, root, event, error))?,
+            settings.clone(),
+        ),
+        _ => (None, SessionSettings::default()),
     };
     let continued = |session: Session| {
-        continues_for(&session, principal.as_ref())?;
+        continues_for(&session, principal.as_ref(), &settings)?;
         runtime.observe_inventory(&actor, *adapter, inventory)
     };
     let observed = match runtime.session(root, root) {
         Ok(session) => continued(session),
         Err(EventError::UnknownTrajectory) if actor.child.is_none() => {
-            match runtime.create_session_with_inventory(root.clone(), inventory.clone(), principal.clone()) {
+            match runtime.create_session_with_inventory(
+                root.clone(),
+                inventory.clone(),
+                principal.clone(),
+                settings.clone(),
+            ) {
                 Ok(_) => runtime.observe_inventory(&actor, *adapter, inventory),
                 Err(EventError::TrajectoryExists) => runtime.session(root, root).and_then(continued),
                 Err(error) => Err(error),
@@ -367,10 +382,15 @@ fn observed(
 }
 
 /// One hook refused before it was dispatched, recorded against the trajectory it was about.
+/// A proposal refused on a fact it could not obtain is denied on it, as at dispatch.
 fn refused_hook(runtime: &Runtime, root: &TrajectoryId, event: &HookEvent, error: EventError) -> Answered {
     let (kind, tool) = hook_shape(event);
-    runtime.record(Some(root), bare_hook(kind, crate::events::HookOutcome::Refused, tool));
-    (409, wire(&refuse(error)))
+    let (status, decision) = match (event, error.missing_fact()) {
+        (HookEvent::ToolCall { .. }, Some(retry)) => (200, missing_call(retry)),
+        _ => (409, refuse(error)),
+    };
+    runtime.record(Some(root), bare_hook(kind, hook_result(&decision).0, tool));
+    (status, wire(&decision))
 }
 
 /// A call whose arguments name a child of this family is refused before it runs: a
@@ -384,10 +404,19 @@ fn names_a_childs_transcript(
     let HookEvent::ToolCall { actor, call, .. } = event else {
         return None;
     };
-    let (status, decision) = match runtime.opened_among(&actor.root, names_children) {
-        Ok(Some(child)) => {
+    let named = runtime
+        .opened_among(&actor.root, names_children)
+        .and_then(|child| match child {
+            Some(child) => runtime
+                .malformed_proposal(&actor.root, call)
+                .map(|malformed| Some((child, malformed))),
+            None => Ok(None),
+        });
+    let (status, decision) = match named {
+        Ok(Some((_, Some(feedback)))) => (200, deny_call(feedback, Outcomes::Integrity)),
+        Ok(Some((child, None))) => {
             tracing::debug!(root = %actor.root.0, child = %child.0, "a call names a family child's transcript");
-            (200, deny(NAMED_TRANSCRIPT.to_string()))
+            (200, denied(NAMED_TRANSCRIPT.to_string(), Outcomes::HardBlock))
         }
         Ok(None) => return None,
         Err(error) => (409, refuse(error)),
@@ -655,10 +684,26 @@ async fn dispatch_event(
             title,
             start,
             launch,
-        } => match launch.map(|launch| runtime.decide_launch(launch)).transpose() {
-            Ok(deciding) => dispatcher.session_start(root, principal, address, title, start, deciding),
-            Err(error) => refuse(error),
-        },
+            settings,
+        } => {
+            // As in `answer`, a host id another family continues under starts that family.
+            let decided = launch
+                .map(|launch| runtime.decide_launch(launch, &settings))
+                .transpose()
+                .and_then(|deciding| Ok((runtime.alias_of(&root)?, deciding)));
+            match decided {
+                Ok((family, deciding)) => dispatcher.session_start(
+                    family.unwrap_or(root),
+                    principal,
+                    settings,
+                    address,
+                    title,
+                    start,
+                    deciding,
+                ),
+                Err(error) => refuse(error),
+            }
+        }
         HookEvent::Prompt {
             actor,
             text,
@@ -760,10 +805,12 @@ impl Dispatcher<'_> {
     /// refuses sends to it, so the start goes on. A launched start opens the family its
     /// launch runs, which a host id the launch continues under does not change; it holds
     /// its launch's `deciding` through the identity it records.
+    #[allow(clippy::too_many_arguments)]
     fn session_start(
         &mut self,
         root: TrajectoryId,
         principal: Option<String>,
+        settings: SessionSettings,
         address: Option<PeerAddress>,
         title: Option<SessionTitle>,
         start: Option<StartKind>,
@@ -772,7 +819,7 @@ impl Dispatcher<'_> {
         let runtime = self.runtime;
         let launched = match (&principal, &launch) {
             (_, None) => Ok(LaunchedStart::Opened(root)),
-            (None, Some(deciding)) => runtime.launched_start(&root, start, deciding),
+            (None, Some(deciding)) => runtime.launched_start(&root, start, &settings, deciding),
             (Some(_), Some(_)) => Err(EventError::PrincipalMismatch),
         };
         let launched = match launched {
@@ -781,7 +828,7 @@ impl Dispatcher<'_> {
         };
         let root = launched.root().clone();
         let opened = session_principal(principal.as_deref())
-            .and_then(|principal| open_or_reopen(runtime, &root, principal, self.options.clone()));
+            .and_then(|principal| open_or_reopen(runtime, &root, principal, &settings, self.options.clone()));
         if opened.is_ok()
             && let Err(error) = runtime.record_peer_identity(&root, address.as_ref(), title.as_ref())
         {
@@ -832,11 +879,14 @@ impl Dispatcher<'_> {
         let decision = match peer {
             Some(frame) => match self.runtime.receive_peer(&actor.root, &frame, &text) {
                 Ok(Received::Direct) => HookDecision::Ack,
-                Ok(Received::Held(notice)) => block(format!(
-                    "[appa] Peer message {} is held: taking it in would narrow this session, or no \
-                     protected sender stands behind it. The model can read it with read_peer_message.",
-                    notice.id.as_str()
-                )),
+                Ok(Received::Held(notice)) => HookDecision::Block {
+                    reason: format!(
+                        "[appa] Peer message {} is held: taking it in would narrow this session, or no \
+                         protected sender stands behind it. The model can read it with read_peer_message.",
+                        notice.id.as_str()
+                    ),
+                    outcomes: None,
+                },
                 Err(error) => {
                     tracing::warn!(root = %actor.root.0, %error, "the peer message was neither admitted nor held");
                     return refuse(error);
@@ -978,11 +1028,14 @@ impl Dispatcher<'_> {
             }
             Ok(ToolCallDecision::Deny {
                 feedback,
+                outcomes,
                 offers,
                 display,
                 review,
             }) => {
-                let feedback = match sent.is_some().then(|| self.runtime.peer_hint(&actor.root, &call)) {
+                // A missing fact keeps its fixed feedback: no address it could not judge reaches the model.
+                let hinted = sent.is_some() && !matches!(outcomes, appa_runtime_api::Outcomes::MissingFact(_));
+                let feedback = match hinted.then(|| self.runtime.peer_hint(&actor.root, &call)) {
                     Some(Ok(Some(address))) => format!(
                         "{feedback}\n[appa] A protected session under this policy uses that name. To send \
                          at this session's label, set `to` to its address: {address}"
@@ -991,6 +1044,7 @@ impl Dispatcher<'_> {
                 };
                 *self.presentation = Some(RemedyPresentation {
                     feedback: feedback.clone(),
+                    outcomes: Some(outcomes),
                     offers: offers.clone(),
                     review: review.clone(),
                     display,
@@ -999,6 +1053,7 @@ impl Dispatcher<'_> {
                     feedback,
                     offers,
                     review,
+                    outcomes: Some(outcomes),
                 }
             }
             Err(error) => fold(error, Refusal::Deny),
@@ -1022,7 +1077,7 @@ impl Dispatcher<'_> {
                 }
                 HookDecision::Ack
             }
-            Err(error) => fold(error, Refusal::Block),
+            Err(error) => fold(error, Refusal::Settle),
         }
     }
 
@@ -1049,7 +1104,7 @@ impl Dispatcher<'_> {
                 with_peer_notices(self.runtime, &actor, outcome_decision(decision, self.presentation))
             }
             Ok(decision) => outcome_decision(decision, self.presentation),
-            Err(error) => fold(error, Refusal::Block),
+            Err(error) => fold(error, Refusal::Settle),
         }
     }
 
@@ -1081,7 +1136,7 @@ impl Dispatcher<'_> {
         {
             Ok(SpawnResultDecision::Return(decision)) => return_decision(said, decision),
             Ok(SpawnResultDecision::Outcome(decision)) => outcome_decision(decision, self.presentation),
-            Err(error) => fold(error, Refusal::Block),
+            Err(error) => fold(error, Refusal::Settle),
         }
     }
 
@@ -1184,7 +1239,7 @@ impl Dispatcher<'_> {
             }
             Err(error) if error.is_operational() => refuse(error),
             Err(_) if is_withheld_return(said.as_deref()) => HookDecision::Ack,
-            Err(error) => block(withheld_return_instruction(&error.to_string())),
+            Err(error) => block(withheld_return_instruction(&error.to_string()), Outcomes::Integrity),
         }
     }
 
@@ -1222,8 +1277,12 @@ fn outcome_decision(
             placeholder,
             presentation,
         } => {
+            let outcomes = presentation.as_ref().and_then(|presentation| presentation.outcomes);
             *embedded_presentation = presentation;
-            HookDecision::ReplaceOutput { output: placeholder }
+            HookDecision::ReplaceOutput {
+                output: placeholder,
+                outcomes,
+            }
         }
     }
 }
@@ -1234,8 +1293,10 @@ fn presentation_for(decision: &HookDecision) -> Option<RemedyPresentation> {
             feedback,
             offers,
             review,
+            outcomes,
         } => Some(RemedyPresentation {
             feedback: feedback.clone(),
+            outcomes: *outcomes,
             offers: offers.clone(),
             review: review.clone(),
             display: Vec::new(),
@@ -1255,7 +1316,7 @@ fn return_decision(said: Option<String>, decision: ChildReturnDecision) -> HookD
         ChildReturnDecision::Staged { value } => HookDecision::ChildReturn { value },
         ChildReturnDecision::Returned { .. } | ChildReturnDecision::NoValue => HookDecision::Ack,
         ChildReturnDecision::Deferred => HookDecision::DeferReturn,
-        ChildReturnDecision::Blocked { feedback } => block(feedback),
+        ChildReturnDecision::Blocked { feedback, outcomes } => block(feedback, outcomes),
     }
 }
 
@@ -1269,29 +1330,45 @@ fn session_principal(spelling: Option<&str>) -> Result<Option<ReaderId>, EventEr
         .transpose()
 }
 
-/// Open the root for `principal`, or reopen it when the principal it opened for is the one
-/// named. A reopen that names none continues under the principal the opening pinned.
+/// Open the root for `principal`, pinning `settings`, or reopen it when the principal it
+/// opened for is the one named. A reopen that names none continues under the principal the
+/// opening pinned, and every reopen under the settings it pinned.
 fn open_or_reopen(
     runtime: &Runtime,
     root: &appa_runtime_api::TrajectoryId,
     principal: Option<ReaderId>,
+    settings: &SessionSettings,
     presentation: EmbeddedPresentationOptions,
 ) -> Result<Session, EventError> {
     let session = match runtime.session_with_presentation(root, root, presentation.clone()) {
-        Err(EventError::UnknownTrajectory) => match runtime.create_session(root.clone(), principal.clone()) {
-            Ok(_) | Err(EventError::TrajectoryExists) => runtime.session_with_presentation(root, root, presentation)?,
-            Err(error) => return Err(error),
-        },
+        Err(EventError::UnknownTrajectory) => {
+            match runtime.create_pinned_session(root.clone(), principal.clone(), settings.clone()) {
+                Ok(_) | Err(EventError::TrajectoryExists) => {
+                    runtime.session_with_presentation(root, root, presentation)?
+                }
+                Err(error) => return Err(error),
+            }
+        }
         reopened => reopened?,
     };
-    continues_for(&session, principal.as_ref())?;
+    continues_for(&session, principal.as_ref(), settings)?;
     Ok(session)
 }
 
-/// A start that names a principal continues a session only when that session opened for it.
-fn continues_for(session: &Session, principal: Option<&ReaderId>) -> Result<(), EventError> {
-    match principal {
-        Some(named) if session.principal()?.as_ref() != Some(named) => Err(EventError::PrincipalMismatch),
+/// A start that names a principal continues a session only when that session opened for it,
+/// and one that names a line variant only when the session opened under no other one.
+fn continues_for(
+    session: &Session,
+    principal: Option<&ReaderId>,
+    settings: &SessionSettings,
+) -> Result<(), EventError> {
+    if let Some(named) = principal
+        && session.principal()?.as_ref() != Some(named)
+    {
+        return Err(EventError::PrincipalMismatch);
+    }
+    match &settings.line_variant {
+        Some(named) if !session.settings()?.continued_by(Some(named)) => Err(EventError::LineVariantMismatch),
         _ => Ok(()),
     }
 }
@@ -1319,8 +1396,13 @@ fn control_call(
             // it. It can be a root's first call, which opens the root as any root call does.
             if let Ok(args) = serde_json::from_str::<crate::api::ExecuteRemedyPlanArgs>(call.arguments.get()) {
                 if actor.child.is_none()
-                    && let Err(error) =
-                        open_or_reopen(runtime, &actor.root, None, EmbeddedPresentationOptions::default())
+                    && let Err(error) = open_or_reopen(
+                        runtime,
+                        &actor.root,
+                        None,
+                        &SessionSettings::default(),
+                        EmbeddedPresentationOptions::default(),
+                    )
                 {
                     return fold(error, Refusal::Deny);
                 }
@@ -1405,7 +1487,16 @@ where
 {
     match &actor.child {
         Some(child) => on_child(runtime, &actor.root, child, missing_start, presentation, event).await,
-        None => event(open_or_reopen(runtime, &actor.root, None, presentation.clone())?).await,
+        None => {
+            event(open_or_reopen(
+                runtime,
+                &actor.root,
+                None,
+                &SessionSettings::default(),
+                presentation.clone(),
+            )?)
+            .await
+        }
     }
 }
 
@@ -1449,15 +1540,21 @@ where
 enum Refusal {
     /// The call has not run: it is denied, and the feedback reaches the model.
     Deny,
-    /// The result or the return is already in hand: it is blocked out of the model's way.
+    /// The return is already in hand: it is blocked out of the model's way, and the child
+    /// may return again.
     Block,
+    /// The host settles what it holds on a block: a result's dispatch, or a resumed spawn. A
+    /// fact a retry could still obtain is refused instead, so the hook can be sent again.
+    Settle,
 }
 
 fn fold(error: EventError, refusal: Refusal) -> HookDecision {
-    match (error.is_operational(), refusal) {
-        (true, _) => refuse(error),
-        (false, Refusal::Deny) => deny(error.to_string()),
-        (false, Refusal::Block) => block(error.to_string()),
+    match (error.missing_fact(), error.is_operational(), refusal) {
+        (Some(retry), _, Refusal::Deny) => missing_call(retry),
+        (Some(retry), _, Refusal::Block) => missing_return(retry),
+        (_, true, _) => refuse(error),
+        (_, false, Refusal::Deny) => deny(error.to_string()),
+        (_, false, Refusal::Block | Refusal::Settle) => block(error.to_string(), Outcomes::Integrity),
     }
 }
 
@@ -1465,15 +1562,40 @@ fn fold(error: EventError, refusal: Refusal) -> HookDecision {
 /// once, here, so a session can tell a runtime refusal from its harness's;
 /// a block is marked by the adapter's withheld-result rendering instead.
 fn deny(feedback: String) -> HookDecision {
+    denied(feedback, Outcomes::Integrity)
+}
+
+fn denied(feedback: String, outcomes: Outcomes) -> HookDecision {
+    deny_call(format!("[appa] {feedback}"), outcomes)
+}
+
+fn deny_call(feedback: String, outcomes: Outcomes) -> HookDecision {
     HookDecision::DenyCall {
-        feedback: format!("[appa] {feedback}"),
+        feedback,
         offers: Vec::new(),
         review: Vec::new(),
+        outcomes: Some(outcomes),
     }
 }
 
-fn block(reason: String) -> HookDecision {
-    HookDecision::Block { reason }
+/// A call denied on a fact not obtained, in the one text a call reads.
+fn missing_call(retry: RetryHint) -> HookDecision {
+    deny_call(MissingIn::Call.model_text().to_string(), Outcomes::MissingFact(retry))
+}
+
+/// A return blocked on a fact not obtained, in the one text a return reads.
+fn missing_return(retry: RetryHint) -> HookDecision {
+    block(
+        MissingIn::Value(ValueKind::Return).model_text().to_string(),
+        Outcomes::MissingFact(retry),
+    )
+}
+
+fn block(reason: String, outcomes: Outcomes) -> HookDecision {
+    HookDecision::Block {
+        reason,
+        outcomes: Some(outcomes),
+    }
 }
 
 /// An acknowledged root event carries the notice of peer messages held for the session.
@@ -1492,12 +1614,25 @@ fn with_peer_notices(runtime: &Runtime, actor: &Actor, decision: HookDecision) -
     }
 }
 
+/// A hook refused. A refusal on a fact not obtained says only that: what failed, and how,
+/// stays in the diagnostics, since a harness may show the detail to its model.
 fn refuse(error: EventError) -> HookDecision {
+    let retry = error.missing_fact();
+    let detail = match retry {
+        Some(_) => {
+            tracing::info!(%error, "a hook was refused on a fact not obtained");
+            UNOBTAINED_REFUSAL.to_string()
+        }
+        None => error.to_string(),
+    };
     HookDecision::Refuse {
         class: error.class(),
-        detail: error.to_string(),
+        detail,
+        retry,
     }
 }
+
+const UNOBTAINED_REFUSAL: &str = "[appa] this hook was not decided: a fact it needs could not be obtained.";
 
 #[cfg(test)]
 mod tests {
@@ -1607,6 +1742,7 @@ mod tests {
             title,
             start,
             launch: None,
+            settings,
         }) = through_the_codec(&host)
         else {
             panic!("a session start parses as one");
@@ -1618,6 +1754,7 @@ mod tests {
             title,
             start,
             launch: Some(launch),
+            settings,
         }
     }
 
@@ -1661,9 +1798,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
         let runtime = open_runtime(&dir);
         let first = launch("first-launch");
-        let deciding = runtime.decide_launch(first.clone()).expect("the first start decides");
+        let deciding = runtime
+            .decide_launch(first.clone(), &Default::default())
+            .expect("the first start decides");
         assert!(matches!(
-            runtime.decide_launch(first.clone()),
+            runtime.decide_launch(first.clone(), &Default::default()),
             Err(EventError::LaunchDeciding)
         ));
 
@@ -1714,10 +1853,15 @@ mod tests {
         );
         assert_eq!(answered_start(&runtime, &compacted).await, HookDecision::Ack);
         let second = runtime
-            .decide_launch(launch("second-launch"))
+            .decide_launch(launch("second-launch"), &Default::default())
             .expect("the second launch decides");
         runtime
-            .launched_start(hook_root(&compacted), Some(StartKind::Compact), &second)
+            .launched_start(
+                hook_root(&compacted),
+                Some(StartKind::Compact),
+                &Default::default(),
+                &second,
+            )
             .expect("the compacted id aliases the second family too");
         drop(second);
         assert!(matches!(
@@ -1726,7 +1870,7 @@ mod tests {
         ));
 
         let _deciding = runtime
-            .decide_launch(launch("first-launch"))
+            .decide_launch(launch("first-launch"), &Default::default())
             .expect("the first launch decides");
         assert!(contended(&answered_start(&runtime, &compacted).await));
     }
@@ -2084,6 +2228,58 @@ mod tests {
                 "{root_id}: the refusal appended nothing"
             );
             assert_eq!(runtime.status(&root).is_some(), root == open, "{root_id}: {reply}");
+        }
+    }
+
+    /// A malformed proposal is an integrity refusal even when it also names a child's
+    /// transcript: the guard reads only a call the dispatcher would judge.
+    #[tokio::test]
+    async fn an_empty_call_id_outranks_a_named_transcript() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let adapter = appa_adapter_claude_code::adapter();
+        let root = TrajectoryId("cc:open".to_string());
+        let spawn = || HookEvent::ToolCall {
+            actor: Actor {
+                root: root.clone(),
+                child: None,
+            },
+            call: spawn_call(),
+            call_id: Some("toolu-spawn".to_string()),
+            spawn: Some(appa_runtime_api::SpawnKind::Single),
+            prompt: None,
+            ruling: None,
+            declares: None,
+        };
+        let HookDecision::DenyCall { offers, .. } = handle(&runtime, spawn()).await else {
+            panic!("a marked spawn blocks until its return is declared");
+        };
+        declare_return(&runtime, &root, &offers).await;
+        let HookDecision::AllowCall { spawn: Some(binding) } = handle(&runtime, spawn()).await else {
+            panic!("the declared spawn releases with its binding");
+        };
+        handle(
+            &runtime,
+            HookEvent::ChildStart {
+                root: root.clone(),
+                child: TrajectoryId("cc:open:a1".to_string()),
+                spawn: SpawnRef::Binding(binding),
+            },
+        )
+        .await;
+        let read = r#""tool":"Read","arguments":{"file_path":"/home/u/subagents/agent-a1.jsonl"}"#;
+        let untargeted_send = r#""tool":"SendMessage","arguments":{"message":"/home/u/subagents/agent-a1.jsonl"}"#;
+        for (call_id, call, deciding) in [
+            ("toolu-1", read, "hard_block"),
+            ("", read, "integrity"),
+            ("toolu-2", untargeted_send, "integrity"),
+        ] {
+            let proposal = format!(
+                r#"{{"protocol":1,"adapter":"claude-code","event":"tool_call","root_id":"open","call_id":"{call_id}",{call},"spawn":false}}"#
+            );
+            let (_, reply) = answer(&runtime, &adapter, PrincipalSource::None, proposal.as_bytes()).await;
+            assert_eq!(reply["decision"], "deny_call", "{call_id:?}: {reply}");
+            assert_eq!(reply["deciding"], deciding, "{call_id:?}: {reply}");
         }
     }
 
@@ -3229,6 +3425,7 @@ mod tests {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -3818,6 +4015,58 @@ mod tests {
         };
         assert_eq!(handle(&runtime, started(&root, "cc:s1:a2")).await, HookDecision::Ack);
         assert_eq!(forks(&runtime, &root), 1);
+    }
+
+    /// A host settles a result's dispatch on a block, so a result the log could not take is
+    /// refused rather than blocked, and the same report lands once the log is free.
+    #[tokio::test]
+    async fn a_contended_result_is_refused_and_stays_reportable() {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = open_runtime(&dir);
+        let actor = Actor {
+            root: TrajectoryId("cc:s1".to_string()),
+            child: None,
+        };
+        let call = crate::api::ProposedCall {
+            tool: "host/claude-code/Bash".to_string(),
+            arguments: crate::api::raw(serde_json::json!({"command": "true"})),
+            cwd: None,
+        };
+        let proposed = HookEvent::ToolCall {
+            actor: actor.clone(),
+            call: call.clone(),
+            call_id: Some("toolu-1".to_string()),
+            spawn: None,
+            prompt: None,
+            ruling: None,
+            declares: None,
+        };
+        assert!(matches!(
+            handle(&runtime, proposed).await,
+            HookDecision::AllowCall { .. }
+        ));
+        let reported = || HookEvent::ToolResult {
+            actor: actor.clone(),
+            call: call.clone(),
+            call_id: Some("toolu-1".to_string()),
+            outcome: ToolOutcome::Success {
+                body: appa_runtime_api::OutcomeBody::Available("ok".to_string()),
+            },
+        };
+        runtime.store().contend_next_appends(u64::MAX);
+        let contended = handle(&runtime, reported()).await;
+        runtime.store().contend_next_appends(0);
+        assert!(
+            matches!(
+                contended,
+                HookDecision::Refuse {
+                    class: appa_runtime_api::RefusalClass::Contended,
+                    ..
+                }
+            ),
+            "{contended:?}"
+        );
+        assert_eq!(handle(&runtime, reported()).await, HookDecision::Ack);
     }
 
     #[tokio::test(start_paused = true)]

@@ -106,6 +106,7 @@ async fn deployment(dir: &tempfile::TempDir) -> Arc<Runtime> {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;
@@ -220,7 +221,7 @@ fn first_offer(feedback: &str) -> OfferId {
 
 fn feedback_of(decision: &HookDecision) -> String {
     match decision {
-        HookDecision::DenyCall { feedback, .. } | HookDecision::Block { reason: feedback } => feedback.clone(),
+        HookDecision::DenyCall { feedback, .. } | HookDecision::Block { reason: feedback, .. } => feedback.clone(),
         other => panic!("expected a refusal carrying feedback, got {other:?}"),
     }
 }
@@ -367,6 +368,7 @@ async fn an_accepted_narrowing_records_where_the_label_moved() {
         Some(&AuditEvent::Narrowed {
             from: label("internal", "public"),
             to: label("internal", "hr"),
+            initiator: Some(appa_runtime_api::Initiator::Agent),
         }),
         "the acceptance is the first thing recorded: {entries:?}",
     );
@@ -499,6 +501,7 @@ async fn attest_deployment(dir: &tempfile::TempDir) -> Arc<Runtime> {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;

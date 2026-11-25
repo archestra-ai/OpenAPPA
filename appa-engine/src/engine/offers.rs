@@ -33,6 +33,8 @@ impl Engine {
         let stage = views.call_stage(&recorded.subject);
         let role = views.call_role(&recorded.subject);
         let live = match check::evaluate(&contract, &views, &call, &stage, role, &self.context(act))? {
+            // An earlier planner's offer on a block nothing lifts gathers nothing on its way out.
+            CheckOutcome::Block(raw) if raw.is_hard() => None,
             CheckOutcome::Block(raw) => {
                 require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw))?;
                 require_atoms(act, plan::plan_atoms(&self.registry, &recorded.plan))?;
@@ -121,7 +123,7 @@ impl Engine {
         if !stage.contains(&recorded.plan) {
             return self.invalidated(view, execution, recorded);
         }
-        let facts = accepted(views, &recorded.trajectory, &subject, execution.offer);
+        let facts = accepted(views, &recorded.trajectory, &subject, execution);
         match (&execution.outcome, recorded.plan.hop()) {
             (OfferOutcome::Derived(evidence), Some(sanitizer)) => self.hop_candidate(
                 view, views, execution, dispatch, &call, &receiving, &value, &lineage, sanitizer, evidence, facts, act,
@@ -342,7 +344,7 @@ impl Engine {
             label,
         };
         let trajectory = &recorded.trajectory;
-        let mut facts = accepted(views, trajectory, &recorded.subject, execution.offer);
+        let mut facts = accepted(views, trajectory, &recorded.subject, execution);
         facts.push(Fact::CandidateDerived {
             trajectory: trajectory.clone(),
             subject: recorded.subject.clone(),
@@ -529,7 +531,9 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value.clone(),
                 residual: residual.clone(),
-                offers,
+                offers: Confined::binding(offers, |offer, _| {
+                    views.offer(offer).map(|recorded| recorded.plan.clone())
+                }),
             })),
             _ => OfferFollowUp::Invalidated,
         }
@@ -629,7 +633,7 @@ impl Engine {
             _ => return Err(TransitionError::PlanOutcomeMismatch),
         };
         let trajectory = &recorded.trajectory;
-        let mut facts = accepted(views, trajectory, &recorded.subject, execution.offer);
+        let mut facts = accepted(views, trajectory, &recorded.subject, execution);
         let advance = Sequence::advance_of(self, view, &facts);
         let subject = crate::basis::SubjectKey::Approval(execution.offer);
         facts.push(Fact::CallApproved {
@@ -740,16 +744,19 @@ impl Engine {
     }
 }
 
-/// An offer's acceptance, ending every sibling offer pending on the same subject.
+/// An offer's acceptance by whoever initiated `execution`, ending every sibling offer pending
+/// on the same subject.
 fn accepted(
     views: &Views,
     trajectory: &TrajectoryId,
     subject: &crate::basis::SubjectKey,
-    offer: crate::value::OfferId,
+    execution: &OfferExecution,
 ) -> Vec<Fact> {
+    let offer = execution.offer;
     let mut facts = vec![Fact::OfferAccepted {
         trajectory: trajectory.clone(),
         offer,
+        initiator: Some(execution.initiator),
     }];
     facts.extend(
         views

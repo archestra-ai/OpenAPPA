@@ -22,7 +22,7 @@ use crate::transition::{
     Blocked, ChildFollowUp, ChildReport, ChildSubmission, Confined, EngineDecision, EngineEvent, EngineView, Evidence,
     EvidenceRequest, FollowUp, ForkBinding, OfferExecution, OfferFollowUp, OfferOutcome, OutcomeBody, OutcomeFollowUp,
     ProposalBatch, ProposalBatchId, Released, Sequence, Settled, SettledOutcome, SpawnMark, ToolOutcome, ToolReport,
-    TransitionError, TransitionRefusal, ValidatedFactBatch,
+    TransitionError, TransitionRefusal, ValidatedFactBatch, Withheld,
 };
 use crate::value::{
     CanonicalDigest, ChildReturnId, DispatchId, ForkId, LabeledValue, Provenance, RawResultDigest, ResolvedCall,
@@ -623,6 +623,11 @@ impl Engine {
             return Ok(stale());
         }
         match &recorded.subject {
+            // An offer an earlier planner left on a call now hard-blocked consults no one: its
+            // execution is refused, and nothing it names may see the call first.
+            crate::basis::SubjectKey::Call { .. } if self.hard_blocked(&self.offer_call(&views, recorded)) => {
+                Ok(stale())
+            }
             crate::basis::SubjectKey::Call { .. } => match recorded.plan.hop() {
                 Some(sanitizer) => Ok(OfferConsult::Rewrite {
                     sanitizer: sanitizer.clone(),
@@ -868,8 +873,9 @@ impl Engine {
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
         principal: Option<ReaderId>,
+        settings: appa_runtime_api::SessionSettings,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
-        self.opening(trajectory, policy_file_key, None, principal)
+        self.opening(trajectory, policy_file_key, None, principal, settings)
     }
 
     /// The opening batch of an independent conversation-root fork. `forked_from` came from
@@ -880,9 +886,10 @@ impl Engine {
         trajectory: &TrajectoryId,
         policy_file_key: crate::profile::PolicyFileKey,
         forked_from: crate::fact::RootForkOrigin,
+        settings: appa_runtime_api::SessionSettings,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let principal = forked_from.principal.clone();
-        self.opening(trajectory, policy_file_key, Some(forked_from), principal)
+        self.opening(trajectory, policy_file_key, Some(forked_from), principal, settings)
     }
 
     fn opening(
@@ -891,6 +898,7 @@ impl Engine {
         policy_file_key: crate::profile::PolicyFileKey,
         forked_from: Option<crate::fact::RootForkOrigin>,
         principal: Option<ReaderId>,
+        settings: appa_runtime_api::SessionSettings,
     ) -> Result<ValidatedFactBatch, TransitionRefusal> {
         let Some(line) = &self.line else {
             return Err(TransitionRefusal::NoRevision);
@@ -906,6 +914,7 @@ impl Engine {
                 revision: line.revision,
                 forked_from,
                 principal,
+                settings,
             })],
         )
     }
@@ -965,6 +974,18 @@ impl Engine {
         .expect("engine test plans read no undecided symbolic audience"))
     }
 
+    /// Whether a call is a hard block now: its contract requires the reserved `blocked` mark,
+    /// which decides the check whatever else it reads.
+    fn hard_blocked(&self, call: &ResolvedCall) -> bool {
+        self.validated_contract(call).is_ok_and(|contract| {
+            contract
+                .requires
+                .attention_marks()
+                .iter()
+                .any(crate::names::MarkName::is_blocked)
+        })
+    }
+
     /// Re-check the call a subject is about against current state, at the subject's stage and
     /// role. A block answers with its plans and the offers already pending on the subject, or
     /// none under the block id `nonce` derives.
@@ -984,9 +1005,14 @@ impl Engine {
             return Ok(Recheck::Clear(Box::new(call)));
         };
         require_atoms(act, plan::block_atoms(&self.registry, &contract, &raw))?;
-        let (block_id, offers) = views
+        let (block_id, mut offers) = views
             .pending_block(subject)
             .unwrap_or_else(|| (proposal_block(nonce, subject, &call), Vec::new()));
+        // An offer an earlier planner left pending on a hard block shows no more than planning
+        // offers now; executing it is already refused.
+        if raw.is_hard() {
+            offers.clear();
+        }
         let mut block = plan::plan(
             &self.registry,
             views,

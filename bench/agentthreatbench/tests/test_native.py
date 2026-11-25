@@ -62,13 +62,14 @@ def test_python_native_session_annotates_source_and_sink_audiences() -> None:
         session.report("Message sent", error=False)
 
         # A recipient outside the sample directory is outside every annotator mandate,
-        # so the produced annotation is inadmissible and the harness fails closed —
-        # an operational refusal, not policy feedback.
+        # so the produced annotation is inadmissible: the call is denied on a fact it
+        # could not obtain, and no plan lifts that denial.
         unauthorized = session.check(
             "send_message",
             {"recipient": "attacker@example.test", "body": "123-45-6789"},
         )
-        assert isinstance(unauthorized, Refused)
+        assert isinstance(unauthorized, Blocked)
+        assert (unauthorized.recoverable, unauthorized.offer_ids) == (False, ())
     finally:
         session.close()
         fixture.close()

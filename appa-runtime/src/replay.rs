@@ -13,7 +13,9 @@
 //! call is blocked and the offer runs it without returning its result; the runner takes it.
 //! `authority`: the call is blocked and the offer names an authority; the runner takes it.
 //! `sanitizer`: the call is blocked and the offer names a sanitizer; the runner takes it.
-//! `deny`: the call is blocked and nothing is offered. Taking an offer goes through the
+//! `deny`: the call is blocked and nothing is offered. A call refused because a fact
+//! the check reads was not obtained, such as an Annotator's answer, was not judged: its step
+//! cannot run, whatever it expects. Taking an offer goes through the
 //! runtime's own remedy path. A remedy that releases the call is followed by the released call,
 //! and the trace continues from it; a remedy that answers with a value releases no call.
 //!
@@ -48,8 +50,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use appa_runtime_api::{
-    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, OutcomeBody, ProposedCall,
-    ToolOutcome, TrajectoryId,
+    Actor, CanonicalTool, CanonicalToolError, HookDecision, HookEvent, OfferedRemedy, OutcomeBody, Outcomes,
+    ProposedCall, ToolOutcome, TrajectoryId,
 };
 use serde::Serialize;
 use serde_json::value::RawValue;
@@ -519,12 +521,18 @@ impl StepOutcome {
     }
 }
 
+pub use crate::api::Unanswered;
+use crate::api::UnansweredConsults;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepReport {
     pub line: usize,
     pub tool: StepTool,
     pub check: Check,
     pub outcome: StepOutcome,
+    /// For a step that could not run, the externals its own consults asked without an
+    /// answer, each once, in the order first asked. Empty for every other step.
+    pub unanswered: Vec<Unanswered>,
 }
 
 /// What one file got: every step up to and including the one that ended it.
@@ -562,6 +570,8 @@ pub async fn run(runtime: &Runtime, traces: &[Trace]) -> Vec<TraceReport> {
 }
 
 async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> TraceReport {
+    let consults = std::sync::Arc::new(UnansweredConsults::default());
+    let runtime = &runtime.noting_unanswered(consults.clone());
     let actor = Actor {
         root: root.clone(),
         child: None,
@@ -580,6 +590,7 @@ async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> Trac
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await
@@ -597,11 +608,16 @@ async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> Trac
     for step in &trace.steps {
         let outcome = run_step(runtime, &actor, step).await;
         let ended = outcome.ends_file();
+        let unanswered = match (&outcome, consults.take()) {
+            (StepOutcome::CannotRun(_), unanswered) => unanswered,
+            (_, _) => Vec::new(),
+        };
         report.steps.push(StepReport {
             line: step.line,
             tool: step.tool.clone(),
             check: step.check.clone(),
             outcome,
+            unanswered,
         });
         if ended {
             break;
@@ -678,7 +694,18 @@ async fn propose(runtime: &Runtime, actor: &Actor, call: ProposedCall) -> Propos
     };
     match hooks::handle(runtime, event).await {
         HookDecision::AllowCall { .. } => Proposed::Allowed(call),
-        HookDecision::DenyCall { feedback, offers, .. } => Proposed::Denied { feedback, offers },
+        // A fact the check could not obtain leaves the step unjudged, never a deny.
+        HookDecision::DenyCall {
+            feedback,
+            outcomes: Some(Outcomes::MissingFact(_)),
+            ..
+        } => Proposed::CannotRun(feedback),
+        HookDecision::DenyCall {
+            feedback,
+            offers,
+            outcomes: Some(_),
+            ..
+        } => Proposed::Denied { feedback, offers },
         HookDecision::Refuse { detail, .. } => Proposed::CannotRun(detail),
         other => Proposed::CannotRun(format!("the call answered {other:?}")),
     }
@@ -696,9 +723,15 @@ async fn report_empty_output(runtime: &Runtime, actor: &Actor, call: ProposedCal
         },
     };
     match hooks::handle(runtime, event).await {
+        // A fact the result needs went unobtained: the dispatch stays open, so the step did
+        // not run.
+        HookDecision::ReplaceOutput {
+            output,
+            outcomes: Some(Outcomes::MissingFact(_)),
+        } => Err(output),
         HookDecision::Ack | HookDecision::ReplaceOutput { .. } | HookDecision::DeliverValue { .. } => Ok(()),
         HookDecision::Refuse { detail, .. } => Err(detail),
-        HookDecision::Block { reason } => Err(reason),
+        HookDecision::Block { reason, .. } => Err(reason),
         other => Err(format!("the result answered {other:?}")),
     }
 }
@@ -745,7 +778,7 @@ async fn take_offer(
                 presentation.feedback
             ));
         }
-        RemedyOutcome::NoAnswer { feedback } => {
+        RemedyOutcome::NoAnswer { feedback, .. } => {
             return Err(format!("taking the offer did not release the call: {feedback}"));
         }
         RemedyOutcome::Refused { reason } => return Err(reason.detail().to_string()),
@@ -1617,6 +1650,7 @@ mod tests {
                             got: Got::Blocked(BTreeSet::from([OfferKind::Accept])),
                             taken: Some(taken(OfferKind::Accept)),
                         },
+                        unanswered: Vec::new(),
                     },
                     StepReport {
                         line: 8,
@@ -1629,6 +1663,7 @@ mod tests {
                             want: Expect::Deny,
                             feedback: None,
                         },
+                        unanswered: Vec::new(),
                     },
                 ],
             },
@@ -1647,6 +1682,7 @@ mod tests {
                             names: vec!["hitl".into()],
                         })),
                     },
+                    unanswered: Vec::new(),
                 }],
             },
         ];
@@ -1683,6 +1719,7 @@ mod tests {
             tool: canonical(tool),
             check: Check::Observe,
             outcome: StepOutcome::Observed { got, taken },
+            unanswered: Vec::new(),
         };
         vec![
             TraceReport {
@@ -1707,6 +1744,7 @@ mod tests {
                             want: Expect::Allow,
                             feedback: Some("ask hitl".into()),
                         },
+                        unanswered: Vec::new(),
                     },
                 ],
             },

@@ -22,9 +22,10 @@ impl Engine {
         // result, or a failure's body sits behind a bound sanitizer. The observation below keys
         // on the plan alone, so a digest checkpointed before a revision dropped the sanitizer
         // still matches.
-        let withheld = self.withholds(&views, dispatch, &call, act)
-            || matches!(report.outcome, ToolOutcome::FailureWithBody { .. })
-                && views.bound_sanitizer(dispatch).is_some();
+        let withheld = self.withholds(&views, dispatch, &call, act).or_else(|| {
+            (matches!(report.outcome, ToolOutcome::FailureWithBody { .. }) && views.bound_sanitizer(dispatch).is_some())
+                .then_some(Withheld::ByRelease)
+        });
         let observed = match (&report.outcome, withholds_output) {
             (ToolOutcome::Success { .. }, true) => Some(ObservedResult::Unavailable),
             (
@@ -61,7 +62,14 @@ impl Engine {
             return Ok(closed());
         }
         if !views.is_open(dispatch) {
-            match (views.closed_successfully(dispatch), &observed) {
+            // A repeated abandonment re-answers the close it recorded.
+            if views.closed_abandoned(dispatch) && matches!(report.outcome, ToolOutcome::Indeterminate) {
+                return Ok(closed());
+            }
+            match (
+                views.closed_successfully(dispatch) || views.closed_abandoned(dispatch),
+                &observed,
+            ) {
                 (true, None) => return Err(TransitionError::ContradictedSuccess),
                 (false, Some(_)) if views.closed_unobserved(dispatch) => {
                     return Err(TransitionError::ClosedUnobserved);
@@ -78,6 +86,13 @@ impl Engine {
         }
         let checkpointed = views.observed_result(dispatch).cloned();
         match (&checkpointed, &observed) {
+            // A success checkpointed for a derivation never obtained, abandoned: it closes
+            // withheld, its effects committed and nothing of it crossing.
+            (Some(_), None)
+                if matches!(report.outcome, ToolOutcome::Indeterminate) && views.awaits_derivation(dispatch) =>
+            {
+                return self.admitting_outcome(view, &views, dispatch, &call, ResultAdmission::SuccessAbandoned, act);
+            }
             // A recorded success cannot be withdrawn: its effects are committed.
             (Some(_), None) => return Err(TransitionError::ContradictedSuccess),
             (Some(recorded), Some(reported)) if recorded != reported => {
@@ -92,7 +107,7 @@ impl Engine {
             return self.restage(view, &views, dispatch, report.offer_nonce, act);
         }
 
-        let admission = match (&report.outcome, withheld) {
+        let admission = match (&report.outcome, withheld.is_some()) {
             (ToolOutcome::Success { .. }, true) => ResultAdmission::SuccessNoValue,
             (ToolOutcome::Failure, _) => ResultAdmission::Failure,
             (ToolOutcome::FailureWithBody { .. }, true) => {
@@ -195,8 +210,9 @@ impl Engine {
         admission: ResultAdmission,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
-        let withheld =
-            self.withholds(views, dispatch, call, act) || matches!(admission, ResultAdmission::FailureNoValue { .. });
+        let withheld = self
+            .withholds(views, dispatch, call, act)
+            .or_else(|| matches!(admission, ResultAdmission::FailureNoValue { .. }).then_some(Withheld::ByRelease));
         let batch = admit::admit_result(
             &self.registry,
             views,
@@ -221,26 +237,32 @@ impl Engine {
     /// it at release, or release bound an output sanitizer this revision no longer registers or
     /// no longer derives the result's output with. A derivation that awaits membership answers
     /// is not settled here; admission asks for them.
-    fn withholds(&self, views: &Views, dispatch: &DispatchId, call: &ResolvedCall, act: &ActEvidence) -> bool {
+    fn withholds(
+        &self,
+        views: &Views,
+        dispatch: &DispatchId,
+        call: &ResolvedCall,
+        act: &ActEvidence,
+    ) -> Option<Withheld> {
         if views.withholds_output(dispatch) {
-            return true;
+            return Some(Withheld::ByRelease);
         }
-        let Some(sanitizer) = views.bound_sanitizer(dispatch) else {
-            return false;
-        };
+        let sanitizer = views.bound_sanitizer(dispatch)?;
         let Some(registered) = self.registry.sanitizer(sanitizer) else {
-            return true;
+            return Some(Withheld::ByRevision);
         };
-        self.outcome_contract(views, dispatch, call).is_ok_and(|contract| {
-            matches!(
-                registered.derive_output(
-                    &call.output_label_from(&contract.output_label()),
-                    &contract.contract.tags,
-                    &self.context(act),
-                ),
-                Ok(None)
-            )
-        })
+        self.outcome_contract(views, dispatch, call)
+            .is_ok_and(|contract| {
+                matches!(
+                    registered.derive_output(
+                        &call.output_label_from(&contract.output_label()),
+                        &contract.contract.tags,
+                        &self.context(act),
+                    ),
+                    Ok(None)
+                )
+            })
+            .then_some(Withheld::ByRevision)
     }
 
     /// The remedy menu a confined result's stage offers under its dispatch's contract, with the
@@ -399,7 +421,7 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value,
                 residual,
-                offers,
+                offers: Confined::binding(offers, |_, id| stage.iter().find(|plan| plan.id == id).cloned()),
             },
         ))
     }
@@ -428,7 +450,9 @@ impl Engine {
                     dispatch: dispatch.clone(),
                     candidate: value,
                     residual,
-                    offers,
+                    offers: Confined::binding(offers, |offer, _| {
+                        views.offer(offer).map(|recorded| recorded.plan.clone())
+                    }),
                 }))),
             });
         }
@@ -459,7 +483,7 @@ impl Engine {
                 dispatch: dispatch.clone(),
                 candidate: value,
                 residual,
-                offers,
+                offers: Confined::binding(offers, |_, id| stage.iter().find(|plan| plan.id == id).cloned()),
             }))),
         })
     }

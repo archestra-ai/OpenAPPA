@@ -62,6 +62,7 @@ def test_a_return_outside_the_bound_shape_crosses_nothing(session: Session, case
 
     answered = decision(child.finish(value))
     assert answered["kind"] == "blocked", f"{case} must not cross: {answered}"
+    assert (answered["deciding"], answered["outcomes"]) == ("integrity", ["integrity"]), answered
 
     assert decision(child.finish())["value"] is None
     delivered = decision(session.check("deliver_result", {"text": "done"}))

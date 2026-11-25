@@ -4,7 +4,7 @@
 mod common;
 #[cfg(unix)]
 use common::fake_claude;
-use common::{actor, audit_len, offer_of, propose, ran, raw, root, serve};
+use common::{actor, audit_len, missing_fact, offer_of, propose, ran, raw, root, serve};
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,7 +15,7 @@ use appa_eventlog::{Backend, LogStore};
 use appa_runtime::api::{AuditEntry, AuditEvent, RemedyOutcome, Runtime};
 use appa_runtime::config::{Config, HostDefaults};
 use appa_runtime::hooks;
-use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, TrajectoryId};
+use appa_runtime_api::{Actor, HookDecision, HookEvent, ProposedCall, RetryHint, TrajectoryId};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -118,6 +118,7 @@ async fn open_runtime(dir: &tempfile::TempDir, config_toml: &str) -> Arc<Runtime
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -348,10 +349,10 @@ async fn command_annotators_run_only_for_the_selected_declaration_and_pick_up_sc
 
     std::fs::write(&script, "cat > /dev/null\nprintf 'not-json'").expect("the annotator edit writes");
     let baseline = audit_len(&runtime);
-    assert!(matches!(
-        propose(&runtime, fetch("https://another.example")).await,
-        HookDecision::Refuse { .. }
-    ));
+    assert_eq!(
+        missing_fact(&propose(&runtime, fetch("https://another.example")).await),
+        Some(RetryHint::AfterRepair)
+    );
     assert_eq!(
         audit_len(&runtime),
         baseline,
@@ -402,12 +403,11 @@ async fn a_call_in_flight_across_a_reload_is_decided_at_the_head() {
     assert!(reloaded.changed);
     std::fs::write(&gate, "go").expect("the old annotator is released");
 
-    assert!(
-        matches!(
-            in_flight.await.expect("the proposal task completes"),
-            HookDecision::Refuse { detail, .. } if detail.contains("status=7")
-        ),
-        "the in-flight call is decided again at the head, whose Annotator refuses it"
+    let decided = in_flight.await.expect("the proposal task completes");
+    assert_eq!(
+        missing_fact(&decided),
+        Some(RetryHint::AfterRepair),
+        "the in-flight call is decided again at the head, whose Annotator refuses it: {decided:?}"
     );
 }
 
@@ -718,6 +718,7 @@ async fn every_context_provider_is_asked_first_and_one_that_fails_leaves_an_erro
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -856,29 +857,27 @@ async fn an_annotation_without_deployer_hints_declares_neither_layer() {
 }
 
 #[tokio::test]
-async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
+async fn every_annotation_failure_denies_on_a_missing_fact_and_appends_nothing() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let (url, annotator) = serve_annotator().await;
     let runtime = open_runtime(&dir, &http_policy(&url)).await;
     let baseline = audit_len(&runtime);
 
-    for failure in [
-        Answer::Down,
-        Answer::Malformed,
+    for (failure, retry) in [
+        // A 500 may pass; an answer the runtime cannot read waits for a repair.
+        (Answer::Down, RetryHint::Later),
+        (Answer::Malformed, RetryHint::AfterRepair),
         // A missing answer envelope stands in for every parse-invalid body: the strict
         // decoder's own unit test enumerates the malformed shapes, and each reaches this
-        // same operational refusal.
-        Answer::Wire(serde_json::json!({ "version": 1 })),
+        // same missing fact.
+        (
+            Answer::Wire(serde_json::json!({ "version": 1 })),
+            RetryHint::AfterRepair,
+        ),
     ] {
         annotator.set("classifier", failure);
         let decision = propose(&runtime, fetch("https://a.example")).await;
-        let HookDecision::Refuse { detail, .. } = decision else {
-            panic!("an annotation failure is an operational refusal, got {decision:?}");
-        };
-        assert!(
-            detail.contains("classifier"),
-            "the refusal names the annotator: {detail}"
-        );
+        assert_eq!(missing_fact(&decision), Some(retry), "got {decision:?}");
         assert_eq!(
             audit_len(&runtime),
             baseline,
@@ -894,6 +893,45 @@ async fn every_annotation_failure_refuses_the_hook_and_appends_nothing() {
         HookDecision::AllowCall { spawn: None }
     );
     assert!(audit_len(&runtime) > baseline);
+}
+
+/// An Annotator nothing listens for is an infrastructure fault during the consult: the call
+/// is denied on the missing fact, the hint says a later proposal may obtain it, and the
+/// trajectory records nothing.
+#[tokio::test]
+async fn an_unreachable_annotator_denies_on_a_missing_fact_worth_retrying() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let closed = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        listener.local_addr().expect("the port has an address")
+    };
+    let runtime = open_runtime(&dir, &http_policy(&format!("http://{closed}/annotate"))).await;
+    let baseline = audit_len(&runtime);
+
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    assert_eq!(missing_fact(&decision), Some(RetryHint::Later), "got {decision:?}");
+    assert_eq!(audit_len(&runtime), baseline);
+}
+
+/// What a failing Annotator says reaches the runtime diagnostics, never the model: the
+/// denial carries nothing of its body.
+#[tokio::test]
+async fn a_failing_annotators_words_never_reach_the_model() {
+    const TOKEN: &str = "annotator-said-q7xz";
+    let router = axum::Router::new().route(
+        "/annotate",
+        axum::routing::post(|_body: String| async { (axum::http::StatusCode::BAD_GATEWAY, TOKEN) }),
+    );
+    let url = format!("{}/annotate", serve(router).await);
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = open_runtime(&dir, &http_policy(&url)).await;
+
+    let decision = propose(&runtime, fetch("https://a.example")).await;
+    assert_eq!(missing_fact(&decision), Some(RetryHint::Later), "got {decision:?}");
+    let HookDecision::DenyCall { feedback, .. } = decision else {
+        unreachable!("a missing fact is a denial");
+    };
+    assert!(!feedback.contains(TOKEN), "{feedback}");
 }
 
 fn reviewed_fallback_policy(url: &str, tool_section: &str) -> String {
@@ -1071,6 +1109,52 @@ on_no_answer = { delta = { trust = "suspicious" }, forwards = {}, requires = { a
     assert_eq!(annotator.requests().len(), 1);
 }
 
+/// A declared `on_no_answer` is the author's choice for its own route only: the same failing
+/// Annotator sends the fallback route to review and denies a route without one on the
+/// missing fact, with its retry hint.
+#[tokio::test]
+async fn only_a_route_with_a_fallback_escapes_the_missing_fact_deny() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, annotator) = serve_annotator().await;
+    annotator.set("classifier", Answer::Down);
+    let policy = reviewed_fallback_policy(
+        &url,
+        r#"
+[[policy.tool]]
+name = "fetch"
+description = "Fetches one URL and returns its body."
+parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+annotator = "classifier"
+on_no_answer = { delta = { trust = "suspicious" }, forwards = {}, requires = { attention = ["annotator-unavailable"] } }
+
+[[policy.tool]]
+name = "lookup"
+description = "Looks up one URL."
+parameters = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+annotator = "classifier"
+"#,
+    );
+    let runtime = open_runtime(&dir, &policy).await;
+
+    let fallback = propose(&runtime, fetch("https://a.example")).await;
+    let HookDecision::DenyCall { offers, .. } = &fallback else {
+        panic!("the fallback route asks for review: {fallback:?}");
+    };
+    assert!(!offers.is_empty(), "{fallback:?}");
+    assert_eq!(missing_fact(&fallback), None, "{fallback:?}");
+
+    let unfallen = propose(
+        &runtime,
+        ProposedCall {
+            tool: "lookup".to_string(),
+            arguments: raw(serde_json::json!({ "url": "https://a.example" })),
+            cwd: None,
+        },
+    )
+    .await;
+    assert_eq!(missing_fact(&unfallen), Some(RetryHint::Later), "{unfallen:?}");
+}
+
 #[cfg(unix)]
 fn builtin_policy(command: &std::path::Path, extra: &str) -> String {
     format!(
@@ -1167,7 +1251,7 @@ async fn the_builtin_timeout_is_its_own_budget_and_a_slow_consult_refuses_fast()
 
     let started = Instant::now();
     let decision = propose(&runtime, fetch("https://a.example")).await;
-    assert!(matches!(decision, HookDecision::Refuse { .. }), "got {decision:?}");
+    assert_eq!(missing_fact(&decision), Some(RetryHint::Later), "got {decision:?}");
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "the consult budget is the builtin's own timeout, not the shared 5s"
@@ -1207,6 +1291,7 @@ async fn concurrent_claude_consults_are_gated_by_the_runtime_permit_pool() {
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -1370,9 +1455,10 @@ url = "{llm_url}"
     let baseline = audit_len(&runtime);
 
     let decision = propose(&runtime, fetch("https://a.example")).await;
-    assert!(
-        matches!(decision, HookDecision::Refuse { .. }),
-        "an llm failure is an operational refusal, got {decision:?}"
+    assert_eq!(
+        missing_fact(&decision),
+        Some(RetryHint::Later),
+        "an llm failure is a missing fact, got {decision:?}"
     );
     assert!(*asked.lock().unwrap() > 0, "the consult reached the provider");
     assert_eq!(
@@ -1836,12 +1922,10 @@ async fn a_produced_group_requirement_reads_membership_from_the_audience_source(
         ),
     );
     let refused = propose(&runtime, fetch("https://d.example")).await;
-    let HookDecision::Refuse { detail, .. } = refused else {
-        panic!("an out-of-mandate audience is an operational refusal, got {refused:?}");
-    };
-    assert!(
-        detail.contains("classifier"),
-        "the refusal names the annotator: {detail}"
+    assert_eq!(
+        missing_fact(&refused),
+        Some(RetryHint::AfterRepair),
+        "an out-of-mandate audience is no answer, got {refused:?}"
     );
     assert_eq!(audit_len(&runtime), before);
     assert_eq!(source.reads().len(), 2);
@@ -1862,8 +1946,9 @@ async fn an_answer_writing_requires_audience_within_is_refused() {
         answer(serde_json::json!({}), Some(serde_json::json!({ "within": ["@team"] }))),
     );
     let refused = propose(&runtime, fetch("https://a.example")).await;
-    assert!(
-        matches!(refused, HookDecision::Refuse { .. }),
+    assert_eq!(
+        missing_fact(&refused),
+        Some(RetryHint::AfterRepair),
         "an answer writing `within` is no answer, got {refused:?}"
     );
     assert_eq!(audit_len(&runtime), before);
@@ -2060,7 +2145,7 @@ async fn a_mandate_placeholder_declares_the_collection_each_call_spells() {
     // answer at all, which refuses the hook.
     let baseline = audit_len(&runtime);
     let second = propose(&runtime, read_channel("C2")).await;
-    assert!(matches!(second, HookDecision::Refuse { .. }), "got {second:?}");
+    assert_eq!(missing_fact(&second), Some(RetryHint::AfterRepair), "got {second:?}");
     let requests = annotator.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(
@@ -2114,6 +2199,7 @@ async fn open_hosted(config: Config) -> Arc<Runtime> {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -2154,6 +2240,7 @@ async fn a_pinned_view_consults_its_own_deployment_after_the_runtime_serves_anot
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -2311,9 +2398,10 @@ async fn a_failing_jev_provider_refuses_the_hook_and_appends_nothing() {
     let baseline = audit_len(&runtime);
 
     let decision = propose(&runtime, fetch("https://a.example")).await;
-    assert!(
-        matches!(decision, HookDecision::Refuse { .. }),
-        "a jev failure is an operational refusal, got {decision:?}"
+    assert_eq!(
+        missing_fact(&decision),
+        Some(RetryHint::Later),
+        "a jev failure is a missing fact, got {decision:?}"
     );
     assert!(
         jev_endpoint()
@@ -2652,6 +2740,7 @@ async fn a_hung_command_recorder_never_delays_a_command_annotator() {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
