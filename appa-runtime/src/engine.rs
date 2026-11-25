@@ -3463,7 +3463,9 @@ impl RuntimeEngine {
                             principal: principal.clone(),
                         }),
                         Err(reason) => {
-                            unanswered.members.insert(member.clone(), *reason);
+                            unanswered
+                                .members
+                                .insert(member.clone(), NoAnswer::of(provider, *reason));
                         }
                     }
                 }
@@ -3472,12 +3474,12 @@ impl RuntimeEngine {
         }
         if let Err(refusal) = audience.expansions(&payload, principal) {
             // The refusal's own Display can carry directory data (member ids, principals)
-            // the model has not seen; the model-visible detail names only the failure class
-            // and its provider/selector.
+            // the model has not seen, so only its class is logged by default.
+            tracing::debug!(%refusal, "gathered audience evidence refused");
             return Err(AudienceFailure::Refused(unobtained_logged(
                 RetryHint::AfterRepair,
                 format_args!(
-                    "the gathered audience evidence is not admissible ({}): {refusal}",
+                    "the gathered audience evidence is not admissible ({})",
                     refusal_class(&refusal)
                 ),
             )));
@@ -3485,24 +3487,28 @@ impl RuntimeEngine {
         let mut requests: Vec<ExternalRequest> = Vec::new();
         let mut failed: Vec<NoAnswer> = Vec::new();
         for owed in audience.member_lookups_owed(&payload) {
-            if let Some(reason) = unanswered.members.get(&owed.member) {
-                // The member is directory data the model has not seen.
-                failed.push(NoAnswer::lookup(&owed.provider, &owed.member, *reason));
+            if let Some(failure) = unanswered.members.get(&owed.member) {
+                failed.push(failure.clone());
                 continue;
             }
             let templates = selector_templates(audience, &owed.provider)
                 .expect("an owed lookup names the registered provider of a pinned source");
             requests.push(member_lookup(audience, owed.provider, owed.member, templates));
         }
-        // A failed lookup ends the act before its judgment can name the selectors it needs, so
-        // every selector this act asked and lost ranks beside it.
+        // A failed lookup ends the act before its judgment can name the facts it needs, so
+        // every fact this act asked and lost ranks beside it.
         if !failed.is_empty() {
-            failed.extend(
-                unanswered
-                    .selectors
-                    .iter()
-                    .map(|(spec, reason)| NoAnswer::selector(spec, *reason)),
-            );
+            failed = unanswered
+                .members
+                .values()
+                .cloned()
+                .chain(
+                    unanswered
+                        .selectors
+                        .iter()
+                        .map(|(spec, reason)| NoAnswer::of(&spec.provider, *reason)),
+                )
+                .collect();
         }
         if let Some(retry) = unobtained(&failed) {
             return Err(AudienceFailure::Refused(retry));
@@ -3548,7 +3554,7 @@ impl RuntimeEngine {
                 continue;
             }
             if let Some(reason) = act.unanswered.selectors.get(spec) {
-                failed.push(NoAnswer::selector(spec, *reason));
+                failed.push(NoAnswer::of(&spec.provider, *reason));
                 continue;
             }
             requests.push(ExternalRequest::AudienceSource {
@@ -3561,9 +3567,8 @@ impl RuntimeEngine {
             if act.payload.lookups.iter().any(|lookup| lookup.member == spec.member) {
                 continue;
             }
-            if let Some(reason) = act.unanswered.members.get(&spec.member) {
-                // The member can be a reader a delta wrote that the model never saw.
-                failed.push(NoAnswer::lookup(&spec.provider, &spec.member, *reason));
+            if let Some(failure) = act.unanswered.members.get(&spec.member) {
+                failed.push(failure.clone());
                 continue;
             }
             requests.push(member_lookup(
@@ -3685,42 +3690,19 @@ fn annotation_args(
     serde_json::Value::Object(args)
 }
 
-/// One audience fact a consult did not obtain: the source, what it was asked, and the class
-/// of the failure, never the source's own words. All of it is the operator's to read.
+/// One audience fact a consult did not obtain: its source and the class of the failure. What
+/// it was asked stays out of the diagnostics, since a member or a selector's answer is
+/// directory data a model may later read there.
+#[derive(Debug, Clone)]
 struct NoAnswer {
     provider: String,
-    asked: Asked,
     reason: crate::events::NoAnswerClass,
 }
 
-/// What a source was asked.
-enum Asked {
-    Member(String),
-    Selector(String),
-}
-
-impl std::fmt::Display for Asked {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Asked::Member(member) => write!(f, "the member lookup of {member}"),
-            Asked::Selector(selector) => write!(f, "selector {selector}"),
-        }
-    }
-}
-
 impl NoAnswer {
-    fn lookup(provider: &str, member: &str, reason: crate::events::NoAnswerClass) -> NoAnswer {
+    fn of(provider: &str, reason: crate::events::NoAnswerClass) -> NoAnswer {
         NoAnswer {
             provider: provider.to_string(),
-            asked: Asked::Member(member.to_string()),
-            reason,
-        }
-    }
-
-    fn selector(spec: &SelectorSpec, reason: crate::events::NoAnswerClass) -> NoAnswer {
-        NoAnswer {
-            provider: spec.provider.clone(),
-            asked: Asked::Selector(spec.selector.clone()),
             reason,
         }
     }
@@ -3736,7 +3718,6 @@ fn unobtained(failed: &[NoAnswer]) -> Option<RetryHint> {
     for failure in failed {
         tracing::info!(
             provider = %failure.provider,
-            asked = %failure.asked,
             reason = %failure.reason,
             "an audience source gave no answer"
         );
@@ -3755,7 +3736,14 @@ fn sanitizer_unobtained(
         SanitizerSubject::Input { .. } => retry_hint(reason),
         SanitizerSubject::Output { .. } => RetryHint::AfterRepair,
     };
-    unobtained_logged(retry, format_args!("sanitizer {sanitizer} gave no answer: {reason}"))
+    match subject {
+        SanitizerSubject::Input { .. } => {
+            unobtained_logged(retry, format_args!("sanitizer {sanitizer} gave no answer: {reason}"))
+        }
+        SanitizerSubject::Output { .. } => {
+            unobtained_logged(retry, format_args!("sanitizer {sanitizer} gave no answer"))
+        }
+    }
 }
 
 /// What asking again can do for a fact whose consult failed for `reason`.
@@ -3961,7 +3949,7 @@ fn member_lookup(
 struct Unanswered {
     selectors: BTreeMap<SelectorSpec, crate::events::NoAnswerClass>,
     /// Qualified members whose lookup produced no answer.
-    members: BTreeMap<String, crate::events::NoAnswerClass>,
+    members: BTreeMap<String, NoAnswer>,
 }
 
 /// A block as its offered plans settle it. A step is an authority's ruling (a waivable gap),
@@ -5623,10 +5611,7 @@ mod tests {
     fn a_round_that_misses_a_fact_only_a_repair_obtains_is_retried_after_repair() {
         use crate::events::NoAnswerClass;
         let failed = |reasons: &[NoAnswerClass]| {
-            let failed: Vec<NoAnswer> = reasons
-                .iter()
-                .map(|reason| NoAnswer::lookup("slack", "slack:U-bob", *reason))
-                .collect();
+            let failed: Vec<NoAnswer> = reasons.iter().map(|reason| NoAnswer::of("slack", *reason)).collect();
             unobtained(&failed)
         };
         let unavailable = NoAnswerClass::NonSuccess { status: 503 };

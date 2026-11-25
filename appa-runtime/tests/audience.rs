@@ -337,6 +337,61 @@ async fn a_lost_selector_outranks_a_later_lookup_failure() {
     assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::AfterRepair)));
 }
 
+/// A call that names a reader whose lookup answers 404 beside a group whose member's lookup
+/// answers 503 a round later: the repair the first round already learned still decides.
+#[tokio::test]
+async fn a_lost_lookup_outranks_a_later_lookup_failure() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let router = Router::new().route(
+        "/audience",
+        post(move |body: String| {
+            let seen = seen.clone();
+            async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                match request["artifact"]["member"].as_str() {
+                    Some(member) => {
+                        seen.lock().expect("the log locks").push(member.to_string());
+                        match member {
+                            "slack:U-carol" => (axum::http::StatusCode::NOT_FOUND, "missing".to_string()),
+                            _ => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "busy".to_string()),
+                        }
+                    }
+                    None => (
+                        axum::http::StatusCode::OK,
+                        serde_json::json!({ "version": 1, "answer": { "members": ["slack:U-bob"] } }).to_string(),
+                    ),
+                }
+            }
+        }),
+    );
+    let url = format!("{}/audience", serve(router).await);
+    let both = "[[policy.tool]]\nname = \"send_both\"\nrequires = { audience = { contains = [\"slack:U-carol\", \"@slack:user-group/team\"] } }\ndelta = {}\n\n";
+    let policy = POLICY
+        .replace(SLACK_BINDING, LOOKUP_URL_BINDINGS)
+        .replace("[externals]", &format!("{both}[externals]"));
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+
+    let decision = propose(
+        &runtime,
+        ProposedCall {
+            tool: "send_both".to_string(),
+            arguments: raw(serde_json::json!({})),
+            cwd: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { outcomes, .. } = decision else {
+        panic!("the call is denied, got {decision:?}");
+    };
+    let mut lookups = asked.lock().expect("the log locks").clone();
+    lookups.sort();
+    lookups.dedup();
+    assert_eq!(lookups, ["slack:U-bob", "slack:U-carol"]);
+    assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::AfterRepair)));
+}
+
 /// A selector is the operator's to read: two calls whose recipients' sources fail alike are
 /// told the same, whichever group each named.
 #[tokio::test]
