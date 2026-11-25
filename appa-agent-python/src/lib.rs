@@ -29,6 +29,7 @@ const CONSULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 const OFFER_ARGUMENT: &str = "offer_id";
 const REFUSAL_CLASS: &str = "refusal_class";
+const REFUSAL_RETRY: &str = "retry";
 
 create_exception!(appa_agent_python, AppaError, PyRuntimeError);
 
@@ -173,7 +174,8 @@ enum DeliveryDisposition {
 struct Pending {
     call: ProposedCall,
     /// The outcome a report already submitted that settled nothing: a fact its result needs
-    /// was not obtained. Reporting again resubmits it, so the tool never runs twice.
+    /// was not obtained, or the runtime refused the report. Reporting again resubmits it, so
+    /// the tool never runs twice.
     unsettled: Option<ToolOutcome>,
 }
 
@@ -209,7 +211,11 @@ struct SessionInner {
 /// class the caller can branch on, or the session refused the operation.
 #[derive(Debug)]
 enum Failure {
-    Refused { class: RefusalClass, detail: String },
+    Refused {
+        class: RefusalClass,
+        detail: String,
+        retry: Option<RetryHint>,
+    },
     Session(String),
 }
 
@@ -378,7 +384,7 @@ impl SessionInner {
 
     fn event(&self, event: HookEvent) -> Result<HookDecision, Failure> {
         match self.tokio.block_on(hooks::handle(&self.runtime, event)) {
-            HookDecision::Refuse { class, detail, .. } => Err(Failure::Refused { class, detail }),
+            HookDecision::Refuse { class, detail, retry } => Err(Failure::Refused { class, detail, retry }),
             decision => Ok(decision),
         }
     }
@@ -630,6 +636,7 @@ impl SessionInner {
             // A refused report settles nothing: the call stays pending for the host to
             // report again.
             Err(failure) => {
+                pending.unsettled = Some(outcome);
                 self.keep_pending(child, call_id, pending)?;
                 return Err(failure);
             }
@@ -1197,14 +1204,18 @@ fn with<T>(inner: &Arc<Mutex<SessionInner>>, act: impl FnOnce(&mut SessionInner)
 }
 
 /// The `AppaError` a failure raises. A refusal carries its class as
-/// `refusal_class`, the serde spelling; any other failure leaves the
-/// class attribute's `None`.
+/// `refusal_class` and, on a fact not obtained, what sending it again can do
+/// as `retry`, both serde spellings; any other failure leaves both `None`.
 fn raised(failure: Failure) -> PyErr {
     match failure {
         Failure::Session(message) => AppaError::new_err(message),
-        Failure::Refused { class, detail } => Python::attach(|py| {
+        Failure::Refused { class, detail, retry } => Python::attach(|py| {
             let error = AppaError::new_err(detail);
-            match error.value(py).setattr(REFUSAL_CLASS, spelling(class)) {
+            let value = error.value(py);
+            match value
+                .setattr(REFUSAL_CLASS, spelling(class))
+                .and_then(|()| value.setattr(REFUSAL_RETRY, retry.map(spelling)))
+            {
                 Ok(()) => error,
                 Err(unset) => unset,
             }
@@ -1212,8 +1223,8 @@ fn raised(failure: Failure) -> PyErr {
     }
 }
 
-fn spelling(class: RefusalClass) -> String {
-    match serde_json::to_value(class) {
+fn spelling(unit: impl Serialize) -> String {
+    match serde_json::to_value(unit) {
         Ok(serde_json::Value::String(spelling)) => spelling,
         _ => unreachable!("a unit variant serializes as its serde name"),
     }
@@ -1427,6 +1438,7 @@ fn appa_agent_python(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<ChildSession>()?;
     let error = module.py().get_type::<AppaError>();
     error.setattr(REFUSAL_CLASS, module.py().None())?;
+    error.setattr(REFUSAL_RETRY, module.py().None())?;
     module.add("AppaError", error)?;
     module.add("BINDING_IDENTITY", BINDING_IDENTITY)?;
     Ok(())
