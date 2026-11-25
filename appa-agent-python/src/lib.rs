@@ -519,7 +519,10 @@ impl SessionInner {
             RemedyOutcome::Returned { value } => ControlReply::of(value),
             RemedyOutcome::Declined { presentation } => ControlReply::of(presentation.feedback),
             RemedyOutcome::NoAnswer { feedback, retry } => ControlReply { reply: feedback, retry },
-            RemedyOutcome::Refused { reason } => ControlReply::of(reason.detail().to_string()),
+            RemedyOutcome::Refused { reason } => ControlReply {
+                reply: reason.detail().to_string(),
+                retry: reason.retry(),
+            },
         }
     }
 

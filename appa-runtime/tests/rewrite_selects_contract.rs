@@ -286,15 +286,17 @@ async fn an_unanswered_annotation_refuses_the_embedded_remedy_and_a_fresh_vouch_
 
     *stubs.failing.lock().unwrap() = Some(StatusCode::SERVICE_UNAVAILABLE);
     vouch(&runtime, &plan).await;
+    let RemedyOutcome::Refused { reason } = execute().await else {
+        panic!("the unanswered attempt is refused");
+    };
     assert_eq!(
-        execute().await,
-        RemedyOutcome::Refused {
-            reason: RemedyRefusal::Unanswered {
-                annotator: "classify".to_string(),
-                class: NoAnswerClass::NonSuccess { status: 503 },
-            },
+        reason,
+        RemedyRefusal::Unanswered {
+            annotator: "classify".to_string(),
+            class: NoAnswerClass::NonSuccess { status: 503 },
         }
     );
+    assert_eq!(reason.retry(), Some(appa_runtime_api::RetryHint::Later));
     assert_eq!(
         engine_facts(),
         before,

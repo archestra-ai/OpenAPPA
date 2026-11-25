@@ -490,6 +490,14 @@ impl RemedyRefusal {
             Self::Runtime { detail } => detail,
         })
     }
+
+    /// What executing the offer again can do, when the refusal is on a fact not obtained.
+    pub fn retry(&self) -> Option<appa_runtime_api::RetryHint> {
+        match self {
+            Self::Unanswered { class, .. } => Some(crate::engine::retry_hint(*class)),
+            _ => None,
+        }
+    }
 }
 
 /// The host operation an embedding host executes a declaration ahead of the spawn under. A
