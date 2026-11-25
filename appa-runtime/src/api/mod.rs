@@ -1489,6 +1489,7 @@ impl Prepared {
                 }),
                 store,
                 transcriber: None,
+                unanswered: None,
                 #[cfg(feature = "archestra")]
                 archestra_context: None,
                 pinned: None,
@@ -1558,6 +1559,8 @@ struct Inner {
     store: Arc<LogStore>,
     /// Where this view's sessions hand a record of every consult they make.
     transcriber: Option<Arc<dyn ConsultTranscriber>>,
+    /// Where this view's sessions note each external a consult left without a usable answer.
+    unanswered: Option<Arc<crate::replay::UnansweredConsults>>,
     #[cfg(feature = "archestra")]
     archestra_context: Option<String>,
     /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
@@ -1700,14 +1703,10 @@ impl Runtime {
         self.view(|view| view.transcriber = Some(transcriber))
     }
 
-    /// This view with every consult record handed to `observer` as well as to the
-    /// transcriber this view already hands them to.
-    pub(crate) fn also_transcribing(&self, observer: Arc<dyn ConsultTranscriber>) -> Runtime {
-        let transcriber: Arc<dyn ConsultTranscriber> = match self.inner.transcriber.clone() {
-            None => observer,
-            Some(host) => Arc::new(crate::transcriber::Both(host, observer)),
-        };
-        self.transcribing(transcriber)
+    /// This view with every external its sessions' consults leave without a usable answer
+    /// noted in `unanswered`.
+    pub(crate) fn noting_unanswered(&self, unanswered: Arc<crate::replay::UnansweredConsults>) -> Runtime {
+        self.view(|view| view.unanswered = Some(unanswered))
     }
 
     /// A request-scoped opaque context returned only to the host's archestra
@@ -1874,6 +1873,7 @@ impl Runtime {
             shared: Arc::clone(&self.inner.shared),
             store: Arc::clone(&self.inner.store),
             transcriber: self.inner.transcriber.clone(),
+            unanswered: self.inner.unanswered.clone(),
             #[cfg(feature = "archestra")]
             archestra_context: self.inner.archestra_context.clone(),
             pinned: self.inner.pinned.clone(),

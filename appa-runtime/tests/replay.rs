@@ -631,15 +631,15 @@ async fn only_a_missing_fact_leaves_a_deny_step_unjudged() {
     assert_eq!(outcomes(&reports[2]), vec![(1, &DENIED)]);
 }
 
-/// A step that cannot run reports the externals its own consults asked without an answer:
-/// in one trace an Annotator, in the other an audience source, each on its second step, after
-/// a first step that consulted nothing.
+/// A step that cannot run reports the externals its own consults left without a usable
+/// answer: in one trace an Annotator whose answer is no annotation, in the other an audience
+/// source that fails, each on its second step, after a first step that consulted nothing.
 #[tokio::test]
 async fn a_step_that_cannot_run_names_the_externals_it_went_unanswered_by() {
     let router = Router::new()
         .route(
             "/annotate",
-            post(|_body: String| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+            post(|_body: String| async { axum::Json(serde_json::json!({ "version": 1 })) }),
         )
         .route(
             "/audience",

@@ -140,6 +140,20 @@ impl Session {
         ruling: Option<appa_runtime_api::Ruling>,
         occasion: Occasion<'_>,
     ) -> ExternalEvidence {
+        let evidence = self.evidence(request, elicitation, ruling, occasion).await;
+        if let (Some(unanswered), Some(external)) = (&self.inner.unanswered, evidence.unanswered()) {
+            unanswered.note(external);
+        }
+        evidence
+    }
+
+    async fn evidence(
+        &self,
+        request: ExternalRequest,
+        elicitation: Option<&Elicitation>,
+        ruling: Option<appa_runtime_api::Ruling>,
+        occasion: Occasion<'_>,
+    ) -> ExternalEvidence {
         match &request {
             ExternalRequest::Authority {
                 authority,

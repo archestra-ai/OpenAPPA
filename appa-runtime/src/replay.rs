@@ -532,35 +532,28 @@ pub struct StepReport {
     pub unanswered: Vec<Unanswered>,
 }
 
-/// An external a step consulted that gave no answer.
+/// An external a step consulted that gave no usable answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unanswered {
     pub role: crate::api::ExternalRole,
     pub name: String,
 }
 
-/// The externals one trace's consults asked without an answer, since the last step took them.
+/// The externals one trace's consults left without a usable answer, since the last step took
+/// them.
 #[derive(Default)]
-struct UnansweredConsults(std::sync::Mutex<Vec<Unanswered>>);
+pub(crate) struct UnansweredConsults(std::sync::Mutex<Vec<Unanswered>>);
 
 impl UnansweredConsults {
+    pub(crate) fn note(&self, unanswered: Unanswered) {
+        let mut asked = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !asked.contains(&unanswered) {
+            asked.push(unanswered);
+        }
+    }
+
     fn take(&self) -> Vec<Unanswered> {
         std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
-    }
-}
-
-impl crate::api::ConsultTranscriber for UnansweredConsults {
-    fn record(&self, record: crate::api::ConsultRecord) {
-        if let crate::api::ExternalOutcome::NoAnswer(_) = record.outcome {
-            let unanswered = Unanswered {
-                role: record.role,
-                name: record.external_name,
-            };
-            let mut asked = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !asked.contains(&unanswered) {
-                asked.push(unanswered);
-            }
-        }
     }
 }
 
@@ -600,7 +593,7 @@ pub async fn run(runtime: &Runtime, traces: &[Trace]) -> Vec<TraceReport> {
 
 async fn run_trace(runtime: &Runtime, trace: &Trace, root: TrajectoryId) -> TraceReport {
     let consults = std::sync::Arc::new(UnansweredConsults::default());
-    let runtime = &runtime.also_transcribing(consults.clone());
+    let runtime = &runtime.noting_unanswered(consults.clone());
     let actor = Actor {
         root: root.clone(),
         child: None,

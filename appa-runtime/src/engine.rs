@@ -263,6 +263,46 @@ pub enum ExternalEvidence {
     },
 }
 
+impl ExternalEvidence {
+    /// The external this evidence records as giving no usable answer, if it is one.
+    pub(crate) fn unanswered(&self) -> Option<crate::replay::Unanswered> {
+        use crate::events::ExternalRole;
+        let (role, name) = match self {
+            ExternalEvidence::Authority {
+                authority,
+                verdict: AuthorityVerdict::Abstain(_),
+                ..
+            } => (ExternalRole::Authority, authority),
+            ExternalEvidence::Sanitizer {
+                sanitizer,
+                derived: Err(_),
+                ..
+            } => (ExternalRole::Sanitizer, sanitizer),
+            ExternalEvidence::AnnotationNoAnswer { annotator, .. } => (ExternalRole::Annotator, annotator),
+            ExternalEvidence::AudienceSource {
+                provider,
+                members: Err(_),
+                ..
+            }
+            | ExternalEvidence::MemberLookup {
+                provider,
+                principal: Err(_),
+                ..
+            } => (ExternalRole::AudienceSource, provider),
+            ExternalEvidence::Held { .. }
+            | ExternalEvidence::Authority { .. }
+            | ExternalEvidence::Sanitizer { .. }
+            | ExternalEvidence::Annotation { .. }
+            | ExternalEvidence::AudienceSource { .. }
+            | ExternalEvidence::MemberLookup { .. } => return None,
+        };
+        Some(crate::replay::Unanswered {
+            role,
+            name: name.clone(),
+        })
+    }
+}
+
 /// An authority's wire verdict: `{"ruling": "approve"|"deny"}`; anything
 /// else abstains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
