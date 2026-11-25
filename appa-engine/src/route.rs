@@ -383,6 +383,13 @@ impl Run {
 
 /// A route as found, with what its order needs: the audience the route's rulings disclose to and
 /// the mandate power it assigns per requirement.
+/// A route's power on each requirement it assigns one to.
+type Resolved<'f> = Vec<(&'f Gap, GapPower<'f>)>;
+
+fn resolved_power<'r, 'f>(resolved: &'r Resolved<'f>, key: &Gap) -> Option<&'r GapPower<'f>> {
+    resolved.iter().find(|(gap, _)| *gap == key).map(|(_, power)| power)
+}
+
 struct Found {
     route: RecoveryRoute,
     disclosure: Vec<Audience>,
@@ -828,11 +835,16 @@ impl<'a> Search<'a> {
     /// no reader `b` does not, and at least one of those is strict. Requirements compared are the
     /// block's own plus any either route clears by a ruling (a route needing an extra ruling
     /// assigns power where the other assigns none).
-    fn precedes(&self, a: &Found, b: &Found) -> bool {
+    fn precedes(&self, (a, a_powers): (&Found, &Resolved<'_>), (b, b_powers): (&Found, &Resolved<'_>)) -> bool {
         let within = self.registry.audience().within_assertions();
+        let none = GapPower::None;
         let mut strictly_less = false;
         for key in a.keys.iter().chain(b.keys.iter().filter(|key| !a.keys.contains(key))) {
-            match plan::gap_power_cmp(&self.power_of(a, key), &self.power_of(b, key), within) {
+            match plan::gap_power_cmp(
+                resolved_power(a_powers, key).unwrap_or(&none),
+                resolved_power(b_powers, key).unwrap_or(&none),
+                within,
+            ) {
                 Some(Ordering::Less) => strictly_less = true,
                 Some(Ordering::Equal) => {}
                 Some(Ordering::Greater) | None => return false,
@@ -861,8 +873,19 @@ impl<'a> Search<'a> {
             .collect();
         let mut after: Vec<Vec<usize>> = vec![Vec::new(); found.len()];
         let mut unplaced_before = vec![0usize; found.len()];
-        for (j, before) in found.iter().enumerate() {
-            for (i, later) in found.iter().enumerate() {
+        // Each route's powers, resolved once: the all-pairs comparison reads them many times.
+        let resolved: Vec<Resolved<'_>> = found
+            .iter()
+            .map(|found| {
+                found
+                    .powers
+                    .iter()
+                    .map(|(gap, _)| (gap, self.power_of(found, gap)))
+                    .collect()
+            })
+            .collect();
+        for (j, before) in found.iter().zip(&resolved).enumerate() {
+            for (i, later) in found.iter().zip(&resolved).enumerate() {
                 if self.precedes(before, later) {
                     after[j].push(i);
                     unplaced_before[i] += 1;
