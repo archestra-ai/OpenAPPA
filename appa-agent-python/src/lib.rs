@@ -48,6 +48,9 @@ enum DispatchResponse {
         dispatched_tool: String,
         dispatched_arguments: serde_json::Value,
         disposition: DeliveryDisposition,
+        /// What kind of refusal sealed the result in place of the tool's bytes, where one did.
+        #[serde(flatten)]
+        refused: Refused,
     },
     Control {
         reply: String,
@@ -133,6 +136,8 @@ enum SpawnResponse {
 enum ReturnResponse {
     Blocked {
         feedback: String,
+        #[serde(flatten)]
+        refused: Refused,
     },
     Returned {
         value: Option<String>,
@@ -373,7 +378,7 @@ impl SessionInner {
 
     fn event(&self, event: HookEvent) -> Result<HookDecision, Failure> {
         match self.tokio.block_on(hooks::handle(&self.runtime, event)) {
-            HookDecision::Refuse { class, detail } => Err(Failure::Refused { class, detail }),
+            HookDecision::Refuse { class, detail, .. } => Err(Failure::Refused { class, detail }),
             decision => Ok(decision),
         }
     }
@@ -601,7 +606,7 @@ impl SessionInner {
                 .take()
                 .ok_or_else(|| "no call is pending".to_string())?,
         };
-        let outcome = pending.unsettled.take().unwrap_or(outcome);
+        let outcome = pending.unsettled.clone().unwrap_or(outcome);
         let (produced, as_produced) = match &outcome {
             ToolOutcome::Success {
                 body: OutcomeBody::Available(body),
@@ -629,7 +634,7 @@ impl SessionInner {
                 return Err(failure);
             }
         };
-        let (content, disposition) = match decision {
+        let (content, disposition, outcomes) = match decision {
             HookDecision::ReplaceOutput {
                 output,
                 outcomes: Some(Outcomes::MissingFact(retry)),
@@ -638,15 +643,14 @@ impl SessionInner {
                 self.keep_pending(child, call_id, pending)?;
                 return encode(DispatchResponse::Unsettled { content: output, retry });
             }
-            HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted),
-            HookDecision::Ack => (produced, DeliveryDisposition::Sealed),
+            HookDecision::Ack if as_produced => (produced, DeliveryDisposition::Admitted, None),
+            HookDecision::Ack => (produced, DeliveryDisposition::Sealed, None),
             // `DeliverValue` carries what the engine admitted in place of the
             // raw result, so it is sealed for the reason `ChildReturn` is
             // substituted: the model reads it, and the tool did not write it.
-            HookDecision::ReplaceOutput { output, .. } | HookDecision::DeliverValue { value: output } => {
-                (output, DeliveryDisposition::Sealed)
-            }
-            HookDecision::Block { reason, .. } => (reason, DeliveryDisposition::Sealed),
+            HookDecision::ReplaceOutput { output, outcomes } => (output, DeliveryDisposition::Sealed, outcomes),
+            HookDecision::DeliverValue { value: output } => (output, DeliveryDisposition::Sealed, None),
+            HookDecision::Block { reason, outcomes } => (reason, DeliveryDisposition::Sealed, outcomes),
             other => return failed(format!("the runtime answered a tool outcome with {other:?}")),
         };
         encode(DispatchResponse::Delivered {
@@ -654,6 +658,7 @@ impl SessionInner {
             dispatched_tool: pending.call.tool.clone(),
             dispatched_arguments: arguments_value(&pending.call),
             disposition,
+            refused: Refused::of(outcomes.as_ref()),
         })
     }
 
@@ -687,12 +692,15 @@ impl SessionInner {
                 .take()
                 .ok_or_else(|| "no call is pending".to_string())?,
         };
-        self.event(HookEvent::ToolResult {
+        if let Err(failure) = self.event(HookEvent::ToolResult {
             actor: self.actor(child),
-            call: pending.call,
+            call: pending.call.clone(),
             call_id: call_id.map(str::to_string),
             outcome: ToolOutcome::Indeterminate,
-        })?;
+        }) {
+            self.keep_pending(child, call_id, pending)?;
+            return Err(failure);
+        }
         Ok(())
     }
 
@@ -881,7 +889,12 @@ impl SessionInner {
                 other => return failed(format!("the runtime answered the echoed return with {other:?}")),
             },
             // A held return keeps the branch live: the child may return again.
-            HookDecision::Block { reason, .. } => return encode(ReturnResponse::Blocked { feedback: reason }),
+            HookDecision::Block { reason, outcomes } => {
+                return encode(ReturnResponse::Blocked {
+                    feedback: reason,
+                    refused: Refused::of(outcomes.as_ref()),
+                });
+            }
             other => return failed(format!("the runtime answered a child return with {other:?}")),
         };
         let decision = self.event(HookEvent::SpawnResult {
@@ -909,7 +922,10 @@ impl SessionInner {
                     disposition,
                 }
             }
-            HookDecision::Block { reason, .. } => ReturnResponse::Blocked { feedback: reason },
+            HookDecision::Block { reason, outcomes } => ReturnResponse::Blocked {
+                feedback: reason,
+                refused: Refused::of(outcomes.as_ref()),
+            },
             other => return failed(format!("the runtime answered a spawn result with {other:?}")),
         })
     }
