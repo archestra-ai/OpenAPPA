@@ -11,6 +11,8 @@ from inspect_ai.tool import Tool, ToolDef
 
 BINDING_IDENTITY: str = appa_agent_python.BINDING_IDENTITY
 EXECUTE_REMEDY_PLAN = "execute_remedy_plan"
+# The typed refusal a blocked or sealed answer states, null where it states none.
+REFUSAL_FIELDS = frozenset({"deciding", "outcomes", "retry"})
 
 
 class NativeProtocolError(RuntimeError):
@@ -84,7 +86,7 @@ def wire_tool_schema(tool: Tool) -> dict[str, object]:
 def _blocked(response: dict[str, object]) -> Blocked | None:
     """The blocked envelope: the policy feedback the engine surfaced and the ids
     of the offers it quotes. A held child return's envelope names no offer ids."""
-    if set(response) not in ({"kind", "feedback"}, {"kind", "feedback", "offer_ids"}):
+    if set(response) - REFUSAL_FIELDS not in ({"kind", "feedback"}, {"kind", "feedback", "offer_ids"}):
         return None
     feedback = response["feedback"]
     offer_ids = response.get("offer_ids", [])
@@ -201,13 +203,11 @@ class NativeSession:
     def report(self, content: str | None, error: bool) -> Reported:
         if not self._pending:
             raise NativeProtocolError("no native call is pending")
-        try:
-            raw = self._session.report(content, error)
-        finally:
-            # Rust consumes the pending handle before it attempts admission.
+        # A refused or unsettled report leaves the call pending, to report again or abandon.
+        response = self._decode(self._session.report(content, error))
+        if response.get("kind") != "unsettled":
             self._pending = False
-        response = self._decode(raw)
-        if response.get("kind") == "delivered" and set(response) == {
+        if response.get("kind") == "delivered" and set(response) - REFUSAL_FIELDS == {
             "kind",
             "content",
             "dispatched_tool",
@@ -300,13 +300,11 @@ class NativeChildSession:
         pending = self._pending
         if pending is None:
             raise NativeProtocolError("no native child call is pending")
-        try:
-            raw = self._child.report(content, error)
-        finally:
-            # Rust consumes the pending handle before it attempts admission.
+        # A refused or unsettled report leaves the call pending, to report again or abandon.
+        response = NativeSession._decode(self._child.report(content, error))
+        if response.get("kind") != "unsettled":
             self._pending = None
-        response = NativeSession._decode(raw)
-        if response.get("kind") == "delivered" and set(response) == {
+        if response.get("kind") == "delivered" and set(response) - REFUSAL_FIELDS == {
             "kind",
             "content",
             "dispatched_tool",

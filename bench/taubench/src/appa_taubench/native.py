@@ -11,6 +11,8 @@ from appa_taubench.knowledge import DISCOVERABLE_WRAPPER
 
 BINDING_IDENTITY: str = appa_agent_python.BINDING_IDENTITY
 AppaError = appa_agent_python.AppaError
+# The typed refusal a blocked or sealed answer states, null where it states none.
+REFUSAL_FIELDS = frozenset({"deciding", "outcomes", "retry"})
 
 
 class NativeProtocolError(RuntimeError):
@@ -79,7 +81,7 @@ class FrameworkSession:
         )
         response = self._decode(response_json)
         match response.get("kind"):
-            case "blocked" if set(response) == {"kind", "feedback", "offer_ids"}:
+            case "blocked" if set(response) - REFUSAL_FIELDS == {"kind", "feedback", "offer_ids"}:
                 feedback = response["feedback"]
                 offer_ids = response["offer_ids"]
                 if (
@@ -145,7 +147,7 @@ class FrameworkSession:
             else self._session.report(content, error, call_id=call_id)
         )
         response = self._decode(response_json)
-        if response.get("kind") == "delivered" and set(response) == {
+        if response.get("kind") == "delivered" and set(response) - REFUSAL_FIELDS == {
             "kind",
             "content",
             "dispatched_tool",
