@@ -386,15 +386,14 @@ struct LogCache {
 
 #[derive(Default)]
 struct CachedLogs {
-    logs: std::collections::HashMap<String, CachedLog>,
-    /// Roots in the order they were last used, oldest first.
-    order: std::collections::VecDeque<String>,
+    logs: std::collections::HashMap<(ReaderId, String), CachedLog>,
+    /// `(reader, root)` entries in the order they were last used, oldest first.
+    order: std::collections::VecDeque<(ReaderId, String)>,
     facts: usize,
 }
 
 #[derive(Clone)]
 struct CachedLog {
-    reader: ReaderId,
     log: Log,
     /// SHA-256 of the plaintext of the log's last batch, avoiding retention of a multi-MiB tip.
     last_batch_digest: [u8; 32],
@@ -433,25 +432,23 @@ impl LogCache {
 
     /// `root`'s cached log, when `reader` decrypted it.
     fn get(&self, reader: ReaderId, root: &str) -> Option<CachedLog> {
-        self.entries()
-            .logs
-            .get(root)
-            .filter(|cached| cached.reader == reader)
-            .cloned()
+        let key = (reader, root.to_owned());
+        self.entries().logs.get(&key).cloned()
     }
 
-    fn forget(&self, root: &str) {
+    fn forget(&self, reader: ReaderId, root: &str) {
+        let key = (reader, root.to_owned());
         let mut entries = self.entries();
-        if let Some(gone) = entries.logs.remove(root) {
+        if let Some(gone) = entries.logs.remove(&key) {
             entries.facts -= gone.log.facts().len();
-            entries.order.retain(|cached| cached != root);
+            entries.order.retain(|cached| cached != &key);
         }
     }
 
     /// Keep `log`, as `reader` decrypted it, unless the cache already holds a later read of its
     /// root by the same reader.
     fn keep(&self, reader: ReaderId, log: &Log, last_batch_digest: [u8; 32]) {
-        let root = log.root().as_str();
+        let key = (reader, log.root().as_str().to_owned());
         let size = log.facts().len();
         let mut entries = self.entries();
         if size > CACHED_FACTS {
@@ -459,34 +456,33 @@ impl LogCache {
         }
         if entries
             .logs
-            .get(root)
-            .is_some_and(|cached| cached.reader == reader && cached.log.basis() >= log.basis())
+            .get(&key)
+            .is_some_and(|cached| cached.log.basis() >= log.basis())
         {
             // A read the cache already answered still counts as a use.
-            entries.order.retain(|cached| cached != root);
-            entries.order.push_back(root.to_owned());
+            entries.order.retain(|cached| cached != &key);
+            entries.order.push_back(key);
             return;
         }
-        if let Some(older) = entries.logs.remove(root) {
+        if let Some(older) = entries.logs.remove(&key) {
             entries.facts -= older.log.facts().len();
-            entries.order.retain(|cached| cached != root);
+            entries.order.retain(|cached| cached != &key);
         }
         while entries.facts + size > CACHED_FACTS {
             let Some(oldest) = entries.order.pop_front() else {
                 break;
             };
             let gone = entries.logs.remove(&oldest);
-            debug_assert!(gone.is_some(), "every root in the order has a cached log");
+            debug_assert!(gone.is_some(), "every key in the order has a cached log");
             if let Some(gone) = gone {
                 entries.facts -= gone.log.facts().len();
             }
         }
-        entries.order.push_back(root.to_owned());
+        entries.order.push_back(key.clone());
         entries.facts += size;
         entries.logs.insert(
-            root.to_owned(),
+            key,
             CachedLog {
-                reader,
                 log: log.clone(),
                 last_batch_digest,
             },
@@ -1472,12 +1468,13 @@ impl PostgresStore {
 
     /// Read `root`'s log on `worker`'s connection, decoding only what the cache lacks.
     fn log_on(&self, worker: &Worker, root: &TrajectoryId) -> Result<Log, ReadError> {
-        let cached = self.logs.get(self.cipher.reader(), root.as_str());
+        let reader = self.cipher.reader();
+        let cached = self.logs.get(reader, root.as_str());
         match self.read_log(worker, root, cached)? {
             Some(log) => Ok(log),
             // The cached copy no longer matches what is stored: read the whole log once.
             None => {
-                self.logs.forget(root.as_str());
+                self.logs.forget(reader, root.as_str());
                 Ok(self
                     .read_log(worker, root, None)?
                     .expect("a read without a cached copy has nothing to mismatch"))
@@ -2447,17 +2444,19 @@ mod tests {
     }
 
     #[test]
-    fn another_readers_read_replaces_the_entry_instead_of_answering_it() {
+    fn another_readers_read_is_isolated_from_the_first_reader() {
         let cache = LogCache::default();
         let log = log();
         let root = log.root().as_str().to_owned();
         let tip = batch_digest(b"last");
         cache.keep(keyed(7, "conversation-a"), &log, tip);
-        // A reader that decoded the stored batches itself holds the key that opens them now.
         cache.keep(ReaderId::PLAIN, &log, tip);
-        assert!(cache.get(keyed(7, "conversation-a"), &root).is_none());
+        assert!(cache.get(keyed(7, "conversation-a"), &root).is_some());
         assert!(cache.get(ReaderId::PLAIN, &root).is_some());
-        assert_eq!(cache.entries().facts, log.facts().len(), "one entry per root");
+        cache.forget(ReaderId::PLAIN, &root);
+        assert!(cache.get(ReaderId::PLAIN, &root).is_none());
+        assert!(cache.get(keyed(7, "conversation-a"), &root).is_some());
+        assert_eq!(cache.entries().facts, log.facts().len());
     }
 
     #[test]

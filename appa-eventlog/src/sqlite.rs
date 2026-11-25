@@ -12,6 +12,7 @@ use appa_engine::value::TrajectoryId;
 use appa_runtime_api::PeerDigest;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[cfg(feature = "fault-injection")]
 use crate::HostObservation;
@@ -160,13 +161,16 @@ struct LogCache {
 struct CachedLog {
     log: Log,
     bytes: usize,
-    tail: Vec<u8>,
+    tail_digest: [u8; 32],
+}
+
+fn batch_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
 }
 
 impl CachedLog {
     fn weight(&self) -> usize {
         self.bytes
-            + self.tail.len()
             + self.log.policy_file().len()
             + std::mem::size_of_val(self.log.facts())
             + std::mem::size_of_val(self.log.host_records())
@@ -509,7 +513,7 @@ impl Sqlite {
         let first = prefix.as_ref().map_or(0, |entry| entry.log.basis() - 1);
         let mut batches = log_rows(&transaction, root, first)?;
         if let Some(entry) = &prefix
-            && batches.first() != Some(&entry.tail)
+            && batches.first().map(|bytes| batch_digest(bytes)) != Some(entry.tail_digest)
         {
             prefix = None;
             *cache = LogCache {
@@ -526,7 +530,7 @@ impl Sqlite {
             let decoded_batches = new.len();
             if let Some(last) = new.last() {
                 entry.bytes += new.iter().map(Vec::len).sum::<usize>();
-                entry.tail.clone_from(last);
+                entry.tail_digest = batch_digest(last);
                 extend(&mut entry.log, new)?;
             }
             let log = entry.log.clone();
@@ -557,7 +561,7 @@ impl Sqlite {
         // while this one decodes, and a racing reader may cache a newer snapshot.
         let decoded_batches = batches.len();
         let bytes = batches.iter().map(Vec::len).sum();
-        let tail = batches.last().expect("a log with an opening has a tail").clone();
+        let tail_digest = batch_digest(batches.last().expect("a log with an opening has a tail"));
         let mut log = decoded(root, batches, policy_file)?;
         log.lineage = Some(lineage.clone().unwrap_or_default());
         if let Some(lineage) = lineage {
@@ -566,7 +570,7 @@ impl Sqlite {
                 cache.keep(CachedLog {
                     log: log.clone(),
                     bytes,
-                    tail,
+                    tail_digest,
                 });
             }
         }
