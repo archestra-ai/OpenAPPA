@@ -459,11 +459,18 @@ pub(crate) fn validate_annotation(
         (Some(annotator), None) => return Err(AnnotationRefusal::Needed(annotator.clone())),
         (Some(annotator), Some(pinned)) => (annotator, pinned),
     };
-    if pinned.annotator() != annotator {
-        return Err(foreign("the pin is not this declaration's annotator's"));
-    }
     if pinned.call() != &call.digest() {
         return Err(foreign("the pin binds another call"));
+    }
+    let Some(pinned_annotator) = pinned.annotator() else {
+        return match declaration.on_no_answer() {
+            Some(fallback) if pinned.produced() == fallback => Ok(()),
+            Some(_) => Err(foreign("the no-answer fallback differs from the declaration")),
+            None => Err(foreign("the declaration has no no-answer fallback")),
+        };
+    };
+    if pinned_annotator != annotator {
+        return Err(foreign("the pin is not this declaration's annotator's"));
     }
     let annotation = pinned.produced();
     let outside = |what: &str| AnnotationRefusal::OutsidePolicy(what.to_string());
@@ -617,6 +624,29 @@ mod tests {
                     annotator: AnnotatorName::new("classifier"),
                     requires: Default::default(),
                     delta_trust: None,
+                    on_no_answer: Some(ProducedAnnotation {
+                        evidence: None,
+                        delta: Delta {
+                            trust: Some(Trust::new(0)),
+                            audience: None,
+                        },
+                        forwards: Delta::NONE,
+                        emits: EffectSet::default(),
+                        requires: Requires {
+                            attention: vec![MarkName::new("reviewed")],
+                            ..Requires::default()
+                        },
+                    }),
+                },
+                ToolDeclaration::Annotated {
+                    name: ToolName::new("strict_lookup"),
+                    tags: vec![],
+                    description: None,
+                    parameters: ToolParameters::open(),
+                    annotator: AnnotatorName::new("classifier"),
+                    requires: Default::default(),
+                    delta_trust: None,
+                    on_no_answer: None,
                 },
             ],
             annotators,
@@ -847,6 +877,53 @@ mod tests {
                 &pinned_by_classifier(with_delta(chain(ChainAudience::Internal)))
             ),
             Err(AnnotationRefusal::OutsidePolicy(_))
+        ));
+    }
+
+    #[test]
+    fn a_no_answer_fallback_pin_must_equal_the_routes_declared_fallback() {
+        let registry = registry(vec![classifier()]);
+        let declaration = registry.tool(&ToolName::new("lookup")).expect("lookup is registered");
+        let fallback = declaration.on_no_answer().expect("lookup declares a fallback").clone();
+        let unpinned = call("lookup");
+        let accepted = unpinned
+            .clone()
+            .with_annotation(Some(PinnedAnnotation::no_answer_fallback(
+                unpinned.digest(),
+                fallback.clone(),
+            )));
+        assert_eq!(validate_annotation(&registry, declaration, &accepted), Ok(()));
+
+        let forged = unpinned
+            .clone()
+            .with_annotation(Some(PinnedAnnotation::no_answer_fallback(
+                unpinned.digest(),
+                ProducedAnnotation {
+                    evidence: None,
+                    delta: Delta::NONE,
+                    forwards: Delta::NONE,
+                    emits: EffectSet::default(),
+                    requires: Requires::default(),
+                },
+            )));
+        assert!(matches!(
+            validate_annotation(&registry, declaration, &forged),
+            Err(AnnotationRefusal::Foreign(_))
+        ));
+
+        let no_fallback_decl = registry
+            .tool(&ToolName::new("strict_lookup"))
+            .expect("strict_lookup is registered");
+        let strict_call = call("strict_lookup");
+        let rejected = strict_call
+            .clone()
+            .with_annotation(Some(PinnedAnnotation::no_answer_fallback(
+                strict_call.digest(),
+                fallback,
+            )));
+        assert!(matches!(
+            validate_annotation(&registry, no_fallback_decl, &rejected),
+            Err(AnnotationRefusal::Foreign(_))
         ));
     }
 

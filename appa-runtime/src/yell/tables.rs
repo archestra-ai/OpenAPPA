@@ -202,9 +202,8 @@ static PRODUCED_ANNOTATION: Table = Table {
     ],
 };
 
-/// `PinnedAnnotation` is `#[serde(transparent)]` over its parts, so these are the parts' keys.
-static PINNED_ANNOTATION: Table = Table {
-    name: "PinnedAnnotation",
+static PINNED_ANNOTATOR: Table = Table {
+    name: "PinnedAnnotation::Annotator",
     entries: &[
         ("annotator", Rule::Token(Class::Annotator)),
         ("call", DIGEST),
@@ -212,6 +211,24 @@ static PINNED_ANNOTATION: Table = Table {
         // What the deployment's context providers answered about the call: repository
         // names, logins, grants — the deployment's own findings, which never leave.
         ("context", Rule::Never),
+    ],
+};
+
+static PINNED_FALLBACK: Table = Table {
+    name: "PinnedAnnotation::NoAnswerFallback",
+    entries: &[
+        ("call", DIGEST),
+        ("produced", Rule::Table(&PRODUCED_ANNOTATION)),
+        ("context", Rule::Never),
+    ],
+};
+
+/// `PinnedAnnotation` is `#[serde(transparent)]` over its tagged `PinnedParts` enum.
+static PINNED_ANNOTATION: Table = Table {
+    name: "PinnedAnnotation",
+    entries: &[
+        ("Annotator", Rule::Table(&PINNED_ANNOTATOR)),
+        ("NoAnswerFallback", Rule::Table(&PINNED_FALLBACK)),
     ],
 };
 

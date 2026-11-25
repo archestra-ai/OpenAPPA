@@ -105,6 +105,9 @@ effects = []
 [[policy.tool]]
 name = "*"
 annotator = "claude-code.undeclared-tool"
+# Opt in to ask `hitl` instead of refusing when the annotator gives no answer:
+# keeps interactive sessions moving, but stalls autonomous runs waiting for approval.
+# on_no_answer = { delta = { trust = "suspicious" }, forwards = {}, requires = { attention = ["human-approval"] } }
 
 # The reserved builtin sanitizer of a structured subagent return. The
 # session declares a JSON schema of bounded fields when it starts the

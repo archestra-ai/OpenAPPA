@@ -519,6 +519,7 @@ mod tests {
             annotator: crate::names::AnnotatorName::new("directory"),
             requires: Default::default(),
             delta_trust: None,
+            on_no_answer: None,
         };
         Registry::build_covered(RegistryConfig {
             recorders: Default::default(),

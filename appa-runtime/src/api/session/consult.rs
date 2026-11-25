@@ -130,17 +130,17 @@ impl Session {
         outcome
     }
 
-    /// One external consult. Only an annotation failure is an error: the call cannot be
-    /// judged without its annotation, no fact may be appended, and the refusal is operational
-    /// — never a policy denial. Every other external keeps its no-answer evidence shape.
+    /// One external consult. Every external keeps its no-answer evidence shape, leaving the
+    /// engine as the single place that chooses between a route's fallback and an operational
+    /// refusal.
     pub(super) async fn consult(
         &self,
         request: ExternalRequest,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
         occasion: Occasion<'_>,
-    ) -> Result<ExternalEvidence, EventError> {
-        Ok(match &request {
+    ) -> ExternalEvidence {
+        match &request {
             ExternalRequest::Authority {
                 authority,
                 declaration,
@@ -230,10 +230,17 @@ impl Session {
                         .map_err(crate::external::NoAnswerReason::MalformedAnswer),
                     ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };
-                // An unanswered annotation is a missing fact, never a policy denial: the call
-                // is not judged, nothing is appended, and no plan is offered.
-                let answer = match answer {
-                    Ok(answer) => answer,
+                // Record no-answer as evidence and let the engine decide between a route's
+                // declared `on_no_answer` fallback and a deny on the missing fact.
+                match answer {
+                    Ok(answer) => ExternalEvidence::Annotation {
+                        annotator: annotator.clone(),
+                        // The evidence names the exact call it answered for: a rewritten call
+                        // never consumes a stale annotation.
+                        call: *call,
+                        answer,
+                        context,
+                    },
                     Err(reason) => {
                         match reason {
                             crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Timeout => {
@@ -241,16 +248,14 @@ impl Session {
                             }
                             _ => tracing::debug!(annotator, ?reason, "an annotation consult produced no answer"),
                         }
-                        return Err(EventError::annotation_unanswered(annotator.clone(), &reason));
+                        ExternalEvidence::AnnotationNoAnswer {
+                            annotator: annotator.clone(),
+                            call: *call,
+                            reason: reason.diagnostic(),
+                            class: (&reason).into(),
+                            context,
+                        }
                     }
-                };
-                ExternalEvidence::Annotation {
-                    annotator: annotator.clone(),
-                    // The evidence names the exact call it answered for: a rewritten call
-                    // never consumes a stale annotation.
-                    call: *call,
-                    answer,
-                    context,
                 }
             }
             ExternalRequest::AudienceSource {
@@ -292,6 +297,6 @@ impl Session {
                     principal,
                 }
             }
-        })
+        }
     }
 }

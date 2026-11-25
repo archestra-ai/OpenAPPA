@@ -1605,9 +1605,7 @@ impl<'a> Sequence<'a> {
         // judged — is validate_annotation's to hold.
         let checked: std::borrow::Cow<'_, ToolAnnotation> = match (call.annotation(), entry.declared()) {
             (None, Some(compiled)) => std::borrow::Cow::Borrowed(compiled),
-            (Some(pinned), None) if Some(pinned.annotator()) == entry.annotator() => {
-                std::borrow::Cow::Owned(pinned.tool_annotation(entry, tool))
-            }
+            (Some(pinned), None) => std::borrow::Cow::Owned(pinned.tool_annotation(entry, tool)),
             _ => return Err(TransitionRefusal::ForgedEvidence),
         };
         if crate::check::validate_annotation(self.engine.registry(), entry, call).is_err() {

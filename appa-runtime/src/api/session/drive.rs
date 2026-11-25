@@ -817,20 +817,19 @@ impl Session {
                 // reviewer they stay serial: one staged review on screen at a time.
                 Next::ResolveExternal(requests) => match elicitation {
                     None => {
-                        // Batch-terminal: every sibling settles first; any no-answer
-                        // then aborts the invocation, discarding the siblings' answers,
-                        // before another engine round or any append.
+                        // Every sibling settles together; the next engine pass turns any
+                        // no-answer into a declared fallback or an operational refusal.
                         // Embedded hosts supply the ruling outside an MCP elicitation context.
                         let consults = requests
                             .into_iter()
                             .map(|request| self.consult(request, None, ruling, occasion));
                         for answered in crate::external::settle_batch(consults).await {
-                            evidence.push(answered?);
+                            evidence.push(answered);
                         }
                     }
                     Some(_) => {
                         for request in requests {
-                            let answered = self.consult(request, elicitation, ruling, occasion).await?;
+                            let answered = self.consult(request, elicitation, ruling, occasion).await;
                             evidence.push(answered);
                         }
                     }

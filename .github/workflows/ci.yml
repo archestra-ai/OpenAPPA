@@ -57,7 +57,7 @@ jobs:
 
       - name: Check new Cargo dependency release ages
         if: github.event_name == 'pull_request' || github.event_name == 'push'
-        uses: archestra-ai/.github/actions/cargo-release-age@v1.25.2
+        uses: archestra-ai/.github/actions/cargo-release-age@v1.31.1
         with:
           base-sha: ${{ github.event.pull_request.base.sha || github.event.before }}
           lockfiles: |
@@ -988,7 +988,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Go
-        uses: actions/setup-go@v7.0.0
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
           cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
@@ -1099,7 +1099,7 @@ jobs:
           pytest integrations/kagent/appa-kagent-adk/tests/test_mcp_lifecycle.py -q
 
       - name: Setup Go for authenticated MCP lifecycle
-        uses: actions/setup-go@v7.0.0
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
           cache-dependency-path: integrations/kagent/appa-kagent-adk-go/go.sum
@@ -1183,7 +1183,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4.4.0
+        uses: docker/setup-buildx-action@v4.4.1
 
       # These builds read the cache the images job writes. They never
       # write it: two jobs writing one scope in one run overwrite each other.
@@ -1238,7 +1238,7 @@ jobs:
         run: bash integrations/kagent/e2e/ci/kind-up.sh
 
       - name: Authenticate to read the OpenRouter key
-        uses: archestra-ai/.github/actions/google-auth@v1.25.2
+        uses: archestra-ai/.github/actions/google-auth@v1.31.1
         with:
           service_account: ci-appa-canary@friendly-path-465518-r6.iam.gserviceaccount.com
           workload_identity_provider: projects/354887056155/locations/global/workloadIdentityPools/github-actions-pool/providers/github-actions-provider
@@ -1311,9 +1311,10 @@ jobs:
 
   # The installer, offline-restore and native-approval rehearsal on a kind
   # cluster. It runs on a manual dispatch, every push to main and every
-  # `run-e2e`-labeled pull request that changes what it exercises,
-  # never on an unlabeled pull request. It reads no secrets, so a fork may
-  # run it. Same rule as above: no same-named placeholder job.
+  # `run-e2e`-labeled same-repository pull request that changes what it
+  # exercises, never on an unlabeled pull request or a fork (which has no
+  # access to `DOCKERHUB_DHI_TOKEN` for pulling `dhi.io` bases). Same rule as
+  # above: no same-named placeholder job.
   marketplace-kagent-acceptance:
     name: Marketplace kagent acceptance
     needs: changes
@@ -1321,8 +1322,9 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       ((needs.changes.outputs.marketplace == 'true' || needs.changes.outputs.e2e == 'true') &&
       (github.event_name == 'push' ||
-      contains(github.event.pull_request.labels.*.name, 'run-e2e') ||
-      github.event.label.name == 'run-e2e'))
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      (contains(github.event.pull_request.labels.*.name, 'run-e2e') ||
+      github.event.label.name == 'run-e2e'))))
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1332,7 +1334,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Setup Go
-        uses: actions/setup-go@v7.0.0
+        uses: actions/setup-go@v7.1.0
         with:
           go-version-file: integrations/kagent/appa-kagent-adk-go/go.mod
           cache: false
@@ -1357,7 +1359,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4.4.0
+        uses: docker/setup-buildx-action@v4.4.1
       - name: Build runtime
         uses: docker/build-push-action@v7.4.0
         with:
@@ -1401,12 +1403,19 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  # All published images get an amd64 build here on every change
-  # that can break them. Publishing itself happens in release.yml.
+  # All published images get an amd64 build here on every change that can
+  # break them. Publishing itself happens in release.yml. Fork pull requests
+  # skip this job because pulling the `dhi.io` bases requires
+  # `DOCKERHUB_DHI_TOKEN`, which GitHub does not expose to forks; skipped
+  # required checks still satisfy branch protection, and pushes to main
+  # always run the build.
   kagent-images-build:
     name: kagent Images Build
     needs: changes
-    if: needs.changes.outputs.e2e == 'true'
+    if: >-
+      needs.changes.outputs.e2e == 'true' &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1429,7 +1438,7 @@ jobs:
           password: ${{ secrets.DOCKERHUB_DHI_TOKEN }}
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v4.4.0
+        uses: docker/setup-buildx-action@v4.4.1
 
       - name: Build the shared runtime image
         uses: docker/build-push-action@v7.4.0
