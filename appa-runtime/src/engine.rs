@@ -265,7 +265,7 @@ pub enum ExternalEvidence {
 
 impl ExternalEvidence {
     /// The external this evidence records as giving no usable answer, if it is one.
-    pub(crate) fn unanswered(&self) -> Option<crate::replay::Unanswered> {
+    pub(crate) fn unanswered(&self) -> Option<crate::api::Unanswered> {
         use crate::events::ExternalRole;
         let (role, name) = match self {
             ExternalEvidence::Authority {
@@ -296,7 +296,7 @@ impl ExternalEvidence {
             | ExternalEvidence::AudienceSource { .. }
             | ExternalEvidence::MemberLookup { .. } => return None,
         };
-        Some(crate::replay::Unanswered {
+        Some(crate::api::Unanswered {
             role,
             name: name.clone(),
         })

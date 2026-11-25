@@ -1554,13 +1554,39 @@ fn trace_published(line: &DeploymentName, published: &Deployment) {
     );
 }
 
+/// An external a step consulted that gave no usable answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unanswered {
+    pub role: ExternalRole,
+    pub name: String,
+}
+
+/// The externals one trace's consults left without a usable answer, since the last step took
+/// them.
+#[derive(Default)]
+pub(crate) struct UnansweredConsults(std::sync::Mutex<Vec<Unanswered>>);
+
+impl UnansweredConsults {
+    pub(crate) fn note(&self, unanswered: Unanswered) {
+        let mut asked = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !asked.contains(&unanswered) {
+            asked.push(unanswered);
+        }
+    }
+
+    #[cfg(feature = "daemon")]
+    pub(crate) fn take(&self) -> Vec<Unanswered> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
 struct Inner {
     shared: Arc<Shared>,
     store: Arc<LogStore>,
     /// Where this view's sessions hand a record of every consult they make.
     transcriber: Option<Arc<dyn ConsultTranscriber>>,
     /// Where this view's sessions note each external a consult left without a usable answer.
-    unanswered: Option<Arc<crate::replay::UnansweredConsults>>,
+    unanswered: Option<Arc<UnansweredConsults>>,
     #[cfg(feature = "archestra")]
     archestra_context: Option<String>,
     /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
@@ -1705,7 +1731,8 @@ impl Runtime {
 
     /// This view with every external its sessions' consults leave without a usable answer
     /// noted in `unanswered`.
-    pub(crate) fn noting_unanswered(&self, unanswered: Arc<crate::replay::UnansweredConsults>) -> Runtime {
+    #[cfg(feature = "daemon")]
+    pub(crate) fn noting_unanswered(&self, unanswered: Arc<UnansweredConsults>) -> Runtime {
         self.view(|view| view.unanswered = Some(unanswered))
     }
 

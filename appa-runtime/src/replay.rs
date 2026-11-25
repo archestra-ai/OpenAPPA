@@ -521,6 +521,9 @@ impl StepOutcome {
     }
 }
 
+pub use crate::api::Unanswered;
+use crate::api::UnansweredConsults;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepReport {
     pub line: usize,
@@ -530,31 +533,6 @@ pub struct StepReport {
     /// For a step that could not run, the externals its own consults asked without an
     /// answer, each once, in the order first asked. Empty for every other step.
     pub unanswered: Vec<Unanswered>,
-}
-
-/// An external a step consulted that gave no usable answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Unanswered {
-    pub role: crate::api::ExternalRole,
-    pub name: String,
-}
-
-/// The externals one trace's consults left without a usable answer, since the last step took
-/// them.
-#[derive(Default)]
-pub(crate) struct UnansweredConsults(std::sync::Mutex<Vec<Unanswered>>);
-
-impl UnansweredConsults {
-    pub(crate) fn note(&self, unanswered: Unanswered) {
-        let mut asked = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !asked.contains(&unanswered) {
-            asked.push(unanswered);
-        }
-    }
-
-    fn take(&self) -> Vec<Unanswered> {
-        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
-    }
 }
 
 /// What one file got: every step up to and including the one that ended it.
