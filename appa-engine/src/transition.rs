@@ -620,6 +620,8 @@ pub enum TransitionError {
     ReturnVoid,
     #[error(transparent)]
     ReturnPolicy(#[from] crate::plan::ReturnPolicyRefusal),
+    #[error(transparent)]
+    BodyDetached(#[from] crate::value::BodyDetached),
 }
 
 impl From<crate::label::MembershipNeeded> for TransitionError {
@@ -851,6 +853,16 @@ impl EngineView {
     /// a family's stamps never decrease. A batch holding no record decides nothing: the view's
     /// chain and stamp stay where they were, as a replay leaves them.
     pub fn advance(&mut self, batch: &ValidatedFactBatch) -> Result<(), ViewMismatch> {
+        self.advance_with(batch, None)
+    }
+
+    /// Advance the cache by a batch the store accepted, detaching eligible bodies whose byte
+    /// length is at least `threshold` so held views stay bounded after live appends.
+    pub fn advance_detached(&mut self, batch: &ValidatedFactBatch, threshold: usize) -> Result<(), ViewMismatch> {
+        self.advance_with(batch, Some(threshold))
+    }
+
+    fn advance_with(&mut self, batch: &ValidatedFactBatch, detach_at: Option<usize>) -> Result<(), ViewMismatch> {
         if batch.family() != &self.family {
             return Err(ViewMismatch::ForeignFamily);
         }
@@ -884,7 +896,10 @@ impl EngineView {
         {
             self.projection.cross_revision();
         }
-        self.projection.fold_all(batch.facts());
+        match detach_at {
+            Some(threshold) => self.projection.fold_detaching(batch.basis(), batch.facts(), threshold),
+            None => self.projection.fold_all(batch.facts()),
+        }
         self.projection.set_position(batch.basis() + 1);
         self.stamp = batch.revision.or(self.stamp);
         Ok(())
@@ -1081,6 +1096,8 @@ pub enum TransitionRefusal {
     UnknownCandidate,
     #[error("the record spends an offer or approval that is no longer current")]
     StaleSpend,
+    #[error("the record requires inline body text that is detached: {0}")]
+    BodyDetached(#[from] crate::value::BodyDetached),
 }
 
 struct PendingRelease {
@@ -2988,7 +3005,7 @@ impl<'a> Sequence<'a> {
                             if views.bound_sanitizer(dispatch).is_some() {
                                 return Err(TransitionRefusal::ForgedLabel);
                             }
-                            let digest = RawResultDigest::of(value.body.as_str().as_bytes());
+                            let digest = value.body.digest();
                             if views.failed_with_body(dispatch) {
                                 if views.failure_body_digest(dispatch) != Some(digest) {
                                     return Err(TransitionRefusal::ForgedLabel);
@@ -3098,8 +3115,9 @@ impl<'a> Sequence<'a> {
                     .ok_or_else(|| TransitionRefusal::UnknownSanitizer(named.as_str().to_string()))?;
                 match sanitizer {
                     ReturnSanitizer::Attest(shape) => {
-                        match shape.validate(value.body.as_str()) {
-                            Ok(canonical) if canonical == value.body.as_str() => {}
+                        let text = value.body.text().map_err(TransitionRefusal::BodyDetached)?;
+                        match shape.validate(text) {
+                            Ok(canonical) if canonical == text => {}
                             _ => return Err(TransitionRefusal::ReturnShapeViolation),
                         }
                         if !views
@@ -3436,7 +3454,7 @@ impl<'a> Sequence<'a> {
         // The bytes this hop read are the predecessor's, whichever it was.
         match &predecessor {
             None => self.observed_as(trajectory, dispatch, source)?,
-            Some((body, _)) if source == &RawResultDigest::of(body.body.as_str().as_bytes()) => {}
+            Some((body, _)) if source == &body.body.digest() => {}
             Some(_) => return Err(TransitionRefusal::ObservationMismatch),
         }
         let from_label = match &predecessor {

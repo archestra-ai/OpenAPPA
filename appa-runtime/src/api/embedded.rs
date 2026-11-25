@@ -433,7 +433,7 @@ impl Runtime {
         let log = self.inner.log(&actor.root).map_err(peer_error)?;
         match prior_call(&log, recipient, call_id, message) {
             PriorCall::Foreign => return Err(refused("this call id is already a different dispatch")),
-            PriorCall::Admitted(body) => return governed_delivery(row, &body),
+            PriorCall::Admitted { digest, len } => return governed_delivery(row, digest, len),
             PriorCall::Open | PriorCall::Absent => {}
         }
         drop(log);
@@ -496,7 +496,7 @@ impl Runtime {
             call_id,
             message,
         );
-        let outcome = outcome_of(decided, proved)?;
+        let outcome = outcome_of(decided, proved, &body)?;
         if let HookDecision::DeliverValue { value } = &outcome.decision
             && value != &body
         {
@@ -600,16 +600,36 @@ fn read_tool_fit(registry: &appa_engine::registry::Registry, call: &ProposedCall
     Ok(())
 }
 
-fn governed_delivery(row: &EmbeddedRow, admitted: &str) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
-    if row.body.as_deref() != Some(admitted) {
-        return Err(refused("the admitted read is not this stored message"));
-    }
-    Ok(deliver(admitted.to_string()))
+fn body_matches(body: &str, digest: appa_engine::value::RawResultDigest, len: u64) -> bool {
+    body.len() as u64 == len && appa_engine::value::RawResultDigest::of(body.as_bytes()) == digest
 }
 
-fn outcome_of(decision: ToolResultDecision, proved: PriorCall) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
+fn governed_delivery(
+    row: &EmbeddedRow,
+    digest: appa_engine::value::RawResultDigest,
+    len: u64,
+) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
+    let Some(body) = row.body.as_deref() else {
+        return Err(refused("the admitted read is not this stored message"));
+    };
+    if !body_matches(body, digest, len) {
+        return Err(refused("the admitted read is not this stored message"));
+    }
+    Ok(deliver(body.to_string()))
+}
+
+fn outcome_of(
+    decision: ToolResultDecision,
+    proved: PriorCall,
+    stored: &str,
+) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
     let proved = match proved {
-        PriorCall::Admitted(body) => Some(body),
+        PriorCall::Admitted { digest, len } => {
+            if !body_matches(stored, digest, len) {
+                return Err(refused("the admitted read is not this stored message"));
+            }
+            Some(stored.to_string())
+        }
         PriorCall::Open | PriorCall::Absent | PriorCall::Foreign => None,
     };
     match decision {
@@ -649,7 +669,10 @@ enum PriorCall {
     Absent,
     Foreign,
     Open,
-    Admitted(String),
+    Admitted {
+        digest: appa_engine::value::RawResultDigest,
+        len: u64,
+    },
 }
 
 fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &HeldMessage) -> PriorCall {
@@ -680,7 +703,7 @@ fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &Held
                 value,
                 provenance: Provenance::ToolResult { dispatch: id },
             } if trajectory == recipient && id == &dispatch => {
-                admitted = Some(value.body.as_str().to_string());
+                admitted = Some((value.body.digest(), value.body.len()));
             }
             _ => {}
         }
@@ -689,7 +712,7 @@ fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &Held
         return PriorCall::Foreign;
     }
     match admitted {
-        Some(body) => PriorCall::Admitted(body),
+        Some((digest, len)) => PriorCall::Admitted { digest, len },
         None => PriorCall::Open,
     }
 }
@@ -1085,7 +1108,7 @@ max_body_bytes = 65536
             .facts()
             .iter()
             .filter_map(|fact| match fact {
-                Fact::ValueAdmitted { value, .. } => Some(value.body.as_str()),
+                Fact::ValueAdmitted { value, .. } => Some(value.body.text().expect("inline")),
                 _ => None,
             })
             .collect();

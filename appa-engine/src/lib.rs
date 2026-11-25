@@ -152,6 +152,16 @@
 //! the release reserved. A result whose release bound an output sanitizer that the later
 //! revision no longer registers, or no longer applies to that result, is withheld.
 //!
+//! ## Value bodies
+//!
+//! A [`value::ValueBody`] carries its SHA-256 [`value::RawResultDigest`] and byte length
+//! alongside either inline UTF-8 bytes or a detached log position ([`value::BodyAt`]). Replay,
+//! validation, and projection read only the digest, length, and equality; when either side of a
+//! comparison is detached, equality identifies the body by its SHA-256 digest and byte length
+//! (inline pairs compare exact bytes). Only tool-result, provider-run, and confined-result
+//! candidate bodies may detach; child-return and deferred-return bodies stay inline because
+//! `attest-schema` validates their text on replay. A detached body cannot be serialized.
+//!
 pub mod admit;
 pub mod audience;
 pub mod authority;

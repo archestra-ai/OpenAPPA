@@ -206,11 +206,8 @@ impl Engine {
                 cross(Vec::new(), LabeledValue::new(body, fold), ReturnDerivation::Raw)
             }
             Some(ReturnSanitizer::Attest(shape)) => {
-                let canonical = ValueBody::new(
-                    shape
-                        .validate(body.as_str())
-                        .map_err(TransitionError::ReturnShapeMismatch)?,
-                );
+                let text = body.text().map_err(TransitionError::BodyDetached)?;
+                let canonical = ValueBody::new(shape.validate(text).map_err(TransitionError::ReturnShapeMismatch)?);
                 if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == canonical) {
                     return Ok(replay(latest));
                 }
@@ -231,7 +228,7 @@ impl Engine {
                     LabeledValue::new(canonical, label),
                     ReturnDerivation::Sanitized {
                         sanitizer: name,
-                        raw_digest: RawResultDigest::of(body.as_str().as_bytes()),
+                        raw_digest: body.digest(),
                     },
                 )
             }
@@ -265,7 +262,7 @@ impl Engine {
                 if let Some(latest) = views.latest_return(child).filter(|latest| latest.body == body) {
                     return Ok(replay(latest));
                 }
-                let digest = RawResultDigest::of(body.as_str().as_bytes());
+                let digest = body.digest();
                 let Some(derived) = sanitizer_evidence(&report.evidence, name, digest) else {
                     return Ok(EngineDecision {
                         append: None,

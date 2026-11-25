@@ -518,6 +518,7 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::UnknownApproval => ReplayRefusalClass("unknown_approval"),
             TransitionRefusal::UnknownCandidate => ReplayRefusalClass("unknown_candidate"),
             TransitionRefusal::StaleSpend => ReplayRefusalClass("stale_spend"),
+            TransitionRefusal::BodyDetached(_) => ReplayRefusalClass("body_detached"),
         }
     }
 }
@@ -633,6 +634,12 @@ pub enum EngineRefusal {
         reason: String,
         no_answer: Option<crate::events::NoAnswerClass>,
     },
+    /// A detached value body could not be resolved to text.
+    #[error("detached value body at seq {} fact {}", .at.seq, .at.fact)]
+    BodyDetached {
+        at: appa_engine::value::BodyAt,
+        digest: RawResultDigest,
+    },
 }
 
 impl EngineRefusal {
@@ -657,6 +664,7 @@ impl EngineRefusal {
             EngineRefusal::UndeclaredTool { .. } => ReplayRefusalClass("undeclared_tool"),
             EngineRefusal::Arguments { .. } => ReplayRefusalClass("arguments"),
             EngineRefusal::Annotation { .. } => ReplayRefusalClass("annotation"),
+            EngineRefusal::BodyDetached { .. } => ReplayRefusalClass("body_detached"),
         }
     }
 }
@@ -2141,7 +2149,7 @@ impl RuntimeEngine {
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Outcome(OutcomeFollowUp::Closed { admitted, withheld }) => {
-                Next::PresentToModel(outcome_presentation(outcome, admitted, withheld))
+                Next::PresentToModel(self.outcome_presentation(outcome, admitted, withheld)?)
             }
             FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => self.resolve_or_withhold(
                 view,
@@ -2212,7 +2220,7 @@ impl RuntimeEngine {
                     source,
                     ValueBody::new(arguments.canonical_text()),
                     SanitizerSubject::Input { call: &call },
-                ) {
+                )? {
                     Ok(derived) => derived,
                     Err(next) => return Ok(*next),
                 };
@@ -2221,10 +2229,8 @@ impl RuntimeEngine {
                 // it: the digest is the annotation's key. Any group its contract reads is
                 // asked through the act's own audience evidence, not gathered here. A
                 // derivation the engine cannot mint a call from is the engine's to refuse.
-                let annotation = match self
-                    .engine
-                    .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
-                {
+                let derived_text = self.body_text(&derived)?;
+                let annotation = match self.engine.resolve_call(call.tool().clone(), derived_text.as_bytes()) {
                     Ok(rewritten) => match (
                         self.engine.registry().declaration(&rewritten),
                         self.do_something_pin(&rewritten),
@@ -2255,7 +2261,7 @@ impl RuntimeEngine {
                 source,
                 body,
                 tool,
-            } => match self.sanitizer_derived(evidence, &sanitizer, source, body, SanitizerSubject::Output { tool }) {
+            } => match self.sanitizer_derived(evidence, &sanitizer, source, body, SanitizerSubject::Output { tool })? {
                 Ok(derived) => OfferOutcome::Derived(Evidence::Sanitizer {
                     sanitizer,
                     source,
@@ -2325,7 +2331,7 @@ impl RuntimeEngine {
                 bytes: call.canonical_arguments().canonical_bytes().to_vec(),
             },
             FollowUp::Offer(OfferFollowUp::Admitted { value }) => Next::PresentToModel(Presentation::Value {
-                value: value.as_str().to_string(),
+                value: self.body_text(&value)?.to_string(),
             }),
             FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
@@ -2654,11 +2660,77 @@ impl RuntimeEngine {
         }
     }
 
+    /// Resolve a [`ValueBody`] to its UTF-8 text.
+    ///
+    /// This is the single place the runtime turns a `ValueBody` into bytes. Inline bodies return
+    /// their shared buffer without copying; a detached body returns [`EngineRefusal::BodyDetached`].
+    pub(crate) fn body_text(&self, body: &ValueBody) -> Result<std::sync::Arc<str>, EngineRefusal> {
+        body.text_arc().map_err(|detached| EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        })
+    }
+
+    /// What the model reads in place of the raw result. An admitted value and the runtime's
+    /// own words are separate presentations here, because a harness delivers the first as it
+    /// crossed and spells its own tool names into the second.
+    fn outcome_presentation(
+        &self,
+        outcome: &ToolOutcome,
+        admitted: Option<ValueBody>,
+        withheld: bool,
+    ) -> Result<Presentation, EngineRefusal> {
+        if withheld {
+            return Ok(Presentation::ReplaceOutput {
+                placeholder: "[appa] the result is withheld".to_string(),
+            });
+        }
+        match (outcome, admitted) {
+            (
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available(raw),
+                },
+                Some(value),
+            ) if value.len() == raw.len() as u64 && value.digest() == RawResultDigest::of(raw.as_bytes()) => {
+                Ok(Presentation::KeepOutput)
+            }
+            (_, Some(value)) => Ok(Presentation::Value {
+                value: self.body_text(&value)?.to_string(),
+            }),
+            (
+                ToolOutcome::Success {
+                    body: OutcomeBody::TooLarge { limit_bytes },
+                },
+                None,
+            ) => Ok(Presentation::ReplaceOutput {
+                placeholder: match limit_bytes {
+                    Some(limit) => {
+                        format!("[appa] the tool ran, but its output is not shown: it is over the {limit}-byte limit")
+                    }
+                    None => "[appa] the tool ran, but its output is not shown: it is over the size limit".to_string(),
+                },
+            }),
+            (
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+                None,
+            ) => Ok(Presentation::ReplaceOutput {
+                placeholder: "[appa] the tool ran, but the harness returned no output".to_string(),
+            }),
+            (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Ok(Presentation::KeepOutput),
+            (ToolOutcome::Success { .. }, None) => Ok(Presentation::ReplaceOutput {
+                placeholder: "[appa] the result is withheld".to_string(),
+            }),
+        }
+    }
+
     /// The value `child` crossed most recently, as the harness would deliver it.
     pub(crate) fn latest_return(&self, view: &EngineView, child: &TrajectoryId) -> Option<String> {
         self.engine
             .latest_return_of(view, child)
-            .map(|body| body.as_str().to_string())
+            .and_then(|body| self.body_text(&body).ok())
+            .map(|text| text.to_string())
     }
 
     fn label_text(&self, label: &Label) -> String {
@@ -2816,7 +2888,7 @@ impl RuntimeEngine {
         let then = match decided.follow_up {
             FollowUp::Settlement(SettlementFollowUp::Accepted { admitted }) => {
                 Next::PresentToModel(Presentation::Value {
-                    value: admitted.as_str().to_string(),
+                    value: self.body_text(&admitted)?.to_string(),
                 })
             }
             FollowUp::Settlement(SettlementFollowUp::Discarded) => Next::PresentToModel(Presentation::Discarded),
@@ -2896,10 +2968,10 @@ impl RuntimeEngine {
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Child(ChildFollowUp::Merged { admitted }) => Next::PresentToModel(Presentation::Value {
-                value: admitted.as_str().to_string(),
+                value: self.body_text(&admitted)?.to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Staged { derived }) => Next::PresentToModel(Presentation::Staged {
-                value: derived.as_str().to_string(),
+                value: self.body_text(&derived)?.to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
             FollowUp::Child(ChildFollowUp::Deferred) => Next::PresentToModel(Presentation::Deferred),
@@ -3106,19 +3178,22 @@ impl RuntimeEngine {
             return Err(UnownedSanitizer::Unapplied(sanitizer.to_string()));
         }
         let (declaration, artifact) = match on {
-            SanitizerPoint::ToolOutput => self.sanitizer_consult(
-                &name,
-                ValueBody::new(value),
-                SanitizerSubject::Output {
-                    tool: tool.map(ToolName::new),
-                },
-            ),
+            SanitizerPoint::ToolOutput => self
+                .sanitizer_consult(
+                    &name,
+                    ValueBody::new(value),
+                    SanitizerSubject::Output {
+                        tool: tool.map(ToolName::new),
+                    },
+                )
+                .expect("a freshly constructed ValueBody is inline"),
             SanitizerPoint::ToolInput => {
                 let call = self
                     .engine
                     .resolve_call(ToolName::new(tool.ok_or(UnownedSanitizer::NoTool)?), value.as_bytes())?;
                 let arguments = ValueBody::new(call.canonical_arguments().canonical_text());
                 self.sanitizer_consult(&name, arguments, SanitizerSubject::Input { call: &call })
+                    .expect("a freshly constructed ValueBody is inline")
             }
         };
         Ok(crate::consult::Consult {
@@ -3223,14 +3298,14 @@ impl RuntimeEngine {
         source: RawResultDigest,
         body: ValueBody,
         subject: SanitizerSubject<'_>,
-    ) -> ExternalRequest {
-        let (declaration, artifact) = self.sanitizer_consult(sanitizer, body, subject);
-        ExternalRequest::Sanitizer {
+    ) -> Result<ExternalRequest, EngineRefusal> {
+        let (declaration, artifact) = self.sanitizer_consult(sanitizer, body, subject)?;
+        Ok(ExternalRequest::Sanitizer {
             sanitizer: sanitizer.as_str().to_string(),
             source,
             declaration,
             artifact,
-        }
+        })
     }
 
     /// The declaration and artifact of one sanitizer consult, whoever raises it.
@@ -3239,7 +3314,7 @@ impl RuntimeEngine {
         sanitizer: &appa_engine::names::SanitizerName,
         body: ValueBody,
         subject: SanitizerSubject<'_>,
-    ) -> (SanitizerDeclaration, SanitizerArtifact) {
+    ) -> Result<(SanitizerDeclaration, SanitizerArtifact), EngineRefusal> {
         let registry = self.engine.registry();
         let registered = registry
             .sanitizer(sanitizer)
@@ -3255,13 +3330,14 @@ impl RuntimeEngine {
             }
             SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None),
         };
-        (
+        let body = self.body_text(&body)?.to_string();
+        Ok((
             SanitizerDeclaration::of(registered, on, registry.trust_chain(), parameters),
             SanitizerArtifact {
                 tool: tool.map(|tool| tool.as_str().to_string()),
-                body: body.as_str().to_string(),
+                body,
             },
-        )
+        ))
     }
 
     /// The sanitizer's derivation from the evidence gathered so far, or what the offer does
@@ -3274,16 +3350,16 @@ impl RuntimeEngine {
         source: RawResultDigest,
         body: ValueBody,
         subject: SanitizerSubject<'_>,
-    ) -> Result<ValueBody, Box<EngineDecision>> {
+    ) -> Result<Result<ValueBody, Box<EngineDecision>>, EngineRefusal> {
         match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
-            SanitizerAnswer::Derived(derived) => Ok(derived),
-            SanitizerAnswer::Missing => Err(Box::new(EngineDecision::deliver(Next::ResolveExternal(vec![
-                self.sanitizer_request(sanitizer, source, body, subject),
-            ])))),
-            SanitizerAnswer::NoAnswer => Err(Box::new(no_answer(format!(
+            SanitizerAnswer::Derived(derived) => Ok(Ok(derived)),
+            SanitizerAnswer::Missing => Ok(Err(Box::new(EngineDecision::deliver(Next::ResolveExternal(vec![
+                self.sanitizer_request(sanitizer, source, body, subject)?,
+            ]))))),
+            SanitizerAnswer::NoAnswer => Ok(Err(Box::new(no_answer(format!(
                 "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
                 sanitizer.as_str()
-            )))),
+            ))))),
         }
     }
 
@@ -3320,7 +3396,7 @@ impl RuntimeEngine {
                     source,
                     body,
                     SanitizerSubject::Output { tool },
-                )]))
+                )?]))
             }
         }
     }
@@ -4059,53 +4135,6 @@ fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
     }
 }
 
-/// What the model reads in place of the raw result. An admitted value and the runtime's
-/// own words are separate presentations here, because a harness delivers the first as it
-/// crossed and spells its own tool names into the second.
-fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>, withheld: bool) -> Presentation {
-    if withheld {
-        return Presentation::ReplaceOutput {
-            placeholder: "[appa] the result is withheld".to_string(),
-        };
-    }
-    match (outcome, admitted) {
-        (
-            ToolOutcome::Success {
-                body: OutcomeBody::Available(raw),
-            },
-            Some(value),
-        ) if value.as_str() == raw => Presentation::KeepOutput,
-        (_, Some(value)) => Presentation::Value {
-            value: value.as_str().to_string(),
-        },
-        (
-            ToolOutcome::Success {
-                body: OutcomeBody::TooLarge { limit_bytes },
-            },
-            None,
-        ) => Presentation::ReplaceOutput {
-            placeholder: match limit_bytes {
-                Some(limit) => {
-                    format!("[appa] the tool ran, but its output is not shown: it is over the {limit}-byte limit")
-                }
-                None => "[appa] the tool ran, but its output is not shown: it is over the size limit".to_string(),
-            },
-        },
-        (
-            ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
-            },
-            None,
-        ) => Presentation::ReplaceOutput {
-            placeholder: "[appa] the tool ran, but the harness returned no output".to_string(),
-        },
-        (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Presentation::KeepOutput,
-        (ToolOutcome::Success { .. }, None) => Presentation::ReplaceOutput {
-            placeholder: "[appa] the result is withheld".to_string(),
-        },
-    }
-}
-
 fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
     evidence
         .iter()
@@ -4231,6 +4260,10 @@ fn stage_feedback(
 fn proposal_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("deciding a proposal: {error}"),
         },
@@ -4247,6 +4280,10 @@ fn outcome_refusal(error: TransitionError) -> EngineRefusal {
         TransitionError::ObservationMismatch
         | TransitionError::ContradictedSuccess
         | TransitionError::ClosedUnobserved => EngineRefusal::OutcomeMismatch,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("deciding an outcome: {error}"),
         },
@@ -4258,6 +4295,10 @@ fn offer_refusal(error: TransitionError) -> EngineRefusal {
         TransitionError::UnknownOffer | TransitionError::OfferElsewhere => EngineRefusal::UnknownOffer,
         TransitionError::ApprovalPending => EngineRefusal::ApprovalPending,
         TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("deciding an offer: {error}"),
         },
@@ -4268,6 +4309,10 @@ fn bind_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::UnbindableFork | TransitionError::ChildAlreadyUsed => EngineRefusal::Unbindable,
         TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("binding a fork: {error}"),
         },
@@ -4277,6 +4322,10 @@ fn bind_refusal(error: TransitionError) -> EngineRefusal {
 fn child_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("deciding a child return: {error}"),
         },
@@ -5347,9 +5396,9 @@ mod tests {
     }
 
     use super::{
-        AnnotationNeed, BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId,
-        OfferNonce, Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject,
-        TrajectoryId, audience_failure, audience_wire, block_feedback, outcome_presentation, remedy_instruction,
+        AnnotationNeed, BARE_CONTROL_TOOL, EngineEvent, EngineRefusal, EngineView, ExternalEvidence, ExternalRequest,
+        Next, OfferId, OfferNonce, Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine,
+        SanitizerSubject, TrajectoryId, audience_failure, audience_wire, block_feedback, remedy_instruction,
         remedy_lines, terminal_safe, unresolved_audience,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
@@ -5607,12 +5656,10 @@ mod tests {
         .expect("the sanitizer policy compiles");
         let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
         let scrub = appa_engine::names::SanitizerName::new("scrub");
-        let request = |subject: SanitizerSubject<'_>| match engine.sanitizer_request(
-            &scrub,
-            RawResultDigest::of(b"raw"),
-            ValueBody::new("raw"),
-            subject,
-        ) {
+        let request = |subject: SanitizerSubject<'_>| match engine
+            .sanitizer_request(&scrub, RawResultDigest::of(b"raw"), ValueBody::new("raw"), subject)
+            .expect("inline sanitizer request")
+        {
             ExternalRequest::Sanitizer {
                 declaration, artifact, ..
             } => (declaration, artifact),
@@ -7116,17 +7163,60 @@ mod tests {
 
     #[test]
     fn withholding_replaces_failure_output_too() {
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("policy compiles");
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
         assert_eq!(
-            outcome_presentation(
-                &ToolOutcome::Failure {
-                    message: "sensitive failure detail".to_string(),
-                },
-                None,
-                true,
-            ),
+            engine
+                .outcome_presentation(
+                    &ToolOutcome::Failure {
+                        message: "sensitive failure detail".to_string(),
+                    },
+                    None,
+                    true,
+                )
+                .expect("withholding does not read body"),
             Presentation::ReplaceOutput {
                 placeholder: "[appa] the result is withheld".to_string(),
             },
         );
+    }
+
+    #[test]
+    fn outcome_presentation_keep_output_works_on_detached_body() {
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("policy compiles");
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
+        let raw = "large tool output payload".to_string();
+        let mut detached = ValueBody::new(raw.clone());
+        let at = appa_engine::value::BodyAt { seq: 3, fact: 1 };
+        detached.detach(at);
+
+        let presentation = engine
+            .outcome_presentation(
+                &ToolOutcome::Success {
+                    body: crate::api::OutcomeBody::Available(raw),
+                },
+                Some(detached.clone()),
+                false,
+            )
+            .expect("KeepOutput matches by digest and length without reading bytes");
+        assert_eq!(presentation, Presentation::KeepOutput);
+
+        // When the raw output differs, Presentation::Value needs the body text and refuses detached.
+        let err = engine
+            .outcome_presentation(
+                &ToolOutcome::Success {
+                    body: crate::api::OutcomeBody::Available("different raw output".to_string()),
+                },
+                Some(detached.clone()),
+                false,
+            )
+            .expect_err("detached body cannot present Value without text");
+        assert!(matches!(
+            err,
+            EngineRefusal::BodyDetached {
+                at: err_at,
+                digest
+            } if err_at == at && digest == detached.digest()
+        ));
     }
 }

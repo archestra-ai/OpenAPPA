@@ -11,8 +11,8 @@ use crate::names::{AuthorityName, SanitizerName, TagName};
 use crate::plan::PlanId;
 use crate::profile::{DeploymentName, DeploymentProfile, PolicyFileKey, PolicyRevision};
 use crate::value::{
-    CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolName, TrajectoryId,
-    ValueId,
+    BodyAt, CanonicalDigest, ChildReturnId, DispatchId, LabeledValue, Provenance, RawResultDigest, ToolName,
+    TrajectoryId, ValueId,
 };
 
 /// How a child bound at fork may return: the policy the parent declared when it approved the
@@ -681,6 +681,48 @@ impl Fact {
         }
     }
 
+    /// Detach eligible bodies in this fact whose byte length is at least `threshold`.
+    ///
+    /// Only tool-result and provider-run admissions and confined-result candidates detach.
+    /// Child-return crossings, deferred returns, and return candidates stay inline because
+    /// `attest-schema` validates their text on replay.
+    pub fn detach_bodies(&mut self, seq: u64, fact_index: u32, threshold: usize) {
+        let at = BodyAt { seq, fact: fact_index };
+        let threshold = threshold as u64;
+        match self {
+            Fact::ValueAdmitted {
+                value,
+                provenance: Provenance::ToolResult { .. } | Provenance::ProviderRun { .. },
+                ..
+            } if value.body.len() >= threshold => {
+                value.body.detach(at);
+            }
+            Fact::CandidateDerived {
+                derived: DerivedCandidate::Result { value, .. },
+                ..
+            } if value.body.len() >= threshold => {
+                value.body.detach(at);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether any [`crate::value::ValueBody`] inside this fact is detached.
+    pub fn has_detached(&self) -> bool {
+        match self {
+            Fact::ValueAdmitted { value, .. }
+            | Fact::ChildReturn { value, .. }
+            | Fact::ReturnDeferred { value, .. } => value.body.is_detached(),
+            Fact::CandidateDerived { derived, .. } => match derived {
+                DerivedCandidate::Result { value, .. } | DerivedCandidate::Return { value, .. } => {
+                    value.body.is_detached()
+                }
+                DerivedCandidate::Call { .. } => false,
+            },
+            _ => false,
+        }
+    }
+
     pub fn trajectory(&self) -> &TrajectoryId {
         match self {
             Fact::TrajectoryOpened(TrajectoryOpening { trajectory, .. })
@@ -712,6 +754,17 @@ impl Fact {
             | Fact::ReturnDiscarded { trajectory, .. }
             | Fact::Boundary { trajectory, .. } => trajectory,
         }
+    }
+}
+
+/// Detach eligible bodies across one batch's facts at `seq` when their byte length is at least
+/// `threshold`.
+pub fn detach_batch_bodies(facts: &mut [Fact], seq: u64, threshold: usize) {
+    for (index, fact) in facts.iter_mut().enumerate() {
+        let Ok(fact_index) = u32::try_from(index) else {
+            break;
+        };
+        fact.detach_bodies(seq, fact_index, threshold);
     }
 }
 
@@ -750,5 +803,107 @@ mod tests {
         };
         let wire = serde_json::to_string(&fact).expect("a fact serializes");
         assert_eq!(serde_json::from_str::<Fact>(&wire).expect("a fact deserializes"), fact);
+    }
+
+    #[test]
+    fn detach_batch_bodies_detaches_only_large_eligible_bodies() {
+        use crate::candidate::{ConfinedFrom, DerivedCandidate, SanitizerLineage};
+        use crate::label::{Audience, Label, Trust};
+        use crate::value::{BodyAt, ChildReturnId, DispatchId, LabeledValue, Provenance, ValueBody};
+
+        let label = Label::new(Trust::new(1), Audience::public());
+        let call = ResolvedCall::new(ToolName::new("read"), crate::params::test_arguments(&json!({})));
+        let dispatch = DispatchId::new(TrajectoryId::new("t"), call.digest(), 0);
+        let big = "x".repeat(128);
+        let small = "tiny";
+
+        let mut batch = vec![
+            // 0: large tool result -> detaches
+            Fact::ValueAdmitted {
+                trajectory: TrajectoryId::new("t"),
+                value: LabeledValue::new(ValueBody::new(big.clone()), label.clone()),
+                provenance: Provenance::ToolResult {
+                    dispatch: dispatch.clone(),
+                },
+            },
+            // 1: small tool result -> stays inline
+            Fact::ValueAdmitted {
+                trajectory: TrajectoryId::new("t"),
+                value: LabeledValue::new(ValueBody::new(small), label.clone()),
+                provenance: Provenance::ToolResult {
+                    dispatch: dispatch.clone(),
+                },
+            },
+            // 2: large child-return ValueAdmitted -> stays inline (R8)
+            Fact::ValueAdmitted {
+                trajectory: TrajectoryId::new("t"),
+                value: LabeledValue::new(ValueBody::new(big.clone()), label.clone()),
+                provenance: Provenance::ChildReturn {
+                    child: TrajectoryId::new("c"),
+                    id: ChildReturnId::new(TrajectoryId::new("c"), 0),
+                },
+            },
+            // 3: large DerivedCandidate::Result -> detaches
+            Fact::CandidateDerived {
+                trajectory: TrajectoryId::new("t"),
+                subject: SubjectKey::ConfinedResult(dispatch.clone()),
+                sanitizer: SanitizerName::new("redactor"),
+                derived: DerivedCandidate::Result {
+                    dispatch: dispatch.clone(),
+                    source: RawResultDigest::of(big.as_bytes()),
+                    from: ConfinedFrom::Bound,
+                    value: LabeledValue::new(ValueBody::new(big.clone()), label.clone()),
+                    residual: None,
+                },
+                lineage: SanitizerLineage::default(),
+                evidence: Default::default(),
+            },
+            // 4: large DerivedCandidate::Return -> stays inline
+            Fact::CandidateDerived {
+                trajectory: TrajectoryId::new("t"),
+                subject: SubjectKey::Return(ChildReturnId::new(TrajectoryId::new("c"), 0)),
+                sanitizer: SanitizerName::new("redactor"),
+                derived: DerivedCandidate::Return {
+                    source: RawResultDigest::of(big.as_bytes()),
+                    value: LabeledValue::new(ValueBody::new(big.clone()), label.clone()),
+                },
+                lineage: SanitizerLineage::default(),
+                evidence: Default::default(),
+            },
+            // 5: large ChildReturn -> stays inline
+            Fact::ChildReturn {
+                trajectory: TrajectoryId::new("t"),
+                id: ChildReturnId::new(TrajectoryId::new("c"), 0),
+                value: LabeledValue::new(ValueBody::new(big.clone()), label.clone()),
+                derivation: ReturnDerivation::Raw,
+                evidence: Default::default(),
+            },
+            // 6: large ReturnDeferred -> stays inline
+            Fact::ReturnDeferred {
+                trajectory: TrajectoryId::new("c"),
+                id: ChildReturnId::new(TrajectoryId::new("c"), 1),
+                value: LabeledValue::new(ValueBody::new(big), label),
+            },
+        ];
+
+        detach_batch_bodies(&mut batch, 7, 64);
+
+        assert!(batch[0].has_detached());
+        if let Fact::ValueAdmitted { value, .. } = &batch[0] {
+            assert_eq!(value.body.at(), Some(BodyAt { seq: 7, fact: 0 }));
+        }
+        assert!(!batch[1].has_detached(), "below-threshold tool result stays inline");
+        assert!(!batch[2].has_detached(), "child-return admission stays inline");
+        assert!(batch[3].has_detached(), "large DerivedCandidate::Result detaches");
+        if let Fact::CandidateDerived {
+            derived: DerivedCandidate::Result { value, .. },
+            ..
+        } = &batch[3]
+        {
+            assert_eq!(value.body.at(), Some(BodyAt { seq: 7, fact: 3 }));
+        }
+        assert!(!batch[4].has_detached(), "DerivedCandidate::Return stays inline");
+        assert!(!batch[5].has_detached(), "ChildReturn stays inline");
+        assert!(!batch[6].has_detached(), "ReturnDeferred stays inline");
     }
 }

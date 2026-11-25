@@ -688,7 +688,7 @@ fn a_raw_return_crosses_at_the_fold_and_the_child_may_return_again() {
     assert_eq!(
         child_returns(&log, &child)
             .iter()
-            .map(|value| value.body.as_str().to_string())
+            .map(|value| value.body.text().expect("inline").to_string())
             .collect::<Vec<_>>(),
         vec!["done", "more"]
     );
@@ -910,7 +910,7 @@ fn a_named_sanitizer_stages_its_derivation_until_the_child_echoes_it() {
     assert!(matches!(
         asked.follow_up,
         FollowUp::Child(ChildFollowUp::Resolve(EvidenceRequest::Sanitizer { ref sanitizer, ref body, .. }))
-            if sanitizer.as_str() == "redactor" && body.as_str() == "raw"
+            if sanitizer.as_str() == "redactor" && body == &ValueBody::new("raw")
     ));
 
     let staged = e
@@ -932,7 +932,7 @@ fn a_named_sanitizer_stages_its_derivation_until_the_child_echoes_it() {
             subject: crate::basis::SubjectKey::Return(_),
             derived: DerivedCandidate::Return { value, .. },
             ..
-        } if value.body.as_str() == "clean" && value.label.trust == TRUSTED
+        } if value.body == ValueBody::new("clean") && value.label.trust == TRUSTED
     )));
     assert!(
         !facts.iter().any(|fact| matches!(fact, Fact::ChildReturn { .. })),
@@ -969,7 +969,7 @@ fn a_named_sanitizer_stages_its_derivation_until_the_child_echoes_it() {
             value,
             derivation: ReturnDerivation::Sanitized { sanitizer, raw_digest, .. },
             ..
-        } if value.body.as_str() == "clean"
+        } if value.body == ValueBody::new("clean")
             && value.label.trust == TRUSTED
             && sanitizer.as_str() == "redactor"
             && *raw_digest == RawResultDigest::of(b"raw")

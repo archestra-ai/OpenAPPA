@@ -371,6 +371,33 @@ impl Projection {
         }
     }
 
+    /// Fold one batch's facts at `seq`, detaching eligible bodies whose byte length is at least
+    /// `threshold` so the held view stays bounded after live appends.
+    pub(crate) fn fold_detaching(&mut self, seq: u64, facts: &[Fact], threshold: usize) {
+        let threshold_u64 = threshold as u64;
+        for (index, fact) in facts.iter().enumerate() {
+            let needs_detach = match fact {
+                Fact::ValueAdmitted {
+                    value,
+                    provenance: Provenance::ToolResult { .. } | Provenance::ProviderRun { .. },
+                    ..
+                } => !value.body.is_detached() && value.body.len() >= threshold_u64,
+                Fact::CandidateDerived {
+                    derived: DerivedCandidate::Result { value, .. },
+                    ..
+                } => !value.body.is_detached() && value.body.len() >= threshold_u64,
+                _ => false,
+            };
+            if needs_detach && let Ok(fact_index) = u32::try_from(index) {
+                let mut detached = fact.clone();
+                detached.detach_bodies(seq, fact_index, threshold);
+                self.fold(&detached);
+            } else {
+                self.fold(fact);
+            }
+        }
+    }
+
     pub(crate) fn set_position(&mut self, position: u64) {
         self.position = position;
     }

@@ -144,7 +144,7 @@ impl Engine {
         mut facts: Vec<Fact>,
         act: &ActEvidence,
     ) -> Result<EngineDecision, TransitionError> {
-        let admitted = admit::admit_result(
+        let admitted = match admit::admit_result(
             &self.registry,
             views,
             dispatch,
@@ -152,8 +152,11 @@ impl Engine {
             ResultAdmission::CandidateAccepted { offer: execution.offer },
             &self.context(act),
             &act.pinned(),
-        )
-        .unwrap_or_else(|error| unreachable!("the confined stage admits what the log already proved: {error}"));
+        ) {
+            Ok(admitted) => admitted,
+            Err(AdmitError::BodyDetached(detached)) => return Err(TransitionError::BodyDetached(detached)),
+            Err(error) => unreachable!("the confined stage admits what the log already proved: {error}"),
+        };
         facts.extend(admitted);
         let value = crossed(&facts);
         Ok(EngineDecision {
@@ -186,7 +189,7 @@ impl Engine {
         else {
             return Err(TransitionError::EvidenceMismatch);
         };
-        let source_digest = RawResultDigest::of(predecessor.body.as_str().as_bytes());
+        let source_digest = predecessor.body.digest();
         if named != sanitizer || source != &source_digest {
             return Err(TransitionError::EvidenceMismatch);
         }
@@ -241,7 +244,7 @@ impl Engine {
         // The successor owes nothing, so it crosses here. The admission re-derives from the record
         // just written, which is why the candidate is folded first: the one admission choke point
         // reads state, never a caller's claim.
-        let admitted = admit::admit_result(
+        let admitted = match admit::admit_result(
             &self.registry,
             &folded(view, &facts).view(views.trajectory()),
             dispatch,
@@ -249,8 +252,11 @@ impl Engine {
             ResultAdmission::CandidateAdmissible,
             &self.context(act),
             &act.pinned(),
-        )
-        .unwrap_or_else(|error| unreachable!("the confined stage admits what this act just derived: {error}"));
+        ) {
+            Ok(admitted) => admitted,
+            Err(AdmitError::BodyDetached(detached)) => return Err(TransitionError::BodyDetached(detached)),
+            Err(error) => unreachable!("the confined stage admits what this act just derived: {error}"),
+        };
         facts.extend(admitted);
         let value = crossed(&facts);
         Ok(EngineDecision {

@@ -944,6 +944,9 @@ impl From<EngineRefusal> for EventError {
                 reason,
                 no_answer,
             } => EventError::annotation(annotator, reason, no_answer),
+            EngineRefusal::BodyDetached { at, .. } => {
+                EventError::UntrustedLog(format!("detached value body at seq {} fact {}", at.seq, at.fact))
+            }
         }
     }
 }
@@ -6614,7 +6617,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         let before = runtime.inner.log(&root).unwrap();
         assert!(before.facts().iter().any(|fact| matches!(fact,
             appa_engine::fact::Fact::ValueAdmitted { value, .. }
-                if value.body.as_str() == r#"{ "literal" : "mcp:demo/read_secret" }"#
+                if value.body == appa_engine::value::ValueBody::new(r#"{ "literal" : "mcp:demo/read_secret" }"#)
         )));
         runtime
             .live(&TrajectoryId("kagent:late".into()), &TrajectoryId("kagent:late".into()))
