@@ -1033,7 +1033,9 @@ impl Dispatcher<'_> {
                 display,
                 review,
             }) => {
-                let feedback = match sent.is_some().then(|| self.runtime.peer_hint(&actor.root, &call)) {
+                // A missing fact keeps its fixed feedback: no address it could not judge reaches the model.
+                let hinted = sent.is_some() && !matches!(outcomes, appa_runtime_api::Outcomes::MissingFact(_));
+                let feedback = match hinted.then(|| self.runtime.peer_hint(&actor.root, &call)) {
                     Some(Ok(Some(address))) => format!(
                         "{feedback}\n[appa] A protected session under this policy uses that name. To send \
                          at this session's label, set `to` to its address: {address}"
