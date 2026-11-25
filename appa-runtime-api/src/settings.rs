@@ -8,7 +8,9 @@ pub enum AutoApply {
     /// A plan whose every step is a stock `approve` ruling.
     #[default]
     RulingsOnly,
-    /// A plan whose every step is a stock `approve` ruling or the acceptance of a narrowing.
+    /// A plan whose every step is a stock `approve` ruling or the acceptance of a narrowing. A
+    /// floor a parent sets on a child's return is observed, never held: a narrowing below it
+    /// is accepted, and a return below it crosses.
     RulingsAndAccept,
 }
 

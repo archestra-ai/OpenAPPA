@@ -1305,16 +1305,22 @@ pub(crate) fn confined_stage(
 
 /// The lowest label a forked trajectory may hold and still return: its fork's floor met with
 /// its parent's current label — the parent accepts nothing cleaner than it is now — and the
-/// dimension the fork's sanitizer raises, which the floor does not bind.
+/// dimension the fork's sanitizer raises, which the floor does not bind. In a family whose
+/// runtime accepts narrowings itself the floor is observed, never held: it binds no dimension.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Floor {
     label: Label,
     raised: Option<crate::authority::Transition>,
+    observed: bool,
 }
 
 impl Floor {
     pub(crate) fn new(label: Label, raised: Option<crate::authority::Transition>) -> Floor {
-        Floor { label, raised }
+        Floor {
+            label,
+            raised,
+            observed: false,
+        }
     }
 
     pub(crate) fn label(&self) -> &Label {
@@ -1334,6 +1340,9 @@ impl Floor {
     /// Does `label` stay at or above the floor on every dimension the floor binds? A
     /// dimension the fork's sanitizer raises is unbound: the derivation replaces it wholesale.
     pub(crate) fn holds(&self, label: &Label) -> bool {
+        if self.observed {
+            return true;
+        }
         let meet = label.combine(&self.label);
         let trust_holds =
             matches!(self.raised, Some(crate::authority::Transition::Trust { .. })) || meet.trust == self.label.trust;
@@ -1358,7 +1367,10 @@ pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
                 .as_ref()
                 .and_then(|sanitizer| registry.sanitizer(&sanitizer.name()))
                 .map(|sanitizer| sanitizer.transition.applied());
-            Some(Floor::new(policy.floor.combine(&views.branch_label(parent)), raised))
+            Some(Floor {
+                observed: views.auto_apply() == AutoApply::RulingsAndAccept,
+                ..Floor::new(policy.floor.combine(&views.branch_label(parent)), raised)
+            })
         }
     }
 }

@@ -609,10 +609,38 @@ async fn a_restarted_runtime_keeps_the_pinned_settings() {
     ));
 }
 
-/// `leak` brings an insider, suspicious result. `scrub` clears its audience and leaves its
-/// trust, so a result routed through it is staged with that residual narrowing. `vet`, where
+const STAGED: &str = r#"
+version = 2
+
+[[policy.tool]]
+name = "leak"
+parameters = { type = "object", properties = { q = { type = "string" } } }
+requires = { attention = ["review"] }
+delta = { audience = ["insider"], trust = "suspicious" }
+
+[[policy.tool]]
+name = "fetch"
+
+[[policy.sanitizer]]
+name = "scrub"
+on = ["tool_output"]
+[policy.sanitizer.permits]
+audience = { from = ["insider"], to = ["public"] }
+
+[[policy.authority]]
+name = "desk"
+permits = { attention = ["review"] }
+
+[policy.deployment]
+confined_results = ["leak"]
+context_control = true
+"#;
+
+/// `leak` brings an insider, suspicious result and needs a ruling by `desk`, which no family
+/// applies unasked, so the agent routes it. `scrub` clears its audience and leaves its trust,
+/// so a result routed through it is staged with that residual narrowing. `vet`, where
 /// registered, lifts the trust that remains.
-fn staged_config(url: &str, vet: bool) -> Config {
+fn staged_config(url: &str, desk: &str, vet: bool) -> Config {
     let vet = match vet {
         true => format!(
             "[[policy.sanitizer]]\nname = \"vet\"\non = [\"tool_output\"]\n[policy.sanitizer.permits]\n\
@@ -621,16 +649,16 @@ fn staged_config(url: &str, vet: bool) -> Config {
         false => String::new(),
     };
     config_from(&format!(
-        "[policy]\n{}\ncontext_control = true\n\n[[policy.tool]]\nname = \"fetch\"\n\n{vet}[externals]\ntimeout_ms = 2000\n\
-         max_body_bytes = 65536\n[externals.sanitizers.scrub]\nurl = \"{url}\"\n",
-        PARTLY_CLEARED.trim_end()
+        "[policy]\n{STAGED}\n{vet}[externals]\ntimeout_ms = 2000\nmax_body_bytes = 65536\n\
+         [externals.sanitizers.scrub]\nurl = \"{url}\"\n[externals.authorities.desk]\nurl = \"{desk}\"\n"
     ))
 }
 
-/// A child whose return its parent floored at `public` and `trust`: no plan accepts the
-/// insider audience `leak` would bring, so its call blocks until the agent routes the result
-/// through `scrub`, and the result is staged with the trust `scrub` leaves.
+/// A child whose return its parent floored at `public` and `trust`: its `leak` blocks until the
+/// agent routes the result through `scrub`, and the result is staged with the trust `scrub`
+/// leaves.
 async fn staged_in_child(runtime: &Runtime, settings: SessionSettings, trust: &str) -> ToolResultDecision {
+    let auto_apply = settings.auto_apply;
     let mut session = runtime
         .create_pinned_session(root(), None, settings)
         .expect("a fresh id opens");
@@ -646,8 +674,37 @@ async fn staged_in_child(runtime: &Runtime, settings: SessionSettings, trust: &s
     )
     .await;
     let blocked = child.on_tool_call(leak(), false).await.expect("the call is judged");
-    assert!(matches!(blocked, ToolCallDecision::Deny { .. }), "{blocked:?}");
-    sanitized_result(runtime, &child, &child_id).await
+    // Each plan stands beside the `desk` ruling. The acceptance, offered only where the floor
+    // is observed, ranks before the sanitizers' settlements, which follow in name order.
+    let ToolCallDecision::Deny { offers, .. } = &blocked else {
+        panic!("the call blocks: {blocked:?}");
+    };
+    let scrub = match auto_apply {
+        AutoApply::RulingsAndAccept => offers.get(1),
+        AutoApply::RulingsOnly => offers.first(),
+    }
+    .unwrap_or_else(|| panic!("the scrub route is offered: {offers:?}"));
+    let offer = runtime
+        .resolve_in(&root(), &OfferId(scrub.id.clone()))
+        .expect("the quoted id resolves")
+        .0;
+    assert!(matches!(
+        child.on_remedy(offer, RemedyArguments::default(), None, None).await,
+        Ok(RemedyDecision::Authorized { .. })
+    ));
+    assert!(matches!(
+        child.on_tool_call(leak(), false).await,
+        Ok(ToolCallDecision::Allow { spawn: None, .. })
+    ));
+    child
+        .on_tool_result(
+            leak(),
+            ToolOutcome::Success {
+                body: OutcomeBody::Available("raw with pii".to_string()),
+            },
+        )
+        .await
+        .expect("the outcome is delivered")
 }
 
 /// Under `RulingsAndAccept` a staged result whose block offers only the acceptance of its
@@ -656,10 +713,11 @@ async fn staged_in_child(runtime: &Runtime, settings: SessionSettings, trust: &s
 #[tokio::test]
 async fn a_staged_narrowing_is_accepted_at_the_result_only_under_rulings_and_accept() {
     let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let desk = stub(serde_json::json!({"ruling": "approve"})).await;
     for (settings, accepted) in [(observe(), true), (SessionSettings::default(), false)] {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(staged_config(&url, false), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let runtime = Runtime::open(staged_config(&url, &desk, false), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let decided = staged_in_child(&runtime, settings.clone(), "suspicious").await;
         match accepted {
             true => {
@@ -705,28 +763,140 @@ async fn a_staged_narrowing_is_accepted_at_the_result_only_under_rulings_and_acc
     }
 }
 
-/// A staged result whose only route is another sanitizer's hop reaches the agent under
-/// `RulingsAndAccept` as under `RulingsOnly`: a hop is the agent's choice.
+/// Under `RulingsOnly` a staged result below the child's floor has another sanitizer's hop as
+/// its only route, and it reaches the agent: a hop is the agent's choice. Under
+/// `RulingsAndAccept` the floor is observed, so the residual narrowing is accepted.
 #[tokio::test]
-async fn a_staged_result_whose_only_route_is_a_hop_reaches_the_agent() {
+async fn a_staged_result_below_its_floor_reaches_the_agent_only_under_rulings_only() {
     let url = stub(serde_json::json!({"body": "scrubbed"})).await;
+    let desk = stub(serde_json::json!({"ruling": "approve"})).await;
     for settings in [observe(), SessionSettings::default()] {
         let dir = tempfile::tempdir().expect("a temp dir is creatable");
-        let runtime =
-            Runtime::open(staged_config(&url, true), dir.path().join("appa.db"), None).expect("the deployment opens");
+        let runtime = Runtime::open(staged_config(&url, &desk, true), dir.path().join("appa.db"), None)
+            .expect("the deployment opens");
         let decided = staged_in_child(&runtime, settings.clone(), "trusted").await;
-        let ToolResultDecision::Replace {
-            presentation: Some(presentation),
-            ..
-        } = decided
-        else {
-            panic!("{settings:?}: the stage reaches the agent, got {decided:?}");
-        };
-        assert_eq!(presentation.offers.len(), 1, "{settings:?}: the hop alone");
-        assert_eq!(
-            presentation.outcomes.map(|outcomes| outcomes.deciding()),
-            Some(Outcome::AgentChoice),
-            "{settings:?}"
-        );
+        match settings.auto_apply {
+            AutoApply::RulingsAndAccept => {
+                assert_eq!(
+                    decided,
+                    ToolResultDecision::Deliver {
+                        value: "scrubbed".to_string()
+                    }
+                );
+                assert_eq!(acceptances(&runtime, "cc:child"), [Some(Initiator::AutoApply)]);
+            }
+            AutoApply::RulingsOnly => {
+                let ToolResultDecision::Replace {
+                    presentation: Some(presentation),
+                    ..
+                } = decided
+                else {
+                    panic!("the stage reaches the agent, got {decided:?}");
+                };
+                assert_eq!(presentation.offers.len(), 1, "the hop alone");
+                assert_eq!(
+                    presentation.outcomes.map(|outcomes| outcomes.deciding()),
+                    Some(Outcome::AgentChoice)
+                );
+            }
+        }
+    }
+}
+
+const BELOW_FLOOR: &str = r#"
+version = 2
+
+[[policy.tool]]
+name = "fetch"
+parameters = { type = "object", properties = { a = { type = "integer" } } }
+delta = {}
+
+[[policy.tool]]
+name = "taint"
+delta = { trust = "suspicious" }
+
+[[policy.tool]]
+name = "peek"
+delta = { audience = ["insider"] }
+
+[policy.deployment]
+context_control = true
+"#;
+
+/// A child whose return its parent floored at the parent's own label, as a background child
+/// crossing as spoken is, reads below that floor on one dimension. Under `RulingsOnly` no plan
+/// accepts the read: it is a hard block. Under `RulingsAndAccept` the floor is observed: the
+/// read is accepted at its block and recorded as the runtime's, and the child's return crosses
+/// to the parent at the label it holds.
+#[tokio::test]
+async fn a_read_below_a_childs_floor_is_accepted_and_crosses_only_under_rulings_and_accept() {
+    let trusted_public = || crate::engine::LabelSpelling {
+        trust: Some("trusted".to_string()),
+        audience: Some(vec!["public".to_string()]),
+    };
+    for (read, crossed) in [("taint", ("suspicious", "public")), ("peek", ("trusted", "insider"))] {
+        for settings in [observe(), enforce()] {
+            let dir = tempfile::tempdir().expect("a temp dir is creatable");
+            let runtime = Runtime::open(
+                config_from(&format!("[policy]\n{BELOW_FLOOR}")),
+                dir.path().join("appa.db"),
+                None,
+            )
+            .expect("the deployment opens");
+            let mut session = runtime
+                .create_pinned_session(root(), None, settings.clone())
+                .expect("a fresh id opens");
+            let child = open_child_floored(
+                &mut session,
+                fetch(serde_json::json!({"a": 1})),
+                TrajectoryId("cc:child".to_string()),
+                trusted_public(),
+            )
+            .await;
+            let call = || ProposedCall {
+                tool: read.to_string(),
+                arguments: raw(serde_json::json!({})),
+                cwd: None,
+            };
+            let decision = child.on_tool_call(call(), false).await.expect("the call is judged");
+            match settings.auto_apply {
+                AutoApply::RulingsOnly => {
+                    let ToolCallDecision::Deny { offers, outcomes, .. } = &decision else {
+                        panic!("{read}: the read below the floor is blocked, got {decision:?}");
+                    };
+                    assert!(offers.is_empty(), "{read}: {decision:?}");
+                    assert_eq!(outcomes, &appa_runtime_api::Outcomes::HardBlock, "{read}");
+                    assert_eq!(acceptances(&runtime, "cc:child"), [], "{read}");
+                }
+                AutoApply::RulingsAndAccept => {
+                    assert!(
+                        matches!(decision, ToolCallDecision::Allow { .. }),
+                        "{read}: {decision:?}"
+                    );
+                    assert_eq!(
+                        acceptances(&runtime, "cc:child"),
+                        [Some(Initiator::AutoApply)],
+                        "{read}"
+                    );
+                    succeed(&child, call()).await;
+                    assert_eq!(
+                        child
+                            .on_child_end(Some("done".to_string()))
+                            .await
+                            .expect("the return is judged"),
+                        crate::api::ChildReturnDecision::Returned {
+                            value: "done".to_string()
+                        },
+                        "{read}"
+                    );
+                    let parent = runtime.try_status(&root()).expect("the root answers its status");
+                    assert_eq!(
+                        (parent.trust.as_str(), parent.audience.as_str()),
+                        crossed,
+                        "{read}: the parent holds what crossed"
+                    );
+                }
+            }
+        }
     }
 }

@@ -231,6 +231,7 @@ pub struct Projection {
     denials: OrdMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
     opening: Option<(TrajectoryId, Label)>,
     principal: Option<crate::label::ReaderId>,
+    auto_apply: appa_runtime_api::AutoApply,
     decided: OrdMap<crate::transition::ProposalBatchId, DecidedBatch>,
     admissions: OrdMap<crate::transition::ProposalBatchId, Vec<ValueId>>,
     offers: OrdMap<crate::value::OfferId, RecordedOffer>,
@@ -349,6 +350,7 @@ impl Projection {
             denials: Default::default(),
             opening: None,
             principal: None,
+            auto_apply: Default::default(),
             decided: Default::default(),
             admissions: Default::default(),
             offers: Default::default(),
@@ -480,6 +482,7 @@ impl Projection {
             denials,
             opening,
             principal,
+            auto_apply,
             decided,
             admissions,
             offers,
@@ -493,6 +496,7 @@ impl Projection {
                 profile,
                 forked_from,
                 principal: opened_for,
+                settings,
                 ..
             }) => {
                 let mut starting = profile.starting_label().clone();
@@ -525,6 +529,7 @@ impl Projection {
                 );
                 *opening = Some((trajectory.clone(), starting));
                 *principal = opened_for.clone();
+                *auto_apply = settings.auto_apply;
             }
             Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
             Fact::OfferOpened {
@@ -996,6 +1001,11 @@ impl Projection {
         self.principal.as_ref()
     }
 
+    /// The remedies the family's opening lets the runtime apply itself.
+    pub(crate) fn auto_apply(&self) -> appa_runtime_api::AutoApply {
+        self.auto_apply
+    }
+
     /// Has a value been admitted for this dispatch's result?
     pub(crate) fn admitted_result(&self, dispatch: &DispatchId) -> bool {
         self.admitted_results.contains(dispatch)
@@ -1061,6 +1071,11 @@ impl Views<'_> {
     /// The reader the family acts for, as its opening pinned it.
     pub(crate) fn principal(&self) -> Option<&crate::label::ReaderId> {
         self.projection.principal()
+    }
+
+    /// The remedies the family's opening lets the runtime apply itself.
+    pub(crate) fn auto_apply(&self) -> appa_runtime_api::AutoApply {
+        self.projection.auto_apply()
     }
 
     /// The annotation an Annotator pinned to this same canonical call, in a proposal this
