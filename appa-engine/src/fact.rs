@@ -311,10 +311,17 @@ pub enum ObservedResult {
 /// no" from "no one knows whether the tool ran".
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CloseOutcome {
-    Success { effects: EffectSet },
+    Success {
+        effects: EffectSet,
+    },
     Failure,
-    FailureWithBody { observed: RawResultDigest },
+    FailureWithBody {
+        observed: RawResultDigest,
+    },
     Indeterminate,
+    /// A checkpointed success the host gave up on while its bound sanitizer's derivation was
+    /// never obtained: its effects committed with the checkpoint, and nothing of it crossed.
+    SuccessAbandoned,
 }
 
 impl CloseOutcome {
@@ -322,7 +329,10 @@ impl CloseOutcome {
     /// keeps it: the call may have executed.
     pub(crate) fn settles_reservation(&self) -> bool {
         match self {
-            CloseOutcome::Success { .. } | CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => true,
+            CloseOutcome::Success { .. }
+            | CloseOutcome::SuccessAbandoned
+            | CloseOutcome::Failure
+            | CloseOutcome::FailureWithBody { .. } => true,
             CloseOutcome::Indeterminate => false,
         }
     }
@@ -398,6 +408,10 @@ pub struct TrajectoryOpening {
     /// in the family; a root fork carries its parent's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<ReaderId>,
+    /// What the host pinned for the family at this opening. The engine decides nothing on
+    /// them; every trajectory in the family reads them from here.
+    #[serde(default, skip_serializing_if = "appa_runtime_api::SessionSettings::is_default")]
+    pub settings: appa_runtime_api::SessionSettings,
 }
 
 /// One record in the log. New variants are added by the slice that both emits and consumes them
@@ -564,6 +578,9 @@ pub enum Fact {
     OfferAccepted {
         trajectory: TrajectoryId,
         offer: crate::value::OfferId,
+        /// Absent on an acceptance recorded before initiators were.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiator: Option<appa_runtime_api::Initiator>,
     },
     OfferDenied {
         trajectory: TrajectoryId,

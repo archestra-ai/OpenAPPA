@@ -117,6 +117,7 @@ async fn session(aliases: &str) -> (Runtime, Actor) {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;

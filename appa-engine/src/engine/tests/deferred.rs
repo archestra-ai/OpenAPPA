@@ -396,6 +396,7 @@ fn a_deferred_return_is_declared_only_for_the_proposal_that_carries_the_deferral
         let declared = e.handle(
             &viewing(&e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -450,6 +451,7 @@ fn a_return_declared_for_one_class_of_proposal_covers_no_proposal_of_the_other()
         .handle(
             &viewing(&e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),

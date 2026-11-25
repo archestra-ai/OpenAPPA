@@ -386,14 +386,17 @@ mod tests {
         for decision in [
             HookDecision::Block {
                 reason: "nothing crossed".to_string(),
+                outcomes: None,
             },
             HookDecision::ReplaceOutput {
                 output: "the output is confined".to_string(),
+                outcomes: None,
             },
             HookDecision::DeliverValue {
                 value: "the admitted derivation".to_string(),
             },
             HookDecision::Refuse {
+                retry: None,
                 class: appa_runtime_api::RefusalClass::Storage,
                 detail: "storage failure".to_string(),
             },
@@ -431,6 +434,7 @@ mod tests {
                 &event,
                 &HookDecision::ReplaceOutput {
                     output: "the output is confined".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({
@@ -454,6 +458,7 @@ mod tests {
                 &event,
                 &HookDecision::Block {
                     reason: "nothing crossed".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({
@@ -495,6 +500,7 @@ mod tests {
             &spawn_result(response),
             &HookDecision::Block {
                 reason: "unreadable".to_string(),
+                outcomes: None,
             },
         );
         for answer in [salvaged, rendered] {
@@ -530,6 +536,7 @@ mod tests {
             &spawn_result(launched.clone()),
             &HookDecision::Block {
                 reason: "unreadable".to_string(),
+                outcomes: None,
             },
         );
         let output = &answer["hookSpecificOutput"]["updatedToolOutput"];
@@ -601,6 +608,7 @@ mod tests {
                     &event,
                     &HookDecision::Block {
                         reason: "held".to_string(),
+                        outcomes: None,
                     }
                 ),
                 serde_json::json!({"decision": "block", "reason": "held"}),

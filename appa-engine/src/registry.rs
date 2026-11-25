@@ -886,11 +886,13 @@ pub const MAX_HINT_CHARS: usize = 512;
 pub const MAX_CONTEXT_HINT_CHARS: usize = 2048;
 
 /// The remedy components the planner-cap lint counts against: every registered authority and
-/// sanitizer, and the policy's whole mark vocabulary, which is what a catch-all authority attends.
+/// sanitizer, the policy's whole mark vocabulary, which is what a catch-all authority attends,
+/// and each Annotator's resolved mandate, which bounds the priors it may require.
 struct Remedies<'a> {
     authorities: &'a [Authority],
     sanitizers: &'a [Sanitizer],
     attention_marks: &'a BTreeSet<MarkName>,
+    annotators: &'a BTreeMap<AnnotatorName, AnnotatorMandate>,
 }
 
 /// The checkable tools a blocked call may redispatch through, indexed once so the planner-cap lint
@@ -994,12 +996,19 @@ fn worst_case_plan_alternatives(
         authorities,
         sanitizers,
         attention_marks,
+        annotators,
     } = *remedies;
     let tags = declaration.tags();
     let mut count: u128 = 1;
     let mut multiply = |competent: usize| count = count.saturating_mul(competent.max(1) as u128);
     // An Annotator-produced floor or requirement is unknown at load, so its competent-authority
     // count is the mandate-dimension approximation — computed only where one may appear.
+    let covering = |gap: &Gap| {
+        authorities
+            .iter()
+            .filter(|authority| covers_gap(authority, gap, tags, context))
+            .count()
+    };
     let trust_cap_competent = || {
         authorities
             .iter()
@@ -1034,11 +1043,36 @@ fn worst_case_plan_alternatives(
     match declaration {
         // An Annotated declaration's requirements exist only per call: the Annotator may answer
         // any slot its mandate allows, so the lint takes the worst case on every slot at once —
-        // a produced trust floor, a produced `contains`, and any declared mark an authority
-        // covers — under a catch-all, the whole vocabulary but the reserved denial.
-        ToolDeclaration::Annotated { .. } => {
+        // a produced trust floor, a produced `contains`, any declared mark an authority
+        // covers — under a catch-all, the whole vocabulary but the reserved denial — and a
+        // `prior` and a `no_prior` on every effect the Annotator's mandate allows or the route's
+        // `on_no_answer` fallback requires.
+        ToolDeclaration::Annotated {
+            annotator,
+            on_no_answer,
+            ..
+        } => {
             multiply(trust_cap_competent());
             multiply(reader_cap_competent());
+            let mandate = annotators
+                .get(annotator)
+                .expect("an annotated declaration names a registered annotator");
+            // Only an effect some authority waives can add a competent authority.
+            let waived: BTreeSet<&EffectKind> = authorities
+                .iter()
+                .flat_map(|authority| authority.mandate.prior_waivers.iter().chain(&authority.mandate.waivers))
+                .collect();
+            let fallback = on_no_answer
+                .iter()
+                .flat_map(|fallback| &fallback.requires.history)
+                .map(|requirement| match requirement {
+                    HistoryRequirement::Prior(kind) | HistoryRequirement::NoPrior(kind) => kind,
+                });
+            let effects: BTreeSet<&EffectKind> = mandate.effects().chain(fallback).collect();
+            for effect in effects.into_iter().filter(|effect| waived.contains(effect)) {
+                multiply(covering(&Gap::Prior(effect.clone())));
+                multiply(covering(&Gap::NoPrior(effect.clone())));
+            }
             let dynamic_marks: Vec<MarkName> = attention_marks
                 .iter()
                 .filter(|mark| {
@@ -1088,21 +1122,16 @@ fn worst_case_plan_alternatives(
                     AudienceRequirement::Includes(_) => {}
                 }
             }
-            let mut seen_no_prior: Vec<&EffectKind> = Vec::new();
+            let mut seen_history: Vec<&HistoryRequirement> = Vec::new();
             for requirement in &tool.requires.history {
-                match requirement {
-                    HistoryRequirement::NoPrior(kind) if !seen_no_prior.contains(&kind) => {
-                        seen_no_prior.push(kind);
-                        let gap = Gap::NoPrior(kind.clone());
-                        multiply(
-                            authorities
-                                .iter()
-                                .filter(|authority| covers_gap(authority, &gap, tags, context))
-                                .count(),
-                        );
-                    }
-                    HistoryRequirement::NoPrior(_) | HistoryRequirement::Prior(_) => {}
+                if seen_history.contains(&requirement) {
+                    continue;
                 }
+                seen_history.push(requirement);
+                multiply(covering(&match requirement {
+                    HistoryRequirement::NoPrior(kind) => Gap::NoPrior(kind.clone()),
+                    HistoryRequirement::Prior(kind) => Gap::Prior(kind.clone()),
+                }));
             }
             let mut seen_marks: Vec<&crate::names::MarkName> = Vec::new();
             for mark in tool.requires.attention_marks() {
@@ -1585,42 +1614,6 @@ impl Registry {
             )
             .collect();
 
-        // The planner-cap lint runs the same cover evaluation planning runs, against the
-        // policy facts alone: the declared `within` assertions and no directory answers.
-        let no_expansions = Expansions::default();
-        let membership_context =
-            MembershipContext::new(audience.within_assertions(), audience.providers(), &no_expansions);
-
-        let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
-        let checkable_tools: Vec<&ToolDeclaration> = tools
-            .iter()
-            .filter(|(name, _)| !name.is_name_selector())
-            .flat_map(|(_, variants)| variants)
-            .map(|(_, d)| d)
-            .collect();
-        let redispatch_candidates = RedispatchCandidates::new(&checkable_tools);
-        for declaration in tools.values().flatten().map(|(_, d)| d).chain(wildcard.as_ref()) {
-            let count = worst_case_plan_alternatives(
-                declaration,
-                profile.confines_result(declaration.name()),
-                profile.context_control(),
-                &redispatch_candidates,
-                &Remedies {
-                    authorities: &config.authorities,
-                    sanitizers: &sanitizer_list,
-                    attention_marks: &attention_marks,
-                },
-                &membership_context,
-            );
-            if count > planner_cap.0 {
-                return Err(LoadError::TooManyPlanAlternatives {
-                    tool: declaration.name().as_str().to_string(),
-                    count,
-                    max: planner_cap.0,
-                });
-            }
-        }
-
         // The policy's whole effect vocabulary: every kind a declaration emits or requires, and
         // every kind an annotator's explicit bound names.
         let effect_kinds: BTreeSet<EffectKind> = tools
@@ -1678,6 +1671,43 @@ impl Registry {
                 (name, mandate)
             })
             .collect();
+
+        // The planner-cap lint runs the same cover evaluation planning runs, against the
+        // policy facts alone: the declared `within` assertions and no directory answers.
+        let no_expansions = Expansions::default();
+        let membership_context =
+            MembershipContext::new(audience.within_assertions(), audience.providers(), &no_expansions);
+
+        let sanitizer_list: Vec<Sanitizer> = sanitizers.values().cloned().collect();
+        let checkable_tools: Vec<&ToolDeclaration> = tools
+            .iter()
+            .filter(|(name, _)| !name.is_name_selector())
+            .flat_map(|(_, variants)| variants)
+            .map(|(_, d)| d)
+            .collect();
+        let redispatch_candidates = RedispatchCandidates::new(&checkable_tools);
+        for declaration in tools.values().flatten().map(|(_, d)| d).chain(wildcard.as_ref()) {
+            let count = worst_case_plan_alternatives(
+                declaration,
+                profile.confines_result(declaration.name()),
+                profile.context_control(),
+                &redispatch_candidates,
+                &Remedies {
+                    authorities: &config.authorities,
+                    sanitizers: &sanitizer_list,
+                    attention_marks: &attention_marks,
+                    annotators: &annotators,
+                },
+                &membership_context,
+            );
+            if count > planner_cap.0 {
+                return Err(LoadError::TooManyPlanAlternatives {
+                    tool: declaration.name().as_str().to_string(),
+                    count,
+                    max: planner_cap.0,
+                });
+            }
+        }
 
         let audience = audience.with_direct(direct);
         // Exact-only policies retain their existing canonical name order. With
@@ -4004,6 +4034,175 @@ mod tests {
         assert!(matches!(
             Registry::build_covered_with_cap(wide(4), PlannerCap::new(64).expect("nonzero")),
             Err(LoadError::TooManyPlanAlternatives { count: 129, max: 64, ref tool }) if tool == "wire"
+        ));
+    }
+
+    #[test]
+    fn the_cap_counts_the_authorities_that_waive_a_required_prior() {
+        let waiving = |n: usize, kind: &str| {
+            let mut deploy = tool("deploy");
+            deploy.requires.history = vec![HistoryRequirement::Prior(EffectKind::new("reviewed"))];
+            let mut cfg = base();
+            cfg.tools = declared(vec![deploy]);
+            cfg.authorities = (0..n)
+                .map(|index| Authority {
+                    except: Vec::new(),
+                    name: AuthorityName::new(format!("a{index}")),
+                    mandate: Mandate {
+                        prior_waivers: vec![EffectKind::new(kind)],
+                        ..Mandate::default()
+                    },
+                    scope: Scope::default(),
+                    hint: None,
+                })
+                .collect();
+            cfg
+        };
+        let cap = || PlannerCap::new(64).expect("nonzero");
+        assert!(Registry::build_covered_with_cap(waiving(64, "reviewed"), cap()).is_ok());
+        assert!(matches!(
+            Registry::build_covered_with_cap(waiving(65, "reviewed"), cap()),
+            Err(LoadError::TooManyPlanAlternatives { count: 65, max: 64, ref tool }) if tool == "deploy"
+        ));
+        assert!(Registry::build_covered_with_cap(waiving(65, "approved"), cap()).is_ok());
+    }
+
+    /// An Annotator may require a prior on any effect its mandate allows, so each such effect
+    /// multiplies the bound by the authorities that waive it; an omitted bound is the whole
+    /// effect vocabulary.
+    #[test]
+    fn the_cap_counts_prior_waivers_for_every_effect_an_annotator_may_require() {
+        let effects = ["e0", "e1"];
+        let count = |bound: Option<&[&str]>, waived: &[&str], authorities: usize| {
+            let mut cfg = base();
+            let mut emitter = tool("emit");
+            emitter.emits = EffectSet::new(effects.map(EffectKind::new)).expect("distinct kinds");
+            cfg.tools = vec![annotated("lookup", "classifier"), ToolDeclaration::Declared(emitter)];
+            cfg.annotators = vec![AnnotatorDeclaration {
+                effects: bound.map(|bound| bound.iter().copied().map(EffectKind::new).collect()),
+                ..annotator("classifier")
+            }];
+            cfg.authorities = (0..authorities)
+                .map(|index| Authority {
+                    except: Vec::new(),
+                    name: AuthorityName::new(format!("a{index}")),
+                    mandate: Mandate {
+                        prior_waivers: waived.iter().copied().map(EffectKind::new).collect(),
+                        ..Mandate::default()
+                    },
+                    scope: Scope::default(),
+                    hint: None,
+                })
+                .collect();
+            // The emitter's own menu fits two; the annotated one never does.
+            match Registry::build_covered_with_cap(cfg, PlannerCap::new(2).expect("nonzero")) {
+                Err(LoadError::TooManyPlanAlternatives { count, ref tool, .. }) if tool == "lookup" => count,
+                other => panic!("the annotated tool exceeds a cap of two, got {other:?}"),
+            }
+        };
+        // The bound is affine in the assignment product (settlements times product, plus the
+        // redispatch candidates), so the waivers show in its growth over the unwaived count.
+        let unwaived = count(Some(&effects), &["unrelated"], 3);
+        let one = count(Some(&effects), &effects[..1], 3) - unwaived;
+        let both = count(Some(&effects), &effects, 3) - unwaived;
+        assert!(one > 0, "three waivers of one required prior multiply the menu");
+        assert_eq!(both, 4 * one, "(3 × 3 − 1) = 4 × (3 − 1)");
+        assert_eq!(count(None, &effects, 3), count(Some(&effects), &effects, 3));
+
+        // A `no_prior` waiver on the same effects is an independent dimension.
+        let mixed = |no_prior_waivers: usize| {
+            let mut cfg = base();
+            cfg.tools = vec![annotated("lookup", "classifier")];
+            cfg.annotators = vec![AnnotatorDeclaration {
+                effects: Some(effects[..1].iter().copied().map(EffectKind::new).collect()),
+                ..annotator("classifier")
+            }];
+            cfg.authorities = (0..3)
+                .map(|index| Authority {
+                    except: Vec::new(),
+                    name: AuthorityName::new(format!("a{index}")),
+                    mandate: Mandate {
+                        prior_waivers: vec![EffectKind::new("e0")],
+                        waivers: match index < no_prior_waivers {
+                            true => vec![EffectKind::new("e0")],
+                            false => Vec::new(),
+                        },
+                        ..Mandate::default()
+                    },
+                    scope: Scope::default(),
+                    hint: None,
+                })
+                .collect();
+            match Registry::build_covered_with_cap(cfg, PlannerCap::new(1).expect("nonzero")) {
+                Err(LoadError::TooManyPlanAlternatives { count, ref tool, .. }) if tool == "lookup" => count,
+                other => panic!("the annotated tool exceeds a cap of one, got {other:?}"),
+            }
+        };
+        assert!(mixed(3) > mixed(1), "no_prior waivers widen the bound");
+        assert_eq!(mixed(3) - mixed(1), 2 * (mixed(2) - mixed(1)));
+
+        // A fallback's required prior outside the Annotator's bound is counted too.
+        let fallback = |waived: &str| {
+            let mut cfg = base();
+            cfg.tools = vec![fallback_route(
+                "lookup",
+                produced_fallback(
+                    Delta::NONE,
+                    EffectSet::new([]).expect("no kinds"),
+                    Requires {
+                        attention: vec![MarkName::new("review")],
+                        history: vec![HistoryRequirement::Prior(EffectKind::new("e1"))],
+                        ..Requires::default()
+                    },
+                ),
+            )];
+            cfg.annotators = vec![AnnotatorDeclaration {
+                effects: Some(effects[..1].iter().copied().map(EffectKind::new).collect()),
+                ..annotator("classifier")
+            }];
+            cfg.authorities = (0..3)
+                .map(|index| Authority {
+                    except: Vec::new(),
+                    name: AuthorityName::new(format!("a{index}")),
+                    mandate: Mandate {
+                        prior_waivers: vec![EffectKind::new(waived)],
+                        ..Mandate::default()
+                    },
+                    scope: Scope::default(),
+                    hint: None,
+                })
+                .collect();
+            match Registry::build_covered_with_cap(cfg, PlannerCap::new(1).expect("nonzero")) {
+                Err(LoadError::TooManyPlanAlternatives { count, ref tool, .. }) if tool == "lookup" => count,
+                other => panic!("the annotated tool exceeds a cap of one, got {other:?}"),
+            }
+        };
+        assert!(
+            fallback("e1") > fallback("unrelated"),
+            "the fallback's prior widens the bound"
+        );
+
+        let mut cfg = base();
+        cfg.tools = vec![annotated("lookup", "classifier")];
+        cfg.annotators = vec![AnnotatorDeclaration {
+            effects: Some(effects.map(EffectKind::new).into()),
+            ..annotator("classifier")
+        }];
+        cfg.authorities = (0..9)
+            .map(|index| Authority {
+                except: Vec::new(),
+                name: AuthorityName::new(format!("a{index}")),
+                mandate: Mandate {
+                    prior_waivers: effects.map(EffectKind::new).to_vec(),
+                    ..Mandate::default()
+                },
+                scope: Scope::default(),
+                hint: None,
+            })
+            .collect();
+        assert!(matches!(
+            Registry::build_covered_with_cap(cfg, PlannerCap::new(64).expect("nonzero")),
+            Err(LoadError::TooManyPlanAlternatives { ref tool, count, .. }) if tool == "lookup" && count >= 81
         ));
     }
 

@@ -239,6 +239,7 @@ pub enum SettlementFollowUp {
 pub struct OfferExecution {
     pub trajectory: TrajectoryId,
     pub offer: crate::value::OfferId,
+    pub initiator: appa_runtime_api::Initiator,
     pub outcome: OfferOutcome,
     /// The child's return policy the parent declares for a marked spawn's plan: the floor it
     /// chose, and the schema where the plan attests. `None` for every other plan.
@@ -318,9 +319,24 @@ pub struct Confined {
     pub candidate: crate::value::LabeledValue,
     pub residual: Narrowing,
     /// The offer opened for each next-stage plan, paired with the plan it binds: acceptance of
-    /// exactly `residual`, and every sanitizer hop that strictly improves the candidate. Runtime
-    /// renders these and routes `execute_remedy_plan` by them; it mints none of its own.
-    pub offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
+    /// exactly `residual` where the floor admits it, and every sanitizer hop that strictly
+    /// improves the candidate. Runtime renders these and routes `execute_remedy_plan` by them;
+    /// it mints none of its own.
+    pub offers: Vec<(crate::value::OfferId, crate::plan::ExecutableRemedyPlan)>,
+}
+
+impl Confined {
+    /// The staged offers with the plans they bind: freshly opened over `stage`, or read back
+    /// from the log where they already stand.
+    pub(crate) fn binding(
+        offers: Vec<(crate::value::OfferId, crate::plan::PlanId)>,
+        plan: impl Fn(&crate::value::OfferId, crate::plan::PlanId) -> Option<crate::plan::ExecutableRemedyPlan>,
+    ) -> Vec<(crate::value::OfferId, crate::plan::ExecutableRemedyPlan)> {
+        offers
+            .into_iter()
+            .filter_map(|(offer, id)| plan(&offer, id).map(|plan| (offer, plan)))
+            .collect()
+    }
 }
 
 /// The host's child identity for one prepared fork. Idempotent: repeating the same pair
@@ -450,10 +466,21 @@ pub enum EvidenceRequest {
 pub enum OutcomeFollowUp {
     Closed {
         admitted: Option<ValueBody>,
-        withheld: bool,
+        withheld: Option<Withheld>,
     },
     Resolve(EvidenceRequest),
     Staged(Box<Confined>),
+}
+
+/// Why a closed result stays out of its trajectory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Withheld {
+    /// As its release settled it: a plan withheld the output, or a failure's body sits
+    /// behind the output sanitizer it was released under.
+    ByRelease,
+    /// The output sanitizer its release bound is gone from this revision, or no longer
+    /// derives this result: nothing left reaches it.
+    ByRevision,
 }
 
 /// One released call: the dispatch the engine opened for it, and the canonical call to invoke.
@@ -1325,7 +1352,7 @@ impl<'a> Sequence<'a> {
                 basis,
                 evidence,
             } => self.offer_opened(trajectory, offer, block, act, call, subject, plan, basis, evidence)?,
-            Fact::OfferAccepted { trajectory, offer } => self.offer_accepted(trajectory, offer)?,
+            Fact::OfferAccepted { trajectory, offer, .. } => self.offer_accepted(trajectory, offer)?,
             Fact::CallApprovalConsumed { trajectory, offer, .. } => self.approval_consumed(trajectory, offer)?,
             Fact::CandidateConsumed {
                 trajectory, subject, ..
@@ -1655,6 +1682,9 @@ impl<'a> Sequence<'a> {
             {
                 Err(TransitionRefusal::ForgedEvidence)
             }
+            (CloseOutcome::SuccessAbandoned, checkpointed) if !checkpointed || !views.awaits_derivation(dispatch) => {
+                Err(TransitionRefusal::ForgedEvidence)
+            }
             (CloseOutcome::Success { effects }, true) if effects != &EffectSet::default() => {
                 Err(TransitionRefusal::EffectsMismatch)
             }
@@ -1961,7 +1991,9 @@ impl<'a> Sequence<'a> {
                 };
                 // The live act answered this whole gate before planning; the enumeration may
                 // read less, but the gathered evidence is still the operation's own ask.
-                self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &block));
+                self.audit_gate(&contract, &block, || {
+                    crate::check::decides_asking(&contract, views, candidate, &stage, &context)
+                });
                 let blocked = || crate::plan::BlockedCall {
                     call: candidate,
                     contract: &contract,
@@ -1989,6 +2021,18 @@ impl<'a> Sequence<'a> {
                         .map_err(TransitionRefusal::from)?;
                     if bundled.contains(plan) {
                         return Ok(bundled);
+                    }
+                }
+                // Only a check the pinned evidence answers in full reached an earlier planner's
+                // menu: the `blocked` mark closing it here never planned anything.
+                if !menu.contains(plan)
+                    && block.is_hard()
+                    && crate::check::decides_asking(&contract, views, candidate, &stage, &context)
+                {
+                    let legacy = crate::plan::hard_block_menu(self.engine.registry(), views, blocked(), &context)
+                        .map_err(TransitionRefusal::from)?;
+                    if legacy.contains(plan) {
+                        return Ok(legacy);
                     }
                 }
                 Ok(menu)
@@ -2165,10 +2209,11 @@ impl<'a> Sequence<'a> {
         // atoms and the chosen plan's — before ruling; mirror the same ask here.
         let stage = views.call_stage(&recorded.subject);
         let role = views.call_role(&recorded.subject);
-        if let Ok(CheckOutcome::Block(raw)) =
-            crate::check::evaluate(&contract, &views, call, &stage, role, &self.context(&expansions))
-        {
-            self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw));
+        let context = self.context(&expansions);
+        if let Ok(CheckOutcome::Block(raw)) = crate::check::evaluate(&contract, &views, call, &stage, role, &context) {
+            self.audit_gate(&contract, &raw, || {
+                crate::check::decides_asking(&contract, &views, call, &stage, &context)
+            });
         }
         self.audit_atoms(crate::plan::plan_atoms(self.engine.registry(), offered));
         self.audit_reads(&expansions);
@@ -2431,7 +2476,7 @@ impl<'a> Sequence<'a> {
                 CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => {
                     effect_advance(self.projection.view(trajectory).reserves(dispatch))
                 }
-                CloseOutcome::Indeterminate => crate::basis::BasisAdvance::default(),
+                CloseOutcome::Indeterminate | CloseOutcome::SuccessAbandoned => crate::basis::BasisAdvance::default(),
             },
             Fact::ValueAdmitted {
                 provenance: Provenance::ProviderRun { effects, .. },
@@ -2448,7 +2493,7 @@ impl<'a> Sequence<'a> {
                     .collect(),
                 ..BasisAdvance::default()
             },
-            Fact::OfferAccepted { trajectory, offer } => match self.projection.view(trajectory).offer(offer) {
+            Fact::OfferAccepted { trajectory, offer, .. } => match self.projection.view(trajectory).offer(offer) {
                 Some(recorded) => BasisAdvance {
                     subjects: vec![recorded.subject.clone()],
                     ..BasisAdvance::default()
@@ -2764,7 +2809,9 @@ impl<'a> Sequence<'a> {
             if let Ok(CheckOutcome::Block(raw)) =
                 crate::check::evaluate(&contract, &final_views, call, &CallStage::default(), role, &context)
             {
-                self.audit_atoms(crate::plan::block_atoms(self.engine.registry(), &contract, &raw));
+                self.audit_gate(&contract, &raw, || {
+                    crate::check::decides_asking(&contract, &final_views, call, &CallStage::default(), &context)
+                });
             }
         }
         let expected: Vec<&DispatchId> = composed.iter().flatten().map(|release| &release.dispatch).collect();
@@ -3303,6 +3350,15 @@ impl<'a> Sequence<'a> {
         self.audit.borrow_mut().read(expansions.reads());
     }
 
+    /// Count a block's planning gate as asked where the act that recorded it reached the gate:
+    /// every act reaches a soft block's. A hard block's was reached only by a planner whose
+    /// check asked every comparison, so only where `asked_all` says the evidence answered them.
+    fn audit_gate(&self, contract: &ToolAnnotation, raw: &crate::check::RawBlock, asked_all: impl FnOnce() -> bool) {
+        if !raw.is_hard() || asked_all() {
+            self.audit_atoms(crate::plan::gate_atoms(self.engine.registry(), contract, raw));
+        }
+    }
+
     /// Contribute the deterministic gate atoms the live act answered before this record's
     /// decision ran — a validation that re-derives less than the live gates demanded still
     /// justifies the evidence those gates gathered.
@@ -3617,7 +3673,9 @@ impl<'a> Sequence<'a> {
             return Err(TransitionRefusal::SanitizerUnapplicable);
         }
         // The live hop's act gated the standing block's whole atom set before offering.
-        self.audit_atoms(crate::plan::block_atoms(registry, &before_contract, &before));
+        self.audit_gate(&before_contract, &before, || {
+            crate::check::decides_asking(&before_contract, &views, predecessor, &stage, &context)
+        });
         self.audit_inherit(&recorded.evidence)?;
         self.audit_reads(expansions);
         Ok(())
@@ -3948,7 +4006,12 @@ mod tests {
 
     fn opening(engine: &Engine, family: &TrajectoryId) -> Fact {
         engine
-            .open_trajectory(family, crate::profile::PolicyFileKey::of(b"policy"), None)
+            .open_trajectory(
+                family,
+                crate::profile::PolicyFileKey::of(b"policy"),
+                None,
+                Default::default(),
+            )
             .expect("the opening validates against the empty log")
             .into_unsealed()
             .remove(0)

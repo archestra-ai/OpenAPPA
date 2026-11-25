@@ -1947,7 +1947,7 @@ mod tests {
     pub(crate) fn opening(id: &TrajectoryId) -> Vec<Fact> {
         engine()
             .at(deployment(), PolicyRevision::FIRST)
-            .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()), None)
+            .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()), None, Default::default())
             .expect("the opening seals")
             .into_unsealed()
     }
@@ -1963,7 +1963,7 @@ mod tests {
         }
         engine()
             .at(line, PolicyRevision::FIRST)
-            .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()), None)
+            .open_trajectory(id, PolicyFileKey::of(POLICY.as_bytes()), None, Default::default())
             .expect("the opening seals")
             .into_unsealed()
     }

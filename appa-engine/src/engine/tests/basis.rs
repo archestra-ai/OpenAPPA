@@ -52,6 +52,7 @@ fn a_later_revision_retires_every_offer_and_approval_an_earlier_one_recorded() {
     };
     let execute = |offer| {
         EngineEvent::ExecuteOffer(OfferExecution {
+            initiator: appa_runtime_api::Initiator::Agent,
             trajectory: traj(),
             offer,
             outcome: OfferOutcome::Approved(Vec::new()),

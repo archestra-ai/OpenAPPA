@@ -383,7 +383,7 @@ fn replay(entries: &[AuditEntry]) {
             AuditEvent::Denied { authority } => {
                 eprintln!("appa: [{at}] {authority} denied this call");
             }
-            AuditEvent::Narrowed { from, to } => {
+            AuditEvent::Narrowed { from, to, .. } => {
                 eprintln!(
                     "appa: remedy authorized [{at}]: narrowing accepted {} -> {}",
                     label(from),

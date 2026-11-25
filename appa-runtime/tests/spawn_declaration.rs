@@ -374,6 +374,7 @@ async fn an_embedded_spawn_after_its_prompt_takes_the_declaration_made_in_the_tu
         title: None,
         launch: None,
         start: None,
+        settings: Default::default(),
     };
     hooks::handle_embedded(&runtime, start).await;
     hooks::handle_embedded(&runtime, parsed(&prompt(&events))).await;

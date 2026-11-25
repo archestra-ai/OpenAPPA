@@ -13,7 +13,8 @@ use std::process::Command;
 use appa_runtime::api::{OfferKind, Remedies, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime::replay::{
-    Expect, Got, StepOutcome, Summary, Taken, Trace, TraceReport, Verdict, collect, parse, render, render_json, run,
+    Expect, Got, StepOutcome, Summary, Taken, Trace, TraceReport, Unanswered, Verdict, collect, parse, render,
+    render_json, run,
 };
 use axum::Router;
 use axum::routing::post;
@@ -584,7 +585,147 @@ async fn a_bound_annotator_decides_the_step() {
     *answer.lock().unwrap() = false;
     let reports = run(&runtime, &[trace("down.appa", text)]).await;
     assert!(
-        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(detail) if detail.contains("classifier")),
+        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(_)),
+        "{:?}",
+        reports[0]
+    );
+}
+
+/// `expect deny` holds only for a call the policy refused. A call refused because its
+/// Annotator gave no answer was not judged: its step cannot run. The `blocked` mark and a
+/// call its contract rejects are refusals like any other.
+#[tokio::test]
+async fn only_a_missing_fact_leaves_a_deny_step_unjudged() {
+    let router = Router::new().route(
+        "/annotate",
+        post(|_body: String| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+    );
+    let url = format!("{}/annotate", serve(router).await);
+    let binding = format!("\n[externals.annotators.classifier]\nurl = \"{url}\"\n");
+    let policy = format!(
+        "{ANNOTATED_POLICY}\n[[policy.tool]]\nname = \"mcp/ops/wipe\"\nrequires = {{ attention = [\"blocked\"] }}\n\
+         \n[[policy.tool]]\nname = \"mcp/mail/forward\"\nrequires = {{ audience = {{ contains = [\"$to\"] }} }}\n"
+    );
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = runtime(&dir, &policy, &binding);
+
+    let reports = run(
+        &runtime,
+        &[
+            trace(
+                "unanswered.appa",
+                "mcp/web/fetch {\n  url: \"https://example.com\"\n}\nexpect deny\n",
+            ),
+            trace("blocked.appa", "mcp/ops/wipe {}\nexpect deny\n"),
+            trace("malformed.appa", "mcp/mail/forward {}\nexpect deny\n"),
+        ],
+    )
+    .await;
+    assert!(
+        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(_)),
+        "{:?}",
+        reports[0]
+    );
+    assert_eq!(reports[0].verdict(), Verdict::CannotRun);
+    assert_eq!(outcomes(&reports[1]), vec![(1, &DENIED)]);
+    assert_eq!(outcomes(&reports[2]), vec![(1, &DENIED)]);
+}
+
+/// A step that cannot run reports the externals its own consults left without a usable
+/// answer: in one trace an Annotator whose answer is no annotation, in the other an audience
+/// source that fails, each on its second step, after a first step that consulted nothing.
+#[tokio::test]
+async fn a_step_that_cannot_run_names_the_externals_it_went_unanswered_by() {
+    let router = Router::new()
+        .route(
+            "/annotate",
+            post(|_body: String| async { axum::Json(serde_json::json!({ "version": 1 })) }),
+        )
+        .route(
+            "/audience",
+            post(|_body: String| async { (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+        );
+    let url = serve(router).await;
+    let policy = format!(
+        "{ANNOTATED_POLICY}\n[policy.audience.group.direct]\nfrom = [\"slack:user-group/direct\"]\n\n\
+         [[policy.tool]]\nname = \"mcp/files/read\"\ndelta = {{ audience = [\"alice@corp.example\"] }}\n\n\
+         [[policy.tool]]\nname = \"mcp/chat/post\"\nrequires = {{ audience = {{ contains = [\"@slack:user-group/direct\"] }} }}\n\
+         delta = {{}}\n"
+    );
+    let bindings = format!(
+        "\n[externals.annotators.classifier]\nurl = \"{url}/annotate\"\n\n[externals.audience.slack]\n\
+         url = \"{url}/audience\"\nselectors = [{{ template = \"user-group/<handle>\" }}]\n"
+    );
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let runtime = runtime(&dir, &policy, &bindings);
+    let read = "mcp/files/read {}\nexpect allow\n\n";
+    let reports = run(
+        &runtime,
+        &[
+            trace(
+                "annotated.appa",
+                &format!("{read}mcp/web/fetch {{\n  url: \"https://example.com\"\n}}\nexpect allow\n"),
+            ),
+            trace("audience.appa", &format!("{read}mcp/chat/post {{}}\nexpect allow\n")),
+        ],
+    )
+    .await;
+    for (report, role, name) in [
+        (&reports[0], appa_runtime::api::ExternalRole::Annotator, "classifier"),
+        (&reports[1], appa_runtime::api::ExternalRole::AudienceSource, "slack"),
+    ] {
+        let [first, second] = report.steps.as_slice() else {
+            panic!("two steps ran: {report:?}");
+        };
+        assert_eq!(first.outcome, taken(OfferKind::Accept), "{report:?}");
+        assert_eq!(first.unanswered, [], "{report:?}");
+        assert!(matches!(second.outcome, StepOutcome::CannotRun(_)), "{report:?}");
+        assert_eq!(
+            second.unanswered,
+            [Unanswered {
+                role,
+                name: name.to_string()
+            }],
+            "{report:?}"
+        );
+    }
+}
+
+/// A taken output-sanitizer offer releases the read, but its live sanitizer never answers for
+/// the result: the dispatch stays open on a missing fact, so the step did not run.
+#[tokio::test]
+async fn a_result_left_on_a_missing_fact_leaves_its_step_unrun() {
+    let unreachable = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port binds");
+        format!("http://{}/", listener.local_addr().expect("the port has an address"))
+    };
+    let policy = "[[policy.tool]]\nname = \"mcp/files/read(path:/hr/*)\"\ndelta = { audience = [\"hr\"] }\n\n\
+         [[policy.sanitizer]]\nname = \"scrub\"\non = [\"tool_output\"]\n\n\
+         [policy.sanitizer.permits]\naudience = { from = [\"hr\"], to = [\"public\"] }\n\n\
+         [policy.deployment]\nconfined_results = [\"mcp/files/read\"]\n";
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("appa.toml");
+    std::fs::write(
+        &path,
+        format!("[policy]\nversion = 2\n{policy}{EXTERNALS}\n[externals.sanitizers.scrub]\nurl = \"{unreachable}\"\n"),
+    )
+    .expect("the fixture writes");
+    let runtime = Runtime::open_in_memory(
+        Config::load(&path).expect("the fixture validates"),
+        None,
+        Remedies::Live,
+    )
+    .expect("the deployment opens in memory");
+    let reports = run(
+        &runtime,
+        &[trace(
+            "scrubbed.appa",
+            "mcp/files/read {\n  path: \"/hr/salaries.csv\"\n}\nexpect sanitizer scrub\n",
+        )],
+    )
+    .await;
+    assert!(
+        matches!(&reports[0].steps[0].outcome, StepOutcome::CannotRun(_)),
         "{:?}",
         reports[0]
     );

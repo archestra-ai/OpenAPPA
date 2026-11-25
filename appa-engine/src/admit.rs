@@ -21,6 +21,7 @@ pub enum ResultAdmission {
         observed: RawResultDigest,
     },
     Indeterminate,
+    SuccessAbandoned,
     SuccessNoValue,
     SuccessRaw {
         body: ValueBody,
@@ -234,6 +235,9 @@ pub(crate) fn admit_result(
     if checkpointed && matches!(admission, ResultAdmission::Failure | ResultAdmission::Indeterminate) {
         return Err(AdmitError::SuccessContradicted);
     }
+    if !checkpointed && matches!(admission, ResultAdmission::SuccessAbandoned) {
+        return Err(AdmitError::ObservationMismatch);
+    }
     let reported = match &admission {
         ResultAdmission::SuccessRaw { body } => Some(body.digest()),
         ResultAdmission::SuccessSanitized { raw_digest, .. } => Some(*raw_digest),
@@ -241,6 +245,7 @@ pub(crate) fn admit_result(
         ResultAdmission::CandidateAccepted { .. }
         | ResultAdmission::CandidateAdmissible
         | ResultAdmission::SuccessNoValue
+        | ResultAdmission::SuccessAbandoned
         | ResultAdmission::Failure
         | ResultAdmission::FailureWithBody { .. }
         | ResultAdmission::Indeterminate => None,
@@ -320,6 +325,11 @@ pub(crate) fn admit_result(
             outcome: CloseOutcome::Indeterminate,
         }],
         ResultAdmission::SuccessNoValue => vec![close_success()],
+        ResultAdmission::SuccessAbandoned => vec![Fact::DispatchClosed {
+            trajectory: trajectory.clone(),
+            dispatch: dispatch.clone(),
+            outcome: CloseOutcome::SuccessAbandoned,
+        }],
         ResultAdmission::SuccessRaw { body } => {
             // A raw success admits at the tool's declared output label, unsanitized.
             vec![close_success(), admit_value(output_label(), body)]

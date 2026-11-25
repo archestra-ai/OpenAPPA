@@ -58,7 +58,7 @@ use appa_eventlog::{
     AheadAttempt, Backend, DeploymentName, EndKind, HostObservation, Log, LogStore, PolicyHead, PublishError,
     StoredLabel,
 };
-use appa_runtime_api::Adapter;
+use appa_runtime_api::{Adapter, SessionSettings};
 use host::{AheadState, Declared, HostState, host_actor, inventory_at};
 
 /// One remedy offer as it is quoted and carried.
@@ -299,10 +299,25 @@ pub(crate) enum ToolCallDecision {
     },
     Deny {
         feedback: String,
+        outcomes: appa_runtime_api::Outcomes,
         offers: Vec<OfferedRemedy>,
         display: Vec<RemedyDisplay>,
         review: Vec<appa_runtime_api::Review>,
     },
+}
+
+impl ToolCallDecision {
+    /// The denial a proposal gets when judging it met a fact it could not obtain, as every
+    /// proposal exit classifies it; `None` for any other error.
+    pub(crate) fn missing_fact(error: &EventError) -> Option<ToolCallDecision> {
+        error.missing_fact().map(|missing| ToolCallDecision::Deny {
+            feedback: crate::engine::MissingIn::Call.model_text().to_string(),
+            outcomes: appa_runtime_api::Outcomes::MissingFact(missing),
+            offers: Vec::new(),
+            display: Vec::new(),
+            review: Vec::new(),
+        })
+    }
 }
 
 /// What the adapter gives the harness as the tool output. `Keep`: use
@@ -324,10 +339,19 @@ pub(crate) enum ToolResultDecision {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RemedyDecision {
-    Authorized { call: ExactCall },
-    Returned { value: String },
-    Declined { presentation: RemedyPresentation },
-    NoAnswer { feedback: String },
+    Authorized {
+        call: ExactCall,
+    },
+    Returned {
+        value: String,
+    },
+    Declined {
+        presentation: RemedyPresentation,
+    },
+    NoAnswer {
+        feedback: String,
+        retry: Option<appa_runtime_api::RetryHint>,
+    },
 }
 
 /// How a deferred return stands after its parent's control call: decided now, or read back
@@ -344,6 +368,9 @@ pub(crate) enum SettlementDecision {
 pub struct RemedyPresentation {
     /// Model-facing explanation in plain text.
     pub feedback: String,
+    /// Why the call or the value is held back; `None` where nothing new is refused: a
+    /// declined offer, a settlement not taken.
+    pub outcomes: Option<appa_runtime_api::Outcomes>,
     /// Machine-readable remedy offers available for this block.
     pub offers: Vec<OfferedRemedy>,
     /// Active human-in-the-loop reviews associated with this block.
@@ -458,14 +485,18 @@ impl RemedyRefusal {
                 "[appa] Another plan already approved this exact call, so this plan was not applied. Call the \
                  blocked tool again with the same arguments; it will be checked again."
             }
-            Self::Unanswered { annotator, class } => {
-                return std::borrow::Cow::Owned(format!(
-                    "annotator {annotator} gave no answer ({class}), so the plan was not applied. Nothing changed \
-                     and the offer still stands: call execute_remedy_plan again with the same offer id."
-                ));
-            }
+            // Which annotator failed, and how, is the host's to read from the fields.
+            Self::Unanswered { .. } => crate::engine::MissingIn::Remedy.model_text(),
             Self::Runtime { detail } => detail,
         })
+    }
+
+    /// What executing the offer again can do, when the refusal is on a fact not obtained.
+    pub fn retry(&self) -> Option<appa_runtime_api::RetryHint> {
+        match self {
+            Self::Unanswered { class, .. } => Some(crate::engine::retry_hint(*class)),
+            _ => None,
+        }
     }
 }
 
@@ -488,16 +519,36 @@ impl RemedyAttempt {
 /// never an engine decision.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemedyOutcome {
-    Authorized { call: ProposedCall },
-    Returned { value: String },
-    Declined { presentation: RemedyPresentation },
-    NoAnswer { feedback: String },
-    Refused { reason: RemedyRefusal },
+    Authorized {
+        call: ProposedCall,
+    },
+    Returned {
+        value: String,
+    },
+    Declined {
+        presentation: RemedyPresentation,
+    },
+    /// The offer stands. `retry` is set when a fact the remedy needs was not obtained: what
+    /// executing it again can do.
+    NoAnswer {
+        feedback: String,
+        retry: Option<appa_runtime_api::RetryHint>,
+    },
+    Refused {
+        reason: RemedyRefusal,
+    },
 }
 
 impl From<EventError> for RemedyOutcome {
     fn from(error: EventError) -> RemedyOutcome {
         let reason = match error {
+            // Contention leaves the offer standing, as a consult with no answer does.
+            EventError::Contended { .. } => {
+                return RemedyOutcome::NoAnswer {
+                    feedback: crate::engine::MissingIn::Remedy.model_text().to_string(),
+                    retry: Some(appa_runtime_api::RetryHint::Later),
+                };
+            }
             EventError::AnnotationRefused {
                 annotator,
                 no_answer: Some(class),
@@ -572,6 +623,7 @@ pub(crate) enum ChildReturnDecision {
     Deferred,
     Blocked {
         feedback: String,
+        outcomes: appa_runtime_api::Outcomes,
     },
 }
 
@@ -721,6 +773,11 @@ pub(crate) enum EventError {
     MalformedPrincipal(String),
     #[error("the session already acts for another principal")]
     PrincipalMismatch,
+    #[error("the session was opened under another line variant")]
+    LineVariantMismatch,
+    /// A start that carries a launch named a line variant; no host sends both.
+    #[error("a start that carries a launch names no line variant; this one names one")]
+    LaunchedLineVariant,
     #[error("no open dispatch with this id exists")]
     UnknownDispatch,
     #[error("this outcome does not match the open dispatch; it is not reported")]
@@ -818,6 +875,19 @@ impl EventError {
         }
     }
 
+    /// The fact the check reads and could not obtain, where that is the failure: an
+    /// Annotator that gave no answer, or a family log other writers kept contended.
+    pub(crate) fn missing_fact(&self) -> Option<appa_runtime_api::RetryHint> {
+        match self {
+            EventError::AnnotationRefused {
+                no_answer: Some(class), ..
+            } => Some(crate::engine::retry_hint(*class)),
+            // Nothing was decided, and asking again later may decide it.
+            EventError::Contended { .. } => Some(appa_runtime_api::RetryHint::Later),
+            _ => None,
+        }
+    }
+
     /// The closed class a host routes this failure on, and the one telemetry counts it under.
     pub(crate) fn class(&self) -> appa_runtime_api::RefusalClass {
         use appa_runtime_api::RefusalClass;
@@ -843,9 +913,13 @@ impl EventError {
             | EventError::ChildDispatchOpen => RefusalClass::OutstandingCall,
             EventError::CallIdReused => RefusalClass::CallIdReused,
             EventError::TrajectoryEnded => RefusalClass::TrajectoryEnded,
-            EventError::UnknownTrajectory | EventError::TrajectoryExists | EventError::RootArchived => {
-                RefusalClass::Trajectory
-            }
+            // A start under another line variant names a family its id does not hold, as a
+            // reused id does.
+            EventError::UnknownTrajectory
+            | EventError::TrajectoryExists
+            | EventError::RootArchived
+            | EventError::LineVariantMismatch
+            | EventError::LaunchedLineVariant => RefusalClass::Trajectory,
             EventError::UnknownDispatch | EventError::OutcomeMismatch => RefusalClass::Dispatch,
             EventError::UnknownOffer
             | EventError::ApprovalPending
@@ -885,6 +959,8 @@ impl EventError {
             | EventError::UndeclaredTool { .. }
             | EventError::MalformedPrincipal(_)
             | EventError::PrincipalMismatch
+            | EventError::LineVariantMismatch
+            | EventError::LaunchedLineVariant
             | EventError::DeclaresOffSpawn
             | EventError::DeferralUnkeyed
             | EventError::UnexpectedDecision => true,
@@ -1265,9 +1341,14 @@ impl Deployment {
         crate::engine::selector_templates(audience, provider).expect("the probe reads only registered providers")
     }
 
-    fn root_opening(&self, trajectory: &TrajectoryId, principal: Option<ReaderId>) -> Vec<appa_engine::fact::Fact> {
+    fn root_opening(
+        &self,
+        trajectory: &TrajectoryId,
+        principal: Option<ReaderId>,
+        settings: SessionSettings,
+    ) -> Vec<appa_engine::fact::Fact> {
         self.resident
-            .root_opening(trajectory, self.config.policy_file().bytes(), principal)
+            .root_opening(trajectory, self.config.policy_file().bytes(), principal, settings)
     }
 }
 
@@ -1411,6 +1492,7 @@ impl Prepared {
                 }),
                 store,
                 transcriber: None,
+                unanswered: None,
                 #[cfg(feature = "archestra")]
                 archestra_context: None,
                 pinned: None,
@@ -1475,11 +1557,39 @@ fn trace_published(line: &DeploymentName, published: &Deployment) {
     );
 }
 
+/// An external a step consulted that gave no usable answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unanswered {
+    pub role: ExternalRole,
+    pub name: String,
+}
+
+/// The externals one trace's consults left without a usable answer, since the last step took
+/// them.
+#[derive(Default)]
+pub(crate) struct UnansweredConsults(std::sync::Mutex<Vec<Unanswered>>);
+
+impl UnansweredConsults {
+    pub(crate) fn note(&self, unanswered: Unanswered) {
+        let mut asked = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !asked.contains(&unanswered) {
+            asked.push(unanswered);
+        }
+    }
+
+    #[cfg(feature = "daemon")]
+    pub(crate) fn take(&self) -> Vec<Unanswered> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
 struct Inner {
     shared: Arc<Shared>,
     store: Arc<LogStore>,
     /// Where this view's sessions hand a record of every consult they make.
     transcriber: Option<Arc<dyn ConsultTranscriber>>,
+    /// Where this view's sessions note each external a consult left without a usable answer.
+    unanswered: Option<Arc<UnansweredConsults>>,
     #[cfg(feature = "archestra")]
     archestra_context: Option<String>,
     /// The deployment this view serves in place of the shared one; see [`Runtime::pinned`].
@@ -1620,6 +1730,13 @@ impl Runtime {
     /// transcribe nothing.
     pub fn transcribing(&self, transcriber: Arc<dyn ConsultTranscriber>) -> Runtime {
         self.view(|view| view.transcriber = Some(transcriber))
+    }
+
+    /// This view with every external its sessions' consults leave without a usable answer
+    /// noted in `unanswered`.
+    #[cfg(feature = "daemon")]
+    pub(crate) fn noting_unanswered(&self, unanswered: Arc<UnansweredConsults>) -> Runtime {
+        self.view(|view| view.unanswered = Some(unanswered))
     }
 
     /// A request-scoped opaque context returned only to the host's archestra
@@ -1786,6 +1903,7 @@ impl Runtime {
             shared: Arc::clone(&self.inner.shared),
             store: Arc::clone(&self.inner.store),
             transcriber: self.inner.transcriber.clone(),
+            unanswered: self.inner.unanswered.clone(),
             #[cfg(feature = "archestra")]
             archestra_context: self.inner.archestra_context.clone(),
             pinned: self.inner.pinned.clone(),
@@ -2245,8 +2363,22 @@ pub enum RootForkRefusal {
     ParentUnavailable,
     #[error("the new root ID names its source family, source trajectory, or an unrelated existing root")]
     RootIdConflict,
+    #[error("the root fork is already open under another line variant")]
+    LineVariantMismatch,
     #[error("the root fork could not be opened: {0}")]
     Refused(String),
+}
+
+/// The settings the family's opening pinned: the log's first record is its opening.
+fn pinned_settings(log: &Log) -> &SessionSettings {
+    const UNPINNED: &SessionSettings = &SessionSettings {
+        auto_apply: appa_runtime_api::AutoApply::RulingsOnly,
+        line_variant: None,
+    };
+    match log.facts().first() {
+        Some(appa_engine::fact::Fact::TrajectoryOpened(opening)) => &opening.settings,
+        _ => UNPINNED,
+    }
 }
 
 fn read_refused(error: appa_eventlog::ReadError) -> EventError {
@@ -2557,11 +2689,23 @@ impl Runtime {
     }
 
     /// Opens a fresh root in this view's deployment line, decided at the revision its
-    /// deployment serves. Refuses an id whose log already exists: a reused harness id MUST NOT
-    /// continue another trajectory's history.
+    /// deployment serves, with no settings pinned.
+    #[cfg(test)]
     pub(crate) fn create_session(&self, id: TrajectoryId, principal: Option<ReaderId>) -> Result<Session, EventError> {
+        self.create_pinned_session(id, principal, SessionSettings::default())
+    }
+
+    /// Opens a fresh root in this view's deployment line, decided at the revision its
+    /// deployment serves, pinning `settings` for the family. Refuses an id whose log already
+    /// exists: a reused harness id MUST NOT continue another trajectory's history.
+    pub(crate) fn create_pinned_session(
+        &self,
+        id: TrajectoryId,
+        principal: Option<ReaderId>,
+        settings: SessionSettings,
+    ) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
-        self.create_session_under(id, deployment, principal, None)
+        self.create_session_under(id, deployment, principal, settings, None)
     }
 
     pub(crate) fn create_session_with_inventory(
@@ -2569,6 +2713,7 @@ impl Runtime {
         id: TrajectoryId,
         inventory: appa_runtime_api::inventory::ToolInventory,
         principal: Option<ReaderId>,
+        settings: SessionSettings,
     ) -> Result<Session, EventError> {
         let deployment = self.inner.deployment();
         // A root opens with an inventory only when the policy it opens under covers every tool
@@ -2583,7 +2728,7 @@ impl Runtime {
         )
         .map_err(EventError::PolicyUnavailable)?;
         self.inner.inventory_engine(&deployment, &inventory)?;
-        self.create_session_under(id, deployment, principal, Some(inventory))
+        self.create_session_under(id, deployment, principal, settings, Some(inventory))
     }
 
     /// Reserve identities in the actor's own scope, independently of the immutable
@@ -2736,14 +2881,23 @@ impl Runtime {
     /// has no prepared spawn, `ChildStart`/`ChildEnd`, or return contract. The embedding integration
     /// identifies the source trajectory; an ordinary `SessionStart` does not infer that
     /// relationship. Opening the same root fork again is not an error, even once the parent has
-    /// ended: a root already open is recognized before the parent is read.
+    /// ended: a root already open is recognized before the parent is read, and keeps the
+    /// settings its first opening pinned. The new root pins `settings`, not its parent's. A
+    /// host id another family continues under is that family's, and refused as a conflict.
     pub fn open_root_fork(
         &self,
         parent_root: &TrajectoryId,
         parent: &TrajectoryId,
         new_root: &TrajectoryId,
+        settings: SessionSettings,
     ) -> Result<(), RootForkRefusal> {
         if new_root == parent_root || new_root == parent {
+            return Err(RootForkRefusal::RootIdConflict);
+        }
+        if self
+            .aliased(new_root)
+            .map_err(|error| RootForkRefusal::Refused(error.to_string()))?
+        {
             return Err(RootForkRefusal::RootIdConflict);
         }
         let standing = self
@@ -2756,7 +2910,7 @@ impl Runtime {
             })
             .map_err(|error| RootForkRefusal::Refused(error.to_string()))?;
         if standing {
-            return self.root_fork_already_open(new_root, parent_root, parent);
+            return self.root_fork_already_open(new_root, parent_root, parent, &settings);
         }
         let refused = |error: EventError| RootForkRefusal::Refused(error.to_string());
         let deployment = self.inner.deployment();
@@ -2776,13 +2930,13 @@ impl Runtime {
         // inventory. It follows the parent's deployment at the head.
         let opening = policy
             .engine()
-            .root_fork_opening(new_root, log.policy_file(), origin)
+            .root_fork_opening(new_root, log.policy_file(), origin, settings.clone())
             .map_err(|refusal| RootForkRefusal::Refused(refusal.to_string()))?;
         match self.inner.store.create_root(opening, log.policy_file()) {
             Ok(_) => Ok(()),
             // A concurrent caller created this root ID after the check above.
             Err(appa_eventlog::CreateError::AlreadyExists { .. }) => {
-                self.root_fork_already_open(new_root, parent_root, parent)
+                self.root_fork_already_open(new_root, parent_root, parent, &settings)
             }
             Err(error) => {
                 self.inner
@@ -2793,12 +2947,14 @@ impl Runtime {
     }
 
     /// A repeat [`Runtime::open_root_fork`]: `fork_root` exists, which is the same root fork
-    /// only when its opening record forked this parent.
+    /// only when its opening record forked this parent, and continues it unless that opening
+    /// pinned another line variant.
     fn root_fork_already_open(
         &self,
         fork_root: &TrajectoryId,
         parent_root: &TrajectoryId,
         parent: &TrajectoryId,
+        settings: &SessionSettings,
     ) -> Result<(), RootForkRefusal> {
         let log = self
             .inner
@@ -2807,8 +2963,12 @@ impl Runtime {
         match log.facts().first() {
             Some(appa_engine::fact::Fact::TrajectoryOpened(appa_engine::fact::TrajectoryOpening {
                 forked_from: Some(origin),
+                settings: pinned,
                 ..
-            })) if origin.is_from(parent_root, parent) => Ok(()),
+            })) if origin.is_from(parent_root, parent) => match pinned.continued_by(settings.line_variant.as_ref()) {
+                true => Ok(()),
+                false => Err(RootForkRefusal::LineVariantMismatch),
+            },
             _ => Err(RootForkRefusal::RootIdConflict),
         }
     }
@@ -2818,14 +2978,20 @@ impl Runtime {
         id: TrajectoryId,
         deployment: Arc<Deployment>,
         principal: Option<ReaderId>,
+        settings: SessionSettings,
         inventory: Option<appa_runtime_api::inventory::ToolInventory>,
     ) -> Result<Session, EventError> {
+        // A host id another family continues under is that family's: opening a root there
+        // would shadow it.
+        if self.aliased(&id)? {
+            return Err(EventError::TrajectoryExists);
+        }
         // A root with an inventory is bound to the composed file — the serving policy with the
         // inventory embedded — so every revision the family follows compiles with it, and the
         // previous version reads the family as pinned to that file.
         let (opening, policy_file) = match inventory {
             None => (
-                deployment.root_opening(&id, principal),
+                deployment.root_opening(&id, principal, settings),
                 deployment.config.policy_file().bytes().to_vec(),
             ),
             Some(inventory) => {
@@ -2835,7 +3001,7 @@ impl Runtime {
                     .map_err(EventError::PolicyUnavailable)?;
                 let bytes = composed.policy_file().bytes().to_vec();
                 let engine = self.inner.inventory_engine(&deployment, &inventory)?;
-                (engine.root_opening(&id, &bytes, principal), bytes)
+                (engine.root_opening(&id, &bytes, principal, settings), bytes)
             }
         };
         let line = self.inner.line();
@@ -2934,6 +3100,24 @@ impl Runtime {
             .cloned())
     }
 
+    /// The feedback refusing a proposal on its own shape, judged under the family's policy:
+    /// what no state can change outranks what state decides.
+    pub(crate) fn malformed_proposal(
+        &self,
+        root: &TrajectoryId,
+        call: &ProposedCall,
+    ) -> Result<Option<String>, EventError> {
+        if call.tool == peer::SEND_MESSAGE
+            && let Err(feedback) = peer::send_arguments(call)
+        {
+            return Ok(Some(format!("[appa] {feedback}")));
+        }
+        let log = self.inner.log(root)?;
+        let deployment = self.inner.deployment();
+        let policy = self.inner.resolve_policy(&deployment, &log)?;
+        Ok(policy.engine().malformed(call))
+    }
+
     pub fn status(&self, id: &TrajectoryId) -> Option<TrajectoryStatus> {
         match self.try_status(id) {
             Ok(status) => Some(status),
@@ -2971,7 +3155,7 @@ impl Runtime {
             .map_err(|error| StatusReadError::Replay(error.to_string()))?;
         policy
             .engine()
-            .trajectory_status(&view, id)
+            .trajectory_status(&view, id, pinned_settings(&log).clone())
             .ok_or_else(|| StatusReadError::Replay("the root has no status projection".to_string()))
     }
 
@@ -3331,7 +3515,7 @@ impl Runtime {
             )),
             RemedyOutcome::Returned { value } => answer(value),
             RemedyOutcome::Declined { presentation } => answer(presentation.feedback),
-            RemedyOutcome::NoAnswer { feedback } => answer(feedback),
+            RemedyOutcome::NoAnswer { feedback, .. } => answer(feedback),
             RemedyOutcome::Refused { reason } => RemedyReply {
                 text: reason.detail().to_string(),
                 is_error: true,
@@ -3825,6 +4009,7 @@ impl Runtime {
             Ok(SettlementDecision::Unacceptable { feedback }) => RemedyOutcome::Declined {
                 presentation: RemedyPresentation {
                     feedback,
+                    outcomes: None,
                     offers: Vec::new(),
                     review: Vec::new(),
                     display: Vec::new(),
@@ -3903,7 +4088,7 @@ impl Runtime {
             Ok(RemedyDecision::Authorized { call }) => RemedyOutcome::Authorized { call: call.proposed() },
             Ok(RemedyDecision::Returned { value }) => RemedyOutcome::Returned { value },
             Ok(RemedyDecision::Declined { presentation }) => RemedyOutcome::Declined { presentation },
-            Ok(RemedyDecision::NoAnswer { feedback }) => RemedyOutcome::NoAnswer { feedback },
+            Ok(RemedyDecision::NoAnswer { feedback, retry }) => RemedyOutcome::NoAnswer { feedback, retry },
             Err(error) => error.into(),
         }
     }
@@ -4301,7 +4486,10 @@ impl Runtime {
     pub(crate) fn branch_status(&self, root: &TrajectoryId, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
         let deployment = self.inner.deployment();
         let (policy, view) = self.rebuilt(&deployment, root);
-        policy.engine().trajectory_status(&view, trajectory)
+        let log = self.inner.log(root).expect("the rebuilt root's log reads");
+        policy
+            .engine()
+            .trajectory_status(&view, trajectory, pinned_settings(&log).clone())
     }
 
     /// Drive one event straight at the engine and take its refusal, for the
@@ -5596,7 +5784,12 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             let runtime = Runtime::open(with_pool(2), dir.path().join("appa.db"), None).expect("the deployment opens");
             let session = |id: &str| {
                 runtime
-                    .create_session_with_inventory(TrajectoryId(id.to_string()), ToolInventory::default(), None)
+                    .create_session_with_inventory(
+                        TrajectoryId(id.to_string()),
+                        ToolInventory::default(),
+                        None,
+                        Default::default(),
+                    )
                     .expect("the inventory session opens")
             };
             let (first, second) = (session("first"), session("second"));
@@ -5887,6 +6080,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -5918,6 +6112,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -5962,6 +6157,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     start: None,
                     launch: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -6032,6 +6228,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -6127,6 +6324,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                         title: None,
                         launch: None,
                         start: None,
+                        settings: Default::default(),
                     }
                 )
                 .await,
@@ -6263,7 +6461,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             ..ToolInventory::default()
         };
         runtime
-            .create_session_with_inventory(id.clone(), inventory.clone(), None)
+            .create_session_with_inventory(id.clone(), inventory.clone(), None, Default::default())
             .unwrap();
         runtime
             .reload(claude_config(
@@ -6489,7 +6687,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             sources: Vec::new(),
         };
         runtime
-            .create_session_with_inventory(root.clone(), inventory("parent"), None)
+            .create_session_with_inventory(root.clone(), inventory("parent"), None, Default::default())
             .unwrap();
         let child = Actor {
             root: root.clone(),
@@ -6566,7 +6764,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
         };
         assert!(
             runtime
-                .create_session_with_inventory(id.clone(), inventory, None)
+                .create_session_with_inventory(id.clone(), inventory, None, Default::default())
                 .is_err()
         );
         assert!(matches!(runtime.session(&id, &id), Err(EventError::UnknownTrajectory)));
@@ -6812,6 +7010,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -6883,6 +7082,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -6939,6 +7139,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -6993,6 +7194,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7041,6 +7243,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -7094,6 +7297,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7163,6 +7367,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -7222,6 +7427,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -7261,6 +7467,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7340,6 +7547,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await;
@@ -7431,6 +7639,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             },
         )
         .await;
@@ -7497,6 +7706,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,
@@ -7531,6 +7741,7 @@ delta = { audience = { resolver = "directory", argument = "customer" } }
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         };
         let runtime = Runtime::open(versioned_policy("first"), db.clone(), None).expect("the deployment opens");
         assert_eq!(
@@ -7706,6 +7917,7 @@ url = "{url}"
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 }
             )
             .await,

@@ -1203,7 +1203,7 @@ async fn an_observer_receives_every_record_typed() {
 }
 
 #[tokio::test]
-async fn a_call_its_annotator_cannot_classify_is_refused_and_the_run_goes_on() {
+async fn a_call_its_annotator_cannot_classify_is_denied_and_the_run_goes_on() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
     let policy = r#"
 version = 2
@@ -1225,24 +1225,25 @@ name = "send_email"
         .answers("send_email", "sent");
     let annotator_url = format!("{}/annotator", host.clone().serve().await);
     let externals = format!("[externals.annotators.classify]\nurl = \"{annotator_url}\"\n");
-    let decisions = Decisions::recording();
-
     let provider = Provider::default();
     provider
         .calls("read_hr", serde_json::json!({"who": "nobody"}))
         .calls("send_email", serde_json::json!({"to": "alice"}))
         .says("I could not read the record, so I only sent the note.");
 
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
     let agent = agent(
         runtime(&dir, policy, &externals),
         &provider,
         &host,
         &["read_hr", "send_email"],
     )
-    .await;
+    .await
+    .with_observer(tx);
     let outcome = agent
         .run(root(), "Look up nobody and tell Alice.", Default::default())
         .await;
+    drop(agent);
 
     assert_eq!(
         outcome,
@@ -1254,19 +1255,26 @@ name = "send_email"
         vec![serde_json::json!({"tool": "send_email", "arguments": {"to": "alice"}})],
         "the unclassified call never reached the host; the next one ran",
     );
-    let reply = provider.tool_result(1, "call_0");
-    assert!(
-        reply.starts_with(
-            "[appa] this call was refused and did not run: annotator=classify error=non_success status=404"
-        ),
-        "the model reads the runtime's own refusal: {reply}",
+    let mut records = Vec::new();
+    while let Some(recorded) = rx.recv().await {
+        records.push(recorded.record);
+    }
+    let denied: Vec<&str> = records
+        .iter()
+        .filter_map(|record| match record {
+            appa_example_agent::Record::Blocked { tool, .. } => Some(tool.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        denied,
+        vec!["read_hr"],
+        "the denial is a block, never a refusal: {records:?}"
     );
     assert!(
-        decisions
-            .recorded()
+        !records
             .iter()
-            .any(|line| line.starts_with("appa: [agent-test] refused read_hr: annotator=classify")),
-        "the refusal is a decision line of its own: {:?}",
-        decisions.recorded(),
+            .any(|record| matches!(record, appa_example_agent::Record::Refused { .. })),
+        "{records:?}"
     );
 }

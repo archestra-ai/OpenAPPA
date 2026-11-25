@@ -40,6 +40,7 @@ static MISSING_SOURCE: std::sync::LazyLock<Label> = std::sync::LazyLock::new(Lab
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CloseKind {
     Success,
+    SuccessAbandoned,
     Failure,
     FailureWithBody(RawResultDigest),
     Indeterminate,
@@ -230,6 +231,7 @@ pub struct Projection {
     denials: OrdMap<TrajectoryId, BTreeMap<CanonicalDigest, BTreeSet<AuthorityName>>>,
     opening: Option<(TrajectoryId, Label)>,
     principal: Option<crate::label::ReaderId>,
+    auto_apply: appa_runtime_api::AutoApply,
     decided: OrdMap<crate::transition::ProposalBatchId, DecidedBatch>,
     admissions: OrdMap<crate::transition::ProposalBatchId, Vec<ValueId>>,
     offers: OrdMap<crate::value::OfferId, RecordedOffer>,
@@ -348,6 +350,7 @@ impl Projection {
             denials: Default::default(),
             opening: None,
             principal: None,
+            auto_apply: Default::default(),
             decided: Default::default(),
             admissions: Default::default(),
             offers: Default::default(),
@@ -518,6 +521,7 @@ impl Projection {
             denials,
             opening,
             principal,
+            auto_apply,
             decided,
             admissions,
             offers,
@@ -531,6 +535,7 @@ impl Projection {
                 profile,
                 forked_from,
                 principal: opened_for,
+                settings,
                 ..
             }) => {
                 let mut starting = profile.starting_label().clone();
@@ -563,6 +568,7 @@ impl Projection {
                 );
                 *opening = Some((trajectory.clone(), starting));
                 *principal = opened_for.clone();
+                *auto_apply = settings.auto_apply;
             }
             Fact::BasisAdvanced { advance, .. } => versions.advance(advance),
             Fact::OfferOpened {
@@ -743,6 +749,7 @@ impl Projection {
                     CloseOutcome::Failure => CloseKind::Failure,
                     CloseOutcome::FailureWithBody { observed } => CloseKind::FailureWithBody(*observed),
                     CloseOutcome::Indeterminate => CloseKind::Indeterminate,
+                    CloseOutcome::SuccessAbandoned => CloseKind::SuccessAbandoned,
                 };
                 closed.insert(dispatch.clone(), kind);
             }
@@ -1033,6 +1040,11 @@ impl Projection {
         self.principal.as_ref()
     }
 
+    /// The remedies the family's opening lets the runtime apply itself.
+    pub(crate) fn auto_apply(&self) -> appa_runtime_api::AutoApply {
+        self.auto_apply
+    }
+
     /// Has a value been admitted for this dispatch's result?
     pub(crate) fn admitted_result(&self, dispatch: &DispatchId) -> bool {
         self.admitted_results.contains(dispatch)
@@ -1098,6 +1110,11 @@ impl Views<'_> {
     /// The reader the family acts for, as its opening pinned it.
     pub(crate) fn principal(&self) -> Option<&crate::label::ReaderId> {
         self.projection.principal()
+    }
+
+    /// The remedies the family's opening lets the runtime apply itself.
+    pub(crate) fn auto_apply(&self) -> appa_runtime_api::AutoApply {
+        self.projection.auto_apply()
     }
 
     /// The annotation an Annotator pinned to this same canonical call, in a proposal this
@@ -1550,6 +1567,18 @@ impl Views<'_> {
 
     pub(crate) fn closed_successfully(&self, dispatch: &DispatchId) -> bool {
         matches!(self.projection.closed.get(dispatch), Some(CloseKind::Success))
+    }
+
+    /// A checkpointed result bound to an output sanitizer whose derivation was never obtained.
+    pub(crate) fn awaits_derivation(&self, dispatch: &DispatchId) -> bool {
+        self.bound_sanitizer(dispatch).is_some()
+            && self
+                .candidate(&crate::basis::SubjectKey::ConfinedResult(dispatch.clone()))
+                .is_none()
+    }
+
+    pub(crate) fn closed_abandoned(&self, dispatch: &DispatchId) -> bool {
+        matches!(self.projection.closed.get(dispatch), Some(CloseKind::SuccessAbandoned))
     }
 
     pub(crate) fn dispatch_failed(&self, dispatch: &DispatchId) -> bool {

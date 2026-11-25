@@ -27,10 +27,10 @@ pub(super) const APPLY_BELOW: &str = " Apply a plan below.";
 /// or meets a family another writer changed under it.
 const DECLARATION_ROUNDS: u32 = 3;
 
-/// How many plans of stock `approve` rulings one proposal applies before its block stands. A
-/// plan can go stale between its block and its execution, and an approval can meet a label
-/// another dispatch moved; each round proposes again and reads the block that stands then.
-const STOCK_APPROVE_ROUNDS: usize = 3;
+/// How many plans one proposal applies itself before its block stands. A plan can go stale
+/// between its block and its execution, and an approval can meet a label another dispatch
+/// moved; each round proposes again and reads the block that stands then.
+const AUTO_APPLY_ROUNDS: usize = 3;
 
 /// One proposed tool call and what came with it: the host's call id, the spawn it starts, the
 /// prompt a fan-out spawn is keyed by, the return a single spawn declares, and the held peer
@@ -278,14 +278,16 @@ impl Session {
         }
     }
 
-    /// Propose, and while the block offers a plan that asks only stock `approve` authorities,
-    /// apply that plan and propose again: the agent sees the call released, never the block.
+    /// Propose, and while the block offers a plan the family lets the runtime apply itself
+    /// ([`Session::auto_applied_offer`]), apply that plan through the same execution an agent's
+    /// plan takes and propose again: the agent sees the call released, never the block.
     /// The plan is read from the block that stands, never an earlier one, and every execution is
     /// followed by a proposal, so the decision returned is never older than the last fact this
     /// loop appended. An approval already recorded stays recorded, and the next proposal of the
-    /// call spends it. A stock `approve` authority never denies, so a plan that was not applied
-    /// lost a race: another dispatch moved its basis or took its subject. The next proposal
-    /// reads what stands after that, and the rounds bound how often it is tried. An
+    /// call spends it. A stock `approve` authority never denies and an acceptance asks no one,
+    /// so a plan that was not applied lost a race: another dispatch moved its basis or took its
+    /// subject. The next proposal reads what stands after that, and the rounds bound how often
+    /// it is tried. An
     /// operational failure to apply the plan refuses the call, never re-proposes it. Only the
     /// first proposal takes a declaration made ahead: when it took none, the later ones run
     /// outside the invocation, so a declaration made meanwhile waits for the next spawn. A
@@ -295,45 +297,64 @@ impl Session {
         proposal: &Proposal,
         invocation: Option<appa_eventlog::InvocationNonce>,
     ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
-        let (mut decision, took) = self.propose_once(proposal, invocation).await?;
-        for _ in 0..STOCK_APPROVE_ROUNDS {
+        let (mut decision, took, mut auto_apply) = self.propose_once(proposal, invocation).await?;
+        for _ in 0..AUTO_APPLY_ROUNDS {
             let ToolCallDecision::Deny { offers, .. } = &decision else {
                 break;
             };
-            let Some(offer) = self.stock_approved_offer(offers)? else {
+            let Some(offer) = self.auto_applied_offer(offers, auto_apply)? else {
                 break;
             };
-            match self.on_remedy(offer, RemedyArguments::default(), None, None).await {
+            match self.auto_apply(offer).await {
                 Ok(RemedyDecision::Authorized { .. }) => {}
                 Err(error) if error.is_operational() => return Err(error),
                 applied => {
-                    tracing::debug!(trajectory = %self.trajectory.0, ?applied, "a stock approve plan was not applied");
+                    tracing::debug!(trajectory = %self.trajectory.0, ?applied, "an auto-applied plan was not applied");
                 }
             }
-            decision = self.propose_once(proposal, took.as_ref().and(invocation)).await?.0;
+            (decision, _, auto_apply) = self.propose_once(proposal, took.as_ref().and(invocation)).await?;
         }
         Ok((decision, took))
     }
 
-    /// The first offered plan that asks only stock `approve` authorities, if the block has one.
-    fn stock_approved_offer(&self, offers: &[appa_runtime_api::OfferedRemedy]) -> Result<Option<OfferId>, EventError> {
+    /// The offered plan the runtime applies itself under `auto_apply`, the family's pinned
+    /// setting as the snapshot that decided the block read it, if the block has one: stock
+    /// `approve` rulings, and the acceptance of a narrowing where the family allows it. Of
+    /// several, the one whose most demanding step asks the least, and the first of those in
+    /// offer order.
+    pub(super) fn auto_applied_offer(
+        &self,
+        offers: &[appa_runtime_api::OfferedRemedy],
+        auto_apply: appa_runtime_api::AutoApply,
+    ) -> Result<Option<OfferId>, EventError> {
         let deployment = self.deployment();
-        if offers.is_empty() || !deployment.externals.has_stock_approve() {
-            return Ok(None);
+        // A plan that declares a return or rewrites arguments is never applied unasked.
+        let eligible: Vec<OfferId> = offers
+            .iter()
+            .filter(|offer| offer.returns.is_none() && offer.input_sanitizer.is_none())
+            .map(|offer| OfferId(offer.id.clone()))
+            .collect();
+        match (auto_apply, eligible.is_empty()) {
+            (_, true) => return Ok(None),
+            (appa_runtime_api::AutoApply::RulingsOnly, _) if !deployment.externals.has_stock_approve() => {
+                return Ok(None);
+            }
+            _ => {}
         }
         self.with_view(|context| {
-            Ok(offers
-                .iter()
-                // A plan that declares a return or rewrites arguments is never authorize-only.
-                .filter(|offer| offer.returns.is_none() && offer.input_sanitizer.is_none())
-                .filter_map(|offer| crate::engine::resolve_rendered(context.log, &OfferId(offer.id.clone())))
-                .find(|offer| {
+            Ok(crate::engine::resolve_rendered_all(context.log, &eligible)
+                .into_iter()
+                .flatten()
+                .filter_map(|offer| {
                     context
                         .engine()
-                        .offer_asks_only(context.view, &self.trajectory, offer, |authority| {
+                        .auto_applied(context.view, &self.trajectory, &offer, auto_apply, |authority| {
                             deployment.externals.is_stock_approve(authority)
                         })
-                }))
+                        .map(|asks| (asks, offer))
+                })
+                .min_by_key(|(asks, _)| std::cmp::Reverse(*asks))
+                .map(|(_, offer)| offer))
         })
     }
 
@@ -360,11 +381,20 @@ impl Session {
         })
     }
 
+    /// One proposal, with the auto-apply its family pinned as the snapshot that decided it read
+    /// it.
     async fn propose_once(
         &self,
         proposal: &Proposal,
         invocation: Option<appa_eventlog::InvocationNonce>,
-    ) -> Result<(ToolCallDecision, Option<appa_eventlog::AheadAttempt>), EventError> {
+    ) -> Result<
+        (
+            ToolCallDecision,
+            Option<appa_eventlog::AheadAttempt>,
+            appa_runtime_api::AutoApply,
+        ),
+        EventError,
+    > {
         let took = Took::default();
         let Proposal {
             call,
@@ -390,9 +420,11 @@ impl Session {
                 tool: call.tool.clone(),
             });
         }
+        let mut auto_apply = appa_runtime_api::AutoApply::default();
         let decision = self
             .drive_with_evidence(
                 |context, mut evidence| {
+                    auto_apply = crate::api::pinned_settings(context.log).auto_apply;
                     if let Some(message) = held_message {
                         evidence.push(ExternalEvidence::Held {
                             message: message.clone(),
@@ -433,20 +465,21 @@ impl Session {
                         dispatch: released.dispatch.clone(),
                     })
                 }
-                ([], feedback) if !feedback.is_empty() => {
+                ([], [entry]) => {
                     tracing::debug!(trajectory = %self.trajectory.0, "call blocked");
                     Ok(ToolCallDecision::Deny {
-                        feedback: join_feedback(feedback),
-                        offers: feedback.iter().flat_map(|entry| entry.offers.clone()).collect(),
-                        display: feedback.iter().filter_map(|entry| entry.display.clone()).collect(),
-                        review: join_review(feedback, &self.deployment().externals),
+                        feedback: entry.text.clone(),
+                        outcomes: entry.outcomes,
+                        offers: entry.offers.clone(),
+                        display: entry.display.iter().cloned().collect(),
+                        review: reviews(&entry.review, &self.deployment().externals),
                     })
                 }
                 _ => Err(EventError::UnexpectedDecision),
             },
             _ => Err(EventError::UnexpectedDecision),
         };
-        decision.map(|decision| (decision, took))
+        decision.map(|decision| (decision, took, auto_apply))
     }
 
     /// Whether the serving policy writes a contract for this tool's exact name — the
@@ -491,6 +524,7 @@ fn noted(decision: &ToolCallDecision, notice: &str) -> ToolCallDecision {
     match decision {
         ToolCallDecision::Deny {
             feedback,
+            outcomes,
             offers,
             display,
             review,
@@ -498,6 +532,7 @@ fn noted(decision: &ToolCallDecision, notice: &str) -> ToolCallDecision {
             let apply = if offers.is_empty() { "" } else { APPLY_BELOW };
             ToolCallDecision::Deny {
                 feedback: format!("{notice}{apply}\n\n{feedback}"),
+                outcomes: *outcomes,
                 offers: offers.clone(),
                 display: display.clone(),
                 review: review.clone(),

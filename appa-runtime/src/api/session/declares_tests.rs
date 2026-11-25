@@ -521,6 +521,7 @@ async fn a_declaration_no_plan_fits_adds_its_notice_to_the_undeclared_block() {
     let Deployed { runtime, .. } = deployed(false);
     let ToolCallDecision::Deny {
         feedback,
+        outcomes,
         offers,
         display,
         review,
@@ -539,6 +540,7 @@ async fn a_declaration_no_plan_fits_adds_its_notice_to_the_undeclared_block() {
                 super::call::UNFIT_DECLARED,
                 super::call::APPLY_BELOW
             ),
+            outcomes,
             offers,
             display,
             review,

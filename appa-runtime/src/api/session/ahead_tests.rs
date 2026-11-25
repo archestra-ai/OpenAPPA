@@ -888,7 +888,11 @@ mod daemon {
         let Replicas { a, .. } = &replicas;
         a.vouch(&key(Some("c")), &acting(), None);
         a.store().contend_next_appends(u64::MAX);
-        assert!(operational(&a.declare_vouched(args(), Some("c"))));
+        // Contention leaves the declaration standing, as a consult with no answer does.
+        assert!(matches!(
+            a.declare_vouched(args(), Some("c")),
+            RemedyOutcome::NoAnswer { .. }
+        ));
         a.store().contend_next_appends(0);
         a.store().fail_commit_after(0);
         assert!(operational(&a.declare_vouched(args(), Some("c"))));

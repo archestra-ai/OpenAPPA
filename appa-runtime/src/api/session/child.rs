@@ -18,7 +18,9 @@ pub(super) fn return_decision(decision: EngineDecision) -> Result<ChildReturnDec
         Next::PresentToModel(Presentation::Staged { value }) => Ok(ChildReturnDecision::Staged { value }),
         Next::PresentToModel(Presentation::NoValue) => Ok(ChildReturnDecision::NoValue),
         Next::PresentToModel(Presentation::Deferred) => Ok(ChildReturnDecision::Deferred),
-        Next::PresentToModel(Presentation::Blocked { feedback, .. }) => Ok(ChildReturnDecision::Blocked { feedback }),
+        Next::PresentToModel(Presentation::Blocked { feedback, outcomes, .. }) => {
+            Ok(ChildReturnDecision::Blocked { feedback, outcomes })
+        }
         _ => Err(EventError::UnexpectedDecision),
     }
 }
@@ -293,6 +295,7 @@ fn ended_child(end: ChildEnd, value: Option<String>) -> ChildReturnDecision {
         (Some(_), ChildEnd::Deferred) => ChildReturnDecision::Deferred,
         (Some(_), ChildEnd::Void) => ChildReturnDecision::Blocked {
             feedback: ENDED_CHILD.to_string(),
+            outcomes: appa_runtime_api::Outcomes::HardBlock,
         },
     }
 }
