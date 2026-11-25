@@ -870,6 +870,9 @@ pub struct RuntimeEngine {
 /// How many families' views one engine holds at most.
 const HELD_VIEWS: usize = 128;
 
+/// How many retained log bytes one engine's held views represent at most, together.
+const HELD_VIEWS_BYTES: usize = 32 * 1024 * 1024;
+
 /// The last view this engine built for each of a bounded number of families, so the next read
 /// of a family validates only the batches its log accepted since rather than the whole log.
 #[derive(Default)]
@@ -882,6 +885,7 @@ struct HeldFamilies {
     views: std::collections::HashMap<(appa_eventlog::ReaderId, TrajectoryId), HeldView>,
     /// Families in the order they were last used, oldest first.
     order: std::collections::VecDeque<(appa_eventlog::ReaderId, TrajectoryId)>,
+    bytes: usize,
 }
 
 struct HeldView {
@@ -889,6 +893,7 @@ struct HeldView {
     lineage: Option<appa_eventlog::LogLineage>,
     basis: u64,
     facts: usize,
+    bytes: usize,
     /// The view's last record, which a later log of the family must still hold at that
     /// position for the view to describe it.
     last: Option<Fact>,
@@ -922,24 +927,36 @@ impl HeldViews {
     }
 
     fn keep(&self, log: &Log, view: &EngineView) {
+        let byte_size = log.retained_bytes();
+        if byte_size > HELD_VIEWS_BYTES {
+            return;
+        }
         let key = (log.reader(), log.root().clone());
         let mut held = self.held();
         // The family was used now, whether or not this view replaces the held one.
         held.order.retain(|entry| entry != &key);
         held.order.push_back(key.clone());
         if held.views.get(&key).is_none_or(|found| found.basis <= log.basis()) {
+            if let Some(older) = held.views.remove(&key) {
+                held.bytes -= older.bytes;
+            }
             let fresh = HeldView {
                 view: view.clone(),
                 lineage: log.lineage().cloned(),
                 basis: log.basis(),
                 facts: log.facts().len(),
+                bytes: byte_size,
                 last: log.facts().last().cloned(),
             };
+            held.bytes += byte_size;
             held.views.insert(key, fresh);
         }
-        while held.order.len() > HELD_VIEWS {
-            if let Some(oldest) = held.order.pop_front() {
-                held.views.remove(&oldest);
+        while held.order.len() > HELD_VIEWS || held.bytes > HELD_VIEWS_BYTES {
+            let Some(oldest) = held.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = held.views.remove(&oldest) {
+                held.bytes -= gone.bytes;
             }
         }
     }

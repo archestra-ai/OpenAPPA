@@ -371,33 +371,6 @@ impl Projection {
         }
     }
 
-    /// Fold one batch's facts at `seq`, detaching eligible bodies whose byte length is at least
-    /// `threshold` so the held view stays bounded after live appends.
-    pub(crate) fn fold_detaching(&mut self, seq: u64, facts: &[Fact], threshold: usize) {
-        let threshold_u64 = threshold as u64;
-        for (index, fact) in facts.iter().enumerate() {
-            let needs_detach = match fact {
-                Fact::ValueAdmitted {
-                    value,
-                    provenance: Provenance::ToolResult { .. } | Provenance::ProviderRun { .. },
-                    ..
-                } => !value.body.is_detached() && value.body.len() >= threshold_u64,
-                Fact::CandidateDerived {
-                    derived: DerivedCandidate::Result { value, .. },
-                    ..
-                } => !value.body.is_detached() && value.body.len() >= threshold_u64,
-                _ => false,
-            };
-            if needs_detach && let Ok(fact_index) = u32::try_from(index) {
-                let mut detached = fact.clone();
-                detached.detach_bodies(seq, fact_index, threshold);
-                self.fold(&detached);
-            } else {
-                self.fold(fact);
-            }
-        }
-    }
-
     /// Attach verified inline text to any detached body in this projection located at `at`.
     /// Returns `Ok(true)` if at least one body was attached, `Ok(false)` if none matched `at`.
     pub(crate) fn attach_body(
@@ -406,33 +379,33 @@ impl Projection {
         text: std::sync::Arc<str>,
     ) -> Result<bool, crate::value::BodyMismatch> {
         let mut attached = false;
-        for value in self.values.iter_mut() {
-            if let Some(body) = &mut value.body
-                && body.at() == Some(at)
-            {
+        let matching_values: Vec<usize> = self
+            .values
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, value)| value.body.as_ref().filter(|body| body.at() == Some(at)).map(|_| idx))
+            .collect();
+        for idx in matching_values {
+            if let Some(body) = &mut self.values[idx].body {
                 *body = body.attach(std::sync::Arc::clone(&text))?;
                 attached = true;
             }
         }
-        let mut mismatch = None;
-        each_mut(&mut self.candidates, |candidate| {
-            if mismatch.is_some() {
-                return;
-            }
-            if let DerivedCandidate::Result { value, .. } = &mut candidate.derived
-                && value.body.at() == Some(at)
+        let matching_candidates: Vec<SubjectKey> = self
+            .candidates
+            .iter()
+            .filter_map(|(key, candidate)| match &candidate.derived {
+                DerivedCandidate::Result { value, .. } if value.body.at() == Some(at) => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        for key in matching_candidates {
+            if let Some(candidate) = self.candidates.get_mut(&key)
+                && let DerivedCandidate::Result { value, .. } = &mut candidate.derived
             {
-                match value.body.attach(std::sync::Arc::clone(&text)) {
-                    Ok(hydrated) => {
-                        value.body = hydrated;
-                        attached = true;
-                    }
-                    Err(error) => mismatch = Some(error),
-                }
+                value.body = value.body.attach(std::sync::Arc::clone(&text))?;
+                attached = true;
             }
-        });
-        if let Some(error) = mismatch {
-            return Err(error);
         }
         Ok(attached)
     }

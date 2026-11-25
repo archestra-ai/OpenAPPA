@@ -156,7 +156,7 @@ pub(crate) fn stamp_of(facts: &[Fact]) -> Option<PolicyRevision> {
 /// Open a root's log from its first batch and the policy file it names: refused unless
 /// `policy_file` still hashes to that key.
 pub(crate) fn open_log(root: &TrajectoryId, first: &[u8], policy_file: Vec<u8>) -> Result<Log, ReadError> {
-    let (record, opening) = opening(root, first)?;
+    let (mut record, opening) = opening(root, first)?;
     if PolicyFileKey::of(&policy_file) != opening.policy_file_key {
         return Err(ReadError::PolicyFileMismatch {
             key: opening.policy_file_key.as_str().to_string(),
@@ -173,8 +173,10 @@ pub(crate) fn open_log(root: &TrajectoryId, first: &[u8], policy_file: Vec<u8>) 
         basis: 0,
         policy_file,
         host: Vec::new(),
+        retained_batch_bytes: 0,
     };
-    push(&mut data, record);
+    appa_engine::fact::detach_batch_bodies(&mut record.facts, 0, appa_engine::value::DETACH_AT);
+    push(&mut data, record, first.len());
     Ok(Log {
         data: std::sync::Arc::new(data),
         lineage: None,
@@ -188,7 +190,7 @@ pub(crate) fn push_batch(log: &mut Log, batch: &[u8]) -> Result<(), ReadError> {
     let data = std::sync::Arc::make_mut(&mut log.data);
     let mut record = decode(data.basis, batch)?;
     appa_engine::fact::detach_batch_bodies(&mut record.facts, data.basis, appa_engine::value::DETACH_AT);
-    push(data, record);
+    push(data, record, batch.len());
     Ok(())
 }
 
@@ -254,7 +256,17 @@ pub(crate) fn extend(log: &mut Log, batches: Vec<Vec<u8>>) -> Result<(), ReadErr
 }
 
 /// Fold one decoded batch onto `log`.
-fn push(log: &mut LogData, record: Record) {
+fn push(log: &mut LogData, record: Record, raw_batch_len: usize) {
+    let detached_bytes: usize = record
+        .facts
+        .iter()
+        .filter_map(Fact::detachable_body)
+        .filter(|body| body.is_detached())
+        .map(|body| usize::try_from(body.len()).unwrap_or(usize::MAX))
+        .fold(0usize, usize::saturating_add);
+    log.retained_batch_bytes = log
+        .retained_batch_bytes
+        .saturating_add(raw_batch_len.saturating_sub(detached_bytes));
     let stamp = stamp_of(&record.facts);
     if let Some(stamp) = stamp {
         log.revisions.insert(stamp);

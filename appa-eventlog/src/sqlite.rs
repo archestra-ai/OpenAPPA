@@ -576,19 +576,21 @@ impl Sqlite {
         at: appa_engine::value::BodyAt,
         digest: appa_engine::value::RawResultDigest,
     ) -> Result<std::sync::Arc<str>, ReadError> {
-        let connection = self.connection();
         let seq = i64::try_from(at.seq).map_err(|_| ReadError::DetachedBody {
             seq: at.seq,
             fact: at.fact,
             reason: crate::DetachedBodyReason::Missing,
         })?;
-        let batch: Option<Vec<u8>> = connection
-            .query_row(
-                "SELECT facts FROM logs WHERE root = ?1 AND seq = ?2",
-                params![root.as_str(), seq],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let batch: Option<Vec<u8>> = {
+            let connection = self.connection();
+            connection
+                .query_row(
+                    "SELECT facts FROM logs WHERE root = ?1 AND seq = ?2",
+                    params![root.as_str(), seq],
+                    |row| row.get(0),
+                )
+                .optional()?
+        };
         let Some(batch) = batch else {
             return Err(ReadError::DetachedBody {
                 seq: at.seq,

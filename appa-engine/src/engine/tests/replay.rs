@@ -389,7 +389,6 @@ fn replay_with_detached_large_tool_result_equals_inline_replay() {
     let get = call("get_ticket", json!({}));
     let open_batch = vec![opened(&e)];
     let mut held_inline = e.view(&traj(), open_batch.clone(), 1).expect("opening replays");
-    let mut held_detached = held_inline.clone();
 
     let proposed = proposed(&e, &open_batch, "b1", nonce(), get).expect("proposal releases");
     let dispatch = match &proposed.follow_up {
@@ -398,9 +397,6 @@ fn replay_with_detached_large_tool_result_equals_inline_replay() {
     };
     let propose_batch = proposed.append.expect("proposal appends");
     held_inline.advance(&propose_batch).expect("inline advances");
-    held_detached
-        .advance_detached(&propose_batch, 64)
-        .expect("detached advances");
 
     let big_body = "x".repeat(256);
     let outcome = e
@@ -419,9 +415,6 @@ fn replay_with_detached_large_tool_result_equals_inline_replay() {
         .expect("outcome closes");
     let outcome_batch = outcome.append.expect("outcome appends");
     held_inline.advance(&outcome_batch).expect("inline advances");
-    held_detached
-        .advance_detached(&outcome_batch, 64)
-        .expect("detached advances");
 
     let mut detached_outcome_facts = outcome_batch.facts().to_vec();
     crate::fact::detach_batch_bodies(&mut detached_outcome_facts, outcome_batch.basis(), 64);
@@ -442,6 +435,5 @@ fn replay_with_detached_large_tool_result_equals_inline_replay() {
     let replayed_detached = e.view(&traj(), full_detached, 3).expect("detached log replays");
 
     assert_eq!(replayed_detached, replayed_inline);
-    assert_eq!(held_detached, held_inline);
-    assert_eq!(held_detached, replayed_inline);
+    assert_eq!(replayed_detached, held_inline);
 }

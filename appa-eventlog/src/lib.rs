@@ -231,6 +231,10 @@ struct LogData {
     basis: u64,
     policy_file: Vec<u8>,
     host: Vec<HostRecord>,
+    /// Conservative retained byte charge of all folded batches (encoded batch bytes minus
+    /// detached body lengths), maintained incrementally on push so cache checks are O(1) and
+    /// include call arguments and host payloads.
+    retained_batch_bytes: usize,
 }
 
 /// One thing a harness observed or did, recorded beside the engine's facts.
@@ -446,16 +450,12 @@ impl Log {
         &self.data.root
     }
 
-    /// Approximate heap bytes retained in memory by this log: inline body payloads, policy
-    /// bytes, and the flat fact/host/index tables. Detached bodies contribute zero payload bytes.
+    /// Conservative heap byte charge retained in memory by this log: encoded batch bytes minus
+    /// detached body payloads (covering call arguments, host records, and inline bodies), plus
+    /// policy bytes and flat table storage. O(1) because the batch charge is maintained on fold.
     pub fn retained_bytes(&self) -> usize {
-        let bodies: usize = self
-            .data
-            .facts
-            .iter()
-            .map(Fact::retained_body_bytes)
-            .fold(0usize, usize::saturating_add);
-        bodies
+        self.data
+            .retained_batch_bytes
             .saturating_add(self.data.policy_file.len())
             .saturating_add(std::mem::size_of_val(self.data.facts.as_slice()))
             .saturating_add(std::mem::size_of_val(self.data.host.as_slice()))

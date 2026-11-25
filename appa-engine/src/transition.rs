@@ -853,27 +853,6 @@ impl EngineView {
     /// a family's stamps never decrease. A batch holding no record decides nothing: the view's
     /// chain and stamp stay where they were, as a replay leaves them.
     pub fn advance(&mut self, batch: &ValidatedFactBatch) -> Result<(), ViewMismatch> {
-        self.advance_with(batch, None)
-    }
-
-    /// Attach verified inline text to any detached body in this view located at `at`.
-    /// Intended for local, per-call hydration; callers must not write hydrated views back into
-    /// shared caches.
-    pub fn attach_body(
-        &mut self,
-        at: crate::value::BodyAt,
-        text: std::sync::Arc<str>,
-    ) -> Result<bool, crate::value::BodyMismatch> {
-        self.projection.attach_body(at, text)
-    }
-
-    /// Advance the cache by a batch the store accepted, detaching eligible bodies whose byte
-    /// length is at least `threshold` so held views stay bounded after live appends.
-    pub fn advance_detached(&mut self, batch: &ValidatedFactBatch, threshold: usize) -> Result<(), ViewMismatch> {
-        self.advance_with(batch, Some(threshold))
-    }
-
-    fn advance_with(&mut self, batch: &ValidatedFactBatch, detach_at: Option<usize>) -> Result<(), ViewMismatch> {
         if batch.family() != &self.family {
             return Err(ViewMismatch::ForeignFamily);
         }
@@ -907,13 +886,21 @@ impl EngineView {
         {
             self.projection.cross_revision();
         }
-        match detach_at {
-            Some(threshold) => self.projection.fold_detaching(batch.basis(), batch.facts(), threshold),
-            None => self.projection.fold_all(batch.facts()),
-        }
+        self.projection.fold_all(batch.facts());
         self.projection.set_position(batch.basis() + 1);
         self.stamp = batch.revision.or(self.stamp);
         Ok(())
+    }
+
+    /// Attach verified inline text to any detached body in this view located at `at`.
+    /// Intended for local, per-call hydration; callers must not write hydrated views back into
+    /// shared caches.
+    pub fn attach_body(
+        &mut self,
+        at: crate::value::BodyAt,
+        text: std::sync::Arc<str>,
+    ) -> Result<bool, crate::value::BodyMismatch> {
+        self.projection.attach_body(at, text)
     }
 }
 

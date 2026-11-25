@@ -356,9 +356,6 @@ pub(crate) struct PostgresStore {
     lease: Option<LeasedPostgres>,
     /// Shared with every view and lease of this store.
     logs: Arc<LogCache>,
-    /// Distinguishes logs read from this store from logs read from another store in the same
-    /// process when both are held by one runtime engine.
-    lineage: LogLineage,
     pub(crate) cipher: StorageCipher,
 }
 
@@ -452,10 +449,10 @@ impl LogCache {
         }
     }
 
-    /// Keep `log`, as `reader` decrypted it, unless the cache already holds a later read of its
+    /// Keep `log`, keyed by `log.reader()`, unless the cache already holds a later read of its
     /// root by the same reader.
-    fn keep(&self, reader: ReaderId, log: &Log, last_batch_digest: [u8; 32]) {
-        let key = (reader, log.root().as_str().to_owned());
+    fn keep(&self, log: &Log, last_batch_digest: [u8; 32]) {
+        let key = (log.reader(), log.root().as_str().to_owned());
         let size = log.facts().len();
         let byte_size = log.retained_bytes();
         let mut entries = self.entries();
@@ -556,7 +553,6 @@ impl PostgresStore {
             pool,
             lease: None,
             logs: Arc::default(),
-            lineage: LogLineage::default(),
             cipher: StorageCipher::Plain,
         })
     }
@@ -568,7 +564,6 @@ impl PostgresStore {
             pool: Arc::clone(&self.pool),
             lease: None,
             logs: Arc::clone(&self.logs),
-            lineage: self.lineage.clone(),
             cipher,
         }
     }
@@ -586,7 +581,6 @@ impl PostgresStore {
                 lease: self.pool.checkout()?,
             }),
             logs: Arc::clone(&self.logs),
-            lineage: self.lineage.clone(),
             cipher: self.cipher.clone(),
         })
     }
@@ -1598,6 +1592,8 @@ impl PostgresStore {
             return Ok(None);
         }
 
+        let last_seq = sizes.last().expect("sizes is non-empty").0;
+        let is_cold = cached.is_none();
         let chunks = plan_chunks(&sizes, STREAM_CHUNK_BYTES);
         let mut state_log: Option<Log> = None;
         let mut tip_digest = [0u8; 32];
@@ -1614,18 +1610,18 @@ impl PostgresStore {
                         &[&id, &lo, &hi],
                     )?;
                     let expected_len = (chunk_end - chunk_start + 1) as usize;
-                    if rows.len() != expected_len {
-                        let expected = chunk_start + rows.len() as u64;
+                    let payloads = contiguous_from(
+                        chunk_start,
+                        rows.into_iter().map(|row| (row.get(0), row.get(1))).collect(),
+                    )
+                    .map_err(|gap| PostgresError(gap.to_string()))?;
+                    if payloads.len() != expected_len {
+                        let expected = chunk_start + payloads.len() as u64;
                         return Err(PostgresError(
-                            SequenceGap {
-                                expected,
-                                found: -1,
-                            }
-                            .to_string(),
+                            SequenceGap { expected, found: -1 }.to_string(),
                         ));
                     }
-                    contiguous_from(chunk_start, rows.into_iter().map(|row| (row.get(0), row.get(1))).collect())
-                        .map_err(|gap| PostgresError(gap.to_string()))
+                    Ok(payloads)
                 }
             })?;
 
@@ -1636,13 +1632,17 @@ impl PostgresStore {
                     .open_bytes(&event_field(&id, seq), &raw)
                     .map_err(PostgresError::from)?;
                 drop(raw);
-                let digest = batch_digest(&plaintext);
+                let digest = if seq == from || seq == last_seq {
+                    Some(batch_digest(&plaintext))
+                } else {
+                    None
+                };
                 if seq == from {
                     match cached.take() {
                         Some(CachedLog {
                             log, last_batch_digest, ..
                         }) => {
-                            if digest != last_batch_digest {
+                            if digest != Some(last_batch_digest) {
                                 return Ok(None);
                             }
                             state_log = Some(log);
@@ -1670,14 +1670,20 @@ impl PostgresStore {
                         .expect("seq == from initializes state_log before later batches");
                     push_batch(log, &plaintext)?;
                 }
-                tip_digest = digest;
+                if seq == last_seq {
+                    tip_digest = digest.expect("last_seq always computes batch_digest");
+                }
             }
         }
 
         let mut log = state_log.expect("non-empty sizes produces a decoded log");
-        log.lineage = Some(self.lineage.clone());
+        // Every cold read gets a fresh lineage so a rewritten log invalidates HeldViews even
+        // when root, reader, basis, fact count, and final fact happen to match.
+        if is_cold || log.lineage.is_none() {
+            log.lineage = Some(LogLineage::default());
+        }
         log.reader = self.cipher.reader();
-        self.logs.keep(self.cipher.reader(), &log, tip_digest);
+        self.logs.keep(&log, tip_digest);
         Ok(Some(log))
     }
 
@@ -2478,10 +2484,12 @@ mod tests {
     use crate::tests::{create, opening, root};
     use crate::{Backend, LogStore};
 
-    fn log() -> Log {
+    fn log_for(reader: ReaderId) -> Log {
         let store = LogStore::open(Backend::Memory).expect("an in-memory store opens");
         create(&store, opening(&root())).expect("a fresh root opens");
-        store.log(&root()).expect("the log reads")
+        let mut log = store.log(&root()).expect("the log reads");
+        log.reader = reader;
+        log
     }
 
     fn keyed(key: u8, scope: &str) -> ReaderId {
@@ -2493,14 +2501,13 @@ mod tests {
     #[test]
     fn a_cached_log_answers_only_the_reader_that_decrypted_it() {
         let cache = LogCache::default();
-        let log = log();
+        let reader = keyed(7, "conversation-a");
+        let log = log_for(reader);
         let root = log.root().as_str().to_owned();
         let tip = batch_digest(b"last");
-        cache.keep(keyed(7, "conversation-a"), &log, tip);
+        cache.keep(&log, tip);
 
-        let hit = cache
-            .get(keyed(7, "conversation-a"), &root)
-            .expect("the same key and scope read it back");
+        let hit = cache.get(reader, &root).expect("the same key and scope read it back");
         assert!(
             Arc::ptr_eq(&hit.log.data, &log.data),
             "the decoded log is shared, not copied"
@@ -2517,17 +2524,19 @@ mod tests {
     #[test]
     fn another_readers_read_is_isolated_from_the_first_reader() {
         let cache = LogCache::default();
-        let log = log();
-        let root = log.root().as_str().to_owned();
+        let reader_a = keyed(7, "conversation-a");
+        let log_a = log_for(reader_a);
+        let log_plain = log_for(ReaderId::PLAIN);
+        let root = log_a.root().as_str().to_owned();
         let tip = batch_digest(b"last");
-        cache.keep(keyed(7, "conversation-a"), &log, tip);
-        cache.keep(ReaderId::PLAIN, &log, tip);
-        assert!(cache.get(keyed(7, "conversation-a"), &root).is_some());
+        cache.keep(&log_a, tip);
+        cache.keep(&log_plain, tip);
+        assert!(cache.get(reader_a, &root).is_some());
         assert!(cache.get(ReaderId::PLAIN, &root).is_some());
         cache.forget(ReaderId::PLAIN, &root);
         assert!(cache.get(ReaderId::PLAIN, &root).is_none());
-        assert!(cache.get(keyed(7, "conversation-a"), &root).is_some());
-        assert_eq!(cache.entries().facts, log.facts().len());
+        assert!(cache.get(reader_a, &root).is_some());
+        assert_eq!(cache.entries().facts, log_a.facts().len());
     }
 
     #[test]
