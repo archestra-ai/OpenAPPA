@@ -290,6 +290,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    retry: None,
                     class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
@@ -398,6 +399,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    retry: None,
                     class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
@@ -620,6 +622,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    retry: None,
                     class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
@@ -716,6 +719,7 @@ mod tests {
                 text: "advice".to_string(),
             },
             HookDecision::Refuse {
+                retry: None,
                 class: appa_runtime_api::RefusalClass::Storage,
                 detail: "refused".to_string(),
             },

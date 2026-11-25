@@ -1615,7 +1615,8 @@ fn with_peer_notices(runtime: &Runtime, actor: &Actor, decision: HookDecision) -
 /// A hook refused. A refusal on a fact not obtained says only that: what failed, and how,
 /// stays in the diagnostics, since a harness may show the detail to its model.
 fn refuse(error: EventError) -> HookDecision {
-    let detail = match error.missing_fact() {
+    let retry = error.missing_fact();
+    let detail = match retry {
         Some(_) => {
             tracing::info!(%error, "a hook was refused on a fact not obtained");
             UNOBTAINED_REFUSAL.to_string()
@@ -1625,6 +1626,7 @@ fn refuse(error: EventError) -> HookDecision {
     HookDecision::Refuse {
         class: error.class(),
         detail,
+        retry,
     }
 }
 

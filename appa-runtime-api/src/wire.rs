@@ -629,8 +629,11 @@ fn refusal_outcomes(
         (Some(held), Some(deciding), _) => (held, deciding),
     };
     Ok(Some(match (held.as_slice(), deciding, retry, remedies) {
-        ([Outcome::Integrity], Outcome::Integrity, None, _) => Outcomes::Integrity,
-        ([Outcome::HardBlock], Outcome::HardBlock, None, _) => Outcomes::HardBlock,
+        ([Outcome::Integrity], Outcome::Integrity, None, false) => Outcomes::Integrity,
+        ([Outcome::HardBlock], Outcome::HardBlock, None, false) => Outcomes::HardBlock,
+        (_, Outcome::Integrity | Outcome::HardBlock, None, true) => {
+            return Err("an integrity fault or a hard block with offers or reviews");
+        }
         ([Outcome::MissingFact], Outcome::MissingFact, Some(retry), false) => Outcomes::MissingFact(retry),
         (_, _, Some(_), _) => {
             return Err("a retry hint on anything but a missing fact alone, with no offers or reviews");
@@ -1540,10 +1543,13 @@ impl WireDecision {
                 text: Some(text.clone()),
                 ..Self::bare(DecisionName::Context)
             },
-            HookDecision::Refuse { class, detail } => Self {
+            HookDecision::Refuse { class, detail, retry } => Self {
                 class: Some(*class),
                 detail: Some(detail.clone()),
-                ..Self::refusal(Some(&Outcomes::Integrity), DecisionName::Refuse)
+                ..Self::refusal(
+                    Some(&retry.map_or(Outcomes::Integrity, Outcomes::MissingFact)),
+                    DecisionName::Refuse,
+                )
             },
             HookDecision::Held { running } => Self {
                 running: Some(running.clone()),
@@ -1645,13 +1651,22 @@ impl WireDecision {
             DecisionName::Context => HookDecision::Context {
                 text: required("text", self.text)?,
             },
-            DecisionName::Refuse => match stated(false)? {
-                None | Some(Outcomes::Integrity) => HookDecision::Refuse {
+            DecisionName::Refuse => {
+                let retry = match stated(false)? {
+                    None | Some(Outcomes::Integrity) => None,
+                    Some(Outcomes::MissingFact(retry)) => Some(retry),
+                    Some(_) => {
+                        return Err(malformed(format!(
+                            "{name:?} with an outcome other than integrity or a missing fact"
+                        )));
+                    }
+                };
+                HookDecision::Refuse {
                     class: self.class.ok_or_else(|| missing("class"))?,
                     detail: required("detail", self.detail)?,
-                },
-                Some(_) => return Err(malformed(format!("{name:?} with an outcome other than integrity"))),
-            },
+                    retry,
+                }
+            }
             DecisionName::Held => HookDecision::Held {
                 running: self.running.ok_or_else(|| missing("running"))?,
             },
@@ -1726,11 +1741,21 @@ mod tests {
         assert_eq!(round_trip(&missing), missing);
 
         let refused = WireDecision::of(&HookDecision::Refuse {
+            retry: None,
             class: RefusalClass::Storage,
             detail: "d".to_string(),
         });
         assert_eq!(refused.deciding, Some(Outcome::Integrity));
         assert_eq!(refused.outcomes, Some(vec![Outcome::Integrity]));
+        let unobtained = HookDecision::Refuse {
+            retry: Some(RetryHint::Later),
+            class: RefusalClass::Contended,
+            detail: "d".to_string(),
+        };
+        let json = serde_json::to_value(WireDecision::of(&unobtained)).expect("serializes");
+        assert_eq!(json["outcomes"], serde_json::json!(["missing_fact"]));
+        assert_eq!(json["retry"], "later");
+        assert_eq!(round_trip(&unobtained), unobtained);
 
         let unstated: WireDecision =
             serde_json::from_str(r#"{"protocol":1,"decision":"deny_call","feedback":"no"}"#).expect("reads");
@@ -1752,6 +1777,8 @@ mod tests {
             r#""outcomes":["missing_fact","consent"],"deciding":"missing_fact","retry":"later""#.to_string(),
             format!(r#""outcomes":["missing_fact"],"deciding":"missing_fact","retry":"later",{offer}"#),
             r#""outcomes":[],"deciding":"consent""#.to_string(),
+            format!(r#""outcomes":["hard_block"],"deciding":"hard_block",{offer}"#),
+            format!(r#""outcomes":["integrity"],"deciding":"integrity",{offer}"#),
         ] {
             let body = format!(r#"{{"protocol":1,"decision":"deny_call","feedback":"no",{fields}}}"#);
             let wire: WireDecision = serde_json::from_str(&body).expect("reads");
@@ -3328,10 +3355,12 @@ mod tests {
             HookDecision::DeferReturn,
             HookDecision::Context { text: "t".to_string() },
             HookDecision::Refuse {
+                retry: None,
                 class: RefusalClass::UntrustedLog,
                 detail: "d".to_string(),
             },
             HookDecision::Refuse {
+                retry: None,
                 class: RefusalClass::SpawnNotTaken,
                 detail: "d".to_string(),
             },
@@ -3363,6 +3392,7 @@ mod tests {
             serde_json::from_str(r#"{"protocol":1,"decision":"refuse","detail":"d"}"#).expect("reads");
         assert!(matches!(classless.into_decision(), Err(ParseRefusal::Malformed { .. })));
         let classed = serde_json::to_value(WireDecision::of(&HookDecision::Refuse {
+            retry: None,
             class: RefusalClass::PolicyUnavailable,
             detail: "d".to_string(),
         }))

@@ -946,6 +946,8 @@ pub enum HookDecision {
     Refuse {
         class: RefusalClass,
         detail: String,
+        /// Set when the refusal is on a fact not obtained: what sending the hook again can do.
+        retry: Option<RetryHint>,
     },
     /// The stop is not taken: the calls `running` names are still running
     /// under [`OpenCalls::Hold`]. Nothing was recorded and nothing crossed.

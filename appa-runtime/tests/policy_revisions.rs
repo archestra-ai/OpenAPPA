@@ -621,7 +621,7 @@ async fn a_legacy_opening_is_refused_with_legacy_family() {
     let runtime = open(dir.path(), &notes);
     for id in ["c2", "c3"] {
         match propose(&runtime, &legacy, call("notes", 2), id).await {
-            HookDecision::Refuse { class, detail } => {
+            HookDecision::Refuse { class, detail, .. } => {
                 assert_eq!(class, RefusalClass::LegacyFamily);
                 assert_eq!(
                     detail,

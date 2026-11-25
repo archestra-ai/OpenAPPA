@@ -396,6 +396,7 @@ mod tests {
                 value: "the admitted derivation".to_string(),
             },
             HookDecision::Refuse {
+                retry: None,
                 class: appa_runtime_api::RefusalClass::Storage,
                 detail: "storage failure".to_string(),
             },
