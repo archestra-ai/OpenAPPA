@@ -59,8 +59,24 @@ pub(crate) enum Received {
     Held(HeldNotice),
 }
 
+/// A send's arguments, or the feedback refusing their shape. Decided by the call alone.
+pub(crate) fn send_arguments(call: &ProposedCall) -> Result<SendArguments, String> {
+    let Ok(arguments) = serde_json::from_str::<SendArguments>(call.arguments.get()) else {
+        return Err("SendMessage takes `to` and `message` as strings".to_string());
+    };
+    if arguments
+        .recipient
+        .as_ref()
+        .is_some_and(|recipient| recipient != &arguments.to)
+    {
+        return Err("`recipient` must equal `to`".to_string());
+    }
+    within_limit(&arguments.message).map_err(|error| error.to_string())?;
+    Ok(arguments)
+}
+
 #[derive(serde::Deserialize)]
-struct SendArguments {
+pub(crate) struct SendArguments {
     to: String,
     message: String,
     recipient: Option<String>,
@@ -208,25 +224,10 @@ impl Runtime {
     /// a name the policy judges. `recipient` is the same field under another name, and a
     /// call that spells the two apart is refused.
     pub(crate) fn peer_send(&self, sender: &TrajectoryId, call: &ProposedCall) -> Result<PeerSend, EventError> {
-        let Ok(arguments) = serde_json::from_str::<SendArguments>(call.arguments.get()) else {
-            return Ok(PeerSend::Refused {
-                feedback: "SendMessage takes `to` and `message` as strings".to_string(),
-            });
+        let arguments = match send_arguments(call) {
+            Ok(arguments) => arguments,
+            Err(feedback) => return Ok(PeerSend::Refused { feedback }),
         };
-        if arguments
-            .recipient
-            .as_ref()
-            .is_some_and(|recipient| recipient != &arguments.to)
-        {
-            return Ok(PeerSend::Refused {
-                feedback: "`recipient` must equal `to`".to_string(),
-            });
-        }
-        if let Err(error) = within_limit(&arguments.message) {
-            return Ok(PeerSend::Refused {
-                feedback: error.to_string(),
-            });
-        }
         let digest = PeerDigest::of_body(&arguments.message);
         let Ok(address) = PeerAddress::parse(&arguments.to) else {
             return Ok(PeerSend::Judge { digest });

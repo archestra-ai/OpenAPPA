@@ -1850,6 +1850,7 @@ max_body_bytes = 4096
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,

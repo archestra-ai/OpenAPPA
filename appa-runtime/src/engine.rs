@@ -62,7 +62,8 @@ use appa_engine::fact::{
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, Label, ReaderId, SymbolicAtom, Trust};
 use appa_engine::names::{AuthorityName, MarkName};
 use appa_engine::plan::{
-    ExecutableRemedyPlan, FloorStanding, ForkAdvice, OutputRemedy, PlanId, PlannedBlock, RemedyPlan, RequiredRuling,
+    ExecutableRemedyPlan, FloorStanding, ForkAdvice, OutputRemedy, PlanId, PlannedBlock, RemedyPlan, RemedyStep,
+    RequiredRuling,
 };
 use appa_engine::profile::{DeploymentName, PolicyFileKey as EnginePolicyFileKey};
 use appa_engine::projection::Views;
@@ -97,7 +98,10 @@ use crate::consult::{
     ToolNameAuthor,
 };
 pub(crate) use appa_engine::engine::DeferredReturn;
-use appa_runtime_api::{OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Ruling};
+use appa_runtime_api::{
+    AutoApply, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, Outcomes, Remediable, Remedy, RetryHint, Ruling,
+    SessionSettings,
+};
 
 /// One fresh 256-bit random number per act that can surface offers; the
 /// runtime mixes it into every `OfferId` it mints.
@@ -124,6 +128,7 @@ pub struct ReleasedCall {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Feedback {
     pub text: String,
+    pub outcomes: Outcomes,
     pub offers: Vec<OfferedRemedy>,
     pub display: Option<RemedyDisplay>,
     /// Every authority an offered plan would consult, with the review a person would read.
@@ -224,7 +229,7 @@ pub enum ExternalEvidence {
     Sanitizer {
         sanitizer: String,
         source: RawResultDigest,
-        derived: Option<String>,
+        derived: Result<String, crate::events::NoAnswerClass>,
     },
     /// The annotation produced for one exact call, by canonical digest: evidence for a
     /// rewritten call never matches, so every rewrite is annotated afresh.
@@ -256,6 +261,46 @@ pub enum ExternalEvidence {
         /// its qualified identity. `Err`: the consult produced no usable answer.
         principal: Result<Option<ReaderId>, crate::events::NoAnswerClass>,
     },
+}
+
+impl ExternalEvidence {
+    /// The external this evidence records as giving no usable answer, if it is one.
+    pub(crate) fn unanswered(&self) -> Option<crate::api::Unanswered> {
+        use crate::events::ExternalRole;
+        let (role, name) = match self {
+            ExternalEvidence::Authority {
+                authority,
+                verdict: AuthorityVerdict::Abstain(_),
+                ..
+            } => (ExternalRole::Authority, authority),
+            ExternalEvidence::Sanitizer {
+                sanitizer,
+                derived: Err(_),
+                ..
+            } => (ExternalRole::Sanitizer, sanitizer),
+            ExternalEvidence::AnnotationNoAnswer { annotator, .. } => (ExternalRole::Annotator, annotator),
+            ExternalEvidence::AudienceSource {
+                provider,
+                members: Err(_),
+                ..
+            }
+            | ExternalEvidence::MemberLookup {
+                provider,
+                principal: Err(_),
+                ..
+            } => (ExternalRole::AudienceSource, provider),
+            ExternalEvidence::Held { .. }
+            | ExternalEvidence::Authority { .. }
+            | ExternalEvidence::Sanitizer { .. }
+            | ExternalEvidence::Annotation { .. }
+            | ExternalEvidence::AudienceSource { .. }
+            | ExternalEvidence::MemberLookup { .. } => return None,
+        };
+        Some(crate::api::Unanswered {
+            role,
+            name: name.clone(),
+        })
+    }
 }
 
 /// An authority's wire verdict: `{"ruling": "approve"|"deny"}`; anything
@@ -324,6 +369,7 @@ pub enum EngineEvent {
     ExecuteOffer {
         trajectory: TrajectoryId,
         offer: OfferId,
+        initiator: appa_runtime_api::Initiator,
         declared: appa_runtime_api::DeclaredReturn,
         evidence: Vec<ExternalEvidence>,
         entropy: OfferNonce,
@@ -393,6 +439,8 @@ pub enum Presentation {
     },
     NoAnswer {
         feedback: String,
+        /// Set when a fact the remedy needs was not obtained: what executing it again can do.
+        retry: Option<RetryHint>,
     },
     NoValue,
     /// A child's return frozen for its parent's decision: nothing crossed.
@@ -401,6 +449,8 @@ pub enum Presentation {
     Discarded,
     Blocked {
         feedback: String,
+        /// Why the value or the call is held back.
+        outcomes: Outcomes,
         offers: Vec<OfferedRemedy>,
         review: Vec<PendingReview>,
         display: Option<RemedyDisplay>,
@@ -518,6 +568,7 @@ impl From<&TransitionRefusal> for ReplayRefusalClass {
             TransitionRefusal::UnknownApproval => ReplayRefusalClass("unknown_approval"),
             TransitionRefusal::UnknownCandidate => ReplayRefusalClass("unknown_candidate"),
             TransitionRefusal::StaleSpend => ReplayRefusalClass("stale_spend"),
+            TransitionRefusal::BodyDetached(_) => ReplayRefusalClass("body_detached"),
         }
     }
 }
@@ -633,6 +684,12 @@ pub enum EngineRefusal {
         reason: String,
         no_answer: Option<crate::events::NoAnswerClass>,
     },
+    /// A detached value body could not be resolved to text.
+    #[error("detached value body at seq {} fact {}", .at.seq, .at.fact)]
+    BodyDetached {
+        at: appa_engine::value::BodyAt,
+        digest: RawResultDigest,
+    },
 }
 
 impl EngineRefusal {
@@ -657,6 +714,7 @@ impl EngineRefusal {
             EngineRefusal::UndeclaredTool { .. } => ReplayRefusalClass("undeclared_tool"),
             EngineRefusal::Arguments { .. } => ReplayRefusalClass("arguments"),
             EngineRefusal::Annotation { .. } => ReplayRefusalClass("annotation"),
+            EngineRefusal::BodyDetached { .. } => ReplayRefusalClass("body_detached"),
         }
     }
 }
@@ -670,6 +728,9 @@ pub struct TrajectoryStatus {
     pub trajectory: String,
     pub trust: String,
     pub audience: String,
+    /// What the family's opening pinned.
+    #[serde(skip_serializing_if = "SessionSettings::is_default")]
+    pub settings: SessionSettings,
 }
 
 /// One label rendered for a display surface: each dimension as chain
@@ -725,6 +786,9 @@ pub enum AuditEvent {
     Narrowed {
         from: AuditLabel,
         to: AuditLabel,
+        /// Who took the plan that accepted it; absent where the log does not record one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        initiator: Option<appa_runtime_api::Initiator>,
     },
     SanitizerBound {
         sanitizer: String,
@@ -862,6 +926,9 @@ pub struct RuntimeEngine {
 /// How many families' views one engine holds at most.
 const HELD_VIEWS: usize = 128;
 
+/// How many retained log bytes one engine's held views represent at most, together.
+const HELD_VIEWS_BYTES: usize = 32 * 1024 * 1024;
+
 /// The last view this engine built for each of a bounded number of families, so the next read
 /// of a family validates only the batches its log accepted since rather than the whole log.
 #[derive(Default)]
@@ -871,9 +938,10 @@ struct HeldViews {
 
 #[derive(Default)]
 struct HeldFamilies {
-    views: std::collections::HashMap<TrajectoryId, HeldView>,
+    views: std::collections::HashMap<(appa_eventlog::ReaderId, TrajectoryId), HeldView>,
     /// Families in the order they were last used, oldest first.
-    order: std::collections::VecDeque<TrajectoryId>,
+    order: std::collections::VecDeque<(appa_eventlog::ReaderId, TrajectoryId)>,
+    bytes: usize,
 }
 
 struct HeldView {
@@ -881,6 +949,7 @@ struct HeldView {
     lineage: Option<appa_eventlog::LogLineage>,
     basis: u64,
     facts: usize,
+    bytes: usize,
     /// The view's last record, which a later log of the family must still hold at that
     /// position for the view to describe it.
     last: Option<Fact>,
@@ -897,9 +966,10 @@ impl HeldViews {
     /// log accepted since. `None` when no held view describes a prefix of `log`, or a batch
     /// is refused: the caller then rebuilds from the whole log.
     fn advanced(&self, engine: &Engine, log: &Log, earlier: &[&Engine]) -> Option<EngineView> {
+        let key = (log.reader(), log.root().clone());
         let (view, basis) = {
             let held = self.held();
-            let found = held.views.get(log.root())?;
+            let found = held.views.get(&key)?;
             let same_prefix = found.lineage.as_ref() == log.lineage()
                 && found.basis <= log.basis()
                 && found.facts <= log.facts().len()
@@ -913,27 +983,36 @@ impl HeldViews {
     }
 
     fn keep(&self, log: &Log, view: &EngineView) {
+        let byte_size = log.retained_bytes();
+        if byte_size > HELD_VIEWS_BYTES {
+            return;
+        }
+        let key = (log.reader(), log.root().clone());
         let mut held = self.held();
         // The family was used now, whether or not this view replaces the held one.
-        held.order.retain(|family| family != log.root());
-        held.order.push_back(log.root().clone());
-        if held
-            .views
-            .get(log.root())
-            .is_none_or(|found| found.basis <= log.basis())
-        {
+        held.order.retain(|entry| entry != &key);
+        held.order.push_back(key.clone());
+        if held.views.get(&key).is_none_or(|found| found.basis <= log.basis()) {
+            if let Some(older) = held.views.remove(&key) {
+                held.bytes -= older.bytes;
+            }
             let fresh = HeldView {
                 view: view.clone(),
                 lineage: log.lineage().cloned(),
                 basis: log.basis(),
                 facts: log.facts().len(),
+                bytes: byte_size,
                 last: log.facts().last().cloned(),
             };
-            held.views.insert(log.root().clone(), fresh);
+            held.bytes += byte_size;
+            held.views.insert(key, fresh);
         }
-        while held.order.len() > HELD_VIEWS {
-            if let Some(oldest) = held.order.pop_front() {
-                held.views.remove(&oldest);
+        while held.order.len() > HELD_VIEWS || held.bytes > HELD_VIEWS_BYTES {
+            let Some(oldest) = held.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = held.views.remove(&oldest) {
+                held.bytes -= gone.bytes;
             }
         }
     }
@@ -1017,9 +1096,10 @@ impl RuntimeEngine {
         trajectory: &TrajectoryId,
         policy_file: &[u8],
         principal: Option<ReaderId>,
+        settings: SessionSettings,
     ) -> Vec<Fact> {
         self.engine
-            .open_trajectory(trajectory, EnginePolicyFileKey::of(policy_file), principal)
+            .open_trajectory(trajectory, EnginePolicyFileKey::of(policy_file), principal, settings)
             .expect("the engine's own opening batch validates against the empty log")
             .into_unsealed()
     }
@@ -1032,9 +1112,10 @@ impl RuntimeEngine {
         trajectory: &TrajectoryId,
         policy_file: &[u8],
         origin: RootForkOrigin,
+        settings: SessionSettings,
     ) -> Result<Vec<Fact>, TransitionRefusal> {
         self.engine
-            .open_root_fork(trajectory, EnginePolicyFileKey::of(policy_file), origin)
+            .open_root_fork(trajectory, EnginePolicyFileKey::of(policy_file), origin, settings)
             .map(ValidatedFactBatch::into_unsealed)
     }
 
@@ -1348,6 +1429,7 @@ impl RuntimeEngine {
                     let Some(call) = call_of(dispatch) else { continue };
                     let outcome = match outcome {
                         CloseOutcome::Success { .. } => "success",
+                        CloseOutcome::SuccessAbandoned => "abandoned",
                         CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => "failure",
                         CloseOutcome::Indeterminate => "indeterminate",
                     };
@@ -1412,13 +1494,19 @@ impl RuntimeEngine {
     /// Render one trajectory's current label from the rebuilt view, for the
     /// statusline. A projection read: no engine event, no fact, nothing
     /// gated.
-    pub(crate) fn trajectory_status(&self, view: &EngineView, trajectory: &TrajectoryId) -> Option<TrajectoryStatus> {
+    pub(crate) fn trajectory_status(
+        &self,
+        view: &EngineView,
+        trajectory: &TrajectoryId,
+        settings: SessionSettings,
+    ) -> Option<TrajectoryStatus> {
         let current = view.views(trajectory)?.current_label();
         let label = self.render_label(&current)?;
         Some(TrajectoryStatus {
             trajectory: terminal_safe(&trajectory.0),
             trust: label.trust,
             audience: label.audience,
+            settings,
         })
     }
 
@@ -1473,6 +1561,7 @@ impl RuntimeEngine {
                 );
             }
         }
+        let initiated = Initiated::of(facts);
         // The log binds each identified call to its dispatch in the batch that opened it.
         let calls: BTreeMap<&appa_engine::value::DispatchId, &str> = log
             .call_bindings()
@@ -1493,7 +1582,7 @@ impl RuntimeEngine {
                     // A child opened with no recorded preparation in this read.
                     None => continue,
                 },
-                _ => match self.audit_event(fact) {
+                _ => match self.audit_event(fact, &initiated) {
                     Some(Some(event)) => event,
                     // A record the audit does not show.
                     Some(None) => continue,
@@ -1512,7 +1601,7 @@ impl RuntimeEngine {
         Ok(Some(entries))
     }
 
-    fn audit_event(&self, fact: &Fact) -> Option<Option<AuditEvent>> {
+    fn audit_event(&self, fact: &Fact, initiated: &Initiated<'_>) -> Option<Option<AuditEvent>> {
         let event = match fact {
             Fact::DispatchOpened {
                 tool,
@@ -1534,6 +1623,7 @@ impl RuntimeEngine {
                     },
                     CloseOutcome::Failure | CloseOutcome::FailureWithBody { .. } => DispatchOutcome::Failed,
                     CloseOutcome::Indeterminate => DispatchOutcome::Unknown,
+                    CloseOutcome::SuccessAbandoned => DispatchOutcome::Ran { effects: Vec::new() },
                 },
             },
             Fact::ValueAdmitted { value, .. } => AuditEvent::Admitted {
@@ -1545,9 +1635,17 @@ impl RuntimeEngine {
             Fact::Denial { authority, .. } => AuditEvent::Denied {
                 authority: terminal_safe(authority.as_str()),
             },
-            Fact::Acceptance { narrowing, .. } | Fact::CandidateAccepted { narrowing, .. } => AuditEvent::Narrowed {
+            Fact::Acceptance {
+                dispatch, narrowing, ..
+            } => AuditEvent::Narrowed {
                 from: self.render_label(&narrowing.from)?,
                 to: self.render_label(&narrowing.to)?,
+                initiator: initiated.approval(dispatch),
+            },
+            Fact::CandidateAccepted { offer, narrowing, .. } => AuditEvent::Narrowed {
+                from: self.render_label(&narrowing.from)?,
+                to: self.render_label(&narrowing.to)?,
+                initiator: initiated.offer(offer),
             },
             Fact::OutputSanitizerBound { sanitizer, .. } => AuditEvent::SanitizerBound {
                 sanitizer: terminal_safe(sanitizer.as_str()),
@@ -1569,6 +1667,7 @@ impl RuntimeEngine {
             Fact::ReturnAccepted { narrowing, .. } => AuditEvent::Narrowed {
                 from: self.render_label(&narrowing.from)?,
                 to: self.render_label(&narrowing.to)?,
+                initiator: None,
             },
             Fact::ReturnDiscarded { .. } => AuditEvent::ReturnDiscarded,
             Fact::Boundary { kind, .. } => match kind {
@@ -1625,6 +1724,7 @@ impl RuntimeEngine {
             EngineEvent::ExecuteOffer {
                 trajectory: owner,
                 offer,
+                initiator,
                 declared,
                 evidence,
                 entropy,
@@ -1633,6 +1733,7 @@ impl RuntimeEngine {
                 view,
                 &owner,
                 &offer,
+                initiator,
                 &declared,
                 &evidence,
                 &entropy,
@@ -1681,7 +1782,9 @@ impl RuntimeEngine {
             // A tool no declaration and no wildcard covers is refused before anything is
             // judged: a typed refusal, never model feedback, and nothing is appended.
             Err(EngineError::UnknownTool(tool)) => return Err(EngineRefusal::UndeclaredTool { tool }),
-            Err(error) => return Ok(deny(malformed_feedback(&error, self.naming))),
+            Err(error) => {
+                return Ok(deny(malformed_feedback(&error, self.naming), Outcomes::Integrity));
+            }
         };
         let Some(views) = view.views(trajectory) else {
             return Err(EngineRefusal::Invariant {
@@ -1879,7 +1982,11 @@ impl RuntimeEngine {
                     }
                 } else {
                     let _ = spent;
-                    deny("[appa] this call's earlier decision no longer stands; propose it again".to_string()).then
+                    deny(
+                        "[appa] this call's earlier decision no longer stands; propose it again".to_string(),
+                        Outcomes::Integrity,
+                    )
+                    .then
                 }
             }
             other => {
@@ -1922,13 +2029,16 @@ impl RuntimeEngine {
                 if !spent.is_empty() || !settled.is_empty() {
                     return Ok(deny_next(
                         "[appa] this call's earlier decision no longer stands; propose it again".to_string(),
+                        Outcomes::Integrity,
                     ));
                 }
                 Err(EngineRefusal::Invariant {
                     detail: "a non-empty proposal produced no release, block, or repeat answer".to_string(),
                 })
             }
-            FollowUp::Malformed { error, .. } => Ok(deny_next(malformed_feedback(&error, self.naming))),
+            FollowUp::Malformed { error, .. } => {
+                Ok(deny_next(malformed_feedback(&error, self.naming), Outcomes::Integrity))
+            }
             other => Err(EngineRefusal::Invariant {
                 detail: format!("a proposal produced a non-proposal follow-up: {other:?}"),
             }),
@@ -1979,6 +2089,7 @@ impl RuntimeEngine {
         let review = self.pending_reviews(block, &offers);
         Feedback {
             text: rendered.text,
+            outcomes: block_outcomes(block),
             offers: self.offered_remedies(block, offers.into_iter().map(|(offer, _)| offer).collect()),
             display: Some(rendered.display),
             review,
@@ -2111,7 +2222,7 @@ impl RuntimeEngine {
         let judged = self.judge_under_audience(
             view.principal(),
             evidence,
-            UnresolvedAudience::Withheld { subject: "result" },
+            UnresolvedAudience::Withheld(ValueKind::Result),
             |audience| {
                 let report = ToolReport {
                     dispatch: dispatch.clone(),
@@ -2143,7 +2254,7 @@ impl RuntimeEngine {
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Outcome(OutcomeFollowUp::Closed { admitted, withheld }) => {
-                Next::PresentToModel(outcome_presentation(outcome, admitted, withheld))
+                Next::PresentToModel(self.outcome_presentation(outcome, admitted, withheld)?)
             }
             FollowUp::Outcome(OutcomeFollowUp::Resolve(request)) => self.resolve_or_withhold(
                 view,
@@ -2151,7 +2262,7 @@ impl RuntimeEngine {
                 Some(dispatch),
                 request,
                 evidence,
-                "[appa] no registered sanitizer answered; the result is withheld and may be retried",
+                UnresolvedAudience::Withheld(ValueKind::Result),
             )?,
             FollowUp::Outcome(OutcomeFollowUp::Staged(confined)) => Next::PresentToModel(self.stage_delivery(
                 "[appa] the cleaned result still narrows this session.",
@@ -2174,6 +2285,7 @@ impl RuntimeEngine {
         view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
+        initiator: appa_runtime_api::Initiator,
         declared: &appa_runtime_api::DeclaredReturn,
         evidence: &[ExternalEvidence],
         entropy: &OfferNonce,
@@ -2214,7 +2326,7 @@ impl RuntimeEngine {
                     source,
                     ValueBody::new(arguments.canonical_text()),
                     SanitizerSubject::Input { call: &call },
-                ) {
+                )? {
                     Ok(derived) => derived,
                     Err(next) => return Ok(*next),
                 };
@@ -2223,10 +2335,8 @@ impl RuntimeEngine {
                 // it: the digest is the annotation's key. Any group its contract reads is
                 // asked through the act's own audience evidence, not gathered here. A
                 // derivation the engine cannot mint a call from is the engine's to refuse.
-                let annotation = match self
-                    .engine
-                    .resolve_call(call.tool().clone(), derived.as_str().as_bytes())
-                {
+                let derived_text = self.body_text(&derived)?;
+                let annotation = match self.engine.resolve_call(call.tool().clone(), derived_text.as_bytes()) {
                     Ok(rewritten) => match (
                         self.engine.registry().declaration(&rewritten),
                         self.do_something_pin(&rewritten),
@@ -2257,7 +2367,7 @@ impl RuntimeEngine {
                 source,
                 body,
                 tool,
-            } => match self.sanitizer_derived(evidence, &sanitizer, source, body, SanitizerSubject::Output { tool }) {
+            } => match self.sanitizer_derived(evidence, &sanitizer, source, body, SanitizerSubject::Output { tool })? {
                 Ok(derived) => OfferOutcome::Derived(Evidence::Sanitizer {
                     sanitizer,
                     source,
@@ -2274,7 +2384,7 @@ impl RuntimeEngine {
                 AuthorityOutcome::Consult(requests) => {
                     return Ok(EngineDecision::deliver(Next::ResolveExternal(requests)));
                 }
-                AuthorityOutcome::NoAnswer(feedback) => return Ok(no_answer(feedback)),
+                AuthorityOutcome::NoAnswer(feedback) => return Ok(no_answer(feedback, None)),
             },
         };
         let denied_by = match &outcome {
@@ -2289,6 +2399,7 @@ impl RuntimeEngine {
                 let execution = OfferExecution {
                     trajectory: trajectory.clone(),
                     offer: engine_offer,
+                    initiator,
                     outcome,
                     return_policy,
                     offer_nonce: engine_nonce(entropy),
@@ -2308,15 +2419,19 @@ impl RuntimeEngine {
                 return Ok(no_answer(
                     "[appa] the sanitizer's derivation was not usable; the offer stands and may be executed again"
                         .to_string(),
+                    None,
                 ));
             }
             // A return declaration the engine will not hold a child to: the floor is not one
             // this trajectory can set, or the declaration does not fit the plan. The offer
             // stands for a corrected declaration.
             AudienceRound::Failed(TransitionError::ReturnPolicy(refusal)) => {
-                return Ok(no_answer(format!(
-                    "[appa] the return declaration is refused: {refusal}; the offer stands and may be executed again"
-                )));
+                return Ok(no_answer(
+                    format!(
+                        "[appa] the return declaration is refused: {refusal}; the offer stands and may be executed again"
+                    ),
+                    None,
+                ));
             }
             AudienceRound::Failed(error) => return Err(offer_refusal(error)),
         };
@@ -2327,7 +2442,7 @@ impl RuntimeEngine {
                 bytes: call.canonical_arguments().canonical_bytes().to_vec(),
             },
             FollowUp::Offer(OfferFollowUp::Admitted { value }) => Next::PresentToModel(Presentation::Value {
-                value: value.as_str().to_string(),
+                value: self.body_text(&value)?.to_string(),
             }),
             FollowUp::Offer(OfferFollowUp::Invalidated) => Next::PresentToModel(Presentation::Declined {
                 feedback: "[appa] the state changed and this offer no longer applies; re-propose the call".to_string(),
@@ -2437,6 +2552,7 @@ impl RuntimeEngine {
     ) -> Presentation {
         let Feedback {
             text,
+            outcomes,
             offers,
             display,
             review,
@@ -2447,6 +2563,7 @@ impl RuntimeEngine {
         };
         Presentation::Blocked {
             feedback,
+            outcomes,
             offers,
             review,
             display,
@@ -2530,17 +2647,21 @@ impl RuntimeEngine {
             .is_some_and(|plan| plan.declares_only())
     }
 
-    /// Whether this offer's plan is rulings alone, each by an authority `rules` accepts.
-    pub(crate) fn offer_asks_only(
+    /// What this offer's plan asks at most, by its most demanding step, where `auto_apply`
+    /// lets the runtime apply it with rulings only by authorities `rules` accepts. `None` for a
+    /// plan the agent applies itself.
+    pub(crate) fn auto_applied(
         &self,
         view: &EngineView,
         trajectory: &TrajectoryId,
         offer: &OfferId,
+        auto_apply: AutoApply,
         rules: impl Fn(&str) -> bool,
-    ) -> bool {
+    ) -> Option<Remedy> {
         parse_offer(offer)
             .and_then(|offer| self.engine.offer_plan(view, trajectory, &offer))
-            .is_some_and(|plan| plan.asks_only(|authority| rules(authority.as_str())))
+            .filter(|plan| plan.auto_applies(auto_apply, |authority| rules(authority.as_str())))
+            .and_then(|plan| plan.steps.iter().map(step_remedy).min())
     }
 
     fn return_policy_of_route(
@@ -2656,11 +2777,87 @@ impl RuntimeEngine {
         }
     }
 
+    /// Resolve a [`ValueBody`] to its UTF-8 text.
+    ///
+    /// This is the single place the runtime turns a `ValueBody` into bytes. Inline bodies return
+    /// their shared buffer without copying; a detached body returns [`EngineRefusal::BodyDetached`].
+    pub(crate) fn body_text(&self, body: &ValueBody) -> Result<std::sync::Arc<str>, EngineRefusal> {
+        body.text_arc().map_err(|detached| EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        })
+    }
+
+    /// What the model reads in place of the raw result. An admitted value and the runtime's
+    /// own words are separate presentations here, because a harness delivers the first as it
+    /// crossed and spells its own tool names into the second.
+    fn outcome_presentation(
+        &self,
+        outcome: &ToolOutcome,
+        admitted: Option<ValueBody>,
+        withheld: Option<appa_engine::transition::Withheld>,
+    ) -> Result<Presentation, EngineRefusal> {
+        use appa_engine::transition::Withheld;
+        match withheld {
+            Some(Withheld::ByRelease) => {
+                return Ok(Presentation::ReplaceOutput {
+                    placeholder: "[appa] the result is withheld".to_string(),
+                });
+            }
+            Some(Withheld::ByRevision) => {
+                return Ok(blocked_without_offers(
+                    "[appa] the result is withheld: the sanitizer it was released under no longer applies".to_string(),
+                    Outcomes::HardBlock,
+                ));
+            }
+            None => {}
+        }
+        match (outcome, admitted) {
+            (
+                ToolOutcome::Success {
+                    body: OutcomeBody::Available(raw),
+                },
+                Some(value),
+            ) if value.len() == raw.len() as u64 && value.digest() == RawResultDigest::of(raw.as_bytes()) => {
+                Ok(Presentation::KeepOutput)
+            }
+            (_, Some(value)) => Ok(Presentation::Value {
+                value: self.body_text(&value)?.to_string(),
+            }),
+            (
+                ToolOutcome::Success {
+                    body: OutcomeBody::TooLarge { limit_bytes },
+                },
+                None,
+            ) => Ok(Presentation::ReplaceOutput {
+                placeholder: match limit_bytes {
+                    Some(limit) => {
+                        format!("[appa] the tool ran, but its output is not shown: it is over the {limit}-byte limit")
+                    }
+                    None => "[appa] the tool ran, but its output is not shown: it is over the size limit".to_string(),
+                },
+            }),
+            (
+                ToolOutcome::Success {
+                    body: OutcomeBody::Unavailable,
+                },
+                None,
+            ) => Ok(Presentation::ReplaceOutput {
+                placeholder: "[appa] the tool ran, but the harness returned no output".to_string(),
+            }),
+            (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Ok(Presentation::KeepOutput),
+            (ToolOutcome::Success { .. }, None) => Ok(Presentation::ReplaceOutput {
+                placeholder: "[appa] the result is withheld".to_string(),
+            }),
+        }
+    }
+
     /// The value `child` crossed most recently, as the harness would deliver it.
     pub(crate) fn latest_return(&self, view: &EngineView, child: &TrajectoryId) -> Option<String> {
         self.engine
             .latest_return_of(view, child)
-            .map(|body| body.as_str().to_string())
+            .and_then(|body| self.body_text(&body).ok())
+            .map(|text| text.to_string())
     }
 
     fn label_text(&self, label: &Label) -> String {
@@ -2678,7 +2875,7 @@ impl RuntimeEngine {
         &self,
         headline: &str,
         residual: &appa_engine::check::Narrowing,
-        staged: &[(EngineOfferId, PlanId)],
+        staged: &[(EngineOfferId, appa_engine::plan::ExecutableRemedyPlan)],
         presentation: &EmbeddedPresentationOptions,
     ) -> Presentation {
         let offers: Vec<OfferId> = staged.iter().map(|(offer, _)| offer_id(offer)).collect();
@@ -2692,6 +2889,11 @@ impl RuntimeEngine {
         );
         Presentation::Blocked {
             feedback,
+            outcomes: route_outcomes(
+                staged
+                    .iter()
+                    .map(|(_, plan)| plan.steps.iter().map(step_remedy).collect()),
+            ),
             offers: offers
                 .into_iter()
                 .map(|offer| OfferedRemedy {
@@ -2818,7 +3020,7 @@ impl RuntimeEngine {
         let then = match decided.follow_up {
             FollowUp::Settlement(SettlementFollowUp::Accepted { admitted }) => {
                 Next::PresentToModel(Presentation::Value {
-                    value: admitted.as_str().to_string(),
+                    value: self.body_text(&admitted)?.to_string(),
                 })
             }
             FollowUp::Settlement(SettlementFollowUp::Discarded) => Next::PresentToModel(Presentation::Discarded),
@@ -2852,10 +3054,10 @@ impl RuntimeEngine {
                 body: ValueBody::new(body),
             },
         };
-        let withheld = UnresolvedAudience::Withheld { subject: "return" };
-        let blocked = |feedback: String| {
+        let withheld = UnresolvedAudience::Withheld(ValueKind::Return);
+        let blocked = |feedback: String, outcomes: Outcomes| {
             Ok(EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
-                feedback,
+                feedback, outcomes,
             ))))
         };
         let judged = self.judge_under_audience(view.principal(), evidence, withheld, |audience| {
@@ -2872,47 +3074,51 @@ impl RuntimeEngine {
             AudienceRound::Judged(decision) => decision,
             AudienceRound::Presented(decision) => return Ok(decision),
             AudienceRound::Failed(TransitionError::ReturnBelowFloor { floor }) => {
-                return blocked(format!(
-                    "[appa] your final message cannot cross: this session's label fell below the floor the parent \
+                return blocked(
+                    format!(
+                        "[appa] your final message cannot cross: this session's label fell below the floor the parent \
                      set for your return ({}). Nothing this session holds now can cross; stop with an empty final \
                      message (send no text or explanation) to end without a return.",
-                    self.label_text(&floor)
-                ));
+                        self.label_text(&floor)
+                    ),
+                    Outcomes::HardBlock,
+                );
             }
             AudienceRound::Failed(TransitionError::ReturnVoid) => {
                 return blocked(
                     "[appa] your parent takes no return from this session, so your final message cannot cross. \
                      Stop with an empty final message (send no text or explanation)."
                         .to_string(),
+                    Outcomes::HardBlock,
                 );
             }
             AudienceRound::Failed(TransitionError::ReturnShapeMismatch(mismatch)) => {
                 let policy = self.engine.return_policy_of(view, child);
-                return blocked(shape_feedback(&mismatch, policy.as_ref()));
+                return blocked(shape_feedback(&mismatch, policy.as_ref()), Outcomes::Integrity);
             }
+            // The declared return sanitizer's mandate does not reach this return under the
+            // policy deciding now: no answer it could give changes that.
             AudienceRound::Failed(TransitionError::SanitizerUnapplicable) => {
-                return Ok(withheld.present("the return sanitizer's derivation was not usable", self.naming));
+                return blocked(
+                    "[appa] the declared return sanitizer cannot apply to this return, so it cannot cross".to_string(),
+                    Outcomes::HardBlock,
+                );
             }
             AudienceRound::Failed(error) => return Err(child_refusal(error)),
         };
         let append = decision.append.map(ValidatedFactBatch::into_unsealed);
         let then = match decision.follow_up {
             FollowUp::Child(ChildFollowUp::Merged { admitted }) => Next::PresentToModel(Presentation::Value {
-                value: admitted.as_str().to_string(),
+                value: self.body_text(&admitted)?.to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Staged { derived }) => Next::PresentToModel(Presentation::Staged {
-                value: derived.as_str().to_string(),
+                value: self.body_text(&derived)?.to_string(),
             }),
             FollowUp::Child(ChildFollowUp::Ended) => Next::PresentToModel(Presentation::NoValue),
             FollowUp::Child(ChildFollowUp::Deferred) => Next::PresentToModel(Presentation::Deferred),
-            FollowUp::Child(ChildFollowUp::Resolve(request)) => self.resolve_or_withhold(
-                view,
-                child,
-                None,
-                request,
-                evidence,
-                "[appa] no registered return sanitizer answered; the return is withheld and may be retried",
-            )?,
+            FollowUp::Child(ChildFollowUp::Resolve(request)) => {
+                self.resolve_or_withhold(view, child, None, request, evidence, withheld)?
+            }
             other => {
                 return Err(EngineRefusal::Invariant {
                     detail: format!("a child return produced an unexpected follow-up: {other:?}"),
@@ -3060,6 +3266,18 @@ impl RuntimeEngine {
         }
     }
 
+    /// The feedback a proposal's own arguments are denied on, as its decision would give it.
+    /// An undeclared tool is refused, not denied, so it is not this.
+    pub(crate) fn malformed(&self, call: &ProposedCall) -> Option<String> {
+        match self
+            .engine
+            .resolve_call(ToolName::new(call.tool.clone()), call.arguments.get().as_bytes())
+        {
+            Ok(_) | Err(EngineError::UnknownTool(_)) => None,
+            Err(error) => Some(malformed_feedback(&error, self.naming)),
+        }
+    }
+
     /// The consult a fresh proposal of this call owes its Annotator, or `None` when a static
     /// contract covers the call. `appa runtime annotate` only: no trajectory is read or changed.
     #[cfg(feature = "daemon")]
@@ -3108,19 +3326,22 @@ impl RuntimeEngine {
             return Err(UnownedSanitizer::Unapplied(sanitizer.to_string()));
         }
         let (declaration, artifact) = match on {
-            SanitizerPoint::ToolOutput => self.sanitizer_consult(
-                &name,
-                ValueBody::new(value),
-                SanitizerSubject::Output {
-                    tool: tool.map(ToolName::new),
-                },
-            ),
+            SanitizerPoint::ToolOutput => self
+                .sanitizer_consult(
+                    &name,
+                    ValueBody::new(value),
+                    SanitizerSubject::Output {
+                        tool: tool.map(ToolName::new),
+                    },
+                )
+                .expect("a freshly constructed ValueBody is inline"),
             SanitizerPoint::ToolInput => {
                 let call = self
                     .engine
                     .resolve_call(ToolName::new(tool.ok_or(UnownedSanitizer::NoTool)?), value.as_bytes())?;
                 let arguments = ValueBody::new(call.canonical_arguments().canonical_text());
                 self.sanitizer_consult(&name, arguments, SanitizerSubject::Input { call: &call })
+                    .expect("a freshly constructed ValueBody is inline")
             }
         };
         Ok(crate::consult::Consult {
@@ -3225,14 +3446,14 @@ impl RuntimeEngine {
         source: RawResultDigest,
         body: ValueBody,
         subject: SanitizerSubject<'_>,
-    ) -> ExternalRequest {
-        let (declaration, artifact) = self.sanitizer_consult(sanitizer, body, subject);
-        ExternalRequest::Sanitizer {
+    ) -> Result<ExternalRequest, EngineRefusal> {
+        let (declaration, artifact) = self.sanitizer_consult(sanitizer, body, subject)?;
+        Ok(ExternalRequest::Sanitizer {
             sanitizer: sanitizer.as_str().to_string(),
             source,
             declaration,
             artifact,
-        }
+        })
     }
 
     /// The declaration and artifact of one sanitizer consult, whoever raises it.
@@ -3241,7 +3462,7 @@ impl RuntimeEngine {
         sanitizer: &appa_engine::names::SanitizerName,
         body: ValueBody,
         subject: SanitizerSubject<'_>,
-    ) -> (SanitizerDeclaration, SanitizerArtifact) {
+    ) -> Result<(SanitizerDeclaration, SanitizerArtifact), EngineRefusal> {
         let registry = self.engine.registry();
         let registered = registry
             .sanitizer(sanitizer)
@@ -3257,13 +3478,14 @@ impl RuntimeEngine {
             }
             SanitizerSubject::Output { tool } => (SanitizerPoint::ToolOutput, tool, None),
         };
-        (
+        let body = self.body_text(&body)?.to_string();
+        Ok((
             SanitizerDeclaration::of(registered, on, registry.trust_chain(), parameters),
             SanitizerArtifact {
                 tool: tool.map(|tool| tool.as_str().to_string()),
-                body: body.as_str().to_string(),
+                body,
             },
-        )
+        ))
     }
 
     /// The sanitizer's derivation from the evidence gathered so far, or what the offer does
@@ -3276,16 +3498,15 @@ impl RuntimeEngine {
         source: RawResultDigest,
         body: ValueBody,
         subject: SanitizerSubject<'_>,
-    ) -> Result<ValueBody, Box<EngineDecision>> {
+    ) -> Result<Result<ValueBody, Box<EngineDecision>>, EngineRefusal> {
         match sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
-            SanitizerAnswer::Derived(derived) => Ok(derived),
-            SanitizerAnswer::Missing => Err(Box::new(EngineDecision::deliver(Next::ResolveExternal(vec![
-                self.sanitizer_request(sanitizer, source, body, subject),
-            ])))),
-            SanitizerAnswer::NoAnswer => Err(Box::new(no_answer(format!(
-                "[appa] sanitizer {} gave no answer; the offer stands and may be executed again",
-                sanitizer.as_str()
-            )))),
+            SanitizerAnswer::Derived(derived) => Ok(Ok(derived)),
+            SanitizerAnswer::Missing => Ok(Err(Box::new(EngineDecision::deliver(Next::ResolveExternal(vec![
+                self.sanitizer_request(sanitizer, source, body, subject)?,
+            ]))))),
+            SanitizerAnswer::NoAnswer(class) => Ok(Err(Box::new(
+                UnresolvedAudience::OfferStands.present(sanitizer_unobtained(sanitizer.as_str(), class, &subject)),
+            ))),
         }
     }
 
@@ -3298,31 +3519,27 @@ impl RuntimeEngine {
         dispatch: Option<&EngineDispatchId>,
         request: EvidenceRequest,
         evidence: &[ExternalEvidence],
-        withheld: &str,
+        withheld: UnresolvedAudience<'_>,
     ) -> Result<Next, EngineRefusal> {
-        let blocked = || Ok(Next::PresentToModel(blocked_without_offers(withheld.to_string())));
         match request {
             EvidenceRequest::Sanitizer {
                 sanitizer,
                 source,
                 body,
             } => {
-                if matches!(
-                    sanitizer_derivation(evidence, sanitizer.as_str(), &source),
-                    SanitizerAnswer::NoAnswer
-                ) {
-                    return blocked();
-                }
                 let tool = dispatch.and_then(|dispatch| {
                     view.views(trajectory)
                         .and_then(|views| views.dispatch_tool(dispatch).cloned())
                 });
-                Ok(Next::ResolveExternal(vec![self.sanitizer_request(
-                    &sanitizer,
-                    source,
-                    body,
-                    SanitizerSubject::Output { tool },
-                )]))
+                let subject = SanitizerSubject::Output { tool };
+                if let SanitizerAnswer::NoAnswer(class) = sanitizer_derivation(evidence, sanitizer.as_str(), &source) {
+                    return Ok(withheld
+                        .present(sanitizer_unobtained(sanitizer.as_str(), class, &subject))
+                        .then);
+                }
+                Ok(Next::ResolveExternal(vec![
+                    self.sanitizer_request(&sanitizer, source, body, subject)?,
+                ]))
             }
         }
     }
@@ -3353,8 +3570,8 @@ impl RuntimeEngine {
                     Next::ResolveExternal(requests),
                 )));
             }
-            Err(AudienceFailure::Refused(detail)) => {
-                return Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)));
+            Err(AudienceFailure::Refused(retry)) => {
+                return Ok(AudienceRound::Presented(unresolved.present(retry)));
             }
         };
         match judge(&act.payload) {
@@ -3364,9 +3581,7 @@ impl RuntimeEngine {
                     AudienceConsult::Requests(requests) => Ok(AudienceRound::Presented(EngineDecision::deliver(
                         Next::ResolveExternal(requests),
                     ))),
-                    AudienceConsult::Unresolved(detail) => {
-                        Ok(AudienceRound::Presented(unresolved.present(&detail, self.naming)))
-                    }
+                    AudienceConsult::Unresolved(retry) => Ok(AudienceRound::Presented(unresolved.present(retry))),
                     AudienceConsult::Unconfigured(level) => Ok(AudienceRound::Presented(
                         unresolved.present_unconfigured(level, self.naming),
                     )),
@@ -3438,7 +3653,9 @@ impl RuntimeEngine {
                             principal: principal.clone(),
                         }),
                         Err(reason) => {
-                            unanswered.members.insert(member.clone(), *reason);
+                            unanswered
+                                .members
+                                .insert(member.clone(), NoAnswer::of(provider, *reason));
                         }
                     }
                 }
@@ -3447,27 +3664,44 @@ impl RuntimeEngine {
         }
         if let Err(refusal) = audience.expansions(&payload, principal) {
             // The refusal's own Display can carry directory data (member ids, principals)
-            // the model has not seen; the model-visible detail names only the failure class
-            // and its provider/selector.
+            // the model has not seen, so only its class is logged by default.
             tracing::debug!(%refusal, "gathered audience evidence refused");
-            return Err(AudienceFailure::Refused(format!(
-                "the gathered audience evidence is not admissible: {}",
-                refusal_class(&refusal)
+            return Err(AudienceFailure::Refused(unobtained_logged(
+                RetryHint::AfterRepair,
+                format_args!(
+                    "the gathered audience evidence is not admissible ({})",
+                    refusal_class(&refusal)
+                ),
             )));
         }
         let mut requests: Vec<ExternalRequest> = Vec::new();
+        let mut failed: Vec<NoAnswer> = Vec::new();
         for owed in audience.member_lookups_owed(&payload) {
-            if let Some(reason) = unanswered.members.get(&owed.member) {
-                // The member is directory data the model has not seen.
-                return Err(AudienceFailure::Refused(audience_failure(
-                    &owed.provider,
-                    "a member lookup",
-                    *reason,
-                )));
+            if let Some(failure) = unanswered.members.get(&owed.member) {
+                failed.push(failure.clone());
+                continue;
             }
             let templates = selector_templates(audience, &owed.provider)
                 .expect("an owed lookup names the registered provider of a pinned source");
             requests.push(member_lookup(audience, owed.provider, owed.member, templates));
+        }
+        // A failed lookup ends the act before its judgment can name the facts it needs, so
+        // every fact this act asked and lost ranks beside it.
+        if !failed.is_empty() {
+            failed = unanswered
+                .members
+                .values()
+                .cloned()
+                .chain(
+                    unanswered
+                        .selectors
+                        .iter()
+                        .map(|(spec, reason)| NoAnswer::of(&spec.provider, *reason)),
+                )
+                .collect();
+        }
+        if let Some(retry) = unobtained(&failed) {
+            return Err(AudienceFailure::Refused(retry));
         }
         if !requests.is_empty() {
             return Err(AudienceFailure::Consult(requests));
@@ -3491,9 +3725,15 @@ impl RuntimeEngine {
             Err(Unroutable::UnmappedChain(level)) => return Ok(AudienceConsult::Unconfigured(level)),
             // A dynamically supplied reference no source serves: an operational failure,
             // never a policy state. (A statically written one refuses at policy load.)
-            Err(unroutable) => return Ok(AudienceConsult::Unresolved(unroutable.to_string())),
+            Err(unroutable) => {
+                return Ok(AudienceConsult::Unresolved(unobtained_logged(
+                    RetryHint::AfterRepair,
+                    format_args!("{unroutable}"),
+                )));
+            }
         };
         let mut requests: Vec<ExternalRequest> = Vec::new();
+        let mut failed: Vec<NoAnswer> = Vec::new();
         for spec in &primitives.selectors {
             let answered = act
                 .payload
@@ -3504,11 +3744,8 @@ impl RuntimeEngine {
                 continue;
             }
             if let Some(reason) = act.unanswered.selectors.get(spec) {
-                return Ok(AudienceConsult::Unresolved(audience_failure(
-                    &spec.provider,
-                    &spec.selector,
-                    *reason,
-                )));
+                failed.push(NoAnswer::of(&spec.provider, *reason));
+                continue;
             }
             requests.push(ExternalRequest::AudienceSource {
                 provider: spec.provider.clone(),
@@ -3520,13 +3757,9 @@ impl RuntimeEngine {
             if act.payload.lookups.iter().any(|lookup| lookup.member == spec.member) {
                 continue;
             }
-            if let Some(reason) = act.unanswered.members.get(&spec.member) {
-                // The member can be a reader a delta wrote that the model never saw.
-                return Ok(AudienceConsult::Unresolved(audience_failure(
-                    &spec.provider,
-                    "a member lookup",
-                    *reason,
-                )));
+            if let Some(failure) = act.unanswered.members.get(&spec.member) {
+                failed.push(failure.clone());
+                continue;
             }
             requests.push(member_lookup(
                 audience,
@@ -3534,6 +3767,9 @@ impl RuntimeEngine {
                 spec.member.clone(),
                 self.templates_of(&spec.provider)?,
             ));
+        }
+        if let Some(retry) = unobtained(&failed) {
+            return Ok(AudienceConsult::Unresolved(retry));
         }
         if requests.is_empty() {
             // Every primitive is answered and pre-validated, yet the act still asked.
@@ -3652,51 +3888,67 @@ fn annotation_args(
     serde_json::Value::Object(args)
 }
 
-fn unresolved_audience(tool: &str, detail: &str) -> String {
-    format!("[appa] {tool}: {detail}; the call was not checked")
+/// One audience fact a consult did not obtain: its source and the class of the failure. What
+/// it was asked stays out of the diagnostics, since a member or a selector's answer is
+/// directory data a model may later read there.
+#[derive(Debug, Clone)]
+struct NoAnswer {
+    provider: String,
+    reason: crate::events::NoAnswerClass,
 }
 
-/// Safe model-visible guidance for one audience consult failure. The class carries no
-/// external response or stderr. In particular, a non-success status says nothing about
-/// retryability.
-fn audience_failure(provider: &str, subject: &str, reason: crate::events::NoAnswerClass) -> String {
-    use crate::events::NoAnswerClass;
+impl NoAnswer {
+    fn of(provider: &str, reason: crate::events::NoAnswerClass) -> NoAnswer {
+        NoAnswer {
+            provider: provider.to_string(),
+            reason,
+        }
+    }
+}
 
-    let failure = format!("audience source {provider} gave no answer for {subject}");
-    match reason {
-        NoAnswerClass::Unregistered => {
-            format!("{failure}: no implementation is configured; an operator must repair the deployment configuration")
+/// The facts one round did not obtain, as one refusal. A failure only a repair fixes
+/// outranks a transient one in the retry hint.
+fn unobtained(failed: &[NoAnswer]) -> Option<RetryHint> {
+    let retry = failed
+        .iter()
+        .map(|failure| retry_hint(failure.reason))
+        .max_by_key(|retry| *retry == RetryHint::AfterRepair)?;
+    for failure in failed {
+        tracing::info!(
+            provider = %failure.provider,
+            reason = %failure.reason,
+            "an audience source gave no answer"
+        );
+    }
+    Some(retry)
+}
+
+/// A sanitizer's missing derivation. A sanitizer of a confined value fails on what it read,
+/// so the hint for it is the same for every class: the class would carry a bit of the value.
+fn sanitizer_unobtained(
+    sanitizer: &str,
+    reason: crate::events::NoAnswerClass,
+    subject: &SanitizerSubject<'_>,
+) -> RetryHint {
+    let retry = match subject {
+        SanitizerSubject::Input { .. } => retry_hint(reason),
+        SanitizerSubject::Output { .. } => RetryHint::AfterRepair,
+    };
+    match subject {
+        SanitizerSubject::Input { .. } => {
+            unobtained_logged(retry, format_args!("sanitizer {sanitizer} gave no answer: {reason}"))
         }
-        NoAnswerClass::Unreachable => {
-            format!(
-                "{failure}: its configured implementation cannot be reached; an operator must repair the deployment configuration or environment"
-            )
+        SanitizerSubject::Output { .. } => {
+            unobtained_logged(retry, format_args!("sanitizer {sanitizer} gave no answer"))
         }
-        NoAnswerClass::Timeout => format!("{failure}: the request timed out; retrying later may succeed"),
-        NoAnswerClass::NonSuccess { status } => format!(
-            "{failure}: it returned non-success status {status}; the cause and retryability are unknown, so ask an operator to inspect the runtime diagnostics"
-        ),
-        NoAnswerClass::Transport => format!(
-            "{failure}: the transport failed for an unknown reason; retryability is unknown, so ask an operator to inspect the runtime diagnostics"
-        ),
-        NoAnswerClass::Malformed => {
-            format!(
-                "{failure}: it returned a malformed answer; an operator must repair the audience-source integration"
-            )
-        }
-        NoAnswerClass::Oversized => {
-            format!(
-                "{failure}: its answer exceeded the configured size limit; an operator must repair the audience-source integration"
-            )
-        }
-        NoAnswerClass::UnsupportedVersion => format!(
-            "{failure}: it used an unsupported protocol version; an operator must repair the audience-source integration"
-        ),
-        NoAnswerClass::ModuleError | NoAnswerClass::ModulePanicked => {
-            format!("{failure}: its module failed; an operator must repair the audience-source integration")
-        }
-        #[cfg(feature = "daemon")]
-        NoAnswerClass::Dismissed => format!("{failure}: the request was dismissed; no retryability is known"),
+    }
+}
+
+/// What asking again can do for a fact whose consult failed for `reason`.
+pub(crate) fn retry_hint(reason: crate::events::NoAnswerClass) -> RetryHint {
+    match reason.is_transient() {
+        true => RetryHint::Later,
+        false => RetryHint::AfterRepair,
     }
 }
 
@@ -3715,7 +3967,7 @@ enum AuthorityOutcome {
 
 enum SanitizerAnswer {
     Missing,
-    NoAnswer,
+    NoAnswer(crate::events::NoAnswerClass),
     Derived(ValueBody),
 }
 
@@ -3727,7 +3979,7 @@ enum AudienceConsult {
     Requests(Vec<ExternalRequest>),
     /// An answer this trajectory did not obtain, with safe guidance based on the known
     /// failure class.
-    Unresolved(String),
+    Unresolved(RetryHint),
     /// A built-in level the loaded policy maps to no sources; proposing again cannot
     /// change the answer.
     Unconfigured(ChainAudience),
@@ -3741,34 +3993,38 @@ enum UnresolvedAudience<'a> {
     /// The proposed call is denied.
     Denied { tool: &'a str },
     /// The value — a tool result or a child's return — is withheld.
-    Withheld { subject: &'static str },
+    Withheld(ValueKind),
     /// The offer stands.
     OfferStands,
 }
 
 impl UnresolvedAudience<'_> {
-    fn present(self, detail: &str, naming: ToolNaming) -> EngineDecision {
+    fn present(self, retry: RetryHint) -> EngineDecision {
+        let missing = Outcomes::MissingFact(retry);
         match self {
-            UnresolvedAudience::Denied { tool } => deny(unresolved_audience(&naming.model_spelling(tool), detail)),
-            UnresolvedAudience::Withheld { subject } => EngineDecision::deliver(Next::PresentToModel(
-                blocked_without_offers(format!("[appa] {detail}; the {subject} is withheld")),
+            UnresolvedAudience::Denied { .. } => deny(MissingIn::Call.model_text().to_string(), missing),
+            UnresolvedAudience::Withheld(kind) => EngineDecision::deliver(Next::PresentToModel(
+                blocked_without_offers(MissingIn::Value(kind).model_text().to_string(), missing),
             )),
-            UnresolvedAudience::OfferStands => no_answer(format!("[appa] {detail}; the offer stands")),
+            UnresolvedAudience::OfferStands => no_answer(MissingIn::Remedy.model_text().to_string(), Some(retry)),
         }
     }
 
-    /// The same act, short of an answer no retry obtains: the wording names the policy
-    /// gap and invites no retry.
+    /// The same act, short of an answer no retry obtains: the policy is misconfigured, so
+    /// the refusal is an integrity fault, and the wording names the gap and invites no retry.
     fn present_unconfigured(self, level: ChainAudience, naming: ToolNaming) -> EngineDecision {
         let detail = unconfigured_audience(level);
         match self {
-            UnresolvedAudience::Denied { tool } => deny(format!(
-                "[appa] {}: {detail}; the call is denied",
-                naming.model_spelling(tool)
-            )),
-            UnresolvedAudience::Withheld { subject } => EngineDecision::deliver(Next::PresentToModel(
-                blocked_without_offers(format!("[appa] {detail}; the {subject} is withheld")),
-            )),
+            UnresolvedAudience::Denied { tool } => deny(
+                format!("[appa] {}: {detail}; the call is denied", naming.model_spelling(tool)),
+                Outcomes::Integrity,
+            ),
+            UnresolvedAudience::Withheld(kind) => {
+                EngineDecision::deliver(Next::PresentToModel(blocked_without_offers(
+                    format!("[appa] {detail}; the {} is withheld", kind.noun()),
+                    Outcomes::Integrity,
+                )))
+            }
             UnresolvedAudience::OfferStands => declined(format!("[appa] {detail}; the offer is declined")),
         }
     }
@@ -3786,7 +4042,58 @@ enum AudienceRound<T> {
 /// operational refusal a failed or inadmissible answer forces.
 enum AudienceFailure {
     Consult(Vec<ExternalRequest>),
-    Refused(String),
+    Refused(RetryHint),
+}
+
+/// A fact an act could not obtain, as the host reads it: what asking again can do. What failed,
+/// and how, goes to the diagnostics only.
+fn unobtained_logged(retry: RetryHint, diagnostic: impl std::fmt::Display) -> RetryHint {
+    tracing::info!(%diagnostic, ?retry, "a fact was not obtained");
+    retry
+}
+
+/// The value a withholding keeps from the model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValueKind {
+    Result,
+    Return,
+}
+
+impl ValueKind {
+    fn noun(self) -> &'static str {
+        match self {
+            ValueKind::Result => "result",
+            ValueKind::Return => "return",
+        }
+    }
+}
+
+/// What a fact not obtained refused. The model reads one text per kind: nothing in it
+/// depends on which source failed or how, and whether asking again helps is the host's to
+/// read, from the typed retry hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MissingIn {
+    Call,
+    Value(ValueKind),
+    Remedy,
+}
+
+impl MissingIn {
+    pub(crate) fn model_text(self) -> &'static str {
+        match self {
+            MissingIn::Call => "[appa] this call was not checked: a fact its check needs could not be obtained.",
+            MissingIn::Value(ValueKind::Result) => {
+                "[appa] the result is withheld: a fact it needs could not be obtained."
+            }
+            MissingIn::Value(ValueKind::Return) => {
+                "[appa] the return is withheld: a fact it needs could not be obtained."
+            }
+            MissingIn::Remedy => {
+                "[appa] the plan was not applied: a fact it needs could not be obtained. Nothing changed, and the \
+                 offer still stands."
+            }
+        }
+    }
 }
 
 /// One act's validated audience payload — what the act pins — beside the consults that
@@ -3829,18 +4136,66 @@ fn member_lookup(
 struct Unanswered {
     selectors: BTreeMap<SelectorSpec, crate::events::NoAnswerClass>,
     /// Qualified members whose lookup produced no answer.
-    members: BTreeMap<String, crate::events::NoAnswerClass>,
+    members: BTreeMap<String, NoAnswer>,
 }
 
-fn deny(text: String) -> EngineDecision {
-    EngineDecision::deliver(deny_next(text))
+/// A block as its offered plans settle it. A step is an authority's ruling (a waivable gap),
+/// accepting a narrowing (consent), or the agent's own choice, as calling another tool first
+/// is. The plans are alternatives, each asking its most demanding step, so the cheapest one
+/// decides; the rest are held for a host to show. A block nothing is offered for is a hard
+/// block.
+fn block_outcomes(block: &CoreBlocked) -> Outcomes {
+    let executable: BTreeMap<PlanId, &ExecutableRemedyPlan> = block
+        .block
+        .plans
+        .iter()
+        .filter_map(RemedyPlan::executable)
+        .map(|plan| (plan.id, plan))
+        .collect();
+    let offered = block.offers.iter().filter_map(|(_, id)| executable.get(id));
+    let redispatches = block
+        .block
+        .plans
+        .iter()
+        .filter(|plan| matches!(plan, RemedyPlan::Redispatch(_)))
+        .map(|_| vec![Remedy::AgentChoice]);
+    route_outcomes(
+        offered
+            .map(|plan| plan.steps.iter().map(step_remedy).collect())
+            .chain(redispatches),
+    )
 }
 
-fn deny_next(text: String) -> Next {
+/// Each route scores its most demanding step; the cheapest route decides, and every step's
+/// remedy is held. No route is a hard block.
+fn route_outcomes(routes: impl Iterator<Item = Vec<Remedy>>) -> Outcomes {
+    let routes: Vec<Vec<Remedy>> = routes.collect();
+    match routes.iter().filter_map(|steps| steps.iter().min()).max() {
+        Some(&deciding) => Outcomes::Remediable(Remediable::new(deciding, routes.into_iter().flatten())),
+        None => Outcomes::HardBlock,
+    }
+}
+
+fn step_remedy(step: &RemedyStep) -> Remedy {
+    match step {
+        RemedyStep::Authorize(_) => Remedy::WaivableGap,
+        RemedyStep::Accept(_) => Remedy::Consent,
+        RemedyStep::Withhold | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => {
+            Remedy::AgentChoice
+        }
+    }
+}
+
+fn deny(text: String, outcomes: Outcomes) -> EngineDecision {
+    EngineDecision::deliver(deny_next(text, outcomes))
+}
+
+fn deny_next(text: String, outcomes: Outcomes) -> Next {
     Next::ModelResponse {
         invocations: Vec::new(),
         feedback: vec![Feedback {
             text,
+            outcomes,
             offers: Vec::new(),
             display: None,
             review: Vec::new(),
@@ -3848,9 +4203,10 @@ fn deny_next(text: String) -> Next {
     }
 }
 
-fn blocked_without_offers(feedback: String) -> Presentation {
+fn blocked_without_offers(feedback: String, outcomes: Outcomes) -> Presentation {
     Presentation::Blocked {
         feedback,
+        outcomes,
         offers: Vec::new(),
         review: Vec::new(),
         display: None,
@@ -3861,8 +4217,8 @@ fn declined(feedback: String) -> EngineDecision {
     EngineDecision::deliver(Next::PresentToModel(Presentation::Declined { feedback }))
 }
 
-fn no_answer(feedback: String) -> EngineDecision {
-    EngineDecision::deliver(Next::PresentToModel(Presentation::NoAnswer { feedback }))
+fn no_answer(feedback: String, retry: Option<RetryHint>) -> EngineDecision {
+    EngineDecision::deliver(Next::PresentToModel(Presentation::NoAnswer { feedback, retry }))
 }
 
 fn engine_nonce(entropy: &OfferNonce) -> EngineOfferNonce {
@@ -3918,6 +4274,46 @@ pub(crate) fn parse_fork(log: &Log, binding: &SpawnBinding) -> Option<ForkId> {
     })?;
     spawn_seal(batch, &fork).verify_slice(&seal).ok()?;
     Some(fork)
+}
+
+/// Who took each accepted offer, and the offer whose approval each release spent, as a log
+/// records them: what an acceptance's audit entry names its initiator by.
+struct Initiated<'a> {
+    offers: BTreeMap<&'a EngineOfferId, appa_runtime_api::Initiator>,
+    approvals: BTreeMap<&'a appa_engine::value::DispatchId, &'a EngineOfferId>,
+}
+
+impl<'a> Initiated<'a> {
+    fn of(facts: &'a [Fact]) -> Self {
+        let mut initiated = Initiated {
+            offers: BTreeMap::new(),
+            approvals: BTreeMap::new(),
+        };
+        for fact in facts {
+            match fact {
+                Fact::OfferAccepted {
+                    offer,
+                    initiator: Some(initiator),
+                    ..
+                } => {
+                    initiated.offers.insert(offer, *initiator);
+                }
+                Fact::CallApprovalConsumed { offer, dispatch, .. } => {
+                    initiated.approvals.insert(dispatch, offer);
+                }
+                _ => {}
+            }
+        }
+        initiated
+    }
+
+    fn offer(&self, offer: &EngineOfferId) -> Option<appa_runtime_api::Initiator> {
+        self.offers.get(offer).copied()
+    }
+
+    fn approval(&self, dispatch: &appa_engine::value::DispatchId) -> Option<appa_runtime_api::Initiator> {
+        self.approvals.get(dispatch).and_then(|offer| self.offer(offer))
+    }
 }
 
 const RENDERED_OFFER_CHARS: usize = 16;
@@ -3977,21 +4373,40 @@ pub(crate) fn renders_offer(quoted: &OfferId) -> bool {
 /// The canonical identity a quoted id names, resolved against the offers this
 /// log has opened.
 pub(crate) fn resolve_rendered(log: &Log, rendered: &OfferId) -> Option<OfferId> {
-    let mut found = None;
+    resolve_rendered_all(log, std::slice::from_ref(rendered))
+        .pop()
+        .flatten()
+}
+
+/// [`resolve_rendered`] for each of `rendered`, in one pass over the log: `None` where an id
+/// names no offer, or more than one.
+pub(crate) fn resolve_rendered_all(log: &Log, rendered: &[OfferId]) -> Vec<Option<OfferId>> {
+    enum Named {
+        Nothing,
+        One(EngineOfferId),
+        Several,
+    }
+    let mut named: BTreeMap<&str, Named> = rendered.iter().map(|id| (id.0.as_str(), Named::Nothing)).collect();
     for fact in log.facts() {
         let Fact::OfferOpened { offer, .. } = fact else {
             continue;
         };
-        if offer_id(offer) != *rendered {
+        let Some(slot) = named.get_mut(offer_id(offer).0.as_str()) else {
             continue;
-        }
-        match found {
-            None => found = Some(OfferId(offer.to_hex())),
-            Some(ref already) if already.0 == offer.to_hex() => {}
-            Some(_) => return None,
-        }
+        };
+        *slot = match slot {
+            Named::Nothing => Named::One(*offer),
+            Named::One(already) if already == offer => continue,
+            Named::One(_) | Named::Several => Named::Several,
+        };
     }
-    found
+    rendered
+        .iter()
+        .map(|id| match named.get(id.0.as_str()) {
+            Some(Named::One(offer)) => Some(OfferId(offer.to_hex())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The exact-bytes key of one policy file, as text. The type is the
@@ -4061,53 +4476,6 @@ fn engine_outcome(outcome: &ToolOutcome) -> CoreToolOutcome {
     }
 }
 
-/// What the model reads in place of the raw result. An admitted value and the runtime's
-/// own words are separate presentations here, because a harness delivers the first as it
-/// crossed and spells its own tool names into the second.
-fn outcome_presentation(outcome: &ToolOutcome, admitted: Option<ValueBody>, withheld: bool) -> Presentation {
-    if withheld {
-        return Presentation::ReplaceOutput {
-            placeholder: "[appa] the result is withheld".to_string(),
-        };
-    }
-    match (outcome, admitted) {
-        (
-            ToolOutcome::Success {
-                body: OutcomeBody::Available(raw),
-            },
-            Some(value),
-        ) if value.as_str() == raw => Presentation::KeepOutput,
-        (_, Some(value)) => Presentation::Value {
-            value: value.as_str().to_string(),
-        },
-        (
-            ToolOutcome::Success {
-                body: OutcomeBody::TooLarge { limit_bytes },
-            },
-            None,
-        ) => Presentation::ReplaceOutput {
-            placeholder: match limit_bytes {
-                Some(limit) => {
-                    format!("[appa] the tool ran, but its output is not shown: it is over the {limit}-byte limit")
-                }
-                None => "[appa] the tool ran, but its output is not shown: it is over the size limit".to_string(),
-            },
-        },
-        (
-            ToolOutcome::Success {
-                body: OutcomeBody::Unavailable,
-            },
-            None,
-        ) => Presentation::ReplaceOutput {
-            placeholder: "[appa] the tool ran, but the harness returned no output".to_string(),
-        },
-        (ToolOutcome::Failure { .. } | ToolOutcome::Indeterminate, None) => Presentation::KeepOutput,
-        (ToolOutcome::Success { .. }, None) => Presentation::ReplaceOutput {
-            placeholder: "[appa] the result is withheld".to_string(),
-        },
-    }
-}
-
 fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
     evidence
         .iter()
@@ -4115,7 +4483,7 @@ fn sanitizer_evidence(evidence: &[ExternalEvidence]) -> Vec<Evidence> {
             ExternalEvidence::Sanitizer {
                 sanitizer,
                 source,
-                derived: Some(derived),
+                derived: Ok(derived),
             } => Some(Evidence::Sanitizer {
                 sanitizer: appa_engine::names::SanitizerName::new(sanitizer.clone()),
                 source: *source,
@@ -4144,8 +4512,8 @@ fn sanitizer_derivation(evidence: &[ExternalEvidence], name: &str, source: &RawR
             && reported == source
         {
             return match derived {
-                Some(derived) => SanitizerAnswer::Derived(ValueBody::new(derived.clone())),
-                None => SanitizerAnswer::NoAnswer,
+                Ok(derived) => SanitizerAnswer::Derived(ValueBody::new(derived.clone())),
+                Err(class) => SanitizerAnswer::NoAnswer(*class),
             };
         }
     }
@@ -4233,6 +4601,10 @@ fn stage_feedback(
 fn proposal_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("deciding a proposal: {error}"),
         },
@@ -4249,6 +4621,10 @@ fn outcome_refusal(error: TransitionError) -> EngineRefusal {
         TransitionError::ObservationMismatch
         | TransitionError::ContradictedSuccess
         | TransitionError::ClosedUnobserved => EngineRefusal::OutcomeMismatch,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("deciding an outcome: {error}"),
         },
@@ -4260,6 +4636,10 @@ fn offer_refusal(error: TransitionError) -> EngineRefusal {
         TransitionError::UnknownOffer | TransitionError::OfferElsewhere => EngineRefusal::UnknownOffer,
         TransitionError::ApprovalPending => EngineRefusal::ApprovalPending,
         TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("deciding an offer: {error}"),
         },
@@ -4270,6 +4650,10 @@ fn bind_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::UnbindableFork | TransitionError::ChildAlreadyUsed => EngineRefusal::Unbindable,
         TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("binding a fork: {error}"),
         },
@@ -4279,6 +4663,10 @@ fn bind_refusal(error: TransitionError) -> EngineRefusal {
 fn child_refusal(error: TransitionError) -> EngineRefusal {
     match error {
         TransitionError::BranchEnded => EngineRefusal::Ended,
+        TransitionError::BodyDetached(detached) => EngineRefusal::BodyDetached {
+            at: detached.at,
+            digest: detached.digest,
+        },
         error => EngineRefusal::Invariant {
             detail: format!("deciding a child return: {error}"),
         },
@@ -5349,10 +5737,10 @@ mod tests {
     }
 
     use super::{
-        AnnotationNeed, BARE_CONTROL_TOOL, EngineEvent, EngineView, ExternalEvidence, ExternalRequest, Next, OfferId,
-        OfferNonce, Presentation, ProposedCall, Resolution, ReturnBounds, RuntimeEngine, SanitizerSubject,
-        TrajectoryId, audience_failure, audience_wire, block_feedback, outcome_presentation, remedy_instruction,
-        remedy_lines, terminal_safe, unresolved_audience,
+        AnnotationNeed, BARE_CONTROL_TOOL, EngineEvent, EngineRefusal, EngineView, ExternalEvidence, ExternalRequest,
+        Next, NoAnswer, OfferId, OfferNonce, Presentation, ProposedCall, Resolution, RetryHint, ReturnBounds,
+        RuntimeEngine, SanitizerSubject, TrajectoryId, audience_wire, block_feedback, remedy_instruction, remedy_lines,
+        terminal_safe, unobtained,
     };
     use crate::api::{EmbeddedPresentationOptions, ToolNaming, ToolOutcome};
     use crate::consult::{AnnotationAnswer, AnswerDelta, HistoryEntry, SanitizerPoint, ToolNameAuthor};
@@ -5366,47 +5754,36 @@ mod tests {
     use appa_engine::value::{RawResultDigest, ToolName, ValueBody};
 
     #[test]
-    fn audience_failure_guidance_distinguishes_repair_retry_and_unknown() {
+    fn a_round_that_misses_a_fact_only_a_repair_obtains_is_retried_after_repair() {
         use crate::events::NoAnswerClass;
-
-        let unregistered = audience_failure("slack", "channel/eng", NoAnswerClass::Unregistered);
-        assert!(unregistered.contains("operator must repair the deployment configuration"));
-        assert!(!unregistered.contains("retrying"));
-
-        let timeout = audience_failure("slack", "channel/eng", NoAnswerClass::Timeout);
-        assert!(timeout.contains("timed out; retrying later may succeed"));
-
-        let failed = audience_failure("slack", "channel/eng", NoAnswerClass::NonSuccess { status: 7 });
-        assert!(failed.contains("non-success status 7"));
-        assert!(failed.contains("cause and retryability are unknown"));
-        assert!(!failed.contains("propose it again"));
-    }
-
-    #[test]
-    fn audience_failure_feedback_contains_only_the_safe_classification() {
-        use crate::external::NoAnswerReason;
-        // What the source itself said: it reaches the runtime diagnostics, never the model.
-        const SENTINEL: &str = "upstream-said-xyzzy";
-        for (reason, classification) in [
-            (NoAnswerReason::Transport, "the transport failed for an unknown reason"),
+        let failed = |reasons: &[NoAnswerClass]| {
+            let failed: Vec<NoAnswer> = reasons.iter().map(|reason| NoAnswer::of("slack", *reason)).collect();
+            unobtained(&failed)
+        };
+        let unavailable = NoAnswerClass::NonSuccess { status: 503 };
+        for (reasons, retry) in [
+            (vec![unavailable], Some(RetryHint::Later)),
+            (vec![NoAnswerClass::Timeout, unavailable], Some(RetryHint::Later)),
+            (vec![NoAnswerClass::NonSuccess { status: 429 }], Some(RetryHint::Later)),
             (
-                NoAnswerReason::NonSuccess {
-                    status: 502,
-                    detail: Some(SENTINEL.to_string()),
-                },
-                "it returned non-success status 502",
+                vec![NoAnswerClass::NonSuccess { status: 404 }],
+                Some(RetryHint::AfterRepair),
             ),
+            (
+                vec![NoAnswerClass::NonSuccess { status: 7 }],
+                Some(RetryHint::AfterRepair),
+            ),
+            (
+                vec![unavailable, NoAnswerClass::Malformed],
+                Some(RetryHint::AfterRepair),
+            ),
+            (
+                vec![NoAnswerClass::Unregistered, unavailable],
+                Some(RetryHint::AfterRepair),
+            ),
+            (vec![], None),
         ] {
-            let detail = audience_failure("slack", "a member lookup", (&reason).into());
-            let feedback = unresolved_audience("SlackSend", &detail);
-
-            assert!(
-                feedback.starts_with("[appa] SlackSend: audience source slack gave no answer for a member lookup: "),
-                "{feedback}"
-            );
-            assert!(feedback.contains(classification), "{feedback}");
-            assert!(!feedback.contains(SENTINEL), "{feedback}");
-            assert!(!feedback.contains("propose it again later"));
+            assert_eq!(failed(&reasons), retry, "{reasons:?}");
         }
     }
 
@@ -5609,12 +5986,10 @@ mod tests {
         .expect("the sanitizer policy compiles");
         let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
         let scrub = appa_engine::names::SanitizerName::new("scrub");
-        let request = |subject: SanitizerSubject<'_>| match engine.sanitizer_request(
-            &scrub,
-            RawResultDigest::of(b"raw"),
-            ValueBody::new("raw"),
-            subject,
-        ) {
+        let request = |subject: SanitizerSubject<'_>| match engine
+            .sanitizer_request(&scrub, RawResultDigest::of(b"raw"), ValueBody::new("raw"), subject)
+            .expect("inline sanitizer request")
+        {
             ExternalRequest::Sanitizer {
                 declaration, artifact, ..
             } => (declaration, artifact),
@@ -5645,7 +6020,7 @@ mod tests {
     }
 
     fn opened_view(engine: &RuntimeEngine, trajectory: &TrajectoryId) -> EngineView {
-        let opening = engine.root_opening(trajectory, b"policy", None);
+        let opening = engine.root_opening(trajectory, b"policy", None, Default::default());
         engine.viewed(opening, trajectory, 1).expect("the opening validates")
     }
 
@@ -5664,7 +6039,7 @@ mod tests {
         let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored)
             .at(&appa_engine::profile::DeploymentName::new("default"), 1);
         let trajectory = TrajectoryId::new("file-delivery-retry");
-        let mut facts = engine.root_opening(&trajectory, b"policy", None);
+        let mut facts = engine.root_opening(&trajectory, b"policy", None, Default::default());
         let view = engine.viewed(facts.clone(), &trajectory, 1).unwrap();
         let id = super::ProposalBatchId::new("recorded-file-call");
         let bytes = br#"{"path":"fixture.txt"}"#;
@@ -5775,7 +6150,7 @@ mod tests {
         let policy = annotator_policy();
         let engine = annotator_engine(&policy);
         let trajectory = TrajectoryId("t".to_string());
-        let opening = engine.root_opening(&trajectory, b"policy", None);
+        let opening = engine.root_opening(&trajectory, b"policy", None, Default::default());
         let view = engine
             .engine
             .view(&trajectory, opening.clone(), 1)
@@ -7118,17 +7493,60 @@ mod tests {
 
     #[test]
     fn withholding_replaces_failure_output_too() {
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("policy compiles");
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
         assert_eq!(
-            outcome_presentation(
-                &ToolOutcome::Failure {
-                    message: "sensitive failure detail".to_string(),
-                },
-                None,
-                true,
-            ),
+            engine
+                .outcome_presentation(
+                    &ToolOutcome::Failure {
+                        message: "sensitive failure detail".to_string(),
+                    },
+                    None,
+                    Some(appa_engine::transition::Withheld::ByRelease),
+                )
+                .expect("withholding does not read body"),
             Presentation::ReplaceOutput {
                 placeholder: "[appa] the result is withheld".to_string(),
             },
         );
+    }
+
+    #[test]
+    fn outcome_presentation_keep_output_works_on_detached_body() {
+        let policy = appa_policy::Config::from_toml_str("version = 2").expect("policy compiles");
+        let engine = RuntimeEngine::from_policy(&policy, ToolNaming::AsAuthored);
+        let raw = "large tool output payload".to_string();
+        let mut detached = ValueBody::new(raw.clone());
+        let at = appa_engine::value::BodyAt { seq: 3, fact: 1 };
+        detached.detach(at);
+
+        let presentation = engine
+            .outcome_presentation(
+                &ToolOutcome::Success {
+                    body: crate::api::OutcomeBody::Available(raw),
+                },
+                Some(detached.clone()),
+                None,
+            )
+            .expect("KeepOutput matches by digest and length without reading bytes");
+        assert_eq!(presentation, Presentation::KeepOutput);
+
+        // When the raw output differs, Presentation::Value needs the body text and refuses detached.
+        let err = engine
+            .outcome_presentation(
+                &ToolOutcome::Success {
+                    body: crate::api::OutcomeBody::Available("different raw output".to_string()),
+                },
+                Some(detached.clone()),
+                None,
+            )
+            .expect_err("detached body cannot present Value without text");
+        assert!(matches!(
+            err,
+            EngineRefusal::BodyDetached {
+                at: err_at,
+                digest
+            } if err_at == at && digest == detached.digest()
+        ));
     }
 }

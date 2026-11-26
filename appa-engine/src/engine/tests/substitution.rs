@@ -956,3 +956,88 @@ fn a_call_released_under_the_default_stage_over_a_standing_derivation_replays() 
     let facts = appended_facts(decided.expect("the batch decides"));
     assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
 }
+
+/// A planner before hard blocks offered an input hop for a `blocked` call's recipient gap.
+/// The log it recorded replays; the same call proposed now is offered nothing.
+#[test]
+fn a_hop_an_earlier_planner_offered_a_blocked_call_replays_and_is_offered_no_more() {
+    let e = substituting_engine(TRUSTED);
+    let recorded: Vec<Fact> = serde_json::from_str(include_str!("fixtures/hard-block-hop-log.json"))
+        .expect("a log recorded at the base commit decodes");
+    assert_eq!(
+        opened_offers(&recorded)
+            .into_iter()
+            .map(|(_, plan)| plan.steps)
+            .collect::<Vec<_>>(),
+        vec![vec![plan::RemedyStep::Derive(crate::names::SanitizerName::new(
+            "redact"
+        ))]],
+        "the fixture offers the hop for the blocked call"
+    );
+    assert_eq!(e.validate_replay(&recorded), Ok(()));
+    let again = proposed(
+        &e,
+        &recorded,
+        "b1",
+        nonce(),
+        call("post_blocked", json!({ "body": "ssn 123" })),
+    )
+    .expect("the recorded batch answers again");
+    let (_, blocked) = answered(&again);
+    assert!(blocked[0].offers.is_empty(), "the recorded hop is no longer shown");
+    let [(legacy, _)] = opened_offers(&recorded)[..] else {
+        panic!("the fixture opens one offer");
+    };
+    assert!(
+        matches!(
+            e.offer_consults(&viewing(&e, &recorded), &traj(), &legacy),
+            Ok(crate::transition::OfferConsult::Stale {
+                subject: crate::basis::SubjectKey::Call { .. }
+            })
+        ),
+        "executing the recorded hop by id routes no consult: the sanitizer never sees the call"
+    );
+
+    let log = internal_log(&e);
+    let facts = appended_facts(
+        proposed(
+            &e,
+            &log,
+            "b1",
+            nonce(),
+            call("post_blocked", json!({ "body": "ssn 123" })),
+        )
+        .expect("the batch decides"),
+    );
+    assert!(opened_offers(&facts).is_empty());
+    assert_eq!(e.validate_replay(&[log, facts].concat()), Ok(()));
+}
+
+/// The same recorded hop, under a revision whose blocked call also needs `@board`'s members,
+/// which nothing in the log answers. The `blocked` mark closes the check without them, but an
+/// earlier planner planned only a check it answered in full, so the offer replays as unbacked.
+#[test]
+fn a_hop_offered_beside_an_unanswered_comparison_does_not_replay() {
+    let mut config = substituting_config();
+    for tool in &mut config.tools {
+        if let crate::contract::ToolDeclaration::Declared(annotation) = tool
+            && annotation.name.as_str() == "post_blocked"
+        {
+            annotation
+                .requires
+                .label
+                .audience
+                .push(AudienceRequirement::Includes(RecipientSpec::Static(group_audience(
+                    "board",
+                ))));
+        }
+    }
+    config.audience = slack_groups(&["board"]);
+    let e = open_engine_at(
+        config,
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+    );
+    let recorded: Vec<Fact> = serde_json::from_str(include_str!("fixtures/hard-block-hop-log.json"))
+        .expect("a log recorded at the base commit decodes");
+    assert_eq!(e.validate_replay(&recorded), Err(TransitionRefusal::UnbackedOffer));
+}

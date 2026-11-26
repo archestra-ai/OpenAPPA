@@ -226,7 +226,7 @@ fn an_admission_after_a_checkpoint_carries_the_bytes_it_observed() {
         &Projection::build(&log, log.len() as u64).view(&traj()),
         &dispatch,
         &call,
-        crate::fact::ObservedResult::Available(crate::value::RawResultDigest::of(body.as_str().as_bytes())),
+        crate::fact::ObservedResult::Available(body.digest()),
     )
     .expect("an open dispatch checkpoints");
     log.extend(checkpoint);
@@ -378,4 +378,62 @@ fn a_value_admitted_under_an_unopened_dispatch_is_refused_on_replay() {
         ]),
         Err(TransitionRefusal::UnknownDispatch)
     );
+}
+
+#[test]
+fn replay_with_detached_large_tool_result_equals_inline_replay() {
+    let e = engine_at(
+        vec![crm_tool()],
+        Label::new(TRUSTED, Audience::restricted([ReaderId::new("insider")])),
+    );
+    let get = call("get_ticket", json!({}));
+    let open_batch = vec![opened(&e)];
+    let mut held_inline = e.view(&traj(), open_batch.clone(), 1).expect("opening replays");
+
+    let proposed = proposed(&e, &open_batch, "b1", nonce(), get).expect("proposal releases");
+    let dispatch = match &proposed.follow_up {
+        FollowUp::Proposals { released, .. } => released[0].dispatch.clone(),
+        other => panic!("expected proposals follow-up, got {other:?}"),
+    };
+    let propose_batch = proposed.append.expect("proposal appends");
+    held_inline.advance(&propose_batch).expect("inline advances");
+
+    let big_body = "x".repeat(256);
+    let outcome = e
+        .handle(
+            &held_inline,
+            EngineEvent::Outcome(ToolReport {
+                dispatch,
+                outcome: ToolOutcome::Success {
+                    body: OutcomeBody::Available(ValueBody::new(big_body)),
+                },
+                evidence: Vec::new(),
+                offer_nonce: nonce(),
+                audience: Default::default(),
+            }),
+        )
+        .expect("outcome closes");
+    let outcome_batch = outcome.append.expect("outcome appends");
+    held_inline.advance(&outcome_batch).expect("inline advances");
+
+    let mut detached_outcome_facts = outcome_batch.facts().to_vec();
+    crate::fact::detach_batch_bodies(&mut detached_outcome_facts, outcome_batch.basis(), 64);
+    assert!(
+        detached_outcome_facts.iter().any(Fact::has_detached),
+        "large tool-result body detaches"
+    );
+
+    let full_inline: Vec<Fact> = [
+        open_batch.clone(),
+        propose_batch.facts().to_vec(),
+        outcome_batch.facts().to_vec(),
+    ]
+    .concat();
+    let full_detached: Vec<Fact> = [open_batch, propose_batch.facts().to_vec(), detached_outcome_facts].concat();
+
+    let replayed_inline = e.view(&traj(), full_inline, 3).expect("inline log replays");
+    let replayed_detached = e.view(&traj(), full_detached, 3).expect("detached log replays");
+
+    assert_eq!(replayed_detached, replayed_inline);
+    assert_eq!(replayed_detached, held_inline);
 }

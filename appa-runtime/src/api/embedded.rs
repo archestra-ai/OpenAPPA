@@ -433,7 +433,7 @@ impl Runtime {
         let log = self.inner.log(&actor.root).map_err(peer_error)?;
         match prior_call(&log, recipient, call_id, message) {
             PriorCall::Foreign => return Err(refused("this call id is already a different dispatch")),
-            PriorCall::Admitted(body) => return governed_delivery(row, &body),
+            PriorCall::Admitted { digest, len } => return governed_delivery(row, digest, len),
             PriorCall::Open | PriorCall::Absent => {}
         }
         drop(log);
@@ -448,13 +448,13 @@ impl Runtime {
             PriorCall::Open
         );
         if !open {
-            match session
+            let proposed = session
                 .propose_with_held(call.clone(), Some(call_id.to_string()), message.clone())
-                .await
-                .map_err(peer_error)?
-            {
+                .await;
+            match proposed.or_else(|error| ToolCallDecision::missing_fact(&error).ok_or_else(|| peer_error(error)))? {
                 ToolCallDecision::Deny {
                     feedback,
+                    outcomes,
                     offers,
                     review,
                     ..
@@ -464,9 +464,11 @@ impl Runtime {
                             feedback: feedback.clone(),
                             offers: offers.clone(),
                             review: review.clone(),
+                            outcomes: Some(outcomes),
                         },
                         presentation: Some(RemedyPresentation {
                             feedback,
+                            outcomes: Some(outcomes),
                             offers,
                             review,
                             display: Vec::new(),
@@ -496,7 +498,7 @@ impl Runtime {
             call_id,
             message,
         );
-        let outcome = outcome_of(decided, proved)?;
+        let outcome = outcome_of(decided, proved, &body)?;
         if let HookDecision::DeliverValue { value } = &outcome.decision
             && value != &body
         {
@@ -600,16 +602,36 @@ fn read_tool_fit(registry: &appa_engine::registry::Registry, call: &ProposedCall
     Ok(())
 }
 
-fn governed_delivery(row: &EmbeddedRow, admitted: &str) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
-    if row.body.as_deref() != Some(admitted) {
-        return Err(refused("the admitted read is not this stored message"));
-    }
-    Ok(deliver(admitted.to_string()))
+fn body_matches(body: &str, digest: appa_engine::value::RawResultDigest, len: u64) -> bool {
+    body.len() as u64 == len && appa_engine::value::RawResultDigest::of(body.as_bytes()) == digest
 }
 
-fn outcome_of(decision: ToolResultDecision, proved: PriorCall) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
+fn governed_delivery(
+    row: &EmbeddedRow,
+    digest: appa_engine::value::RawResultDigest,
+    len: u64,
+) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
+    let Some(body) = row.body.as_deref() else {
+        return Err(refused("the admitted read is not this stored message"));
+    };
+    if !body_matches(body, digest, len) {
+        return Err(refused("the admitted read is not this stored message"));
+    }
+    Ok(deliver(body.to_string()))
+}
+
+fn outcome_of(
+    decision: ToolResultDecision,
+    proved: PriorCall,
+    stored: &str,
+) -> Result<EmbeddedHookOutcome, EmbeddedPeerError> {
     let proved = match proved {
-        PriorCall::Admitted(body) => Some(body),
+        PriorCall::Admitted { digest, len } => {
+            if !body_matches(stored, digest, len) {
+                return Err(refused("the admitted read is not this stored message"));
+            }
+            Some(stored.to_string())
+        }
         PriorCall::Open | PriorCall::Absent | PriorCall::Foreign => None,
     };
     match decision {
@@ -618,7 +640,10 @@ fn outcome_of(decision: ToolResultDecision, proved: PriorCall) -> Result<Embedde
             placeholder,
             presentation,
         } => Ok(EmbeddedHookOutcome {
-            decision: HookDecision::ReplaceOutput { output: placeholder },
+            decision: HookDecision::ReplaceOutput {
+                output: placeholder,
+                outcomes: presentation.as_ref().and_then(|presentation| presentation.outcomes),
+            },
             presentation,
         }),
         ToolResultDecision::Keep => {
@@ -649,7 +674,10 @@ enum PriorCall {
     Absent,
     Foreign,
     Open,
-    Admitted(String),
+    Admitted {
+        digest: appa_engine::value::RawResultDigest,
+        len: u64,
+    },
 }
 
 fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &HeldMessage) -> PriorCall {
@@ -680,7 +708,7 @@ fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &Held
                 value,
                 provenance: Provenance::ToolResult { dispatch: id },
             } if trajectory == recipient && id == &dispatch => {
-                admitted = Some(value.body.as_str().to_string());
+                admitted = Some((value.body.digest(), value.body.len()));
             }
             _ => {}
         }
@@ -689,7 +717,7 @@ fn prior_call(log: &Log, recipient: &TrajectoryId, call_id: &str, message: &Held
         return PriorCall::Foreign;
     }
     match admitted {
-        Some(body) => PriorCall::Admitted(body),
+        Some((digest, len)) => PriorCall::Admitted { digest, len },
         None => PriorCall::Open,
     }
 }
@@ -774,7 +802,7 @@ impl TryFrom<&HookDecision> for StoredOutcome {
     fn try_from(decision: &HookDecision) -> Result<Self, Self::Error> {
         match decision {
             HookDecision::DeliverValue { value } => Ok(Self::Deliver { value: value.clone() }),
-            HookDecision::ReplaceOutput { output } => Ok(Self::Replace { output: output.clone() }),
+            HookDecision::ReplaceOutput { output, .. } => Ok(Self::Replace { output: output.clone() }),
             HookDecision::Ack => Err(refused("the read was acknowledged without an admitted body")),
             HookDecision::AllowCall { .. }
             | HookDecision::PassControl
@@ -793,7 +821,7 @@ impl From<StoredOutcome> for HookDecision {
     fn from(stored: StoredOutcome) -> Self {
         match stored {
             StoredOutcome::Deliver { value } => HookDecision::DeliverValue { value },
-            StoredOutcome::Replace { output } => HookDecision::ReplaceOutput { output },
+            StoredOutcome::Replace { output } => HookDecision::ReplaceOutput { output, outcomes: None },
         }
     }
 }
@@ -918,6 +946,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,
@@ -1017,6 +1046,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,
@@ -1085,7 +1115,7 @@ max_body_bytes = 65536
             .facts()
             .iter()
             .filter_map(|fact| match fact {
-                Fact::ValueAdmitted { value, .. } => Some(value.body.as_str()),
+                Fact::ValueAdmitted { value, .. } => Some(value.body.text().expect("inline")),
                 _ => None,
             })
             .collect();
@@ -1105,6 +1135,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,
@@ -1182,6 +1213,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,
@@ -1377,6 +1409,7 @@ max_body_bytes = 65536
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
             )
             .await,

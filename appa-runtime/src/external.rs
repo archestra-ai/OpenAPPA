@@ -1105,6 +1105,7 @@ mod tests {
                         trust_below: Some("trusted".to_string()),
                         audience_missing: None,
                         effects_containing: vec![],
+                        prior_effects_containing: vec![],
                         attention: vec![],
                     },
                 },

@@ -63,6 +63,7 @@ async fn start(runtime: &Arc<Runtime>, root: &TrajectoryId) {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await;
@@ -571,7 +572,7 @@ async fn lines_publishing_the_same_bytes_keep_their_own_engines() {
         let head = pin(&second);
         let decided = propose(&head, &id, call("fetch", 2), "c2").await;
         assert!(allowed(&decided), "{tenant}: {decided:?}");
-        let forked = head.open_root_fork(&id, &id, &root(&format!("{tenant}-fork")));
+        let forked = head.open_root_fork(&id, &id, &root(&format!("{tenant}-fork")), Default::default());
         assert!(forked.is_ok(), "{tenant}: {forked:?}");
     }
 }
@@ -620,7 +621,7 @@ async fn a_legacy_opening_is_refused_with_legacy_family() {
     let runtime = open(dir.path(), &notes);
     for id in ["c2", "c3"] {
         match propose(&runtime, &legacy, call("notes", 2), id).await {
-            HookDecision::Refuse { class, detail } => {
+            HookDecision::Refuse { class, detail, .. } => {
                 assert_eq!(class, RefusalClass::LegacyFamily);
                 assert_eq!(
                     detail,
@@ -701,7 +702,7 @@ async fn a_root_fork_follows_its_parents_deployment() {
     assert!(allowed(&propose(&runtime, &parent, call("notes", 1), "c1").await));
     let fork = root("fork");
     runtime
-        .open_root_fork(&parent, &parent, &fork)
+        .open_root_fork(&parent, &parent, &fork, Default::default())
         .expect("the parent can be forked");
 
     runtime

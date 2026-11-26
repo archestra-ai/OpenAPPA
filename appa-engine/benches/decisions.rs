@@ -176,6 +176,7 @@ fn round(engine: &Engine, view: &mut EngineView, history: History, round: usize)
         engine,
         view,
         EngineEvent::ExecuteOffer(OfferExecution {
+            initiator: appa_runtime_api::Initiator::Agent,
             trajectory: trajectory(),
             offer,
             outcome: OfferOutcome::Approved(evidence),
@@ -206,7 +207,12 @@ fn round(engine: &Engine, view: &mut EngineView, history: History, round: usize)
 /// The view after `rounds` rounds, and the view as it stood halfway there.
 fn history_of(engine: &Engine, history: History, rounds: usize) -> (EngineView, EngineView) {
     let opening = engine
-        .open_trajectory(&trajectory(), PolicyFileKey::of(b"bench policy"), None)
+        .open_trajectory(
+            &trajectory(),
+            PolicyFileKey::of(b"bench policy"),
+            None,
+            Default::default(),
+        )
         .expect("the bench trajectory opens")
         .into_unsealed();
     let mut view = engine.view(&trajectory(), opening, 1).expect("the opening replays");

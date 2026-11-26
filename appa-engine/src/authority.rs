@@ -136,7 +136,11 @@ pub struct Mandate {
     /// written here stays symbolic; the operation that validates the mandate resolves what
     /// the comparison needs.
     pub reader_ceiling: Option<DeclaredAudience>,
+    /// Cover a `no_prior` gap: the forbidden effect is already in the trajectory.
     pub waivers: Vec<EffectKind>,
+    /// Cover a `prior` gap: the required effect is not yet in the trajectory.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_waivers: Vec<EffectKind>,
     pub attends: Attends,
 }
 
@@ -145,6 +149,7 @@ impl Mandate {
         self.trust_ceiling.is_none()
             && self.reader_ceiling.is_none()
             && self.waivers.is_empty()
+            && self.prior_waivers.is_empty()
             && self.attends.is_empty()
     }
 

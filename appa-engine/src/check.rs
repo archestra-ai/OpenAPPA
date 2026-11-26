@@ -1,7 +1,8 @@
 //! The check: the pure evaluation of a proposed call against the trajectory. Its outcome is
 //! allow or block — or, before either, a membership ask: the symbolic atoms the audience
 //! comparisons need extensional answers for. The ask is not a decision and appends nothing;
-//! the operation gathers the pinned evidence and the same check runs again, decided.
+//! the operation gathers the pinned evidence and the same check runs again, decided. A call
+//! that meets the reserved `blocked` mark asks nothing: it is blocked whatever the answers.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +31,13 @@ pub enum Gap {
     Attention(MarkName),
 }
 
+impl Gap {
+    /// The reserved `blocked` mark: no authority permits it.
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, Gap::Attention(mark) if mark.is_blocked())
+    }
+}
+
 /// A voluntary narrowing of the release frontier: committing this call moves the trajectory's
 /// label down. The comparison and the recorded acceptance read exactly these two labels.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,6 +61,14 @@ impl Narrowing {
 pub struct RawBlock {
     pub requirement_gaps: Vec<Gap>,
     pub narrowing: Option<Narrowing>,
+}
+
+impl RawBlock {
+    /// Does a `blocked` gap make this a hard block? No remedy can lift it, so planning
+    /// gathers nothing and offers nothing.
+    pub fn is_hard(&self) -> bool {
+        self.requirement_gaps.iter().any(Gap::is_blocked)
+    }
 }
 
 /// What the checked call is to its deployment: an ordinary tool call, or the one proposal the
@@ -127,9 +143,19 @@ pub(crate) enum CallReads<'a> {
     Static,
 }
 
+/// How a check meets the comparisons its membership context leaves undecided.
+#[derive(Clone, Copy)]
+enum Undecided {
+    /// A `blocked` mark decides the call whatever they answer, so the check closes without them.
+    ClosedByBlocked,
+    /// Each is asked: an advisory reading, and the check before a `blocked` mark closed it.
+    Asked,
+}
+
 /// The state-only evaluation of an argument-independent annotation — the one path a recovery
 /// route may check a tool over before any call to it exists (RMD-20). Same gap logic as
-/// [`evaluate_state`], at the origin stage, reading no call.
+/// [`evaluate_state`], at the origin stage, reading no call. Advisory, so it asks every
+/// undecided comparison.
 pub(crate) fn evaluate_static(
     annotation: &StaticAnnotation<'_>,
     current: &Label,
@@ -137,7 +163,7 @@ pub(crate) fn evaluate_static(
     has_reserved: &impl Fn(&EffectKind) -> bool,
     context: &MembershipContext<'_>,
 ) -> Result<RawBlock, MembershipNeeded> {
-    evaluate_state(
+    evaluate_state_under(
         annotation.annotation(),
         current,
         has_committed,
@@ -145,7 +171,30 @@ pub(crate) fn evaluate_static(
         CallReads::Static,
         &CallStage::default(),
         context,
+        Undecided::Asked,
     )
+}
+
+/// Whether the check decides this call under `context` with every undecided comparison asked:
+/// the check a hard block's planning gate stood behind before a `blocked` mark closed it.
+pub(crate) fn decides_asking(
+    annotation: &ToolAnnotation,
+    views: &Views,
+    call: &ResolvedCall,
+    stage: &CallStage,
+    context: &MembershipContext<'_>,
+) -> bool {
+    evaluate_state_under(
+        annotation,
+        &views.current_label(),
+        &|kind| views.has_effect(kind),
+        &|kind| views.has_reservation(kind),
+        CallReads::Resolved(call),
+        stage,
+        context,
+        Undecided::Asked,
+    )
+    .is_ok()
 }
 
 /// Evaluate one call against the branch views. Pure: a function of the annotation, the views,
@@ -190,6 +239,29 @@ pub(crate) fn evaluate_state(
     stage: &CallStage,
     context: &MembershipContext<'_>,
 ) -> Result<RawBlock, MembershipNeeded> {
+    evaluate_state_under(
+        annotation,
+        current,
+        has_committed,
+        has_reserved,
+        reads,
+        stage,
+        context,
+        Undecided::ClosedByBlocked,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_state_under(
+    annotation: &ToolAnnotation,
+    current: &Label,
+    has_committed: &impl Fn(&EffectKind) -> bool,
+    has_reserved: &impl Fn(&EffectKind) -> bool,
+    reads: CallReads<'_>,
+    stage: &CallStage,
+    context: &MembershipContext<'_>,
+    undecided: Undecided,
+) -> Result<RawBlock, MembershipNeeded> {
     let committed = match reads {
         CallReads::Resolved(call) => current.combine(&call.output_label(annotation)),
         CallReads::Static => committed_label(annotation, current),
@@ -212,16 +284,21 @@ pub(crate) fn evaluate_state(
     let mut gaps = Vec::new();
     let mut needed = Vec::new();
     label_gaps(annotation, &checked, &released, reads, context, &mut gaps, &mut needed);
-    if !needed.is_empty() {
-        // An undecided comparison keeps the whole check open: gaps drive remedy planning,
-        // and a requirement that is neither held nor refuted cannot be planned over yet.
-        needed.sort();
-        needed.dedup();
-        return Err(MembershipNeeded { needed });
-    }
     history_gaps(annotation, has_committed, has_reserved, &mut gaps);
     for mark in annotation.requires.attention_marks() {
         gaps.push(Gap::Attention(mark.clone()));
+    }
+    // An undecided comparison keeps the check open, because a requirement that is neither held
+    // nor refuted cannot be planned over yet. A `blocked` mark decides the call whatever the
+    // comparison answers, so a live check closes without it.
+    let closed = match undecided {
+        Undecided::ClosedByBlocked => gaps.iter().any(Gap::is_blocked),
+        Undecided::Asked => false,
+    };
+    if !needed.is_empty() && !closed {
+        needed.sort();
+        needed.dedup();
+        return Err(MembershipNeeded { needed });
     }
     let mut seen = Vec::with_capacity(gaps.len());
     for gap in gaps {
@@ -973,6 +1050,63 @@ mod tests {
                 Err(AnnotationRefusal::OutsidePolicy(_))
             ));
         }
+    }
+
+    /// An internal trajectory sending to a literal reader needs the members of `internal`. With
+    /// no answer pinned the check asks for them, unless the call meets `blocked`: then it is
+    /// blocked on the gaps already known, with the undecided comparison left out.
+    #[test]
+    fn a_blocked_call_is_decided_before_membership_is_known() {
+        use crate::label::{Audience, ChainAudience, TestContext};
+        let internal = Label::new(
+            Trust::new(1),
+            Audience::of_clauses([Clause::new([ChainAudience::Internal], [], []).unwrap()]),
+        );
+        let sending = |attention: Vec<MarkName>| ToolAnnotation {
+            requires: Requires {
+                label: LabelRequirements {
+                    trust_floor: Some(Trust::new(2)),
+                    audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(
+                        DeclaredAudience::restricted([ReaderId::new("alice@corp.com")]),
+                    ))],
+                },
+                history: vec![HistoryRequirement::Prior(EffectKind::new("reviewed"))],
+                attention,
+            },
+            ..annotation("send")
+        };
+        let unanswered = TestContext::default();
+        let state = |annotation: &ToolAnnotation| {
+            evaluate_state(
+                annotation,
+                &internal,
+                &|_| false,
+                &|_| false,
+                CallReads::Resolved(&call("send")),
+                &CallStage::default(),
+                &unanswered.context(),
+            )
+        };
+
+        assert_eq!(
+            state(&sending(vec![MarkName::new("signoff")])),
+            Err(MembershipNeeded {
+                needed: vec![SymbolicAtom::Chain(ChainAudience::Internal)]
+            })
+        );
+        let blocked = state(&sending(vec![MarkName::new(MarkName::BLOCKED)])).expect("blocked asks nothing");
+        assert_eq!(
+            blocked.requirement_gaps,
+            vec![
+                Gap::TrustFloor {
+                    required: Trust::new(2),
+                    actual: Trust::new(1),
+                },
+                Gap::Prior(EffectKind::new("reviewed")),
+                Gap::Attention(MarkName::new(MarkName::BLOCKED)),
+            ]
+        );
+        assert_eq!(blocked.narrowing, None);
     }
 
     /// A produced annotation is public policy vocabulary; `public` itself is always an

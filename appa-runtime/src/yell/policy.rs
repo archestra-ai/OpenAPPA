@@ -110,6 +110,7 @@ static PERMITS: Table = Table {
         ("trust_below", TRUST),
         ("audience_missing", Rule::Each(&READER)),
         ("effects_containing", Rule::Elements(Class::Effect)),
+        ("prior_effects_containing", Rule::Elements(Class::Effect)),
         ("attention", Rule::Elements(Class::Mark)),
     ],
 };

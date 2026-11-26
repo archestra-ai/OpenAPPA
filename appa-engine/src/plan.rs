@@ -24,7 +24,8 @@
 //! enumerator, and the redispatch list is checked against an independent direct-set reference.
 //!
 //! **Implemented remedy subset (the honest bound).** `Authorize` (trust floor via `trust_ceiling`,
-//! `includes` via `reader_ceiling`, `no_prior` via `waivers`, attention via `attends`), `Accept`
+//! `includes` via `reader_ceiling`, `no_prior` via `waivers`, `prior` via `prior_waivers`,
+//! attention via `attends`), `Accept`
 //! (narrowing), `Withhold` (execution without admitting result output), `Sanitize` (an
 //! output sanitizer's relabel standing in for the raw crossing),
 //! `Derive` (an input sanitizer's substitution of the whole argument set), and `Redispatch` over direct `prior(k)` emitters, in
@@ -56,6 +57,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use appa_runtime_api::AutoApply;
 use serde::{Deserialize, Serialize};
 
 use crate::authority::{Authority, DeclaredTransition, Mandate, Sanitizer};
@@ -143,15 +145,17 @@ impl ExecutableRemedyPlan {
         matches!(self.steps.as_slice(), [RemedyStep::Return(_)])
     }
 
-    /// Is this plan rulings alone, each by an authority `rules` accepts? Such a plan accepts no
-    /// narrowing, treats no result and declares no return, so executing it settles nothing the
-    /// agent would otherwise choose.
-    pub fn asks_only(&self, rules: impl Fn(&AuthorityName) -> bool) -> bool {
+    /// May the runtime apply this plan at its block, under `auto_apply`, with rulings only by
+    /// authorities `rules` accepts? Such a plan treats no result, rewrites no argument and
+    /// declares no return; under [`AutoApply::RulingsOnly`] it also accepts no narrowing. So
+    /// executing it settles nothing the agent would otherwise choose.
+    pub fn auto_applies(&self, auto_apply: AutoApply, rules: impl Fn(&AuthorityName) -> bool) -> bool {
         !self.steps.is_empty()
-            && self
-                .steps
-                .iter()
-                .all(|step| matches!(step, RemedyStep::Authorize(authority) if rules(authority)))
+            && self.steps.iter().all(|step| match step {
+                RemedyStep::Authorize(authority) => rules(authority),
+                RemedyStep::Accept(_) => auto_apply == AutoApply::RulingsAndAccept,
+                RemedyStep::Withhold | RemedyStep::Sanitize(_) | RemedyStep::Derive(_) | RemedyStep::Return(_) => false,
+            })
     }
 
     /// The narrowing this plan asks the agent to accept, where its route carries one.
@@ -355,8 +359,41 @@ pub(crate) struct BlockedCall<'a> {
 /// Plan the remedies for a raw block. Emits the executable plans when the block clears in one
 /// atomic step, and every direct redispatch when only a prior tool call unlocks it. Both land in
 /// the one `plans` list; fork advice is separate and never a remedy.
-/// See the module docs for the direct-clearing model.
+/// See the module docs for the direct-clearing model. A hard block plans nothing.
 pub(crate) fn plan(
+    registry: &Registry,
+    views: &Views,
+    blocked: BlockedCall<'_>,
+    context: &MembershipContext<'_>,
+) -> Result<PlannedBlock, MembershipNeeded> {
+    match blocked.raw.is_hard() {
+        true => Ok(PlannedBlock {
+            raw: blocked.raw.clone(),
+            plans: Vec::new(),
+            fork_advice: None,
+            narrowing_impact: None,
+        }),
+        false => planned(registry, views, blocked, context),
+    }
+}
+
+/// The menu a planner before hard blocks recorded for one: what it planned for the block's
+/// other gaps. Replay reads it for offers such a log carries; no block offers it.
+pub(crate) fn hard_block_menu(
+    registry: &Registry,
+    views: &Views,
+    blocked: BlockedCall<'_>,
+    context: &MembershipContext<'_>,
+) -> Result<Vec<ExecutableRemedyPlan>, MembershipNeeded> {
+    Ok(planned(registry, views, blocked, context)?
+        .plans
+        .iter()
+        .filter_map(RemedyPlan::executable)
+        .cloned()
+        .collect())
+}
+
+fn planned(
     registry: &Registry,
     views: &Views,
     blocked: BlockedCall<'_>,
@@ -480,18 +517,19 @@ fn narrowing_impact(
             &mut needs,
         )
         .is_empty();
-        let covered = |needs: &mut NeededAtoms| {
-            // Every gap and authority is read, so an undecided cover drops the variant whatever the order.
-            gaps.iter().fold(true, |all, gap| {
-                let held = registry.authorities().iter().fold(false, |held, authority| {
-                    held | needs.holds(gap_cover(authority, gap, &annotation.tags, &context))
-                });
-                all && held
+        let held = |gap: &Gap, needs: &mut NeededAtoms| {
+            registry.authorities().iter().fold(false, |held, authority| {
+                held | needs.holds(gap_cover(authority, gap, &annotation.tags, &context))
             })
         };
-        // An input hop, or another tool's call for a `prior` gap, is a route outside this
-        // one-stage view.
-        let redispatch = gaps.iter().any(|gap| matches!(gap, Gap::Prior(_)));
+        let covered = |needs: &mut NeededAtoms| {
+            // Every gap and authority is read, so an undecided cover drops the variant whatever the order.
+            gaps.iter().fold(true, |all, gap| held(gap, needs) & all)
+        };
+        // An input hop, or another tool's call for a `prior` gap no authority waives, is a route
+        // outside this one-stage view.
+        let redispatch =
+            |needs: &mut NeededAtoms| gaps.iter().any(|gap| matches!(gap, Gap::Prior(_)) && !held(gap, needs));
         let hops = |needs: &mut NeededAtoms| {
             !input_hops(
                 registry,
@@ -507,7 +545,7 @@ fn narrowing_impact(
         };
         let standing = if settles && gaps.is_empty() {
             Some(Standing::Clear)
-        } else if redispatch || hops(&mut needs) {
+        } else if redispatch(&mut needs) || hops(&mut needs) {
             None
         } else if settles && covered(&mut needs) {
             Some(Standing::SignOff)
@@ -840,7 +878,7 @@ fn least_mandate_first(
             .find(|&index| {
                 (0..candidates.len())
                     .filter(|&other| !used[other] && other != index)
-                    .all(|other| !plan_precedes(gaps, &powers[other], &powers[index], context.within))
+                    .all(|other| !plan_precedes(&powers[other], &powers[index], context.within))
             })
             .expect("a finite strict partial order has a minimal element");
         used[next] = true;
@@ -853,10 +891,10 @@ fn least_mandate_first(
         .collect()
 }
 
-fn plan_precedes(gaps: &[Gap], a: &[GapPower<'_>], b: &[GapPower<'_>], within: &WithinAssertions) -> bool {
+fn plan_precedes(a: &[GapPower<'_>], b: &[GapPower<'_>], within: &WithinAssertions) -> bool {
     let mut strictly_less = false;
-    for ((gap, a), b) in gaps.iter().zip(a).zip(b) {
-        match gap_power_cmp(gap, a, b, within) {
+    for (a, b) in a.iter().zip(b) {
+        match gap_power_cmp(a, b, within) {
             Some(Ordering::Less) => strictly_less = true,
             Some(Ordering::Equal) => {}
             Some(Ordering::Greater) | None => return false,
@@ -868,10 +906,35 @@ fn plan_precedes(gaps: &[Gap], a: &[GapPower<'_>], b: &[GapPower<'_>], within: &
 pub(crate) enum GapPower<'a> {
     None,
     Substitution(&'a Audience),
-    Ruling {
-        mandate: &'a Mandate,
-        reader_ceiling: Option<&'a Audience>,
-    },
+    Ruling(RulingPower<'a>),
+}
+
+/// The part of an assigned authority's mandate that ranks its ruling on one gap, resolved once
+/// so that ranking compares it without re-reading the mandate.
+pub(crate) enum RulingPower<'a> {
+    Trust(crate::label::Trust),
+    Readers(&'a Audience),
+    Waivers(BTreeSet<&'a EffectKind>),
+    Attention,
+}
+
+impl<'a> RulingPower<'a> {
+    /// `reader_ceiling` is the resolved ceiling, read only for an `includes` gap.
+    pub(crate) fn of(gap: &Gap, mandate: &'a Mandate, reader_ceiling: Option<&'a Audience>) -> RulingPower<'a> {
+        match gap {
+            Gap::TrustFloor { .. } => RulingPower::Trust(
+                mandate
+                    .trust_ceiling
+                    .expect("a competent trust-floor authority declares a trust ceiling"),
+            ),
+            Gap::Includes { .. } => {
+                RulingPower::Readers(reader_ceiling.expect("a competent includes authority declares a reader ceiling"))
+            }
+            Gap::NoPrior(_) => RulingPower::Waivers(mandate.waivers.iter().collect()),
+            Gap::Prior(_) => RulingPower::Waivers(mandate.prior_waivers.iter().collect()),
+            Gap::Attention(_) => RulingPower::Attention,
+        }
+    }
 }
 
 struct RankingReads<'a> {
@@ -946,10 +1009,7 @@ fn assigned_power<'a>(
                 .as_ref(),
             _ => None,
         };
-        return GapPower::Ruling {
-            mandate,
-            reader_ceiling,
-        };
+        return GapPower::Ruling(RulingPower::of(gap, mandate, reader_ceiling));
     }
     let (Some(sanitizer), Gap::Includes { recipients }) = (candidate.hop(), gap) else {
         return GapPower::None;
@@ -963,59 +1023,27 @@ fn assigned_power<'a>(
     }
 }
 
-pub(crate) fn gap_power_cmp(
-    gap: &Gap,
-    a: &GapPower<'_>,
-    b: &GapPower<'_>,
-    within: &WithinAssertions,
-) -> Option<Ordering> {
-    let ((a, a_readers), (b, b_readers)) = match (a, b) {
-        (GapPower::None, GapPower::None) => return Some(Ordering::Equal),
-        (GapPower::None, _) => return Some(Ordering::Less),
-        (_, GapPower::None) => return Some(Ordering::Greater),
-        (GapPower::Substitution(a), GapPower::Substitution(b)) => {
-            return inclusion_cmp(
+pub(crate) fn gap_power_cmp(a: &GapPower<'_>, b: &GapPower<'_>, within: &WithinAssertions) -> Option<Ordering> {
+    match (a, b) {
+        (GapPower::None, GapPower::None) => Some(Ordering::Equal),
+        (GapPower::None, _) => Some(Ordering::Less),
+        (_, GapPower::None) => Some(Ordering::Greater),
+        (GapPower::Substitution(a), GapPower::Substitution(b)) => inclusion_cmp(
+            a.derives_within_audience(b, within),
+            b.derives_within_audience(a, within),
+        ),
+        (GapPower::Substitution(_), GapPower::Ruling(_)) => Some(Ordering::Less),
+        (GapPower::Ruling(_), GapPower::Substitution(_)) => Some(Ordering::Greater),
+        (GapPower::Ruling(a), GapPower::Ruling(b)) => match (a, b) {
+            (RulingPower::Trust(a), RulingPower::Trust(b)) => Some(a.cmp(b)),
+            (RulingPower::Readers(a), RulingPower::Readers(b)) => inclusion_cmp(
                 a.derives_within_audience(b, within),
                 b.derives_within_audience(a, within),
-            );
-        }
-        (GapPower::Substitution(_), GapPower::Ruling { .. }) => return Some(Ordering::Less),
-        (GapPower::Ruling { .. }, GapPower::Substitution(_)) => return Some(Ordering::Greater),
-        (
-            GapPower::Ruling {
-                mandate: a,
-                reader_ceiling: a_readers,
-            },
-            GapPower::Ruling {
-                mandate: b,
-                reader_ceiling: b_readers,
-            },
-        ) => ((a, a_readers), (b, b_readers)),
-    };
-    match gap {
-        Gap::TrustFloor { .. } => {
-            let (a, b) = (a.trust_ceiling, b.trust_ceiling);
-            let a = a.expect("a competent trust-floor authority declares a trust ceiling");
-            let b = b.expect("a competent trust-floor authority declares a trust ceiling");
-            Some(a.cmp(&b))
-        }
-        Gap::Includes { .. } => {
-            let a = a_readers.expect("a competent includes authority declares a reader ceiling");
-            let b = b_readers.expect("a competent includes authority declares a reader ceiling");
-            inclusion_cmp(
-                a.derives_within_audience(b, within),
-                b.derives_within_audience(a, within),
-            )
-        }
-        Gap::NoPrior(_) => {
-            let a: BTreeSet<&EffectKind> = a.waivers.iter().collect();
-            let b: BTreeSet<&EffectKind> = b.waivers.iter().collect();
-            inclusion_cmp(a.is_subset(&b), b.is_subset(&a))
-        }
-        Gap::Attention(_) => Some(Ordering::Equal),
-        // These gaps have no covering authority by construction (`enumerate_assignments` returns
-        // `None`), so no assignment reaching this comparison carries one.
-        Gap::Prior(_) => Some(Ordering::Equal),
+            ),
+            (RulingPower::Waivers(a), RulingPower::Waivers(b)) => inclusion_cmp(a.is_subset(b), b.is_subset(a)),
+            (RulingPower::Attention, RulingPower::Attention) => Some(Ordering::Equal),
+            _ => unreachable!("two rulings compared on one gap resolve the same power"),
+        },
     }
 }
 
@@ -1277,16 +1305,22 @@ pub(crate) fn confined_stage(
 
 /// The lowest label a forked trajectory may hold and still return: its fork's floor met with
 /// its parent's current label — the parent accepts nothing cleaner than it is now — and the
-/// dimension the fork's sanitizer raises, which the floor does not bind.
+/// dimension the fork's sanitizer raises, which the floor does not bind. In a family whose
+/// runtime accepts narrowings itself the floor is observed, never held: it binds no dimension.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Floor {
     label: Label,
     raised: Option<crate::authority::Transition>,
+    observed: bool,
 }
 
 impl Floor {
     pub(crate) fn new(label: Label, raised: Option<crate::authority::Transition>) -> Floor {
-        Floor { label, raised }
+        Floor {
+            label,
+            raised,
+            observed: false,
+        }
     }
 
     pub(crate) fn label(&self) -> &Label {
@@ -1306,6 +1340,9 @@ impl Floor {
     /// Does `label` stay at or above the floor on every dimension the floor binds? A
     /// dimension the fork's sanitizer raises is unbound: the derivation replaces it wholesale.
     pub(crate) fn holds(&self, label: &Label) -> bool {
+        if self.observed {
+            return true;
+        }
         let meet = label.combine(&self.label);
         let trust_holds =
             matches!(self.raised, Some(crate::authority::Transition::Trust { .. })) || meet.trust == self.label.trust;
@@ -1330,7 +1367,10 @@ pub(crate) fn floor_of(registry: &Registry, views: &Views) -> Option<Floor> {
                 .as_ref()
                 .and_then(|sanitizer| registry.sanitizer(&sanitizer.name()))
                 .map(|sanitizer| sanitizer.transition.applied());
-            Some(Floor::new(policy.floor.combine(&views.branch_label(parent)), raised))
+            Some(Floor {
+                observed: views.auto_apply() == AutoApply::RulingsAndAccept,
+                ..Floor::new(policy.floor.combine(&views.branch_label(parent)), raised)
+            })
         }
     }
 }
@@ -1565,9 +1605,9 @@ pub(crate) fn gap_cover(
             }
         }
         Gap::NoPrior(kind) => Evaluation::of_exact(authority.in_scope(tags) && mandate.waivers.contains(kind)),
+        Gap::Prior(kind) => Evaluation::of_exact(authority.in_scope(tags) && mandate.prior_waivers.contains(kind)),
         // Attention routes by its own currency — the attended mark — never by scope.
         Gap::Attention(mark) => Evaluation::of_exact(mandate.attends.covers(mark)),
-        Gap::Prior(_) => Evaluation::Fails,
     }
 }
 
@@ -1586,7 +1626,18 @@ pub(crate) fn covers_gap(authority: &Authority, gap: &Gap, tags: &[TagName], con
 /// admission derives from the value's label first and asks for members only where the
 /// enumeration itself finds derivation short, so the gate would demand atoms the decision
 /// never reads. The check's own reads — the call's contract — are the check stage's.
+/// A hard block plans nothing, so it reads nothing.
 pub(crate) fn block_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &RawBlock) -> Vec<SymbolicAtom> {
+    match raw.is_hard() {
+        true => Vec::new(),
+        false => gate_atoms(registry, contract, raw),
+    }
+}
+
+/// The atoms any planner's gate may have asked for this block, a hard one included.
+/// Replay counts them as asked, so a log whose act gathered a blocked call's mandates
+/// still settles.
+pub(crate) fn gate_atoms(registry: &Registry, contract: &ToolAnnotation, raw: &RawBlock) -> Vec<SymbolicAtom> {
     let providers = registry.audience().providers();
     let mut atoms: Vec<SymbolicAtom> = Vec::new();
     let has = |wanted: fn(&Gap) -> bool| raw.requirement_gaps.iter().any(wanted);
@@ -2959,6 +3010,94 @@ mod tests {
     }
 
     #[test]
+    fn a_prior_gap_is_waived_only_by_a_matching_prior_waiver() {
+        let history = |requirement: HistoryRequirement| {
+            requiring(
+                "deploy",
+                Requires {
+                    history: vec![requirement],
+                    ..Requires::default()
+                },
+            )
+        };
+        let waiving = |waivers: &[&str], prior_waivers: &[&str]| {
+            mandated(
+                "desk",
+                Mandate {
+                    waivers: waivers.iter().copied().map(EffectKind::new).collect(),
+                    prior_waivers: prior_waivers.iter().copied().map(EffectKind::new).collect(),
+                    ..Mandate::default()
+                },
+            )
+        };
+        let planned = |tool: ToolAnnotation, desk: Authority, log: &[Fact]| {
+            plan_of(
+                &registry(vec![tool], vec![desk], vec![]),
+                log,
+                &call("deploy", json!({})),
+            )
+        };
+        let clean = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        let reviewed = EffectKind::new("reviewed");
+        let after_review = vec![clean[0].clone(), committed_effect(reviewed.clone())];
+        let prior = HistoryRequirement::Prior(reviewed.clone());
+        let no_prior = HistoryRequirement::NoPrior(reviewed.clone());
+
+        let waived = planned(history(prior.clone()), waiving(&[], &["reviewed"]), &clean);
+        assert_eq!(waived.raw.requirement_gaps, [Gap::Prior(reviewed.clone())]);
+        let [RemedyPlan::Executable(plan)] = waived.plans.as_slice() else {
+            panic!("one ruling plan: {:?}", waived.plans);
+        };
+        assert_eq!(plan.steps, [RemedyStep::Authorize(AuthorityName::new("desk"))]);
+        assert_eq!(
+            plan.required,
+            [RequiredRuling {
+                authority: AuthorityName::new("desk"),
+                covers: vec![Gap::Prior(reviewed.clone())],
+            }]
+        );
+
+        for desk in [waiving(&["reviewed"], &[]), waiving(&[], &["approved"])] {
+            let refused = planned(history(prior.clone()), desk, &clean);
+            assert_eq!(refused.raw.requirement_gaps, [Gap::Prior(reviewed.clone())]);
+            assert!(!refused.is_curable(), "{:?}", refused.plans);
+        }
+
+        let forbidden = planned(history(no_prior), waiving(&[], &["reviewed"]), &after_review);
+        assert_eq!(forbidden.raw.requirement_gaps, [Gap::NoPrior(reviewed)]);
+        assert!(!forbidden.is_curable(), "{:?}", forbidden.plans);
+    }
+
+    #[test]
+    fn a_prior_waiver_binds_only_in_scope() {
+        let tool = ToolAnnotation {
+            tags: vec![TagName::new("prod")],
+            ..requiring(
+                "deploy",
+                Requires {
+                    history: vec![HistoryRequirement::Prior(EffectKind::new("reviewed"))],
+                    ..Requires::default()
+                },
+            )
+        };
+        let desk = Authority {
+            scope: Scope {
+                tags: vec![TagName::new("staging")],
+            },
+            ..mandated(
+                "desk",
+                Mandate {
+                    prior_waivers: vec![EffectKind::new("reviewed")],
+                    ..Mandate::default()
+                },
+            )
+        };
+        let registry = registry(vec![tool], vec![desk], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        assert!(!plan_of(&registry, &log, &call("deploy", json!({}))).is_curable());
+    }
+
+    #[test]
     fn a_reservation_at_the_emitters_own_block_does_not_suppress_the_offer() {
         let delete = requiring(
             "delete_db",
@@ -3366,6 +3505,43 @@ mod tests {
                 ],
             }),
             "the annotated tool, the annotated name selector and the wildcard are labeled per call, so the impact marks them unjudged"
+        );
+    }
+
+    #[test]
+    fn a_narrowing_judges_a_tool_whose_prior_an_authority_waives() {
+        let fetch = ToolAnnotation {
+            delta: Delta {
+                trust: Some(SUSPICIOUS),
+                audience: None,
+            },
+            ..plain_tool("fetch")
+        };
+        let deploy = requiring(
+            "deploy",
+            Requires {
+                label: floor(TRUSTED),
+                history: vec![HistoryRequirement::Prior(EffectKind::new("reviewed"))],
+                ..Requires::default()
+            },
+        );
+        let desk = mandated(
+            "desk",
+            Mandate {
+                prior_waivers: vec![EffectKind::new("reviewed")],
+                ..Mandate::default()
+            },
+        );
+        let registry = registry(vec![fetch, deploy], vec![desk], vec![]);
+        let log = vec![opened(Label::new(TRUSTED, Audience::public()))];
+        assert_eq!(
+            plan_of(&registry, &log, &call("fetch", json!({}))).narrowing_impact,
+            Some(NarrowingImpact {
+                sign_off: vec![],
+                blocked: vec![ToolName::new("deploy")],
+                recipient_checked: vec![],
+                per_call: vec![],
+            })
         );
     }
 
@@ -3928,8 +4104,8 @@ mod tests {
                     })
                 }
                 Gap::NoPrior(kind) => authority.mandate.waivers.contains(kind),
+                Gap::Prior(kind) => authority.mandate.prior_waivers.contains(kind),
                 Gap::Attention(mark) => authority.mandate.attends.covers(mark),
-                Gap::Prior(_) => false,
             })
         }
 
@@ -4067,24 +4243,28 @@ mod tests {
             prop::option::of((0u8..2).prop_map(Trust::new)),
             prop::option::of(small_audience()),
             prop::collection::vec(small_effect(), 0..2),
+            prop::collection::vec(small_effect(), 0..2),
             prop_oneof![
                 Just(Attends::Named(vec![])),
                 Just(Attends::Named(vec![MarkName::new("m0")])),
                 Just(Attends::Any),
             ],
         )
-            .prop_map(move |(trust_ceiling, reader_ceiling, waivers, attends)| Authority {
-                except: Vec::new(),
-                name: name.clone(),
-                mandate: Mandate {
-                    trust_ceiling,
-                    reader_ceiling: reader_ceiling.map(DeclaredAudience::literal),
-                    waivers,
-                    attends,
+            .prop_map(
+                move |(trust_ceiling, reader_ceiling, waivers, prior_waivers, attends)| Authority {
+                    except: Vec::new(),
+                    name: name.clone(),
+                    mandate: Mandate {
+                        trust_ceiling,
+                        reader_ceiling: reader_ceiling.map(DeclaredAudience::literal),
+                        waivers,
+                        prior_waivers,
+                        attends,
+                    },
+                    scope: Scope::default(),
+                    hint: None,
                 },
-                scope: Scope::default(),
-                hint: None,
-            })
+            )
     }
 
     fn a_state() -> impl Strategy<Value = State> {
@@ -4326,15 +4506,6 @@ mod tests {
             for kind in &no_priors {
                 multiply(authorities.iter().filter(|a| a.mandate.waivers.contains(kind)).count());
             }
-            let marks: BTreeSet<_> = contract.requires.attention_marks().iter().collect();
-            for mark in &marks {
-                multiply(authorities.iter().filter(|a| a.mandate.attends.covers(mark)).count());
-            }
-            let output_sanitizers = registry.sanitizers().filter(|sanitizer| sanitizer.on.output).count();
-            let withhold = u128::from(
-                registry.profile().confines_result(&contract.name) && !contract.emits.is_empty(),
-            );
-            bound = bound.saturating_mul(1 + withhold + output_sanitizers as u128);
             let priors: BTreeSet<&EffectKind> = contract
                 .requires
                 .history
@@ -4344,6 +4515,18 @@ mod tests {
                     HistoryRequirement::NoPrior(_) => None,
                 })
                 .collect();
+            for kind in &priors {
+                multiply(authorities.iter().filter(|a| a.mandate.prior_waivers.contains(kind)).count());
+            }
+            let marks: BTreeSet<_> = contract.requires.attention_marks().iter().collect();
+            for mark in &marks {
+                multiply(authorities.iter().filter(|a| a.mandate.attends.covers(mark)).count());
+            }
+            let output_sanitizers = registry.sanitizers().filter(|sanitizer| sanitizer.on.output).count();
+            let withhold = u128::from(
+                registry.profile().confines_result(&contract.name) && !contract.emits.is_empty(),
+            );
+            bound = bound.saturating_mul(1 + withhold + output_sanitizers as u128);
             let redispatches = registry
                 .tools()
                 .filter_map(ToolDeclaration::declared)
@@ -4383,8 +4566,8 @@ mod tests {
                     Gap::Includes { recipients } => scoped && authority.mandate.reader_ceiling.as_ref()
                         .is_some_and(|c| decided(Audience::of_declared(c).includes(recipients, &parts.context()))),
                     Gap::NoPrior(kind) => scoped && authority.mandate.waivers.contains(kind),
+                    Gap::Prior(kind) => scoped && authority.mandate.prior_waivers.contains(kind),
                     Gap::Attention(mark) => authority.mandate.attends.covers(mark),
-                    Gap::Prior(_) => false,
                 }
             };
             let per_gap: Vec<Vec<&Authority>> = raw.requirement_gaps.iter()
@@ -4444,7 +4627,12 @@ mod tests {
                         let sb: std::collections::BTreeSet<_> = b.waivers.iter().collect();
                         inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
                     }
-                    Gap::Attention(_) | Gap::Prior(_) => Some(O::Equal),
+                    Gap::Prior(_) => {
+                        let sa: std::collections::BTreeSet<_> = a.prior_waivers.iter().collect();
+                        let sb: std::collections::BTreeSet<_> = b.prior_waivers.iter().collect();
+                        inclusion(sa.is_subset(&sb), sb.is_subset(&sa))
+                    }
+                    Gap::Attention(_) => Some(O::Equal),
                 }
             };
             let precedes = |a: &Vec<(AuthorityName, Vec<Gap>)>, b: &Vec<(AuthorityName, Vec<Gap>)>| -> bool {
@@ -4500,6 +4688,57 @@ mod tests {
             outcome: crate::fact::CloseOutcome::Success {
                 effects: EffectSet::new([kind]).unwrap(),
             },
+        }
+    }
+
+    /// The runtime applies a plan at its block only when every step is a ruling by an
+    /// authority it accepts, or, where the family allows it, the acceptance of a narrowing.
+    #[test]
+    fn a_plan_auto_applies_only_as_rulings_and_the_acceptances_its_family_allows() {
+        let narrowing = Narrowing {
+            from: Label::new(TRUSTED, Audience::public()),
+            to: Label::new(SUSPICIOUS, Audience::public()),
+        };
+        let stock = || RemedyStep::Authorize(AuthorityName::new("stock"));
+        let other = || RemedyStep::Authorize(AuthorityName::new("other"));
+        let accept = || RemedyStep::Accept(narrowing.clone());
+        let output = || RemedyStep::Sanitize(SanitizerName::new("scrub"));
+        let input = || RemedyStep::Derive(SanitizerName::new("redact"));
+        let declare = || RemedyStep::Return(ReturnRoute::Raw);
+        // (steps, under rulings only, under rulings and accept)
+        let table = [
+            (vec![stock()], true, true),
+            (vec![stock(), stock()], true, true),
+            (vec![accept()], false, true),
+            (vec![accept(), stock()], false, true),
+            (vec![other()], false, false),
+            (vec![accept(), other()], false, false),
+            (vec![RemedyStep::Withhold], false, false),
+            (vec![accept(), output()], false, false),
+            (vec![output()], false, false),
+            (vec![input()], false, false),
+            (vec![stock(), input()], false, false),
+            (vec![declare()], false, false),
+            (vec![accept(), RemedyStep::Return(ReturnRoute::Void)], false, false),
+            (vec![], false, false),
+        ];
+        for (steps, rulings_only, rulings_and_accept) in table {
+            let plan = ExecutableRemedyPlan {
+                id: PlanId::new(0),
+                steps: steps.clone(),
+                required: Vec::new(),
+            };
+            let rules = |authority: &AuthorityName| authority.as_str() == "stock";
+            assert_eq!(
+                plan.auto_applies(AutoApply::RulingsOnly, rules),
+                rulings_only,
+                "{steps:?} under rulings only"
+            );
+            assert_eq!(
+                plan.auto_applies(AutoApply::RulingsAndAccept, rules),
+                rulings_and_accept,
+                "{steps:?} under rulings and accept"
+            );
         }
     }
 }

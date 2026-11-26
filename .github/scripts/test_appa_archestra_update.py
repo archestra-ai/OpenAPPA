@@ -22,7 +22,7 @@ def command(root, *args):
 def manifest(commit):
     return '# Pinned to OpenAPPA main at old.\n[dependencies]\n' + "\n".join(
         f'{name} = {{ git = "{updater.GIT_URL}", rev = "{commit}" }}'
-        for name in ("appa-runtime", "appa-runtime-api", "appa-eventlog", "appa-package")
+        for name in sorted(updater.EMBEDDED)
     ) + '\nother = "1"\n'
 
 
@@ -214,7 +214,7 @@ class UpdaterTests(unittest.TestCase):
         text = text.replace(f'rev = "{self.old}" }}', f'rev = "{self.old}", features = ["postgres"] }}')
         result = updater.updated_manifest(text, self.candidate)
         self.assertEqual(updater.pin(result), self.candidate["sha"])
-        self.assertEqual(result.count('features = ["postgres"]'), 4)
+        self.assertEqual(result.count('features = ["postgres"]'), len(updater.EMBEDDED))
         self.assertIn('other = "1"', result)
         with self.assertRaises(ValueError):
             updater.pin(text.replace(self.old, self.future["sha"], 1))

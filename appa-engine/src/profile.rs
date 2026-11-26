@@ -512,10 +512,14 @@ fn identity_document(registry: &RegistryConfig, profile: &DeploymentProfile) -> 
                 },
                 "scope": sorted_set(&authority.scope.tags),
             });
-            // Written only where the authority excepts a tag, so a policy that excepts none
-            // keeps the identity it had.
+            // Written only where the authority excepts a tag or waives a prior, so a policy that
+            // does neither keeps the identity it had.
             if !authority.except.is_empty() {
                 document["except"] = serde_json::Value::Array(sorted_set(&authority.except));
+            }
+            if !authority.mandate.prior_waivers.is_empty() {
+                document["mandate"]["prior_waivers"] =
+                    serde_json::Value::Array(sorted_set(&authority.mandate.prior_waivers));
             }
             document
         })
@@ -659,6 +663,7 @@ pub(crate) fn opening_at(trajectory: crate::value::TrajectoryId, starting_label:
         revision: PolicyRevision::FIRST,
         forked_from: None,
         principal: None,
+        settings: Default::default(),
     })
 }
 

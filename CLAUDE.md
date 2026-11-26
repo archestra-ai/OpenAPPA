@@ -39,7 +39,11 @@ else, including the website docs, follows it.
 
 APPA owes nothing to its own past. Docs describe the current model only
 — no retired rules, no "formerly", no migration notes. Config and wire
-surfaces may break without shims or deprecation paths.
+surfaces may break without shims or deprecation paths. Stored event logs
+are the exception: within the store's supported upgrade path, a later
+build must still decode the records an earlier build wrote, so an
+in-flight trajectory survives an upgrade. Families below an explicit
+cutoff (such as `LegacyFamily`) are refused, not shimmed.
 
 ## Policy & Algebra: IFC Monoids First
 

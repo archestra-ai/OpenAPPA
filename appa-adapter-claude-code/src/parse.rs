@@ -274,6 +274,7 @@ pub(crate) fn parse(body: &[u8]) -> Result<Option<HookEvent>, ParseRefusal> {
             title: session_title(&event),
             launch: None,
             start: start_kind(event.source.as_deref()),
+            settings: Default::default(),
         })),
         "UserPromptSubmit" => match event.prompt.clone() {
             Some(text) => Ok(Some(HookEvent::Prompt {

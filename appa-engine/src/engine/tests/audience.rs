@@ -99,7 +99,7 @@ fn a_chain_only_output_sanitizer_is_offered_and_admitted_without_membership() {
     let (log, dispatch) = released_under_output_sanitizer(&e, vec![opened(&e)], &call);
 
     let raw = ValueBody::new("TOKEN=abc");
-    let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+    let source = raw.digest();
     let report = |evidence: Vec<crate::transition::Evidence>| ToolReport {
         dispatch: dispatch.clone(),
         outcome: ToolOutcome::Success {
@@ -129,7 +129,7 @@ fn a_chain_only_output_sanitizer_is_offered_and_admitted_without_membership() {
         crossed.follow_up,
         FollowUp::Outcome(OutcomeFollowUp::Closed {
             admitted: Some(derived),
-            withheld: false,
+            withheld: None,
         })
     );
     let log = [log, crossed.append.expect("the derivation appends").facts().to_vec()].concat();
@@ -1010,6 +1010,91 @@ mod symbolic_audiences {
     }
 
     #[test]
+    fn a_blocked_call_with_a_prior_gap_is_routed_nowhere_and_reads_no_audience() {
+        let mut backup = plain_tool("backup");
+        backup.emits = EffectSet::new([EffectKind::new("backup")]).unwrap();
+        backup.delta = Delta {
+            trust: None,
+            audience: Some(DeltaAudience::Static(DeclaredAudience::literal(readers(&["insider"])))),
+        };
+        let mut wire = plain_tool("wire");
+        wire.requires = Requires {
+            label: LabelRequirements {
+                trust_floor: None,
+                audience: vec![AudienceRequirement::Includes(RecipientSpec::Static(grouped(
+                    &[],
+                    &["team"],
+                )))],
+            },
+            history: vec![HistoryRequirement::Prior(EffectKind::new("backup"))],
+            attention: vec![crate::names::MarkName::new(crate::names::MarkName::BLOCKED)],
+        };
+        let e = grouped_engine(
+            config(vec![backup, wire], vec![]),
+            &[],
+            Label::new(TRUSTED, Audience::public()),
+        );
+        let log = vec![opened(&e)];
+        let decided = e
+            .handle(
+                &viewing(&e, &log),
+                act_batch("b1", vec![], vec![raw(&call("wire", json!({})))], no_answers()),
+            )
+            .expect("a blocked call reads no symbolic audience");
+        let (_, blocked) = answered(&decided);
+        assert!(blocked[0].block.plans.is_empty(), "no redispatch is offered");
+        let log = [log, appended_facts(decided)].concat();
+        let view = e.view(&traj(), log.clone(), log.len() as u64).expect("the log replays");
+        let subject = crate::basis::SubjectKey::Call {
+            trajectory: traj(),
+            batch: crate::transition::ProposalBatchId::new("b1"),
+            position: 0,
+        };
+        for depth in [crate::route::RouteDepth::ONE, crate::route::RouteDepth::new(2).unwrap()] {
+            assert_eq!(e.recovery_routes(&view, &subject, &no_answers(), depth), Ok(Vec::new()));
+        }
+    }
+
+    #[test]
+    fn a_blocked_variant_left_undecided_does_not_hide_its_sibling_newly_blocked() {
+        let mut fetch = plain_tool("fetch");
+        fetch.delta = Delta {
+            trust: None,
+            audience: Some(DeltaAudience::Static(DeclaredAudience::literal(readers(&["insider"])))),
+        };
+        let mut audit = plain_tool("audit");
+        audit.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(grouped(
+            &["alice"],
+            &[],
+        )))];
+        let mut org = plain_tool("audit(scope:org)");
+        org.requires.label.audience = vec![AudienceRequirement::Includes(RecipientSpec::Static(grouped(
+            &[],
+            &["team"],
+        )))];
+        org.requires.attention = vec![crate::names::MarkName::new(crate::names::MarkName::BLOCKED)];
+        let e = grouped_engine(
+            config(vec![fetch, audit, org], vec![]),
+            &[],
+            Label::new(TRUSTED, Audience::public()),
+        );
+        let log = vec![opened(&e)];
+        let decided = e
+            .handle(
+                &viewing(&e, &log),
+                act_batch("b1", vec![], vec![raw(&call("fetch", json!({})))], no_answers()),
+            )
+            .expect("the narrowing blocks");
+        let (_, blocked) = answered(&decided);
+        let impact = blocked[0]
+            .block
+            .narrowing_impact
+            .as_ref()
+            .expect("the narrowing has an impact");
+        assert_eq!(impact.blocked, vec![ToolName::new("audit")]);
+    }
+
+    #[test]
     fn a_route_reads_the_answers_the_block_recorded_over_any_fresh_answer() {
         use crate::route::{RouteDepth, RouteOutcome, RouteStep};
 
@@ -1410,7 +1495,7 @@ mod symbolic_audiences {
         let body = ValueBody::new("what I found");
         let evidence = vec![Evidence::Sanitizer {
             sanitizer: SanitizerName::new("declassify"),
-            source: RawResultDigest::of(body.as_str().as_bytes()),
+            source: body.digest(),
             derived: ValueBody::new("clean"),
         }];
         let derived = e
@@ -1512,7 +1597,7 @@ mod symbolic_audiences {
         });
         let log = [opened_log.clone(), spawn_family_at(&e, &opened_log, &child, policy)].concat();
         let body = ValueBody::new("what I found");
-        let raw_digest = RawResultDigest::of(body.as_str().as_bytes());
+        let raw_digest = body.digest();
 
         let asked = e
             .handle(
@@ -1632,7 +1717,7 @@ mod symbolic_audiences {
         let clean = ValueBody::new("clean");
         let evidence = vec![Evidence::Sanitizer {
             sanitizer: SanitizerName::new("declassify"),
-            source: RawResultDigest::of(body.as_str().as_bytes()),
+            source: body.digest(),
             derived: clean.clone(),
         }];
         let answers = crate::audience::AudienceEvidence {
@@ -2028,4 +2113,127 @@ fn a_mandate_placeholder_admits_the_collection_each_call_spells() {
     assert!(parameters.validate(&serde_json::json!({ "channel": "C1" })).is_ok());
     assert!(parameters.validate(&serde_json::json!({})).is_err());
     assert!(parameters.validate(&serde_json::json!({ "channel": 1 })).is_err());
+}
+
+/// A `blocked` mark beside a recipient outside the label: the officer's mandate reads
+/// `team`, but nothing lifts the mark, so the act asks for no membership and offers nothing,
+/// live and on replay. A log whose act still pinned the mandate's answers, as an earlier
+/// planner gathered them, replays too.
+#[test]
+fn a_blocked_call_reads_no_mandate_live_or_on_replay() {
+    let officer = crate::authority::Authority {
+        except: Vec::new(),
+        name: AuthorityName::new("officer"),
+        mandate: crate::authority::Mandate {
+            reader_ceiling: Some(group_audience("team")),
+            ..crate::authority::Mandate::default()
+        },
+        scope: crate::authority::Scope::default(),
+        hint: None,
+    };
+    let mut send = plain_tool("send");
+    send.parameters = crate::params::test_string_argument_schema("to");
+    send.requires = Requires {
+        label: LabelRequirements {
+            trust_floor: None,
+            audience: vec![AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into()))],
+        },
+        attention: vec![MarkName::new(MarkName::BLOCKED)],
+        ..Requires::default()
+    };
+    let e = open_engine_at(
+        RegistryConfig {
+            authorities: vec![officer],
+            audience: slack_groups(&["team"]),
+            ..test_config(vec![send])
+        },
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
+    );
+    let opening = vec![opened(&e)];
+    let decision = e
+        .handle(
+            &viewing(&e, &opening),
+            evidenced_batch("b1", vec![send_to("carol@other.com")], Default::default()),
+        )
+        .expect("the blocked call is decided without membership");
+    let (released, blocked) = answered(&decision);
+    assert!(released.is_empty());
+    assert!(blocked[0].block.raw.is_hard());
+    assert!(!blocked[0].block.is_curable());
+    assert!(blocked[0].offers.is_empty());
+    let facts = appended_facts(decision);
+    assert_eq!(e.validate_replay(&[opening.clone(), facts.clone()].concat()), Ok(()));
+
+    let mut gathered = facts;
+    for fact in &mut gathered {
+        if let Fact::ProposalBatchDecided { evidence, .. } = fact {
+            *evidence = source_evidence(vec![user_group("team", wide_as_reported())]);
+        }
+    }
+    assert_eq!(e.validate_replay(&[opening, gathered].concat()), Ok(()));
+}
+
+/// An earlier planner reached a blocked call's mandate gate only once the check's own
+/// comparisons were answered: here the `board` one beside the outsider recipient's gap. Pins
+/// of the mandate without that answer were never asked.
+#[test]
+fn a_blocked_calls_mandate_pins_replay_only_behind_an_answered_check() {
+    let officer = crate::authority::Authority {
+        except: Vec::new(),
+        name: AuthorityName::new("officer"),
+        mandate: crate::authority::Mandate {
+            reader_ceiling: Some(group_audience("team")),
+            ..crate::authority::Mandate::default()
+        },
+        scope: crate::authority::Scope::default(),
+        hint: None,
+    };
+    let mut send = plain_tool("send");
+    send.parameters = crate::params::test_string_argument_schema("to");
+    send.requires = Requires {
+        label: LabelRequirements {
+            trust_floor: None,
+            audience: vec![
+                AudienceRequirement::Includes(RecipientSpec::Placeholder("to".into())),
+                AudienceRequirement::Includes(RecipientSpec::Static(group_audience("board"))),
+            ],
+        },
+        attention: vec![MarkName::new(MarkName::BLOCKED)],
+        ..Requires::default()
+    };
+    let e = open_engine_at(
+        RegistryConfig {
+            authorities: vec![officer],
+            audience: slack_groups(&["team", "board"]),
+            ..test_config(vec![send])
+        },
+        Label::new(TRUSTED, Audience::restricted([corp_reader("alice")])),
+    );
+    let opening = vec![opened(&e)];
+    let decision = e
+        .handle(
+            &viewing(&e, &opening),
+            evidenced_batch("b1", vec![send_to("carol@other.com")], Default::default()),
+        )
+        .expect("the blocked call is decided without membership");
+    let facts = appended_facts(decision);
+    let pinned = |sources: Vec<crate::audience::SourceClaims>| {
+        let mut facts = facts.clone();
+        for fact in &mut facts {
+            if let Fact::ProposalBatchDecided { evidence, .. } = fact {
+                *evidence = source_evidence(sources.clone());
+            }
+        }
+        e.validate_replay(&[opening.clone(), facts].concat())
+    };
+
+    let team = user_group("team", wide_as_reported());
+    assert_eq!(
+        pinned(vec![team.clone()]),
+        Err(TransitionRefusal::UnrequestedEvidence {
+            entry: "source slack:user-group/team".to_string()
+        })
+    );
+    let board = user_group("board", vec![corp_reader("alice")]);
+    assert_eq!(pinned(vec![team, board]), Ok(()));
 }

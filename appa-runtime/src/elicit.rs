@@ -434,6 +434,12 @@ fn requirement_text(requirement: &Requirement) -> String {
         Requirement::Effect { excludes } => {
             format!("an earlier {} action in this conversation", terminal_safe(excludes))
         }
+        Requirement::Prior { contains } => {
+            format!(
+                "a required earlier {} action not recorded in this conversation",
+                terminal_safe(contains)
+            )
+        }
         Requirement::Attention { mark } => format!("attention: {}", terminal_safe(mark)),
     }
 }
@@ -460,6 +466,9 @@ fn requirement_item(requirement: &Requirement) -> ReviewScopeItem {
         },
         Requirement::Effect { excludes } => ReviewRequirement::Effect {
             excludes: excludes.clone(),
+        },
+        Requirement::Prior { contains } => ReviewRequirement::Prior {
+            contains: contains.clone(),
         },
     };
     ReviewScopeItem::Requirement { requirement, text }
@@ -673,6 +682,7 @@ mod tests {
                 trust_below: None,
                 audience_missing: None,
                 effects_containing: vec![],
+                prior_effects_containing: vec![],
                 attention: vec![],
             },
         };

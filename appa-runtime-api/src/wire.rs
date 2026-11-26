@@ -49,10 +49,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use crate::{
-    Actor, AdapterName, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
-    OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, OutcomeBody, ParseRefusal, PeerAddress, PeerFrame,
-    PromptKey, ProposedCall, RefusalClass, Review, ReviewChannel, ReviewScopeItem, Ruling, SessionTitle, SpawnBinding,
-    SpawnKind, SpawnRef, StartKind, ToolOutcome, TrajectoryId,
+    Actor, AdapterName, AutoApply, CanonicalTool, DeclaredReturn, HookDecision, HookEvent, LaunchStart, LaunchToken,
+    LineVariant, OfferedInputSanitizer, OfferedRemedy, OfferedReturn, OpenCalls, Outcome, OutcomeBody, Outcomes,
+    ParseRefusal, PeerAddress, PeerFrame, PromptKey, ProposedCall, RefusalClass, Remediable, Remedy, RetryHint, Review,
+    ReviewChannel, ReviewScopeItem, Ruling, SessionSettings, SessionTitle, SpawnBinding, SpawnKind, SpawnRef,
+    StartKind, ToolOutcome, TrajectoryId,
 };
 
 /// The protocol this crate speaks. A wire event or decision carrying
@@ -166,10 +167,12 @@ enum Field {
     Principal,
     AnsweredCallIds,
     Declares,
+    AutoApply,
+    LineVariant,
 }
 
 impl Field {
-    const ALL: [Field; 23] = [
+    const ALL: [Field; 25] = [
         Field::RootId,
         Field::ChildId,
         Field::Text,
@@ -193,6 +196,8 @@ impl Field {
         Field::Principal,
         Field::AnsweredCallIds,
         Field::Declares,
+        Field::AutoApply,
+        Field::LineVariant,
     ];
 
     fn spelling(self) -> &'static str {
@@ -220,6 +225,8 @@ impl Field {
             Field::Principal => "principal",
             Field::AnsweredCallIds => "answered_call_ids",
             Field::Declares => "declares",
+            Field::AutoApply => "auto_apply",
+            Field::LineVariant => "line_variant",
         }
     }
 }
@@ -245,6 +252,8 @@ fn fields_read(name: EventName) -> &'static [Field] {
             Field::Start,
             Field::ForkedFrom,
             Field::Principal,
+            Field::AutoApply,
+            Field::LineVariant,
         ],
         EventName::Prompt => &[
             Field::RootId,
@@ -585,6 +594,13 @@ pub struct WireEvent {
     /// On a single spawn's tool call: the return it declares for its subagent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declares: Option<DeclaredReturn>,
+    /// On a session start: what the runtime applies at a block on its own, if the start
+    /// opens the family. Absent is [`AutoApply::RulingsOnly`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_apply: Option<AutoApply>,
+    /// On a session start: the host's name for the authority line it composed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_variant: Option<LineVariant>,
 }
 
 /// A parsed wire event with what the server identified from it.
@@ -595,6 +611,46 @@ pub struct Accepted {
     /// Set on a tool call only; empty otherwise, because a tool call is
     /// the one event whose named children are asked for.
     pub names_children: Vec<TrajectoryId>,
+}
+
+/// A refusal's outcomes as the wire states them, held to the invariants [`Outcomes`] keeps;
+/// `remedies` says the decision names offers or reviews, which a missing fact never does.
+/// A remediable denial's deciding outcome is the cheapest offer's, so it is read, not derived.
+fn refusal_outcomes(
+    held: Option<Vec<Outcome>>,
+    deciding: Option<Outcome>,
+    retry: Option<RetryHint>,
+    remedies: bool,
+) -> Result<Option<Outcomes>, &'static str> {
+    let (held, deciding) = match (held, deciding, retry) {
+        (None, None, None) => return Ok(None),
+        (None, _, _) => return Err("a deciding outcome or a retry hint but no outcomes"),
+        (Some(_), None, _) => return Err("outcomes without their deciding one"),
+        (Some(held), Some(deciding), _) => (held, deciding),
+    };
+    Ok(Some(match (held.as_slice(), deciding, retry, remedies) {
+        ([Outcome::Integrity], Outcome::Integrity, None, false) => Outcomes::Integrity,
+        ([Outcome::HardBlock], Outcome::HardBlock, None, false) => Outcomes::HardBlock,
+        (_, Outcome::Integrity | Outcome::HardBlock, None, true) => {
+            return Err("an integrity fault or a hard block with offers or reviews");
+        }
+        ([Outcome::MissingFact], Outcome::MissingFact, Some(retry), false) => Outcomes::MissingFact(retry),
+        (_, _, Some(_), _) => {
+            return Err("a retry hint on anything but a missing fact alone, with no offers or reviews");
+        }
+        (_, deciding, None, _) => match (
+            deciding.remedy(),
+            held.iter()
+                .map(|outcome| outcome.remedy())
+                .collect::<Option<Vec<Remedy>>>(),
+        ) {
+            (Some(deciding), Some(held)) if held.contains(&deciding) => {
+                Outcomes::Remediable(Remediable::new(deciding, held))
+            }
+            (Some(_), Some(_)) => return Err("a deciding outcome its outcomes do not hold"),
+            _ => return Err("an integrity fault, a hard block or a missing fact beside other outcomes"),
+        },
+    }))
 }
 
 fn malformed(detail: impl Into<String>) -> ParseRefusal {
@@ -631,6 +687,8 @@ impl WireEvent {
             principal: None,
             answered_call_ids: None,
             declares: None,
+            auto_apply: None,
+            line_variant: None,
         }
     }
 
@@ -661,6 +719,8 @@ impl WireEvent {
             Field::Principal => self.principal.is_some(),
             Field::AnsweredCallIds => self.answered_call_ids.is_some(),
             Field::Declares => self.declares.is_some(),
+            Field::AutoApply => self.auto_apply.is_some(),
+            Field::LineVariant => self.line_variant.is_some(),
         }
     }
 
@@ -692,6 +752,7 @@ impl WireEvent {
                 title,
                 start,
                 launch,
+                settings,
             } => {
                 let (root_id, _) = ids(&Actor {
                     root: root.clone(),
@@ -715,6 +776,8 @@ impl WireEvent {
                     start: *start,
                     forked_from,
                     principal: checked_principal(adapter, PrincipalSource::Wire, principal.clone())?,
+                    auto_apply: (settings.auto_apply != AutoApply::default()).then_some(settings.auto_apply),
+                    line_variant: settings.line_variant.clone(),
                     ..Self::bare(adapter, EventName::SessionStart)
                 }
             }
@@ -965,6 +1028,8 @@ impl WireEvent {
             forked_from,
             answered_call_ids,
             declares,
+            auto_apply,
+            line_variant,
             ..
         } = self;
         let root = || -> Result<TrajectoryId, ParseRefusal> {
@@ -1027,6 +1092,10 @@ impl WireEvent {
                 title,
                 start,
                 launch: launch_start(served.name, launch, start, forked_from)?,
+                settings: SessionSettings {
+                    auto_apply: auto_apply.unwrap_or_default(),
+                    line_variant,
+                },
             }),
             EventName::Prompt => match text {
                 Some(text) => accepted(HookEvent::Prompt {
@@ -1363,6 +1432,14 @@ pub struct WireDecision {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub running: Option<Vec<String>>,
+    /// Every outcome a refusal holds: one alone, or the remedy kinds its offers ask for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcomes: Option<Vec<Outcome>>,
+    /// The outcome that decides the refusal: for remedies, what the cheapest offer asks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deciding: Option<Outcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryHint>,
 }
 
 impl WireDecision {
@@ -1381,6 +1458,18 @@ impl WireDecision {
             class: None,
             detail: None,
             running: None,
+            outcomes: None,
+            deciding: None,
+            retry: None,
+        }
+    }
+
+    fn refusal(outcomes: Option<&Outcomes>, decision: DecisionName) -> Self {
+        Self {
+            outcomes: outcomes.map(|outcomes| outcomes.held().collect()),
+            deciding: outcomes.map(Outcomes::deciding),
+            retry: outcomes.and_then(Outcomes::retry),
+            ..Self::bare(decision)
         }
     }
 
@@ -1396,6 +1485,7 @@ impl WireDecision {
                 feedback,
                 offers,
                 review,
+                outcomes,
             } => Self {
                 feedback: Some(feedback.clone()),
                 offers: Some(
@@ -1430,15 +1520,15 @@ impl WireDecision {
                         })
                         .collect(),
                 ),
-                ..Self::bare(DecisionName::DenyCall)
+                ..Self::refusal(outcomes.as_ref(), DecisionName::DenyCall)
             },
-            HookDecision::Block { reason } => Self {
+            HookDecision::Block { reason, outcomes } => Self {
                 reason: Some(reason.clone()),
-                ..Self::bare(DecisionName::Block)
+                ..Self::refusal(outcomes.as_ref(), DecisionName::Block)
             },
-            HookDecision::ReplaceOutput { output } => Self {
+            HookDecision::ReplaceOutput { output, outcomes } => Self {
                 output: Some(output.clone()),
-                ..Self::bare(DecisionName::ReplaceOutput)
+                ..Self::refusal(outcomes.as_ref(), DecisionName::ReplaceOutput)
             },
             HookDecision::DeliverValue { value } => Self {
                 value: Some(value.clone()),
@@ -1453,10 +1543,13 @@ impl WireDecision {
                 text: Some(text.clone()),
                 ..Self::bare(DecisionName::Context)
             },
-            HookDecision::Refuse { class, detail } => Self {
+            HookDecision::Refuse { class, detail, retry } => Self {
                 class: Some(*class),
                 detail: Some(detail.clone()),
-                ..Self::bare(DecisionName::Refuse)
+                ..Self::refusal(
+                    Some(&retry.map_or(Outcomes::Integrity, Outcomes::MissingFact)),
+                    DecisionName::Refuse,
+                )
             },
             HookDecision::Held { running } => Self {
                 running: Some(running.clone()),
@@ -1477,50 +1570,76 @@ impl WireDecision {
         let name = self.decision;
         let missing = |field: &str| malformed(format!("{name:?} without its {field}"));
         let required = |field: &str, value: Option<String>| value.ok_or_else(|| missing(field));
+        let (held, deciding, retry) = (self.outcomes, self.deciding, self.retry);
+        let remedies = self.offers.as_ref().is_some_and(|offers| !offers.is_empty())
+            || self.review.as_ref().is_some_and(|review| !review.is_empty());
+        let stated = |remedies: bool| {
+            refusal_outcomes(held.clone(), deciding, retry, remedies)
+                .map_err(|problem| malformed(format!("{name:?} with {problem}")))
+        };
+        // A block or a replacement carries no offers or reviews, so outcomes stated beside them
+        // would describe remedies the decision drops.
+        let unremedied = || match (stated(false)?, remedies) {
+            (Some(_), true) => Err(malformed(format!("{name:?} with outcomes beside offers or reviews"))),
+            (outcomes, _) => Ok(outcomes),
+        };
+        match name {
+            DecisionName::DenyCall | DecisionName::Block | DecisionName::ReplaceOutput | DecisionName::Refuse => {}
+            _ if held.is_some() || deciding.is_some() || retry.is_some() => {
+                return Err(malformed(format!("{name:?} with refusal outcomes")));
+            }
+            _ => {}
+        }
         Ok(match name {
             DecisionName::Ack => HookDecision::Ack,
             DecisionName::AllowCall => HookDecision::AllowCall {
                 spawn: self.spawn_binding.map(SpawnBinding),
             },
             DecisionName::PassControl => HookDecision::PassControl,
-            DecisionName::DenyCall => HookDecision::DenyCall {
-                feedback: required("feedback", self.feedback)?,
-                offers: self
-                    .offers
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|offer| OfferedRemedy {
-                        id: offer.offer_id,
-                        returns: offer.returns.map(|returns| match returns {
-                            WireReturn::Unsanitized(UnsanitizedReturn::AsSpoken) => OfferedReturn::AsSpoken,
-                            WireReturn::Unsanitized(UnsanitizedReturn::Void) => OfferedReturn::Void,
-                            WireReturn::Sanitized { sanitizer } => OfferedReturn::Sanitized { sanitizer },
-                        }),
-                        input_sanitizer: offer.input_sanitizer.map(|sanitizer| OfferedInputSanitizer {
-                            name: sanitizer.name,
-                            target: sanitizer.target,
-                            description: sanitizer.description,
-                        }),
-                    })
-                    .collect(),
-                review: self
-                    .review
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|entry| Review {
-                        offer: entry.offer_id,
-                        text: entry.text,
-                        authority: entry.authority,
-                        hint: entry.hint,
-                        scope: entry.scope,
-                    })
-                    .collect(),
-            },
+            DecisionName::DenyCall => {
+                let outcomes = stated(remedies)?;
+                HookDecision::DenyCall {
+                    feedback: required("feedback", self.feedback)?,
+                    offers: self
+                        .offers
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|offer| OfferedRemedy {
+                            id: offer.offer_id,
+                            returns: offer.returns.map(|returns| match returns {
+                                WireReturn::Unsanitized(UnsanitizedReturn::AsSpoken) => OfferedReturn::AsSpoken,
+                                WireReturn::Unsanitized(UnsanitizedReturn::Void) => OfferedReturn::Void,
+                                WireReturn::Sanitized { sanitizer } => OfferedReturn::Sanitized { sanitizer },
+                            }),
+                            input_sanitizer: offer.input_sanitizer.map(|sanitizer| OfferedInputSanitizer {
+                                name: sanitizer.name,
+                                target: sanitizer.target,
+                                description: sanitizer.description,
+                            }),
+                        })
+                        .collect(),
+                    review: self
+                        .review
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|entry| Review {
+                            offer: entry.offer_id,
+                            text: entry.text,
+                            authority: entry.authority,
+                            hint: entry.hint,
+                            scope: entry.scope,
+                        })
+                        .collect(),
+                    outcomes,
+                }
+            }
             DecisionName::Block => HookDecision::Block {
                 reason: required("reason", self.reason)?,
+                outcomes: unremedied()?,
             },
             DecisionName::ReplaceOutput => HookDecision::ReplaceOutput {
                 output: required("output", self.output)?,
+                outcomes: unremedied()?,
             },
             DecisionName::DeliverValue => HookDecision::DeliverValue {
                 value: required("value", self.value)?,
@@ -1532,10 +1651,22 @@ impl WireDecision {
             DecisionName::Context => HookDecision::Context {
                 text: required("text", self.text)?,
             },
-            DecisionName::Refuse => HookDecision::Refuse {
-                class: self.class.ok_or_else(|| missing("class"))?,
-                detail: required("detail", self.detail)?,
-            },
+            DecisionName::Refuse => {
+                let retry = match unremedied()? {
+                    None | Some(Outcomes::Integrity) => None,
+                    Some(Outcomes::MissingFact(retry)) => Some(retry),
+                    Some(_) => {
+                        return Err(malformed(format!(
+                            "{name:?} with an outcome other than integrity or a missing fact"
+                        )));
+                    }
+                };
+                HookDecision::Refuse {
+                    class: self.class.ok_or_else(|| missing("class"))?,
+                    detail: required("detail", self.detail)?,
+                    retry,
+                }
+            }
             DecisionName::Held => HookDecision::Held {
                 running: self.running.ok_or_else(|| missing("running"))?,
             },
@@ -1573,6 +1704,117 @@ mod tests {
             feedback: "no".to_string(),
             offers: Vec::new(),
             review: vec![review],
+            outcomes: None,
+        }
+    }
+
+    #[test]
+    fn a_refusals_outcomes_cross_the_wire_and_a_decision_without_them_reads() {
+        let denied = HookDecision::DenyCall {
+            feedback: "no".to_string(),
+            offers: Vec::new(),
+            review: Vec::new(),
+            outcomes: Some(Outcomes::Remediable(Remediable::new(
+                Remedy::WaivableGap,
+                [Remedy::Consent, Remedy::AgentChoice],
+            ))),
+        };
+        let wire = WireDecision::of(&denied);
+        assert_eq!(
+            wire.outcomes,
+            Some(vec![Outcome::AgentChoice, Outcome::WaivableGap, Outcome::Consent])
+        );
+        assert_eq!(wire.deciding, Some(Outcome::WaivableGap));
+        assert_eq!(wire.retry, None);
+        assert_eq!(round_trip(&denied), denied);
+
+        let missing = HookDecision::DenyCall {
+            feedback: "no".to_string(),
+            offers: Vec::new(),
+            review: Vec::new(),
+            outcomes: Some(Outcomes::MissingFact(RetryHint::AfterRepair)),
+        };
+        let json = serde_json::to_value(WireDecision::of(&missing)).expect("serializes");
+        assert_eq!(json["outcomes"], serde_json::json!(["missing_fact"]));
+        assert_eq!(json["deciding"], "missing_fact");
+        assert_eq!(json["retry"], "after_repair");
+        assert_eq!(round_trip(&missing), missing);
+
+        let refused = WireDecision::of(&HookDecision::Refuse {
+            retry: None,
+            class: RefusalClass::Storage,
+            detail: "d".to_string(),
+        });
+        assert_eq!(refused.deciding, Some(Outcome::Integrity));
+        assert_eq!(refused.outcomes, Some(vec![Outcome::Integrity]));
+        let unobtained = HookDecision::Refuse {
+            retry: Some(RetryHint::Later),
+            class: RefusalClass::Contended,
+            detail: "d".to_string(),
+        };
+        let json = serde_json::to_value(WireDecision::of(&unobtained)).expect("serializes");
+        assert_eq!(json["outcomes"], serde_json::json!(["missing_fact"]));
+        assert_eq!(json["retry"], "later");
+        assert_eq!(round_trip(&unobtained), unobtained);
+        let remedied: WireDecision = serde_json::from_str(
+            r#"{"protocol":1,"decision":"refuse","class":"contended","detail":"d","outcomes":["missing_fact"],"deciding":"missing_fact","retry":"later","offers":[{"offer_id":"o1"}]}"#,
+        )
+        .expect("reads");
+        assert!(matches!(remedied.into_decision(), Err(ParseRefusal::Malformed { .. })));
+
+        let unstated: WireDecision =
+            serde_json::from_str(r#"{"protocol":1,"decision":"deny_call","feedback":"no"}"#).expect("reads");
+        assert!(matches!(
+            unstated.into_decision(),
+            Ok(HookDecision::DenyCall { outcomes: None, .. })
+        ));
+        let acked: WireDecision = serde_json::from_str(r#"{"protocol":1,"decision":"ack"}"#).expect("reads");
+        assert_eq!(acked.into_decision().expect("parses"), HookDecision::Ack);
+        let offer = r#""offers":[{"offer_id":"o1"}]"#;
+        for fields in [
+            r#""outcomes":["hard_block","consent"],"deciding":"consent""#.to_string(),
+            r#""outcomes":["agent_choice"],"deciding":"consent""#.to_string(),
+            r#""outcomes":["consent"]"#.to_string(),
+            r#""deciding":"consent""#.to_string(),
+            r#""retry":"later""#.to_string(),
+            r#""outcomes":["consent"],"deciding":"consent","retry":"later""#.to_string(),
+            r#""outcomes":["missing_fact"],"deciding":"missing_fact""#.to_string(),
+            r#""outcomes":["missing_fact","consent"],"deciding":"missing_fact","retry":"later""#.to_string(),
+            format!(r#""outcomes":["missing_fact"],"deciding":"missing_fact","retry":"later",{offer}"#),
+            r#""outcomes":[],"deciding":"consent""#.to_string(),
+            format!(r#""outcomes":["hard_block"],"deciding":"hard_block",{offer}"#),
+            format!(r#""outcomes":["integrity"],"deciding":"integrity",{offer}"#),
+        ] {
+            let body = format!(r#"{{"protocol":1,"decision":"deny_call","feedback":"no",{fields}}}"#);
+            let wire: WireDecision = serde_json::from_str(&body).expect("reads");
+            assert!(
+                matches!(wire.into_decision(), Err(ParseRefusal::Malformed { .. })),
+                "{fields}"
+            );
+        }
+        let missing = r#""outcomes":["missing_fact"],"deciding":"missing_fact","retry":"later""#;
+        let integrity = r#""outcomes":["integrity"],"deciding":"integrity""#;
+        for body in [
+            format!(
+                r#"{{"protocol":1,"decision":"deny_call","feedback":"no","review":[{{"offer_id":"o1","text":"approve?"}}],{missing}}}"#
+            ),
+            format!(r#"{{"protocol":1,"decision":"allow_call",{integrity}}}"#),
+            r#"{"protocol":1,"decision":"ack","deciding":"integrity"}"#.to_string(),
+            r#"{"protocol":1,"decision":"deliver_value","value":"v","retry":"later"}"#.to_string(),
+            r#"{"protocol":1,"decision":"refuse","class":"storage","detail":"d","outcomes":["hard_block"],"deciding":"hard_block"}"#
+                .to_string(),
+            r#"{"protocol":1,"decision":"block","reason":"r","outcomes":["missing_fact"],"deciding":"missing_fact"}"#
+                .to_string(),
+            r#"{"protocol":1,"decision":"block","reason":"r","offers":[{"offer_id":"o1"}],"outcomes":["hard_block"],"deciding":"hard_block"}"#
+                .to_string(),
+            r#"{"protocol":1,"decision":"replace_output","output":"o","review":[{"offer_id":"o1","text":"approve?"}],"outcomes":["consent"],"deciding":"consent"}"#
+                .to_string(),
+        ] {
+            let wire: WireDecision = serde_json::from_str(&body).expect("reads");
+            assert!(
+                matches!(wire.into_decision(), Err(ParseRefusal::Malformed { .. })),
+                "{body}"
+            );
         }
     }
 
@@ -1668,6 +1910,15 @@ mod tests {
                     text: "t".to_string(),
                 },
                 serde_json::json!({"kind": "requirement", "requirement": {"type": "effect", "excludes": "deploy"}, "text": "t"}),
+            ),
+            (
+                ReviewScopeItem::Requirement {
+                    requirement: ReviewRequirement::Prior {
+                        contains: "reviewed".to_string(),
+                    },
+                    text: "t".to_string(),
+                },
+                serde_json::json!({"kind": "requirement", "requirement": {"type": "prior", "contains": "reviewed"}, "text": "t"}),
             ),
             (
                 ReviewScopeItem::Narrowing {
@@ -2159,6 +2410,7 @@ mod tests {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &foreign).is_err());
         let principal = HookEvent::SessionStart {
@@ -2168,6 +2420,7 @@ mod tests {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         };
         assert!(WireEvent::from_event(AdapterName::ClaudeCode, &principal).is_err());
     }
@@ -2315,8 +2568,91 @@ mod tests {
                 title,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             };
             assert_eq!(through(&start), start);
+        }
+    }
+
+    /// A start's settings cross the wire and back; a start that names none reads the
+    /// defaults and spells nothing for them, another event naming one is refused, and a line
+    /// variant that is no token does not read.
+    #[test]
+    fn session_settings_round_trip_and_cross_only_on_a_start() {
+        use crate::{AutoApply, LineVariant};
+        let through = |event: &HookEvent| {
+            let wire = WireEvent::from_event(AdapterName::ClaudeCode, event).expect("translates");
+            let bytes = serde_json::to_vec(&wire).expect("serializes");
+            WireEvent::read(&bytes)
+                .expect("reads")
+                .into_event(&CLAUDE_CODE, PrincipalSource::None)
+                .expect("parses")
+                .expect("event")
+                .event
+        };
+        let observe = LineVariant::parse("observe").expect("a token");
+        for settings in [
+            SessionSettings {
+                auto_apply: AutoApply::RulingsAndAccept,
+                line_variant: Some(observe.clone()),
+            },
+            SessionSettings {
+                auto_apply: AutoApply::RulingsOnly,
+                line_variant: Some(observe),
+            },
+            SessionSettings {
+                auto_apply: AutoApply::RulingsAndAccept,
+                line_variant: None,
+            },
+            SessionSettings::default(),
+        ] {
+            let start = HookEvent::SessionStart {
+                root: TrajectoryId("cc:s1".to_string()),
+                principal: None,
+                address: None,
+                title: None,
+                launch: None,
+                start: None,
+                settings,
+            };
+            assert_eq!(through(&start), start);
+        }
+
+        let posted = |row: &str| {
+            WireEvent::read(row.as_bytes()).and_then(|wire| wire.into_event(&CLAUDE_CODE, PrincipalSource::None))
+        };
+        let old = r#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1"}"#;
+        let Ok(Some(Accepted {
+            event: HookEvent::SessionStart { settings, .. },
+            ..
+        })) = posted(old)
+        else {
+            panic!("a start that names no settings reads");
+        };
+        assert_eq!(settings, SessionSettings::default());
+        let default_start = HookEvent::SessionStart {
+            root: TrajectoryId("cc:s1".to_string()),
+            principal: None,
+            address: None,
+            title: None,
+            launch: None,
+            start: None,
+            settings: SessionSettings::default(),
+        };
+        let spelled = WireEvent::from_event(AdapterName::ClaudeCode, &default_start).expect("translates");
+        assert_eq!(serde_json::to_vec(&spelled).expect("serializes"), old.as_bytes());
+
+        for row in [
+            r#"{"protocol":1,"adapter":"claude-code","event":"prompt","root_id":"s1","text":"hi","line_variant":"observe"}"#,
+            r#"{"protocol":1,"adapter":"claude-code","event":"turn_end","root_id":"s1","auto_apply":"rulings_and_accept"}"#,
+            r#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1","line_variant":"not a token"}"#,
+            r#"{"protocol":1,"adapter":"claude-code","event":"session_start","root_id":"s1","auto_apply":"everything"}"#,
+        ] {
+            let read = posted(row);
+            assert!(
+                matches!(read, Err(ParseRefusal::Malformed { .. })),
+                "{row} must be refused, got {read:?}"
+            );
         }
     }
 
@@ -2350,6 +2686,7 @@ mod tests {
                     launch: launch.clone(),
                     forked_from,
                 }),
+                settings: Default::default(),
             };
             assert_eq!(through(&event), event);
         }
@@ -2995,22 +3332,40 @@ mod tests {
                     hint: None,
                     scope: None,
                 }],
+                outcomes: Some(Outcomes::Remediable(Remediable::new(
+                    Remedy::Consent,
+                    [Remedy::WaivableGap],
+                ))),
+            },
+            HookDecision::DenyCall {
+                feedback: "no".to_string(),
+                offers: Vec::new(),
+                review: Vec::new(),
+                outcomes: Some(Outcomes::MissingFact(RetryHint::Later)),
             },
             HookDecision::Block {
                 reason: "r".to_string(),
+                outcomes: None,
+            },
+            HookDecision::Block {
+                reason: "r".to_string(),
+                outcomes: Some(Outcomes::MissingFact(RetryHint::AfterRepair)),
             },
             HookDecision::ReplaceOutput {
                 output: "o".to_string(),
+                outcomes: Some(Outcomes::Remediable(Remediable::new(Remedy::Consent, []))),
             },
             HookDecision::DeliverValue { value: "v".to_string() },
             HookDecision::ChildReturn { value: "v".to_string() },
             HookDecision::DeferReturn,
             HookDecision::Context { text: "t".to_string() },
             HookDecision::Refuse {
+                retry: None,
                 class: RefusalClass::UntrustedLog,
                 detail: "d".to_string(),
             },
             HookDecision::Refuse {
+                retry: None,
                 class: RefusalClass::SpawnNotTaken,
                 detail: "d".to_string(),
             },
@@ -3029,6 +3384,7 @@ mod tests {
                 input_sanitizer: None,
             }],
             review: Vec::new(),
+            outcomes: None,
         }))
         .expect("serializes");
         assert_eq!(offers["offers"][0]["returns"], "as_spoken");
@@ -3041,6 +3397,7 @@ mod tests {
             serde_json::from_str(r#"{"protocol":1,"decision":"refuse","detail":"d"}"#).expect("reads");
         assert!(matches!(classless.into_decision(), Err(ParseRefusal::Malformed { .. })));
         let classed = serde_json::to_value(WireDecision::of(&HookDecision::Refuse {
+            retry: None,
             class: RefusalClass::PolicyUnavailable,
             detail: "d".to_string(),
         }))
@@ -3092,6 +3449,7 @@ mod tests {
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         };
         let wire = WireEvent::from_event(AdapterName::Kagent, &event).expect("translates");
         let bytes = serde_json::to_vec(&wire).expect("serializes");

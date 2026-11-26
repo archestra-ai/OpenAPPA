@@ -10,7 +10,7 @@ use appa_runtime::config::Config;
 use appa_runtime::hooks;
 use appa_runtime_api::{
     Actor, Adapter, Codec, HookDecision, HookEvent, OutcomeBody, ParseRefusal, PrincipalSource, PromptKey,
-    ProposedCall, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
+    ProposedCall, SessionSettings, SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId,
 };
 
 fn the_reexported_vocabulary(
@@ -33,8 +33,9 @@ fn the_declared_root_fork(
     parent_root: &TrajectoryId,
     parent: &TrajectoryId,
     new_root: &TrajectoryId,
+    settings: SessionSettings,
 ) {
-    let _: Result<(), RootForkRefusal> = runtime.open_root_fork(parent_root, parent, new_root);
+    let _: Result<(), RootForkRefusal> = runtime.open_root_fork(parent_root, parent, new_root, settings);
 }
 
 fn the_declared_reload(runtime: &Runtime, config: Config) {
@@ -179,10 +180,10 @@ fn the_declared_vocabulary(event: HookEvent, decision: HookDecision, refusal: Pa
         HookDecision::Context { text } => {
             let _: String = text;
         }
-        HookDecision::Block { reason } => {
+        HookDecision::Block { reason, .. } => {
             let _: String = reason;
         }
-        HookDecision::ReplaceOutput { output } => {
+        HookDecision::ReplaceOutput { output, .. } => {
             let _: String = output;
         }
         HookDecision::DeliverValue { value } => {
@@ -259,7 +260,7 @@ fn the_declared_audit(runtime: &Runtime, id: &TrajectoryId) {
             AuditEvent::Ruled { authority } | AuditEvent::Denied { authority } => {
                 let _: String = authority;
             }
-            AuditEvent::Narrowed { from, to } => {
+            AuditEvent::Narrowed { from, to, .. } => {
                 let _: (AuditLabel, AuditLabel) = (from, to);
             }
             AuditEvent::SanitizerBound { sanitizer } | AuditEvent::Sanitized { sanitizer } => {
@@ -293,7 +294,7 @@ async fn the_declared_remedy_entry(runtime: &Runtime, acting: &Actor, offer: Off
             let _: Vec<appa_runtime_api::OfferedRemedy> = presentation.offers;
             let _: Vec<appa_runtime_api::Review> = presentation.review;
         }
-        RemedyOutcome::NoAnswer { feedback } => {
+        RemedyOutcome::NoAnswer { feedback, .. } => {
             let _: String = feedback;
         }
         RemedyOutcome::Refused { reason } => {

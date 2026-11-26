@@ -7,11 +7,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::common;
+use common::missing_fact;
 
 use appa_runtime::api::{OfferId, RemedyOutcome, Runtime};
 use appa_runtime::config::Config;
 use appa_runtime::hooks;
-use appa_runtime_api::{Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, ToolOutcome, TrajectoryId};
+use appa_runtime_api::{
+    Actor, HookDecision, HookEvent, OutcomeBody, ProposedCall, RetryHint, ToolOutcome, TrajectoryId,
+};
 
 const APPA: &str = env!("CARGO_BIN_EXE_appa");
 
@@ -92,6 +95,7 @@ async fn start(runtime: &Arc<Runtime>, root: &str) {
         title: None,
         launch: None,
         start: None,
+        settings: Default::default(),
     };
     assert_eq!(hooks::handle(runtime, event).await, HookDecision::Ack);
 }
@@ -311,8 +315,9 @@ async fn the_file_tracker_battery_routes_file_tools_and_bash_to_the_tracker_and_
         call("host/claude-code/Bash", serde_json::json!({ "command": "cat .env" })),
     )
     .await;
-    assert!(
-        matches!(&undeclared, HookDecision::Refuse { detail, .. } if detail.contains("names no")),
+    assert_eq!(
+        missing_fact(&undeclared),
+        Some(RetryHint::AfterRepair),
         "{undeclared:?}"
     );
 

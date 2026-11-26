@@ -1196,6 +1196,7 @@ The `permits` table defines the specific categories of preconditions an authorit
 | `trust_below` | Authorizes calls where trajectory trust is below the required rank (up to the rank specified here). |
 | `audience_missing` | Authorizes sharing data with recipients outside the trajectory's audience (up to the audience specified here). |
 | `effects_containing` | Authorizes calls blocked by an `excludes` effect precondition when that effect is already present. |
+| `prior_effects_containing` | Authorizes calls blocked by a `contains` effect precondition when that effect is not yet present. |
 | `attention` | Authorizes declared attention marks (or all declared marks except `blocked` when set to `["*"]`). |
 
 Example granting broad authority across trust, audience, effect, and attention boundaries:
@@ -1243,7 +1244,7 @@ Authorities can use built-in handlers, HTTP endpoints, or local executables. Con
 | `builtin = "hitl"` | Routes requests to an interactive human reviewer displaying call details and requested exceptions. |
 | `builtin = "approve"` | Automatically approves matching requests within `permits`. If a blocked call requires only automatic approvals, OpenAPPA applies them transparently without interrupting the agent. (Plans requiring narrowing acceptance are still returned to the agent.) |
 | `builtin = "claude-code"` or `builtin = "llm"` | Uses an LLM to evaluate approval requests against the declaration and unmet preconditions. |
-| `builtin = "<module>"` | Executes a shared library module loaded from `--modules-dir`. |
+| `builtin = "<module>"` | Executes a shared library module loaded from `--modules-dir`. The module runs in the OpenAPPA process with no time limit. |
 | `url` or `command` | Dispatches approval requests to an external service or executable. |
 
 All authority implementations, including automatic approvers, remain strictly constrained by declared `permits`.
@@ -1258,6 +1259,7 @@ OpenAPPA transmits consult requests detailing the proposed tool call and unmet p
 | Public audience | `{"kind":"audience","required":"public"}` |
 | Restricted audience | `{"kind":"audience","required":["internal","@finance","alice@corp.com"]}` (ordered by built-in audience, `@` references, then literal reader IDs). |
 | Effect exclusion | `{"kind":"effect","excludes":"email.sent"}` |
+| Required prior effect | `{"kind":"prior","contains":"backup.completed"}` |
 | Attention | `{"kind":"attention","mark":"finance-signoff"}` |
 
 Consult requests do not disclose the trajectory's current label or existing audience members.
@@ -1601,11 +1603,11 @@ token_env = "APPA_APPROVER_TOKEN"
 ```
 
 Deployment settings:
-- `timeout_ms`: Maximum execution time per consult request (default: 5,000 ms).
-- `max_body_bytes`: Maximum accepted response payload size (default: 65,536 bytes).
-- `review_timeout_ms`: Maximum duration human review requests remain pending (default: 600,000 ms).
+- `timeout_ms`: Maximum time for one `url` or `command` consult or recorder delivery, including the wait for a free slot (default: 5,000 ms).
+- `max_body_bytes`: Maximum size of an external response or a model's output (default: 65,536 bytes). The same cap applies to every tool result. OpenAPPA replaces a larger result with a placeholder that states the limit, so the model does not see that output.
+- `review_timeout_ms`: Maximum time a human review that OpenAPPA opens through MCP elicitation stays pending (default: 600,000 ms). An MCP session stays open for this time plus 60 seconds.
 
-These settings apply to the whole deployment; a binding cannot override them. [Model implementations](#model-implementations) and [Jev](#jev) configure their own `timeout_ms` and `max_concurrent` limits in their own sections. `max_concurrent` bounds concurrent requests to a backend across all active sessions.
+These settings apply to the whole deployment; a binding cannot override them. [Model implementations](#model-implementations) and [Jev](#jev) configure their own `timeout_ms` and `max_concurrent` limits in their own sections. `max_concurrent` bounds concurrent requests to a backend across all active sessions. The shared `timeout_ms` does not apply to an authority, sanitizer, or annotator with `builtin = "claude-code"` or `builtin = "llm"`: it uses the `timeout_ms` of `[externals.claude_code]` or `[externals.llm]` (default: 60,000 ms). Jev uses the shared `timeout_ms` unless `[externals.jev]` sets its own. A module loaded from `--modules-dir` has no time limit.
 
 Implementation requirements by component type:
 
@@ -1632,7 +1634,7 @@ If the endpoint requires authentication, set `token_env` to the name of an envir
 
 Set `command` to an array specifying the executable and arguments (e.g. `command = ["python3", "./sanitize.py"]`). OpenAPPA executes the process directly without an intermediate shell, launching it with the configuration directory as its working directory and terminating child processes upon completion. Commands referencing `appa` invoke the runtime's own binary to execute built-in plugins (such as `appa file-tracker`).
 
-Commands read a single JSON consult request from standard input and write a JSON response to standard output within `timeout_ms` and `max_body_bytes`. When OpenAPPA reaches the end of standard output, it closes standard input, so a command that needs the whole request must read it before it closes standard output. `APPA_CONSULT_TIMEOUT_MS` informs the process of remaining execution time (accounting for queue wait). The runtime limits concurrent local program executions to eight.
+Commands read a single JSON consult request from standard input and write a JSON response to standard output within `timeout_ms` and `max_body_bytes`. When OpenAPPA reaches the end of standard output, it closes standard input, so a command that needs the whole request must read it before it closes standard output. `APPA_CONSULT_TIMEOUT_MS` informs the process of remaining execution time (accounting for queue wait). The runtime limits concurrent local program executions to eight consults and, separately, two recorder deliveries.
 
 If a command requires credentials, specify `token_env` with an environment variable name prefixed with `APPA_PROVIDER_`. OpenAPPA passes that variable into the process environment while filtering out other internal `APPA_*` variables. On Windows, where variable names ignore case, the filter also ignores case.
 

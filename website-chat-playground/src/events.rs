@@ -307,7 +307,7 @@ impl Reader {
                 trajectory,
                 text: format!("{authority} denied this call"),
             }],
-            AuditEvent::Narrowed { from, to } => vec![
+            AuditEvent::Narrowed { from, to, .. } => vec![
                 WireEvent::Remedy {
                     trajectory: trajectory.clone(),
                     text: format!(

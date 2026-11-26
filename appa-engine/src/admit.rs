@@ -21,6 +21,7 @@ pub enum ResultAdmission {
         observed: RawResultDigest,
     },
     Indeterminate,
+    SuccessAbandoned,
     SuccessNoValue,
     SuccessRaw {
         body: ValueBody,
@@ -66,6 +67,8 @@ pub enum AdmitError {
     ConfinedResidual,
     #[error("this dispatch has no confined candidate standing, or its candidate owes no residual")]
     NoCandidate,
+    #[error(transparent)]
+    BodyDetached(#[from] crate::value::BodyDetached),
 }
 
 /// What a dispatch's outcome is judged under: the contract its release pinned, met with what the
@@ -232,13 +235,17 @@ pub(crate) fn admit_result(
     if checkpointed && matches!(admission, ResultAdmission::Failure | ResultAdmission::Indeterminate) {
         return Err(AdmitError::SuccessContradicted);
     }
+    if !checkpointed && matches!(admission, ResultAdmission::SuccessAbandoned) {
+        return Err(AdmitError::ObservationMismatch);
+    }
     let reported = match &admission {
-        ResultAdmission::SuccessRaw { body } => Some(RawResultDigest::of(body.as_str().as_bytes())),
+        ResultAdmission::SuccessRaw { body } => Some(body.digest()),
         ResultAdmission::SuccessSanitized { raw_digest, .. } => Some(*raw_digest),
         ResultAdmission::FailureNoValue { observed } => Some(*observed),
         ResultAdmission::CandidateAccepted { .. }
         | ResultAdmission::CandidateAdmissible
         | ResultAdmission::SuccessNoValue
+        | ResultAdmission::SuccessAbandoned
         | ResultAdmission::Failure
         | ResultAdmission::FailureWithBody { .. }
         | ResultAdmission::Indeterminate => None,
@@ -292,7 +299,7 @@ pub(crate) fn admit_result(
             if call.held().is_none() {
                 return Err(AdmitError::ObservationMismatch);
             }
-            let observed = RawResultDigest::of(body.as_str().as_bytes());
+            let observed = body.digest();
             vec![
                 Fact::DispatchClosed {
                     trajectory: trajectory.clone(),
@@ -318,6 +325,11 @@ pub(crate) fn admit_result(
             outcome: CloseOutcome::Indeterminate,
         }],
         ResultAdmission::SuccessNoValue => vec![close_success()],
+        ResultAdmission::SuccessAbandoned => vec![Fact::DispatchClosed {
+            trajectory: trajectory.clone(),
+            dispatch: dispatch.clone(),
+            outcome: CloseOutcome::SuccessAbandoned,
+        }],
         ResultAdmission::SuccessRaw { body } => {
             // A raw success admits at the tool's declared output label, unsanitized.
             vec![close_success(), admit_value(output_label(), body)]
@@ -360,6 +372,8 @@ pub(crate) fn admit_result(
             else {
                 return Err(AdmitError::NoCandidate);
             };
+            // A ValueAdmitted record must carry inline bytes so it can be persisted.
+            value.body.text()?;
             let mut facts = vec![
                 Fact::CandidateAccepted {
                     trajectory: trajectory.clone(),
@@ -380,6 +394,7 @@ pub(crate) fn admit_result(
             else {
                 return Err(AdmitError::NoCandidate);
             };
+            value.body.text()?;
             vec![close_success(), admit_derived(value.clone())]
         }
     };

@@ -427,24 +427,155 @@ pub enum Provenance {
     },
 }
 
+/// The position of a detached body in its family log: the batch sequence number and the
+/// fact's 0-based index within that batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BodyAt {
+    pub seq: u64,
+    pub fact: u32,
+}
+
+/// A body's bytes are not held in memory; the caller must fetch them from the log at `at`
+/// and verify them against `digest` before reading text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("value body is detached at seq {} fact {}", .at.seq, .at.fact)]
+pub struct BodyDetached {
+    pub at: BodyAt,
+    pub digest: RawResultDigest,
+}
+
+/// Fetched body bytes did not match the digest and length recorded on the detached body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("attached body mismatch: expected {expected_len} bytes, got {actual_len} bytes")]
+pub struct BodyMismatch {
+    pub expected_digest: RawResultDigest,
+    pub expected_len: u64,
+    pub actual_digest: RawResultDigest,
+    pub actual_len: u64,
+}
+
+/// Default byte threshold at or above which tool-result, provider-run, and confined-result
+/// bodies may detach from in-memory logs and views.
+pub const DETACH_AT: usize = 64 * 1024;
+
+#[derive(Clone, Debug)]
+enum BodyBytes {
+    Inline(std::sync::Arc<str>),
+    Detached(BodyAt),
+}
+
 /// A value's body — opaque to the engine, which checks labels, never content. Content robustness
 /// is the registered sanitizer's/authority's concern, not the engine's.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ValueBody(std::sync::Arc<str>);
+///
+/// Always carries its SHA-256 [`RawResultDigest`] and byte length. Large bodies of eligible
+/// facts may be detached in memory ([`ValueBody::detach`]) so replay and held views stay
+/// bounded; equality compares exact text when both sides are inline and `(digest, len)`
+/// otherwise. A detached body cannot be serialized.
+#[derive(Clone, Debug)]
+pub struct ValueBody {
+    digest: RawResultDigest,
+    len: u64,
+    bytes: BodyBytes,
+}
 
 impl ValueBody {
     pub fn new(body: impl Into<String>) -> Self {
-        ValueBody(body.into().into())
+        let text: std::sync::Arc<str> = body.into().into();
+        let digest = RawResultDigest::of(text.as_bytes());
+        let len = text.len() as u64;
+        ValueBody {
+            digest,
+            len,
+            bytes: BodyBytes::Inline(text),
+        }
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    pub fn digest(&self) -> RawResultDigest {
+        self.digest
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn text(&self) -> Result<&str, BodyDetached> {
+        match &self.bytes {
+            BodyBytes::Inline(text) => Ok(text),
+            BodyBytes::Detached(at) => Err(BodyDetached {
+                at: *at,
+                digest: self.digest,
+            }),
+        }
+    }
+
+    pub fn text_arc(&self) -> Result<std::sync::Arc<str>, BodyDetached> {
+        match &self.bytes {
+            BodyBytes::Inline(text) => Ok(std::sync::Arc::clone(text)),
+            BodyBytes::Detached(at) => Err(BodyDetached {
+                at: *at,
+                digest: self.digest,
+            }),
+        }
+    }
+
+    pub fn is_detached(&self) -> bool {
+        matches!(self.bytes, BodyBytes::Detached(_))
+    }
+
+    pub fn at(&self) -> Option<BodyAt> {
+        match self.bytes {
+            BodyBytes::Inline(_) => None,
+            BodyBytes::Detached(at) => Some(at),
+        }
+    }
+
+    pub fn detach(&mut self, at: BodyAt) {
+        self.bytes = BodyBytes::Detached(at);
+    }
+
+    pub fn attach(&self, text: std::sync::Arc<str>) -> Result<ValueBody, BodyMismatch> {
+        let actual_len = text.len() as u64;
+        let actual_digest = RawResultDigest::of(text.as_bytes());
+        if actual_len != self.len || actual_digest != self.digest {
+            return Err(BodyMismatch {
+                expected_digest: self.digest,
+                expected_len: self.len,
+                actual_digest,
+                actual_len,
+            });
+        }
+        Ok(ValueBody {
+            digest: self.digest,
+            len: self.len,
+            bytes: BodyBytes::Inline(text),
+        })
     }
 }
 
+impl PartialEq for ValueBody {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.bytes, &other.bytes) {
+            (BodyBytes::Inline(a), BodyBytes::Inline(b)) => a == b,
+            _ => self.digest == other.digest && self.len == other.len,
+        }
+    }
+}
+
+impl Eq for ValueBody {}
+
 impl Serialize for ValueBody {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
+        match &self.bytes {
+            BodyBytes::Inline(text) => serializer.serialize_str(text),
+            BodyBytes::Detached(at) => Err(serde::ser::Error::custom(format!(
+                "cannot serialize detached ValueBody at seq {} fact {}",
+                at.seq, at.fact
+            ))),
+        }
     }
 }
 
@@ -761,5 +892,56 @@ mod tests {
     fn raw_result_digest_binds_bytes() {
         assert_eq!(RawResultDigest::of(b"hello"), RawResultDigest::of(b"hello"));
         assert_ne!(RawResultDigest::of(b"hello"), RawResultDigest::of(b"world"));
+    }
+
+    #[test]
+    fn value_body_inline_and_detached_equality_and_serialization() {
+        let a = ValueBody::new("hello world");
+        let b = ValueBody::new("hello world");
+        let c = ValueBody::new("hello earth");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 11);
+        assert!(!a.is_empty());
+        assert!(!a.is_detached());
+        assert_eq!(a.at(), None);
+        assert_eq!(a.text(), Ok("hello world"));
+        assert_eq!(a.digest(), RawResultDigest::of(b"hello world"));
+
+        let at = BodyAt { seq: 4, fact: 2 };
+        let mut detached = a.clone();
+        detached.detach(at);
+        assert!(detached.is_detached());
+        assert_eq!(detached.at(), Some(at));
+        assert_eq!(detached.len(), 11);
+        assert_eq!(detached.digest(), a.digest());
+        assert_eq!(detached.text(), Err(BodyDetached { at, digest: a.digest() }));
+
+        // Detached equals its inline counterpart and another detached copy with the same digest+len.
+        assert_eq!(detached, a);
+        assert_eq!(a, detached);
+        assert_ne!(detached, c);
+        let mut detached_other_loc = b.clone();
+        detached_other_loc.detach(BodyAt { seq: 9, fact: 0 });
+        assert_eq!(detached, detached_other_loc);
+
+        // Inline serializes as a bare string; detached refuses serialization.
+        assert_eq!(serde_json::to_string(&a).expect("inline serializes"), "\"hello world\"");
+        assert!(
+            serde_json::to_string(&detached).is_err(),
+            "a detached body must never serialize"
+        );
+        assert_eq!(
+            serde_json::from_str::<ValueBody>("\"hello world\"").expect("string deserializes"),
+            a
+        );
+
+        // Reattaching verifies digest and length.
+        let attached = detached
+            .attach(std::sync::Arc::from("hello world"))
+            .expect("matching text reattaches");
+        assert!(!attached.is_detached());
+        assert_eq!(attached.text(), Ok("hello world"));
+        assert!(detached.attach(std::sync::Arc::from("wrong bytes")).is_err());
     }
 }

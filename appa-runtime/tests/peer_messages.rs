@@ -79,6 +79,7 @@ async fn start(runtime: &Runtime, session: &str, address: &str, principal: Optio
         title,
         launch: None,
         start: None,
+        settings: Default::default(),
     };
     match principal {
         Some(_) => assert_eq!(hooks::handle(runtime, event).await, HookDecision::Ack),
