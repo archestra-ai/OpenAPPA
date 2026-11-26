@@ -117,10 +117,14 @@ def release(api: GitHub, source: Path, tag: str, expected="") -> dict:
     return {"tag": tag, "sha": commit, "id": record["id"], "url": url}
 
 
+# The OpenAPPA crates Archestra embeds, all pinned to one release commit.
+EMBEDDED = frozenset({"appa-runtime", "appa-runtime-api", "appa-engine", "appa-policy", "appa-eventlog", "appa-package"})
+
+
 def pin(text: str) -> str:
     deps = tomllib.loads(text)["dependencies"]
     appa = {name: dep for name, dep in deps.items() if isinstance(dep, dict) and dep.get("git") == GIT_URL}
-    if set(appa) != {"appa-runtime", "appa-runtime-api", "appa-eventlog", "appa-package"}:
+    if set(appa) != EMBEDDED:
         raise ValueError("unexpected embedded OpenAPPA dependency set; review updater")
     revisions = {sha(dep.get("rev", "")) for dep in appa.values()}
     if len(revisions) != 1 or any("branch" in dep or "tag" in dep for dep in appa.values()):
@@ -142,8 +146,8 @@ def newer(source: Path, current: str, candidate: dict) -> bool:
 def updated_manifest(text: str, candidate: dict) -> str:
     old = pin(text)
     text, count = re.subn(r'(git = "' + re.escape(GIT_URL) + r'", rev = ")' + old + r'"', lambda m: m[1] + candidate["sha"] + '"', text)
-    if count != 4:
-        raise ValueError("cannot update all four OpenAPPA revisions without changing manifest structure")
+    if count != len(EMBEDDED):
+        raise ValueError("cannot update every OpenAPPA revision without changing manifest structure")
     text = re.sub(r"^# Pinned to OpenAPPA .*$", f'# Pinned to OpenAPPA {candidate["tag"]} (release commit {candidate["sha"]}).', text, flags=re.MULTILINE)
     if pin(text) != candidate["sha"]:
         raise ValueError("manifest update did not preserve the dependency pins")
