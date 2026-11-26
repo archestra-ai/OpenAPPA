@@ -541,9 +541,39 @@ impl<'de> Deserialize<'de> for AnnotationEvidence {
 /// the opening's policy identity.
 /// The parts live behind one box: a pin rides proposals, evidence, and dispatch records,
 /// and the parts inline would bloat every enum that carries them.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct PinnedAnnotation(Box<PinnedParts>);
+
+/// Logs written before the `NoAnswerFallback` arm stored an Annotator's pin untagged. Stored
+/// logs stay readable, so that spelling still reads as [`PinnedParts::Annotator`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UntaggedAnnotatorPin {
+    annotator: AnnotatorName,
+    call: crate::value::CanonicalDigest,
+    produced: ProducedAnnotation,
+    #[serde(default)]
+    context: AnnotationContext,
+}
+
+impl<'de> Deserialize<'de> for PinnedAnnotation {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = serde_json::Value::deserialize(deserializer)?;
+        let parts = match stored.get("annotator") {
+            Some(_) => serde_json::from_value::<UntaggedAnnotatorPin>(stored).map(|pin| PinnedParts::Annotator {
+                annotator: pin.annotator,
+                call: pin.call,
+                produced: pin.produced,
+                context: pin.context,
+            }),
+            None => serde_json::from_value::<PinnedParts>(stored),
+        };
+        parts
+            .map(|parts| PinnedAnnotation(Box::new(parts)))
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum PinnedParts {
@@ -1143,5 +1173,51 @@ mod tests {
         let read = serde_json::from_value::<PinnedAnnotation>(wire).expect("a pinned annotation reads back");
         assert_eq!(read.context(), &context);
         assert_ne!(read, bare, "the context the Annotator saw is part of the pin");
+    }
+
+    #[test]
+    fn an_untagged_annotator_pin_from_an_earlier_log_reads_as_that_pin() {
+        let digest = crate::value::CanonicalDigest::of_call(
+            &ToolName::new("Bash"),
+            &crate::params::test_arguments(&serde_json::json!({ "command": "gh pr view 1" })),
+        );
+        let produced = ProducedAnnotation {
+            evidence: None,
+            delta: Delta {
+                trust: Some(Trust::new(1)),
+                audience: None,
+            },
+            forwards: Delta::NONE,
+            emits: EffectSet::default(),
+            requires: Requires::default(),
+        };
+        let context = AnnotationContext::new(
+            [(
+                ContextProviderName::new("github"),
+                ContextEntry::Answer(serde_json::json!({"repo": {"visibility": "public"}})),
+            )]
+            .into(),
+        );
+        let pinned = PinnedAnnotation::new(AnnotatorName::new("bash-classifier"), digest, produced.clone())
+            .with_context(context);
+        let bare = PinnedAnnotation::new(AnnotatorName::new("bash-classifier"), digest, produced);
+
+        const CALL: &str = r#""call":"5591cbcc03c4f5977a40abc49c85b652d9009fdbbfe5d08adf91428b2611b0c0""#;
+        const PRODUCED: &str = r#""produced":{"delta":{"audience":null,"trust":1},"emits":[],"requires":{"attention":[],"history":[],"label":{"audience":[],"trust_floor":null}}}"#;
+        let stored = |extra: &str| format!(r#"{{"annotator":"bash-classifier",{CALL},{extra}{PRODUCED}}}"#);
+        let read = |row: String| serde_json::from_str::<PinnedAnnotation>(&row);
+
+        assert_eq!(
+            read(stored(
+                r#""context":{"github":{"answer":{"repo":{"visibility":"public"}}}},"#
+            ))
+            .expect("reads"),
+            pinned
+        );
+        assert_eq!(read(stored("")).expect("reads"), bare);
+        assert!(
+            read(stored(r#""surprise":true,"#)).is_err(),
+            "an untagged pin with a field no earlier log wrote is refused"
+        );
     }
 }
