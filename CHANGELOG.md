@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.48.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.47.0...v0.48.0) (2026-11-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* **runtime:** hook decisions DenyCall, Block and ReplaceOutput carry typed `outcomes`, Refuse and RemedyOutcome::NoAnswer carry `retry`, and SessionStart carries `settings`. A tool call whose annotator gives no answer is now a `deny_call` deciding on `missing_fact` (HTTP 200) instead of a `refuse` with `annotation_refused` (409). The Python binding (appa-agent-python-v10) adds deciding/outcomes/retry and an `unsettled` report kind, and no longer raises AppaError on annotator failure.
+
+### Features
+
+* **batteries:** xmemory rules for memberships, API keys, schema checks and the context pack ([#1019](https://github.com/archestra-ai/OpenAPPA/issues/1019)) ([b44e162](https://github.com/archestra-ai/OpenAPPA/commit/b44e162def3e99795dfb60c1b6d63508e9eecab3))
+* **runtime:** add annotator no-answer fallback ([#568](https://github.com/archestra-ai/OpenAPPA/issues/568)) ([7524c1e](https://github.com/archestra-ai/OpenAPPA/commit/7524c1e86cc9f13c375d712d2cd09eb120f1d50c))
+* **runtime:** typed refusal outcomes and per-family enforcement lines ([#1027](https://github.com/archestra-ai/OpenAPPA/issues/1027)) ([891112b](https://github.com/archestra-ai/OpenAPPA/commit/891112b2cd184ed259e94cb0c8e2d28fb4535e76))
+
+
+### Bug Fixes
+
+* **ci:** close Archestra update PRs that a newer manual pin already contains ([#1028](https://github.com/archestra-ai/OpenAPPA/issues/1028)) ([25bf109](https://github.com/archestra-ai/OpenAPPA/commit/25bf1097473f3fd432dcc64b57a332367c9d9d81))
+* **ci:** skip DHI-backed image builds on fork pull requests ([#1026](https://github.com/archestra-ai/OpenAPPA/issues/1026)) ([03d6a0d](https://github.com/archestra-ai/OpenAPPA/commit/03d6a0d617ee0137bb0d63bbe291df1b5fae329b))
+* **config:** define the [externals] limit defaults once and say what each bounds ([#916](https://github.com/archestra-ai/OpenAPPA/issues/916)) ([d20b500](https://github.com/archestra-ai/OpenAPPA/commit/d20b500badce09380a56df7514599fd1aafb9475))
+* **engine:** withhold a result whose bound sanitizer a later revision no longer applies ([#1018](https://github.com/archestra-ai/OpenAPPA/issues/1018)) ([e10cbe1](https://github.com/archestra-ai/OpenAPPA/commit/e10cbe145905550bbd5a133201ce55fca952680a))
+* **eventlog,runtime:** bound memory on large encrypted ledgers with reader-scoped cache, streaming reads, and lazy bodies ([#1030](https://github.com/archestra-ai/OpenAPPA/issues/1030)) ([b108b15](https://github.com/archestra-ai/OpenAPPA/commit/b108b158509a2a79344cdf3fa7bbaf4832eefc4c))
+* **runtime:** a resumed-back launch runs its first family; installs are serialized through the swap ([#995](https://github.com/archestra-ai/OpenAPPA/issues/995)) ([fead64b](https://github.com/archestra-ai/OpenAPPA/commit/fead64b448612de634db0a638006b3361b424d1b))
+* **runtime:** close secret-redaction gaps — escaped quotes, credential keys, unwritten tool names ([#996](https://github.com/archestra-ai/OpenAPPA/issues/996)) ([0241227](https://github.com/archestra-ai/OpenAPPA/commit/024122799e55f02745afeb035c77da1f85071144))
+* **runtime:** consult lifecycle — no child after settle, bounded error-body reads, permit cutoff, loopback caps ([#997](https://github.com/archestra-ai/OpenAPPA/issues/997)) ([bbb42c9](https://github.com/archestra-ai/OpenAPPA/commit/bbb42c9269f3086725cfddf5d2d54ff8e208f122))
+* **runtime:** refuse binding an ended child as ended, not as an engine fault ([#1017](https://github.com/archestra-ai/OpenAPPA/issues/1017)) ([b8327b7](https://github.com/archestra-ai/OpenAPPA/commit/b8327b72594115c23de5244b97f17cb12be97708))
+* **runtime:** word the deferral notice as a routine review and say what to tell the person ([#1016](https://github.com/archestra-ai/OpenAPPA/issues/1016)) ([d3e63d1](https://github.com/archestra-ai/OpenAPPA/commit/d3e63d121917c5c029ab569b5f73a6de44350cbb))
+
+
+### Dependencies
+
+* bump actions/setup-go from 7.0.0 to 7.1.0 ([#1020](https://github.com/archestra-ai/OpenAPPA/issues/1020)) ([65f1f21](https://github.com/archestra-ai/OpenAPPA/commit/65f1f2183ba31290d8d206199916510839e16187))
+* bump archestra-ai/.github from 1.13.6 to 1.31.1 ([#1021](https://github.com/archestra-ai/OpenAPPA/issues/1021)) ([bf3cd21](https://github.com/archestra-ai/OpenAPPA/commit/bf3cd212b3b19c39d37571c758b2935edd02517e))
+* bump docker/setup-buildx-action from 4.4.0 to 4.4.1 ([#1022](https://github.com/archestra-ai/OpenAPPA/issues/1022)) ([7b3822b](https://github.com/archestra-ai/OpenAPPA/commit/7b3822b7ce862107820b8eb2b05559ea6c124212))
+* bump GenAI and OpenTelemetry HTTP instrumentation ([#874](https://github.com/archestra-ai/OpenAPPA/issues/874)) ([f7ae9d5](https://github.com/archestra-ai/OpenAPPA/commit/f7ae9d575aef32859ee1c8ab44baf93128e3ee53))
+* bump the rust-dependencies group across 1 directory with 8 updates ([#1024](https://github.com/archestra-ai/OpenAPPA/issues/1024)) ([462990c](https://github.com/archestra-ai/OpenAPPA/commit/462990c0ee540aaed3f32cd62724ffe261564c1c))
+
 ## [0.47.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.46.1...v0.47.0) (2026-11-21)
 
 
