@@ -965,6 +965,7 @@ async fn launched_start(
         title,
         start,
         launch: None,
+        settings,
     } = parsed(&host)
     else {
         panic!("a session start parses as one");
@@ -979,6 +980,7 @@ async fn launched_start(
             launch: LaunchToken::parse(launch).expect("the token parses"),
             forked_from: forked_from.map(|session| TrajectoryId(format!("cc:{session}"))),
         }),
+        settings,
     };
     let wire = WireEvent::from_event(AdapterName::ClaudeCode, &event).expect("the start translates");
     let wire = serde_json::to_vec(&wire).expect("the start serializes");

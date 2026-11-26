@@ -130,17 +130,17 @@ impl Session {
         outcome
     }
 
-    /// One external consult. Only an annotation failure is an error: the call cannot be
-    /// judged without its annotation, no fact may be appended, and the refusal is operational
-    /// — never a policy denial. Every other external keeps its no-answer evidence shape.
+    /// One external consult. Every external keeps its no-answer evidence shape, leaving the
+    /// engine as the single place that chooses between a route's fallback and an operational
+    /// refusal.
     pub(super) async fn consult(
         &self,
         request: ExternalRequest,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
         occasion: Occasion<'_>,
-    ) -> Result<ExternalEvidence, EventError> {
-        Ok(match &request {
+    ) -> ExternalEvidence {
+        let evidence = match &request {
             ExternalRequest::Authority {
                 authority,
                 declaration,
@@ -184,8 +184,10 @@ impl Session {
                     },
                 };
                 let derived = match self.timed_consult(&consult, None, None, occasion, None).await {
-                    ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer).map(|answer| answer.body),
-                    ConsultOutcome::NoAnswer(_) => None,
+                    ConsultOutcome::Answer(answer) => SanitizerAnswer::from_wire(&answer)
+                        .map(|answer| answer.body)
+                        .ok_or(crate::events::NoAnswerClass::Malformed),
+                    ConsultOutcome::NoAnswer(reason) => Err((&reason).into()),
                 };
                 ExternalEvidence::Sanitizer {
                     sanitizer: sanitizer.clone(),
@@ -228,10 +230,17 @@ impl Session {
                         .map_err(crate::external::NoAnswerReason::MalformedAnswer),
                     ConsultOutcome::NoAnswer(reason) => Err(reason),
                 };
-                // Annotation failure is an operational refusal, never model feedback: the
-                // call is not judged, nothing is appended, and the harness fails closed.
-                let answer = match answer {
-                    Ok(answer) => answer,
+                // Record no-answer as evidence and let the engine decide between a route's
+                // declared `on_no_answer` fallback and a deny on the missing fact.
+                match answer {
+                    Ok(answer) => ExternalEvidence::Annotation {
+                        annotator: annotator.clone(),
+                        // The evidence names the exact call it answered for: a rewritten call
+                        // never consumes a stale annotation.
+                        call: *call,
+                        answer,
+                        context,
+                    },
                     Err(reason) => {
                         match reason {
                             crate::external::NoAnswerReason::Unreachable | crate::external::NoAnswerReason::Timeout => {
@@ -239,16 +248,14 @@ impl Session {
                             }
                             _ => tracing::debug!(annotator, ?reason, "an annotation consult produced no answer"),
                         }
-                        return Err(EventError::annotation_unanswered(annotator.clone(), &reason));
+                        ExternalEvidence::AnnotationNoAnswer {
+                            annotator: annotator.clone(),
+                            call: *call,
+                            reason: reason.diagnostic(),
+                            class: (&reason).into(),
+                            context,
+                        }
                     }
-                };
-                ExternalEvidence::Annotation {
-                    annotator: annotator.clone(),
-                    // The evidence names the exact call it answered for: a rewritten call
-                    // never consumes a stale annotation.
-                    call: *call,
-                    answer,
-                    context,
                 }
             }
             ExternalRequest::AudienceSource {
@@ -290,6 +297,10 @@ impl Session {
                     principal,
                 }
             }
-        })
+        };
+        if let (Some(unanswered), Some(external)) = (&self.inner.unanswered, evidence.unanswered()) {
+            unanswered.note(external);
+        }
+        evidence
     }
 }

@@ -65,7 +65,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_dropped_is_withheld() {
         decision.follow_up
             == FollowUp::Outcome(OutcomeFollowUp::Closed {
                 admitted: None,
-                withheld: true,
+                withheld: Some(crate::transition::Withheld::ByRevision),
             })
     };
 
@@ -150,7 +150,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_no_longer_applies_is_withheld(
     let call = call("fetch", json!({}));
     let (log, dispatch) = released_under_output_sanitizer(&first, vec![opened(&first)], &call);
     let raw = ValueBody::new("page bytes");
-    let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+    let source = raw.digest();
     let report = |evidence: Vec<crate::transition::Evidence>| ToolReport {
         dispatch: dispatch.clone(),
         outcome: ToolOutcome::Success {
@@ -169,7 +169,7 @@ fn a_result_bound_to_a_sanitizer_a_later_revision_no_longer_applies_is_withheld(
     };
     let withheld = FollowUp::Outcome(OutcomeFollowUp::Closed {
         admitted: None,
-        withheld: true,
+        withheld: Some(crate::transition::Withheld::ByRevision),
     });
     let checkpoint = appended_facts(
         first
@@ -243,7 +243,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
     let view = e.view(&traj(), log.clone(), log.len() as u64).unwrap();
 
     let raw = ValueBody::new("page bytes");
-    let source = crate::value::RawResultDigest::of(raw.as_str().as_bytes());
+    let source = raw.digest();
     let report = |evidence: Vec<crate::transition::Evidence>| ToolReport {
         dispatch: dispatch.clone(),
         outcome: ToolOutcome::Success {
@@ -330,7 +330,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         crossed.follow_up,
         FollowUp::Outcome(OutcomeFollowUp::Closed {
             admitted: Some(derived),
-            withheld: false,
+            withheld: None,
         })
     );
     let facts = crossed.append.expect("the derivation appends").facts().to_vec();
@@ -371,7 +371,7 @@ fn a_bound_sanitizer_checkpoints_before_it_asks_for_the_derivation() {
         .follow_up,
         FollowUp::Outcome(OutcomeFollowUp::Closed {
             admitted: Some(derived),
-            withheld: false,
+            withheld: None,
         })
     );
     assert_eq!(
@@ -529,7 +529,7 @@ fn redacted_result(e: &Engine, mut log: Vec<Fact>, dispatch: &DispatchId) -> (Ve
             &viewing(e, &log),
             report(vec![Evidence::Sanitizer {
                 sanitizer: crate::names::SanitizerName::new("redactor"),
-                source: crate::value::RawResultDigest::of(raw.as_str().as_bytes()),
+                source: raw.digest(),
                 derived: ValueBody::new("file bytes, redacted"),
             }]),
         )
@@ -589,14 +589,21 @@ fn a_sanitized_file_read_keeps_the_files_audience() {
 
 /// The log an engine built before held messages had a record of their own wrote for
 /// [`released_file_fetch`], as it stored it: the held message pinned as a file read. It reads
-/// as the same held message, so the family replays.
+/// as the same held message, so the family replays. It predates acceptances naming who took
+/// them, which is all a log built now adds.
 #[test]
 fn a_log_written_before_held_messages_were_recorded_replays() {
     let e = file_redacting_engine();
     let stored: Vec<Fact> =
         serde_json::from_str(include_str!("fixtures/held_read_before_recorders.json")).expect("the stored log decodes");
     assert_eq!(e.validate_replay(&stored), Ok(()));
-    assert_eq!(stored, released_file_fetch(&e, &insider_file()).0);
+    let mut built = released_file_fetch(&e, &insider_file()).0;
+    for fact in &mut built {
+        if let Fact::OfferAccepted { initiator, .. } = fact {
+            assert_eq!(initiator.take(), Some(appa_runtime_api::Initiator::Agent));
+        }
+    }
+    assert_eq!(stored, built);
 }
 
 /// A held message was recorded as a file read. Any other file basis is no held message.
@@ -733,7 +740,7 @@ fn a_spend_of_an_offer_the_log_never_accepted_is_refused() {
             hop,
             OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
                 sanitizer: crate::names::SanitizerName::new("scrubber"),
-                source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+                source: derived.digest(),
                 derived: ValueBody::new("page bytes, redacted, scrubbed"),
             }),
         )
@@ -784,7 +791,7 @@ fn offer_consults_names_the_external_work_each_offer_needs() {
         e.offer_consults(&viewing(&e, &log), &traj(), &hop),
         Ok(OfferConsult::Sanitizer {
             sanitizer: crate::names::SanitizerName::new("scrubber"),
-            source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+            source: derived.digest(),
             body: derived.clone(),
             tool: Some(ToolName::new("fetch")),
         }),
@@ -859,7 +866,7 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
             .offers
             .iter()
             .find(|(id, _)| id == offer)
-            .map(|(_, plan)| *plan)
+            .map(|(_, plan)| plan.id)
             .expect("the stage's own offer")
     };
     let scrubbed = ValueBody::new("page bytes, redacted, scrubbed");
@@ -892,7 +899,7 @@ fn a_confined_stage_is_left_by_a_hop_or_by_accepting_its_residual() {
         hop,
         OfferOutcome::Derived(crate::transition::Evidence::Sanitizer {
             sanitizer: crate::names::SanitizerName::new("scrubber"),
-            source: crate::value::RawResultDigest::of(derived.as_str().as_bytes()),
+            source: derived.digest(),
             derived: scrubbed.clone(),
         }),
     )
@@ -1080,7 +1087,7 @@ fn a_failure_body_under_a_bound_sanitizer_closes_withheld() {
     };
     let withheld = FollowUp::Outcome(OutcomeFollowUp::Closed {
         admitted: None,
-        withheld: true,
+        withheld: Some(crate::transition::Withheld::ByRelease),
     });
 
     let closed = e.handle(&viewing(&e, &log), report()).expect("the failure closes");
@@ -1091,7 +1098,7 @@ fn a_failure_body_under_a_bound_sanitizer_closes_withheld() {
         Fact::DispatchClosed {
             outcome: crate::fact::CloseOutcome::FailureWithBody { observed },
             ..
-        } if observed == &crate::value::RawResultDigest::of(body.as_str().as_bytes())
+        } if observed == &body.digest()
     )));
     assert!(!facts.iter().any(|fact| matches!(fact, Fact::ValueAdmitted { .. })));
     let log = [log, facts].concat();

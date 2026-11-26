@@ -331,7 +331,13 @@ pub(crate) fn build(source: Source<'_>, mode: Mode, budget: Budget) -> Projectio
 
     let mut facts = Vec::with_capacity(source.facts.len() - from);
     for (seq, fact) in source.facts.iter().enumerate().skip(from) {
-        let stripped = strip(&serialized(fact), &tables::FACT, &mut tokens, mode, &source.vouched);
+        let stripped = strip(
+            &serialized_fact(fact),
+            &tables::FACT,
+            &mut tokens,
+            mode,
+            &source.vouched,
+        );
         record_drift(&mut unclassified, &stripped, "fact");
         facts.push(FactEntry {
             seq,
@@ -414,13 +420,79 @@ fn budget_start(facts: &[Fact], mode: Mode, vouched: &BTreeSet<String>) -> usize
     let mut measure = Tokens::default();
     let mut total = 0usize;
     for (index, fact) in facts.iter().enumerate().rev() {
-        let stripped = strip(&serialized(fact), &tables::FACT, &mut measure, mode, vouched);
+        let stripped = strip(&serialized_fact(fact), &tables::FACT, &mut measure, mode, vouched);
         total += serde_json::to_string(&stripped.value).map_or(0, |text| text.len()) + ENTRY_OVERHEAD;
         if total > MAX_FACT_BYTES {
             return index + 1;
         }
     }
     0
+}
+
+/// Serialize a fact for the yell walk, rendering any detached [`ValueBody`] as `{len, digest}`
+/// so diagnostic export succeeds even when a log holds detached bodies.
+fn serialized_fact(fact: &Fact) -> Value {
+    if !fact.has_detached() {
+        return serialized(fact);
+    }
+    let mut inline = fact.clone();
+    let detached = match &mut inline {
+        Fact::ValueAdmitted { value, .. } => {
+            let meta = detached_meta(&value.body);
+            value.body = appa_engine::value::ValueBody::new("");
+            Some(("ValueAdmitted", None, meta))
+        }
+        Fact::ChildReturn { value, .. } => {
+            let meta = detached_meta(&value.body);
+            value.body = appa_engine::value::ValueBody::new("");
+            Some(("ChildReturn", None, meta))
+        }
+        Fact::ReturnDeferred { value, .. } => {
+            let meta = detached_meta(&value.body);
+            value.body = appa_engine::value::ValueBody::new("");
+            Some(("ReturnDeferred", None, meta))
+        }
+        Fact::CandidateDerived { derived, .. } => match derived {
+            appa_engine::candidate::DerivedCandidate::Result { value, .. } => {
+                let meta = detached_meta(&value.body);
+                value.body = appa_engine::value::ValueBody::new("");
+                Some(("CandidateDerived", Some("Result"), meta))
+            }
+            appa_engine::candidate::DerivedCandidate::Return { value, .. } => {
+                let meta = detached_meta(&value.body);
+                value.body = appa_engine::value::ValueBody::new("");
+                Some(("CandidateDerived", Some("Return"), meta))
+            }
+            appa_engine::candidate::DerivedCandidate::Call { .. } => None,
+        },
+        _ => None,
+    };
+    let mut json = serialized(&inline);
+    if let Some((variant, candidate, meta)) = detached {
+        let slot = match candidate {
+            Some(kind) => json
+                .get_mut(variant)
+                .and_then(|v| v.get_mut("derived"))
+                .and_then(|v| v.get_mut(kind))
+                .and_then(|v| v.get_mut("value"))
+                .and_then(|v| v.get_mut("body")),
+            None => json
+                .get_mut(variant)
+                .and_then(|v| v.get_mut("value"))
+                .and_then(|v| v.get_mut("body")),
+        };
+        if let Some(slot) = slot {
+            *slot = meta;
+        }
+    }
+    json
+}
+
+fn detached_meta(body: &appa_engine::value::ValueBody) -> Value {
+    serde_json::json!({
+        "len": body.len(),
+        "digest": crate::engine::hex(body.digest().bytes()),
+    })
 }
 
 /// A fact or an event as its own serde produces it. Every engine and runtime type here
@@ -707,7 +779,7 @@ mod tests {
         ));
         let fork = TrajectoryId("cc:fork-session".to_string());
         runtime
-            .open_root_fork(&parent, &parent, &fork)
+            .open_root_fork(&parent, &parent, &fork, Default::default())
             .expect("the root fork opens");
 
         let projection = project(&runtime, &fork, Mode::Pseudonymized, Budget::default());
@@ -1215,6 +1287,44 @@ mod tests {
         assert!(
             projection.policy.is_some(),
             "the rules are the whole of what was asked for"
+        );
+    }
+
+    #[test]
+    fn yell_renders_a_detached_body_as_body_bytes_without_panicking() {
+        let label = appa_engine::label::Label::new(
+            appa_engine::label::Trust::new(1),
+            appa_engine::label::Audience::public(),
+        );
+        let digest: appa_engine::value::CanonicalDigest =
+            serde_json::from_str(&format!("\"{}\"", "00".repeat(32))).expect("canonical digest parses");
+        let dispatch = appa_engine::value::DispatchId::new(TrajectoryId("t".into()), digest, 0);
+        let raw = "secret body that is detached";
+        let mut body = appa_engine::value::ValueBody::new(raw);
+        body.detach(appa_engine::value::BodyAt { seq: 2, fact: 1 });
+        let fact = Fact::ValueAdmitted {
+            trajectory: TrajectoryId("t".into()),
+            value: appa_engine::value::LabeledValue::new(body, label),
+            provenance: appa_engine::value::Provenance::ToolResult { dispatch },
+        };
+        assert!(fact.has_detached());
+
+        let mut tokens = Tokens::default();
+        let stripped = strip(
+            &serialized_fact(&fact),
+            &tables::FACT,
+            &mut tokens,
+            Mode::Baseline,
+            &BTreeSet::new(),
+        );
+        assert!(
+            stripped.unclassified.is_empty(),
+            "detached body must classify cleanly: {:?}",
+            stripped.unclassified
+        );
+        assert_eq!(
+            stripped.value.pointer("/ValueAdmitted/value/body_bytes"),
+            Some(&Value::from(raw.len() as u64))
         );
     }
 }

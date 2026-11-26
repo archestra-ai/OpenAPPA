@@ -38,8 +38,10 @@
 //! lowest result trust — that narrows every answer, so no answer loosens what the policy
 //! author wrote. The
 //! wildcard declaration (`"*"`) routes every call without a matching explicit contract through an
-//! Annotator; a call nothing covers is refused before it runs, and an annotation that fails
-//! to arrive is an operational refusal, never a policy denial.
+//! Annotator; a call nothing covers is refused before it runs. An annotation that fails to arrive
+//! is an operational refusal by default. An `Annotated` declaration may instead supply a static
+//! `on_no_answer` annotation with an attention requirement: when the Annotator produces no answer,
+//! that fallback is pinned to the call and follows the ordinary policy approval path.
 //!
 //! ## Two fork lifecycles
 //!
@@ -149,6 +151,16 @@
 //! declaration of the call: the result's label is the meet of both, and the effects are those
 //! the release reserved. A result whose release bound an output sanitizer that the later
 //! revision no longer registers, or no longer applies to that result, is withheld.
+//!
+//! ## Value bodies
+//!
+//! A [`value::ValueBody`] carries its SHA-256 [`value::RawResultDigest`] and byte length
+//! alongside either inline UTF-8 bytes or a detached log position ([`value::BodyAt`]). Replay,
+//! validation, and projection read only the digest, length, and equality; when either side of a
+//! comparison is detached, equality identifies the body by its SHA-256 digest and byte length
+//! (inline pairs compare exact bytes). Only tool-result, provider-run, and confined-result
+//! candidate bodies may detach; child-return and deferred-return bodies stay inline because
+//! `attest-schema` validates their text on replay. A detached body cannot be serialized.
 //!
 pub mod admit;
 pub mod audience;

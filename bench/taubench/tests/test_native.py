@@ -285,7 +285,7 @@ def test_control_reply_is_surfaced_as_the_models_next_step(monkeypatch) -> None:
         "Authorized. Call the write_record tool again with exactly these arguments; "
         'it will run without a new check: {"record_id":"safe"}'
     )
-    session = wrapper_session(monkeypatch, {"kind": "control", "reply": reply})
+    session = wrapper_session(monkeypatch, {"kind": "control", "reply": reply, "retry": None})
     try:
         assert session.check("execute_remedy_plan", {"offer_id": "a6b41f1968b6fa7d"}) == Blocked(
             reply, recoverable=True

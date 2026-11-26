@@ -234,6 +234,7 @@ impl Launcher {
                 title,
                 start,
                 launch: None,
+                settings,
             } => {
                 let launch = self
                     .launch
@@ -253,6 +254,7 @@ impl Launcher {
                     title,
                     start,
                     launch: launch.map(|launch| LaunchStart { launch, forked_from }),
+                    settings,
                 }
             }
             other => other,
@@ -417,6 +419,7 @@ fn refused(event: &HookEvent, answered: Option<HookDecision>, failure: &str) -> 
             Some(decision) if stands_in_for_a_result(&decision) => decision,
             _ => HookDecision::Block {
                 reason: unchecked_reason(event, &format!("the runtime refused this hook: {failure}")),
+                outcomes: None,
             },
         }),
     }
@@ -496,6 +499,7 @@ fn withholding(codec: &Codec, hook: Unanswered<'_>, failure: &str) -> Option<ser
                 event,
                 &HookDecision::Block {
                     reason: unchecked_reason(event, &format!("the runtime did not answer this hook: {failure}")),
+                    outcomes: None,
                 },
             )
         }),
@@ -557,6 +561,7 @@ mod tests {
                 title,
                 start,
                 launch: None,
+                settings,
             })) => HookEvent::SessionStart {
                 root,
                 principal,
@@ -564,6 +569,7 @@ mod tests {
                 title,
                 start,
                 launch: Some(launch.clone()),
+                settings,
             },
             _ => panic!("a session start parses as one"),
         }
@@ -630,7 +636,11 @@ mod tests {
         // The other start decides for ten seconds, past what a fixed number of posts waited.
         let held = Duration::from_secs(10);
         let compacted = launched_start("7b8c9d0e-1f2a-4b3c-9d4e-5f6a7b8c9d0e", "compact", &launch);
-        let mut deciding = Some(runtime.decide_launch(launch.clone()).expect("the other start decides"));
+        let mut deciding = Some(
+            runtime
+                .decide_launch(launch.clone(), &Default::default())
+                .expect("the other start decides"),
+        );
         let mut classes = Vec::new();
         let answered = posted(
             &compacted,
@@ -662,7 +672,9 @@ mod tests {
 
         // A deadline that leaves no room for the next wait ends the posts at the refusal.
         let spent = launched_start("9d0e1f2a-3b4c-4d5e-9f6a-7b8c9d0e1f2a", "compact", &launch);
-        let deciding = runtime.decide_launch(launch.clone()).expect("the other start decides");
+        let deciding = runtime
+            .decide_launch(launch.clone(), &Default::default())
+            .expect("the other start decides");
         waits.borrow_mut().clear();
         let mut classes = Vec::new();
         posted(
@@ -723,6 +735,7 @@ mod tests {
         let refused = Answer {
             status: 409,
             body: serde_json::to_vec(&WireDecision::of(&HookDecision::Refuse {
+                retry: None,
                 class: appa_runtime_api::RefusalClass::Storage,
                 detail: "storage failure: disk full".to_string(),
             }))
@@ -851,6 +864,7 @@ mod tests {
         assert!(matches!(event, HookEvent::ToolResult { .. }));
 
         let operational = HookDecision::Refuse {
+            retry: None,
             class: appa_runtime_api::RefusalClass::Storage,
             detail: "storage failure: disk full".to_string(),
         };
@@ -881,6 +895,7 @@ mod tests {
             .expect("the event parses")
             .expect("PreToolUse is gated");
         let refuse = HookDecision::Refuse {
+            retry: None,
             class: appa_runtime_api::RefusalClass::Storage,
             detail: "storage failure: disk full".to_string(),
         };

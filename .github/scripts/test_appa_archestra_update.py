@@ -22,7 +22,7 @@ def command(root, *args):
 def manifest(commit):
     return '# Pinned to OpenAPPA main at old.\n[dependencies]\n' + "\n".join(
         f'{name} = {{ git = "{updater.GIT_URL}", rev = "{commit}" }}'
-        for name in ("appa-runtime", "appa-runtime-api", "appa-eventlog", "appa-package")
+        for name in sorted(updater.EMBEDDED)
     ) + '\nother = "1"\n'
 
 
@@ -74,6 +74,8 @@ class API:
             candidate_pr["body"] = data["body"]
             self.prs.append(candidate_pr)
             return candidate_pr
+        if "/issues/" in path and path.endswith("/comments") and method == "POST":
+            return {}
         if "/pulls/" in path and method == "PATCH":
             next(p for p in self.prs if str(p["number"]) == path.rsplit("/", 1)[1])["state"] = data["state"]
             return {}
@@ -212,7 +214,7 @@ class UpdaterTests(unittest.TestCase):
         text = text.replace(f'rev = "{self.old}" }}', f'rev = "{self.old}", features = ["postgres"] }}')
         result = updater.updated_manifest(text, self.candidate)
         self.assertEqual(updater.pin(result), self.candidate["sha"])
-        self.assertEqual(result.count('features = ["postgres"]'), 4)
+        self.assertEqual(result.count('features = ["postgres"]'), len(updater.EMBEDDED))
         self.assertIn('other = "1"', result)
         with self.assertRaises(ValueError):
             updater.pin(text.replace(self.old, self.future["sha"], 1))
@@ -390,6 +392,34 @@ class UpdaterTests(unittest.TestCase):
         self.api.refs = {"a" * 40: {p: self.files[p] for p in updater.FILES}, "main": self.files}
         with self.assertRaisesRegex(ValueError, "rerun"):
             self.publish()
+        self.assertEqual(self.api.writes, [])
+
+    def sweep(self):
+        with patch.object(updater, "GitHub", return_value=self.api), patch.dict(os.environ, {"GH_TOKEN": "test-only"}):
+            updater.sweep(argparse.Namespace(source=self.source, bot_login=BOT))
+
+    def test_sweep_closes_owned_prs_that_a_newer_manual_pin_contains(self):
+        # A maintainer pinned main to the v1.2.3 commit before its update PR merged.
+        self.api.files[updater.MANIFEST] = manifest(self.future["sha"])
+        self.api.prs = [pr(self.candidate, 1), pr(self.future, 2), pr(self.candidate, 3, login="developer")]
+        self.sweep()
+        self.assertEqual([p["state"] for p in self.api.prs], ["closed", "closed", "open"])
+        comments = [(path, data["body"]) for method, path, data in self.api.writes if path.endswith("/comments")]
+        self.assertEqual([path for path, _ in comments], [f"/repos/{updater.TARGET}/issues/{n}/comments" for n in (1, 2)])
+        self.assertIn(self.future["sha"], comments[0][1])
+        self.assertFalse(any("merge" in path or "/reviews" in path for _, path, _ in self.api.writes))
+
+    def test_sweep_keeps_updates_that_main_does_not_contain(self):
+        self.api.files[updater.MANIFEST] = manifest(self.candidate["sha"])
+        older = {**self.candidate, "tag": "v1.2.1", "id": 21, "sha": self.old}
+        self.api.prs = [pr(older, 1), pr(self.future, 2)]
+        self.sweep()
+        self.assertEqual([p["state"] for p in self.api.prs], ["closed", "open"])
+
+    def test_sweep_ignores_a_pin_off_openappa_main(self):
+        self.api.files[updater.MANIFEST] = manifest("c" * 40)
+        self.api.prs = [pr(self.candidate, 1)]
+        self.sweep()
         self.assertEqual(self.api.writes, [])
 
     def test_github_pull_list_paginates_before_filtering(self):

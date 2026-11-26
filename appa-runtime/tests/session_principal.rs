@@ -49,6 +49,7 @@ async fn start(runtime: &Arc<Runtime>, principal: Option<&str>) -> HookDecision 
             title: None,
             launch: None,
             start: None,
+            settings: Default::default(),
         },
     )
     .await
@@ -179,7 +180,9 @@ async fn a_root_fork_acts_for_its_parents_principal() {
     narrow_to_self(&runtime).await;
 
     let fork = TrajectoryId("test-fork".to_string());
-    runtime.open_root_fork(&root(), &root(), &fork).expect("the root forks");
+    runtime
+        .open_root_fork(&root(), &root(), &fork, Default::default())
+        .expect("the root forks");
     let on_fork = |call: ProposedCall| {
         hooks::handle(
             &runtime,

@@ -202,9 +202,8 @@ static PRODUCED_ANNOTATION: Table = Table {
     ],
 };
 
-/// `PinnedAnnotation` is `#[serde(transparent)]` over its parts, so these are the parts' keys.
-static PINNED_ANNOTATION: Table = Table {
-    name: "PinnedAnnotation",
+static PINNED_ANNOTATOR: Table = Table {
+    name: "PinnedAnnotation::Annotator",
     entries: &[
         ("annotator", Rule::Token(Class::Annotator)),
         ("call", DIGEST),
@@ -212,6 +211,24 @@ static PINNED_ANNOTATION: Table = Table {
         // What the deployment's context providers answered about the call: repository
         // names, logins, grants — the deployment's own findings, which never leave.
         ("context", Rule::Never),
+    ],
+};
+
+static PINNED_FALLBACK: Table = Table {
+    name: "PinnedAnnotation::NoAnswerFallback",
+    entries: &[
+        ("call", DIGEST),
+        ("produced", Rule::Table(&PRODUCED_ANNOTATION)),
+        ("context", Rule::Never),
+    ],
+};
+
+/// `PinnedAnnotation` is `#[serde(transparent)]` over its tagged `PinnedParts` enum.
+static PINNED_ANNOTATION: Table = Table {
+    name: "PinnedAnnotation",
+    entries: &[
+        ("Annotator", Rule::Table(&PINNED_ANNOTATOR)),
+        ("NoAnswerFallback", Rule::Table(&PINNED_FALLBACK)),
     ],
 };
 
@@ -513,7 +530,15 @@ static TRAJECTORY_OPENED: Table = Table {
         ("forked_from", Rule::Table(&ROOT_FORK_ORIGIN)),
         // The person the family acts for.
         ("principal", Rule::Token(Class::Reader)),
+        ("settings", Rule::Table(&SESSION_SETTINGS)),
     ],
+};
+
+/// What the family's host pinned: a closed-set setting, and the host's own name for the line
+/// it composed, which names no person but tells deployments apart.
+static SESSION_SETTINGS: Table = Table {
+    name: "SessionSettings",
+    entries: &[("auto_apply", Rule::Keep), ("line_variant", Rule::Fingerprint)],
 };
 
 static VALUE_ADMITTED: Table = Table {
@@ -574,6 +599,7 @@ static CLOSE_OUTCOME: Table = Table {
         ("Success", Rule::Table(&CLOSE_SUCCESS)),
         ("Failure", Rule::Keep),
         ("Indeterminate", Rule::Keep),
+        ("SuccessAbandoned", Rule::Keep),
     ],
 };
 
@@ -724,12 +750,13 @@ static OFFER_OPENED: Table = Table {
     ],
 };
 
-/// `OfferAccepted` and `OfferInvalidated` carry the same two fields. The name is the shared
-/// one, not either variant's: it is what a drift report prints, and naming one of the two
-/// would file the other's drift under a fact it did not come from.
+/// `OfferAccepted` and `OfferInvalidated` carry the same two fields, and an acceptance who
+/// took it, one of a closed set. The name is the shared one, not either variant's: it is what
+/// a drift report prints, and naming one of the two would file the other's drift under a fact
+/// it did not come from.
 static OFFER_LIFECYCLE: Table = Table {
     name: "OfferLifecycle",
-    entries: &[("trajectory", TRAJECTORY), ("offer", DIGEST)],
+    entries: &[("trajectory", TRAJECTORY), ("offer", DIGEST), ("initiator", Rule::Keep)],
 };
 
 static OFFER_DENIED: Table = Table {

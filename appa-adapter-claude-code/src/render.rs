@@ -84,7 +84,7 @@ pub(crate) fn render(event: &HookEvent, decision: &HookDecision) -> serde_json::
 fn structured_return(event: &HookEvent, decision: &HookDecision) -> serde_json::Value {
     match decision {
         HookDecision::Ack => allow("appa: the return crosses to the parent"),
-        HookDecision::Block { reason } => deny(reason),
+        HookDecision::Block { reason, .. } => deny(reason),
         HookDecision::ChildReturn { value } => match serde_json::from_str::<serde_json::Value>(value) {
             Ok(_) => deny(&structured_echo(value)),
             Err(_) => deny(UNSTRUCTURED),
@@ -100,14 +100,14 @@ fn render_decision(event: &HookEvent, decision: &HookDecision) -> serde_json::Va
         HookDecision::AllowCall { .. } => allow("appa: the call is released"),
         HookDecision::PassControl => allow("appa: the runtime's own control tool"),
         HookDecision::DenyCall { feedback, .. } => deny(feedback),
-        HookDecision::Block { reason } => match replacement(event, &withheld(reason)) {
+        HookDecision::Block { reason, .. } => match replacement(event, &withheld(reason)) {
             Some(replacement) => replaced(replacement, Some(reason)),
             None => block(reason),
         },
         // What stands in for the body the model asked for: an admitted value, or the
         // runtime's own words about the result. Claude Code dispatches the spellings this
         // adapter identifies from, so nothing here is spelled back and both render alike.
-        HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
+        HookDecision::ReplaceOutput { output, .. } | HookDecision::DeliverValue { value: output } => {
             match replacement(event, output) {
                 Some(replacement) => replaced(replacement, None),
                 None => block(output),
@@ -275,6 +275,7 @@ mod tests {
                     feedback: "blocked: the recipient cannot read this".to_string(),
                     offers: Vec::new(),
                     review: Vec::new(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({
@@ -289,6 +290,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    retry: None,
                     class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
@@ -309,6 +311,7 @@ mod tests {
             feedback: "blocked: the recipient cannot read this".to_string(),
             offers: Vec::new(),
             review: Vec::new(),
+            outcomes: None,
         };
         assert_eq!(answer(&host("auto"), &event, &release), serde_json::json!({}));
         assert_eq!(answer(&host("auto"), &event, &denial), render(&event, &denial));
@@ -347,6 +350,7 @@ mod tests {
                 &event,
                 &HookDecision::ReplaceOutput {
                     output: "the output is confined".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({
@@ -367,6 +371,7 @@ mod tests {
                 &event,
                 &HookDecision::ReplaceOutput {
                     output: "the output is confined".to_string(),
+                    outcomes: None,
                 }
             ),
             "this codec spells nothing back, so an admitted value and the runtime's own words render alike",
@@ -376,6 +381,7 @@ mod tests {
                 &event,
                 &HookDecision::Block {
                     reason: "this outcome does not match the open dispatch".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({
@@ -393,6 +399,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    retry: None,
                     class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
@@ -410,6 +417,7 @@ mod tests {
                 &tool_result(serde_json::json!("plain text")),
                 &HookDecision::ReplaceOutput {
                     output: "the output is confined".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({
@@ -441,6 +449,7 @@ mod tests {
                 &event,
                 &HookDecision::Block {
                     reason: "the trajectory has ended".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({"decision": "block", "reason": "the trajectory has ended"}),
@@ -450,6 +459,7 @@ mod tests {
                 &event,
                 &HookDecision::ReplaceOutput {
                     output: "the output is confined".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({"decision": "block", "reason": "the output is confined"}),
@@ -547,6 +557,7 @@ mod tests {
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
                 &HookDecision::Context {
                     text: "available file tools".into()
@@ -572,6 +583,7 @@ mod tests {
                 &event,
                 &HookDecision::Block {
                     reason: "nothing crossed".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({"decision": "block", "reason": "nothing crossed"}),
@@ -601,6 +613,7 @@ mod tests {
                 &event,
                 &HookDecision::ReplaceOutput {
                     output: "the output is confined".to_string(),
+                    outcomes: None,
                 }
             ),
             serde_json::json!({"decision": "block", "reason": "the output is confined"}),
@@ -609,6 +622,7 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Refuse {
+                    retry: None,
                     class: appa_runtime_api::RefusalClass::Storage,
                     detail: "storage failure: disk full".to_string(),
                 }
@@ -685,12 +699,15 @@ mod tests {
                 feedback: "denied".to_string(),
                 offers: Vec::new(),
                 review: Vec::new(),
+                outcomes: None,
             },
             HookDecision::Block {
                 reason: "held".to_string(),
+                outcomes: None,
             },
             HookDecision::ReplaceOutput {
                 output: "replaced".to_string(),
+                outcomes: None,
             },
             HookDecision::DeliverValue {
                 value: "delivered".to_string(),
@@ -702,6 +719,7 @@ mod tests {
                 text: "advice".to_string(),
             },
             HookDecision::Refuse {
+                retry: None,
                 class: appa_runtime_api::RefusalClass::Storage,
                 detail: "refused".to_string(),
             },
@@ -718,6 +736,7 @@ mod tests {
                     title: None,
                     launch: None,
                     start: None,
+                    settings: Default::default(),
                 },
                 [
                     "empty", "allow", "allow", "deny", "block", "block", "block", "block", "context", "error",
@@ -862,7 +881,8 @@ mod tests {
             render(
                 &event,
                 &HookDecision::Block {
-                    reason: "below the floor".to_string()
+                    reason: "below the floor".to_string(),
+                    outcomes: None,
                 }
             ),
             deny("below the floor")

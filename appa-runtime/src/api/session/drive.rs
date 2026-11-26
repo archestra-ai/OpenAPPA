@@ -817,20 +817,19 @@ impl Session {
                 // reviewer they stay serial: one staged review on screen at a time.
                 Next::ResolveExternal(requests) => match elicitation {
                     None => {
-                        // Batch-terminal: every sibling settles first; any no-answer
-                        // then aborts the invocation, discarding the siblings' answers,
-                        // before another engine round or any append.
+                        // Every sibling settles together; the next engine pass turns any
+                        // no-answer into a declared fallback or an operational refusal.
                         // Embedded hosts supply the ruling outside an MCP elicitation context.
                         let consults = requests
                             .into_iter()
                             .map(|request| self.consult(request, None, ruling, occasion));
                         for answered in crate::external::settle_batch(consults).await {
-                            evidence.push(answered?);
+                            evidence.push(answered);
                         }
                     }
                     Some(_) => {
                         for request in requests {
-                            let answered = self.consult(request, elicitation, ruling, occasion).await?;
+                            let answered = self.consult(request, elicitation, ruling, occasion).await;
                             evidence.push(answered);
                         }
                     }
@@ -880,10 +879,40 @@ impl Session {
             {
                 return Err(EventError::ChildDispatchOpen);
             }
-            let decision = policy
-                .engine()
-                .handle(&view, &self.trajectory, event, &self.presentation)
-                .map_err(EventError::from)?;
+            const MAX_HYDRATIONS: usize = 16;
+            let decision = {
+                let mut hydrated: Option<appa_engine::transition::EngineView> = None;
+                let mut hydrations = 0usize;
+                loop {
+                    let active_view = hydrated.as_ref().unwrap_or(&view);
+                    match policy
+                        .engine()
+                        .handle(active_view, &self.trajectory, event.clone(), &self.presentation)
+                    {
+                        Ok(decision) => break decision,
+                        Err(crate::engine::EngineRefusal::BodyDetached { at, digest })
+                            if hydrations < MAX_HYDRATIONS =>
+                        {
+                            hydrations += 1;
+                            let text = self.inner.step_body(&step, &self.root, at, digest)?;
+                            let target = hydrated.get_or_insert_with(|| view.clone());
+                            let attached = target.attach_body(at, text).map_err(|error| {
+                                EventError::UntrustedLog(format!(
+                                    "detached body at seq {} fact {} mismatch: {error}",
+                                    at.seq, at.fact
+                                ))
+                            })?;
+                            if !attached {
+                                return Err(EventError::from(crate::engine::EngineRefusal::BodyDetached {
+                                    at,
+                                    digest,
+                                }));
+                            }
+                        }
+                        Err(error) => return Err(EventError::from(error)),
+                    }
+                }
+            };
 
             let Some(facts) = decision.append.as_ref() else {
                 if let (Some(took), Some(_)) = (opening.took, opening.spawn) {

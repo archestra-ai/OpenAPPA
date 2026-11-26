@@ -4,8 +4,8 @@ use appa_engine::authority::{
     Attends, Authority, ContextHint, DeclaredTransition, Hint, HintTooLong, Mandate, Sanitizer, SanitizerPoints, Scope,
 };
 use appa_engine::contract::{
-    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, RecipientSpec, Requires,
-    SelectorPlaceholder, ToolAnnotation, ToolDeclaration,
+    AudienceRequirement, Delta, DeltaAudience, HistoryRequirement, LabelRequirements, ProducedAnnotation,
+    RecipientSpec, Requires, SelectorPlaceholder, ToolAnnotation, ToolDeclaration,
 };
 use appa_engine::fact::{EffectKind, EffectSet};
 use appa_engine::label::{Audience, DeclaredAudience, Label, Trust};
@@ -18,8 +18,8 @@ use appa_engine::value::ToolName;
 use crate::annotator::AnnotatorBuiltin;
 use crate::error::ConfigError;
 use crate::raw::{
-    RawAuthority, RawBoundary, RawDelta, RawDeployment, RawPermits, RawRequires, RawSanitizer, RawSanitizerPermits,
-    RawStartingAudience, RawTool,
+    RawAnnotationFallback, RawAuthority, RawBoundary, RawDelta, RawDeployment, RawPermits, RawRequires, RawSanitizer,
+    RawSanitizerPermits, RawStartingAudience, RawTool,
 };
 
 impl RawDeployment {
@@ -132,6 +132,9 @@ impl RawTool {
             })?,
             None => ToolParameters::open(),
         };
+        if self.annotator.is_none() && self.on_no_answer.is_some() {
+            return Err(ConfigError::FallbackWithoutAnnotator { tool: self.name });
+        }
         if let Some(annotator) = self.annotator {
             // Beside an Annotator a rule may write a label floor: a trust floor, the readers
             // the data must reach, and a lowest result trust. Every other field is the
@@ -165,6 +168,10 @@ impl RawTool {
                 }
                 None => LabelRequirements::default(),
             };
+            let on_no_answer = self
+                .on_no_answer
+                .map(|fallback| fallback.convert(chain, &self.name))
+                .transpose()?;
             return Ok(ToolDeclaration::Annotated {
                 name: ToolName::new(self.name),
                 tags: self.tags.into_iter().map(TagName::new).collect(),
@@ -173,6 +180,7 @@ impl RawTool {
                 annotator: AnnotatorName::new(annotator),
                 requires,
                 delta_trust,
+                on_no_answer,
             });
         }
         // Declaring the tool is the deployment saying it knows it, so an omitted `delta` and
@@ -206,6 +214,35 @@ impl RawTool {
             emits,
             requires,
         }))
+    }
+}
+
+impl RawAnnotationFallback {
+    fn convert(self, chain: &TrustChain, tool: &str) -> Result<ProducedAnnotation, ConfigError> {
+        let context = format!("tool {tool} on_no_answer");
+        let delta = self
+            .delta
+            .map(|delta| delta.convert(chain, &context))
+            .transpose()?
+            .unwrap_or_default();
+        let forwards = self.forwards.convert_literal(chain, &context)?;
+        let requires = self.requires.convert(chain, &context)?;
+        if requires.attention.is_empty() {
+            return Err(ConfigError::FallbackWithoutAttention { tool: tool.to_string() });
+        }
+        let emits = EffectSet::new(self.effects.into_iter().map(EffectKind::new)).map_err(|duplicate| {
+            ConfigError::DuplicateEffect {
+                tool: tool.to_string(),
+                kind: duplicate.0.as_str().to_string(),
+            }
+        })?;
+        Ok(ProducedAnnotation {
+            delta,
+            forwards,
+            emits,
+            requires,
+            evidence: None,
+        })
     }
 }
 
@@ -312,6 +349,7 @@ impl RawPermits {
                 .map(|r| parse_declared_audience(&r, &format!("{ctx} audience_missing")))
                 .transpose()?,
             waivers: self.effects_containing.into_iter().map(EffectKind::new).collect(),
+            prior_waivers: self.prior_effects_containing.into_iter().map(EffectKind::new).collect(),
             attends: parse_attends(self.attention, ctx)?,
         })
     }

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use appa_runtime::api::{EmbeddedPresentationOptions, RemedyAttempt, RemedyOutcome, Runtime};
 use appa_runtime::hooks;
 use appa_runtime_api::{
-    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OpenCalls, OutcomeBody, ProposedCall, SpawnBinding,
-    SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
+    ADVERTISED_CONTROL_TOOL, Actor, HookDecision, HookEvent, OpenCalls, OutcomeBody, Outcomes, ProposedCall,
+    SpawnBinding, SpawnKind, SpawnRef, ToolOutcome, TrajectoryId, canonical_tool_name, is_reserved_tool_name,
 };
 use serde_json::value::RawValue;
 use thiserror::Error;
@@ -205,6 +205,7 @@ impl Agent {
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             })
             .await
         {
@@ -601,7 +602,7 @@ impl Run<'_> {
                     other => return Err(unexpected("an echoed child return", &other)),
                 }
             }
-            HookDecision::Block { reason } => self.unadmitted_return(parent, reason).await,
+            HookDecision::Block { reason, .. } => self.unadmitted_return(parent, reason).await,
             // The return could not be judged; it is withheld like a blocked one and the
             // parent goes on. Only a refused lifecycle event ends the run.
             HookDecision::Refuse { detail, .. } => self.unadmitted_return(parent, withheld(&detail)).await,
@@ -675,11 +676,37 @@ impl Run<'_> {
         };
         let event = HookEvent::ToolResult {
             actor: self.actor(frame),
-            call,
+            call: call.clone(),
             call_id: Some(id.0.clone()),
             outcome,
         };
         match hooks::handle(&self.agent.runtime, event).await {
+            // A report a fact went unobtained for settles nothing; this loop does not wait for
+            // the fact, so it abandons the call and the dispatch closes withheld.
+            HookDecision::ReplaceOutput {
+                output,
+                outcomes: Some(Outcomes::MissingFact(_)),
+            } => {
+                let abandoned = HookEvent::ToolResult {
+                    actor: self.actor(frame),
+                    call,
+                    call_id: Some(id.0.clone()),
+                    outcome: ToolOutcome::Indeterminate,
+                };
+                match hooks::handle(&self.agent.runtime, abandoned).await {
+                    HookDecision::Ack => {}
+                    other => return Err(unexpected("an abandoned tool outcome", &other)),
+                }
+                self.record(
+                    frame,
+                    Record::OutputBlocked {
+                        call: id.clone(),
+                        reason: output.clone(),
+                    },
+                )
+                .await;
+                Ok(output)
+            }
             // The output crosses as produced.
             HookDecision::Ack => {
                 self.record(
@@ -692,7 +719,7 @@ impl Run<'_> {
                 .await;
                 Ok(raw)
             }
-            HookDecision::ReplaceOutput { output } | HookDecision::DeliverValue { value: output } => {
+            HookDecision::ReplaceOutput { output, .. } | HookDecision::DeliverValue { value: output } => {
                 self.record(
                     frame,
                     Record::Substituted {
@@ -703,7 +730,7 @@ impl Run<'_> {
                 .await;
                 Ok(output)
             }
-            HookDecision::Block { reason } => {
+            HookDecision::Block { reason, .. } => {
                 self.record(
                     frame,
                     Record::OutputBlocked {
@@ -800,7 +827,7 @@ impl Run<'_> {
                 },
                 presentation.feedback,
             ),
-            RemedyOutcome::NoAnswer { feedback } => (
+            RemedyOutcome::NoAnswer { feedback, .. } => (
                 Record::OfferRefused {
                     call: id,
                     feedback: feedback.clone(),

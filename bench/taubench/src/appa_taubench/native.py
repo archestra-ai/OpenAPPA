@@ -11,6 +11,22 @@ from appa_taubench.knowledge import DISCOVERABLE_WRAPPER
 
 BINDING_IDENTITY: str = appa_agent_python.BINDING_IDENTITY
 AppaError = appa_agent_python.AppaError
+# The typed refusal a blocked or sealed answer states, null where it states none.
+REFUSAL_FIELDS = frozenset({"deciding", "outcomes", "retry"})
+
+
+def _unsettled(response: dict[str, object]) -> str | None:
+    """The safe content of a report that settled nothing: a fact its result needs was not
+    obtained. This harness does not retry it, so the caller abandons the call and the model
+    reads that content in place of the result."""
+    content = response.get("content")
+    if (
+        response.get("kind") == "unsettled"
+        and set(response) == {"kind", "content", "retry"}
+        and isinstance(content, str)
+    ):
+        return content
+    return None
 
 
 class NativeProtocolError(RuntimeError):
@@ -79,7 +95,7 @@ class FrameworkSession:
         )
         response = self._decode(response_json)
         match response.get("kind"):
-            case "blocked" if set(response) == {"kind", "feedback", "offer_ids"}:
+            case "blocked" if set(response) - REFUSAL_FIELDS == {"kind", "feedback", "offer_ids"}:
                 feedback = response["feedback"]
                 offer_ids = response["offer_ids"]
                 if (
@@ -88,7 +104,7 @@ class FrameworkSession:
                     and all(isinstance(offer, str) for offer in offer_ids)
                 ):
                     return Blocked(feedback, self._has_next_step(feedback, offer_ids), tuple(offer_ids))
-            case "control" if set(response) == {"kind", "reply"}:
+            case "control" if set(response) == {"kind", "reply", "retry"}:
                 # The engine's own control tool answered. This contract mints no
                 # offers, so the reply is a refusal's next step rather than an
                 # authorization; hand it back as feedback the model can act on.
@@ -145,7 +161,10 @@ class FrameworkSession:
             else self._session.report(content, error, call_id=call_id)
         )
         response = self._decode(response_json)
-        if response.get("kind") == "delivered" and set(response) == {
+        if (withheld := _unsettled(response)) is not None:
+            self.abandon(call_id)
+            return Reported(withheld, "sealed")
+        if response.get("kind") == "delivered" and set(response) - REFUSAL_FIELDS == {
             "kind",
             "content",
             "dispatched_tool",

@@ -56,6 +56,7 @@ pub(super) fn annotated(tool: ToolAnnotation, annotator: &str) -> crate::contrac
         annotator: crate::names::AnnotatorName::new(annotator),
         requires: Default::default(),
         delta_trust: None,
+        on_no_answer: None,
     }
 }
 
@@ -69,6 +70,7 @@ pub(super) fn wildcard(by: &str) -> crate::contract::ToolDeclaration {
         annotator: crate::names::AnnotatorName::new(by),
         requires: Default::default(),
         delta_trust: None,
+        on_no_answer: None,
     }
 }
 
@@ -111,10 +113,15 @@ pub(super) fn opened(e: &Engine) -> Fact {
 }
 
 pub(super) fn opened_root(e: &Engine, trajectory: &TrajectoryId) -> Fact {
-    e.open_trajectory(trajectory, crate::profile::PolicyFileKey::of(b"policy"), None)
-        .expect("the engine opens its own root")
-        .into_unsealed()
-        .remove(0)
+    e.open_trajectory(
+        trajectory,
+        crate::profile::PolicyFileKey::of(b"policy"),
+        None,
+        Default::default(),
+    )
+    .expect("the engine opens its own root")
+    .into_unsealed()
+    .remove(0)
 }
 
 pub(super) fn read_tool(name: &str, delta: Delta) -> ToolAnnotation {
@@ -207,6 +214,7 @@ pub(super) fn reads(
                 .handle(
                     &viewing(e, log),
                     EngineEvent::ExecuteOffer(OfferExecution {
+                        initiator: appa_runtime_api::Initiator::Agent,
                         trajectory: trajectory.clone(),
                         offer,
                         outcome: OfferOutcome::Approved(Vec::new()),
@@ -307,6 +315,7 @@ pub(super) fn spawn_family_marked(
         .handle(
             &viewing(e, &so_far(&facts)),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: parent.clone(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -357,6 +366,7 @@ pub(super) fn declared_spawn(e: &Engine, log: &[Fact], id: &str) -> Vec<Fact> {
         .handle(
             &viewing(e, &[log, &facts].concat()),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -536,54 +546,63 @@ pub(super) fn close(
 }
 
 pub(super) fn substituting_engine(trust: Trust) -> Engine {
-    let partner = Audience::restricted([ReaderId::new("partner")]);
-    let post = post_tool;
     open_engine_at(
-        RegistryConfig {
-            recorders: Default::default(),
-            tools: {
-                let mut tools = declared(vec![
-                    post("post", vec![crate::names::TagName::new("outbound")]),
-                    post("post_untagged", vec![]),
-                    restrictable_tool("ping"),
-                ]);
-                tools.push(annotated(
-                    post("post_dyn", vec![crate::names::TagName::new("outbound")]),
-                    "acl",
-                ));
-                tools
-            },
-            annotators: vec![annotator("acl")],
-            authorities: vec![crate::authority::Authority {
-                except: Vec::new(),
-                name: AuthorityName::new("officer"),
-                mandate: crate::authority::Mandate {
-                    trust_ceiling: Some(TRUSTED),
-                    reader_ceiling: Some(DeclaredAudience::literal(partner)),
-                    ..crate::authority::Mandate::default()
-                },
-                scope: crate::authority::Scope::default(),
-                hint: None,
-            }],
-            sanitizers: vec![crate::authority::Sanitizer {
-                name: crate::names::SanitizerName::new("redact"),
-                on: crate::authority::SanitizerPoints {
-                    input: true,
-                    output: false,
-                },
-                transition: crate::authority::DeclaredTransition::Audience {
-                    from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
-                    to: DeclaredAudience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]),
-                },
-                scope: crate::authority::Scope {
-                    tags: vec![crate::names::TagName::new("outbound")],
-                },
-                hint: None,
-            }],
-            ..test_config(vec![])
-        },
+        substituting_config(),
         Label::new(trust, Audience::restricted([ReaderId::new("insider")])),
     )
+}
+
+pub(super) fn substituting_config() -> RegistryConfig {
+    let partner = Audience::restricted([ReaderId::new("partner")]);
+    let post = post_tool;
+    RegistryConfig {
+        recorders: Default::default(),
+        tools: {
+            let mut tools = declared(vec![
+                post("post", vec![crate::names::TagName::new("outbound")]),
+                post("post_untagged", vec![]),
+                {
+                    let mut blocked = post("post_blocked", vec![crate::names::TagName::new("outbound")]);
+                    blocked.requires.attention = vec![crate::names::MarkName::new(crate::names::MarkName::BLOCKED)];
+                    blocked
+                },
+                restrictable_tool("ping"),
+            ]);
+            tools.push(annotated(
+                post("post_dyn", vec![crate::names::TagName::new("outbound")]),
+                "acl",
+            ));
+            tools
+        },
+        annotators: vec![annotator("acl")],
+        authorities: vec![crate::authority::Authority {
+            except: Vec::new(),
+            name: AuthorityName::new("officer"),
+            mandate: crate::authority::Mandate {
+                trust_ceiling: Some(TRUSTED),
+                reader_ceiling: Some(DeclaredAudience::literal(partner)),
+                ..crate::authority::Mandate::default()
+            },
+            scope: crate::authority::Scope::default(),
+            hint: None,
+        }],
+        sanitizers: vec![crate::authority::Sanitizer {
+            name: crate::names::SanitizerName::new("redact"),
+            on: crate::authority::SanitizerPoints {
+                input: true,
+                output: false,
+            },
+            transition: crate::authority::DeclaredTransition::Audience {
+                from_includes: DeclaredAudience::restricted([ReaderId::new("insider")]),
+                to: DeclaredAudience::restricted([ReaderId::new("insider"), ReaderId::new("partner")]),
+            },
+            scope: crate::authority::Scope {
+                tags: vec![crate::names::TagName::new("outbound")],
+            },
+            hint: None,
+        }],
+        ..test_config(vec![])
+    }
 }
 
 pub(super) fn internal_log(e: &Engine) -> Vec<Fact> {
@@ -817,6 +836,7 @@ pub(super) fn execute_offer_with(
     e.handle(
         &view,
         EngineEvent::ExecuteOffer(OfferExecution {
+            initiator: appa_runtime_api::Initiator::Agent,
             trajectory: traj(),
             offer,
             outcome,
@@ -1183,6 +1203,7 @@ pub(super) fn fan_out_family(e: &Engine, floor: Label) -> (Vec<Fact>, crate::val
         .handle(
             &viewing(e, &log),
             EngineEvent::ExecuteOffer(OfferExecution {
+                initiator: appa_runtime_api::Initiator::Agent,
                 trajectory: traj(),
                 offer,
                 outcome: OfferOutcome::Approved(Vec::new()),
@@ -1305,7 +1326,7 @@ pub(super) fn staged_candidate(e: &Engine) -> (Vec<Fact>, DispatchId, ValueBody,
             &view(&log),
             EngineEvent::Outcome(report(vec![crate::transition::Evidence::Sanitizer {
                 sanitizer: crate::names::SanitizerName::new("redactor"),
-                source: crate::value::RawResultDigest::of(raw.as_str().as_bytes()),
+                source: raw.digest(),
                 derived: derived.clone(),
             }])),
         )

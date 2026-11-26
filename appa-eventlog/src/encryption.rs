@@ -2,11 +2,11 @@
 //! A view never falls back to plaintext when its key is absent or incorrect.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ring::{
-    aead,
+    aead, hmac,
     rand::{SecureRandom, SystemRandom},
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 const MAGIC: &[u8] = b"\0appa-storage-v1\0";
 const TEXT: &str = "appa-storage-v1:";
@@ -45,6 +45,20 @@ pub enum StorageCipher {
 pub struct EncryptionKey {
     key: aead::LessSafeKey,
     scope: String,
+    reader: ReaderId,
+}
+
+use crate::ReaderId;
+
+fn process_reader_key() -> &'static hmac::Key {
+    static KEY: OnceLock<hmac::Key> = OnceLock::new();
+    KEY.get_or_init(|| {
+        let mut secret = [0u8; 32];
+        SystemRandom::new()
+            .fill(&mut secret)
+            .expect("system CSPRNG produces 32 random bytes for process-local cache isolation");
+        hmac::Key::new(hmac::HMAC_SHA256, &secret)
+    })
 }
 
 impl StorageCipher {
@@ -52,16 +66,31 @@ impl StorageCipher {
         if key.len() != 32 || scope.is_empty() || scope.len() > 2048 || scope.chars().any(char::is_control) {
             return Err(StorageEncryptionError("invalid storage encryption context"));
         }
+        let mut message = Vec::with_capacity(8 + key.len() + scope.len());
+        message.extend_from_slice(&(key.len() as u64).to_be_bytes());
+        message.extend_from_slice(key);
+        message.extend_from_slice(scope.as_bytes());
+        let tag = hmac::sign(process_reader_key(), &message);
+        let reader = ReaderId::keyed(tag.as_ref().try_into().expect("an HMAC-SHA256 tag is 32 bytes"));
         let key = aead::UnboundKey::new(&aead::AES_256_GCM, key)
             .map_err(|_| StorageEncryptionError("invalid storage encryption key"))?;
         Ok(Self::Encrypted(Arc::new(EncryptionKey {
             key: aead::LessSafeKey::new(key),
             scope,
+            reader,
         })))
     }
 
     pub fn is_encrypted(&self) -> bool {
         matches!(self, Self::Encrypted(_))
+    }
+
+    /// The opaque reader identity this cipher decrypts for.
+    pub fn reader(&self) -> ReaderId {
+        match self {
+            Self::Plain => ReaderId::PLAIN,
+            Self::Encrypted(material) => material.reader,
+        }
     }
 
     pub fn seal_bytes(&self, context: &str, bytes: &[u8]) -> Result<Vec<u8>, StorageEncryptionError> {
@@ -237,6 +266,19 @@ mod tests {
         *tampered.last_mut().unwrap() ^= 1;
         assert!(cipher.open_bytes("events:root:0", &tampered).is_err());
         assert!(cipher.open_bytes("events:root:0", b"plaintext").is_err());
+    }
+    #[test]
+    fn a_reader_is_one_key_and_scope() {
+        let reader = |key: u8, scope: &str| StorageCipher::encrypted(&[key; 32], scope.into()).unwrap().reader();
+        assert_eq!(reader(7, "conversation-a"), reader(7, "conversation-a"));
+        assert_ne!(reader(7, "conversation-a"), reader(8, "conversation-a"));
+        assert_ne!(reader(7, "conversation-a"), reader(7, "conversation-b"));
+        assert_ne!(reader(7, "conversation-a"), StorageCipher::Plain.reader());
+        assert_ne!(
+            format!("{:?}", reader(7, "conversation-a")),
+            format!("{:?}", [7u8; 32]),
+            "the reader does not spell out the key"
+        );
     }
     #[test]
     fn json_text_and_marker_like_plaintext_round_trip() {

@@ -67,8 +67,8 @@ fn decode(seq: u64, bytes: &[u8]) -> Result<Record, ReadError> {
 #[derive(Debug, thiserror::Error)]
 #[error("event sequence contains a gap: expected position {expected}, found {found}")]
 pub(crate) struct SequenceGap {
-    expected: u64,
-    found: i64,
+    pub(crate) expected: u64,
+    pub(crate) found: i64,
 }
 
 /// The batches of rows read in `seq` order from position `first`, refused unless their
@@ -85,6 +85,11 @@ pub(crate) fn contiguous_from(first: u64, rows: Vec<(i64, Vec<u8>)>) -> Result<V
         .collect()
 }
 
+/// The policy file key a log's opening batch names.
+pub(crate) fn opening_policy_key(root: &TrajectoryId, first: &[u8]) -> Result<PolicyFileKey, ReadError> {
+    Ok(opening(root, first)?.1.policy_file_key)
+}
+
 /// The policy file key a log's opening names. A log with no batch is an unknown root.
 pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<PolicyFileKey, ReadError> {
     let Some(first) = batches.first() else {
@@ -92,7 +97,7 @@ pub(crate) fn opening_key(root: &TrajectoryId, batches: &[Vec<u8>]) -> Result<Po
             root: root.as_str().to_string(),
         });
     };
-    Ok(opening(root, first)?.1.policy_file_key)
+    opening_policy_key(root, first)
 }
 
 /// A log's opening batch, and the opening record it begins with. An opening that names no
@@ -148,16 +153,10 @@ pub(crate) fn stamp_of(facts: &[Fact]) -> Option<PolicyRevision> {
     }
 }
 
-/// A root's log decoded onto the policy file its opening names: refused unless `policy_file`
-/// still hashes to that key.
-pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
-    let mut batches = batches.into_iter();
-    let Some(first) = batches.next() else {
-        return Err(ReadError::UnknownRoot {
-            root: root.as_str().to_string(),
-        });
-    };
-    let (record, opening) = opening(root, &first)?;
+/// Open a root's log from its first batch and the policy file it names: refused unless
+/// `policy_file` still hashes to that key.
+pub(crate) fn open_log(root: &TrajectoryId, first: &[u8], policy_file: Vec<u8>) -> Result<Log, ReadError> {
+    let (mut record, opening) = opening(root, first)?;
     if PolicyFileKey::of(&policy_file) != opening.policy_file_key {
         return Err(ReadError::PolicyFileMismatch {
             key: opening.policy_file_key.as_str().to_string(),
@@ -174,33 +173,100 @@ pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: V
         basis: 0,
         policy_file,
         host: Vec::new(),
+        retained_batch_bytes: 0,
     };
-    push(&mut data, record);
-    for batch in batches {
-        let record = decode(data.basis, &batch)?;
-        push(&mut data, record);
-    }
+    appa_engine::fact::detach_batch_bodies(&mut record.facts, 0, appa_engine::value::DETACH_AT);
+    push(&mut data, record, first.len());
     Ok(Log {
         data: std::sync::Arc::new(data),
         lineage: None,
+        reader: crate::ReaderId::PLAIN,
     })
+}
+
+/// Decode one batch onto `log` at its current basis, detaching large eligible bodies so
+/// in-memory logs and views stay bounded.
+pub(crate) fn push_batch(log: &mut Log, batch: &[u8]) -> Result<(), ReadError> {
+    let data = std::sync::Arc::make_mut(&mut log.data);
+    let mut record = decode(data.basis, batch)?;
+    appa_engine::fact::detach_batch_bodies(&mut record.facts, data.basis, appa_engine::value::DETACH_AT);
+    push(data, record, batch.len());
+    Ok(())
+}
+
+/// Decode one batch inline and extract the verified text of the detachable body at `fact`.
+pub(crate) fn decode_body(
+    seq: u64,
+    batch: &[u8],
+    fact: u32,
+    expected: appa_engine::value::RawResultDigest,
+) -> Result<std::sync::Arc<str>, ReadError> {
+    let record = decode(seq, batch)?;
+    let Some(entry) = record.facts.get(fact as usize) else {
+        return Err(ReadError::DetachedBody {
+            seq,
+            fact,
+            reason: crate::DetachedBodyReason::WrongFact,
+        });
+    };
+    let Some(body) = entry.detachable_body() else {
+        return Err(ReadError::DetachedBody {
+            seq,
+            fact,
+            reason: crate::DetachedBodyReason::WrongFact,
+        });
+    };
+    if body.digest() != expected {
+        return Err(ReadError::DetachedBody {
+            seq,
+            fact,
+            reason: crate::DetachedBodyReason::Mismatch,
+        });
+    }
+    body.text_arc().map_err(|_| ReadError::DetachedBody {
+        seq,
+        fact,
+        reason: crate::DetachedBodyReason::WrongFact,
+    })
+}
+
+/// A root's log decoded onto the policy file its opening names: refused unless `policy_file`
+/// still hashes to that key.
+pub(crate) fn decoded(root: &TrajectoryId, batches: Vec<Vec<u8>>, policy_file: Vec<u8>) -> Result<Log, ReadError> {
+    let mut batches = batches.into_iter();
+    let Some(first) = batches.next() else {
+        return Err(ReadError::UnknownRoot {
+            root: root.as_str().to_string(),
+        });
+    };
+    let mut log = open_log(root, &first, policy_file)?;
+    for batch in batches {
+        push_batch(&mut log, &batch)?;
+    }
+    Ok(log)
 }
 
 /// Decode the batches that follow `log` in its root's log onto it, in order. Only the new
 /// batches are decoded: a batch never changes once it is accepted.
 pub(crate) fn extend(log: &mut Log, batches: Vec<Vec<u8>>) -> Result<(), ReadError> {
-    if !batches.is_empty() {
-        let data = std::sync::Arc::make_mut(&mut log.data);
-        for batch in batches {
-            let record = decode(data.basis, &batch)?;
-            push(data, record);
-        }
+    for batch in batches {
+        push_batch(log, &batch)?;
     }
     Ok(())
 }
 
 /// Fold one decoded batch onto `log`.
-fn push(log: &mut LogData, record: Record) {
+fn push(log: &mut LogData, record: Record, raw_batch_len: usize) {
+    let detached_bytes: usize = record
+        .facts
+        .iter()
+        .filter_map(Fact::detachable_body)
+        .filter(|body| body.is_detached())
+        .map(|body| usize::try_from(body.len()).unwrap_or(usize::MAX))
+        .fold(0usize, usize::saturating_add);
+    log.retained_batch_bytes = log
+        .retained_batch_bytes
+        .saturating_add(raw_batch_len.saturating_sub(detached_bytes));
     let stamp = stamp_of(&record.facts);
     if let Some(stamp) = stamp {
         log.revisions.insert(stamp);

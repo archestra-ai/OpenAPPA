@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use appa_runtime::api::{ProbeError, Remedies, RemedyOutcome, Runtime};
 use appa_runtime::{config::Config, hooks};
-use appa_runtime_api::{HookDecision, HookEvent, ProposedCall};
+use appa_runtime_api::{HookDecision, HookEvent, Outcome, Outcomes, ProposedCall, RetryHint};
 use axum::Router;
 use axum::extract::State;
 use axum::routing::post;
@@ -173,6 +173,7 @@ async fn narrowed_under(dir: &tempfile::TempDir, policy: &str, audience_url: &st
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -268,6 +269,322 @@ async fn no_answer_leaves_the_call_unchecked_and_the_log_unchanged() {
     ran(&runtime, send("@team")).await;
 }
 
+/// A source that answers 500 leaves the check without the fact it reads: the call is denied
+/// on the missing fact alone, with no plan, and the proposal retried once it answers runs.
+#[tokio::test]
+async fn an_unanswered_source_denies_on_a_missing_fact() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let runtime = narrowed(&dir, &url).await;
+
+    source.members(None);
+    let decision = propose(&runtime, send("@team")).await;
+    let HookDecision::DenyCall { offers, outcomes, .. } = decision else {
+        panic!("the call is denied, got {decision:?}");
+    };
+    assert!(offers.is_empty());
+    assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::Later)));
+
+    source.members(Some(vec!["bob@corp.example"]));
+    assert_eq!(
+        propose(&runtime, send("@team")).await,
+        HookDecision::AllowCall { spawn: None }
+    );
+}
+
+/// A call that reads two groups: one source answers 404, which only a repair fixes; the other
+/// reports a member whose lookup answers 503, which a later try may get past. The repair
+/// decides the hint, whichever consult round failed last.
+#[tokio::test]
+async fn a_lost_selector_outranks_a_later_lookup_failure() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let router = Router::new().route(
+        "/audience",
+        post(|body: String| async move {
+            let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+            match (
+                request["artifact"]["member"].is_string(),
+                body.contains("user-group/gone"),
+            ) {
+                (true, _) => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "busy".to_string()),
+                (false, true) => (axum::http::StatusCode::NOT_FOUND, "missing".to_string()),
+                (false, false) => (
+                    axum::http::StatusCode::OK,
+                    serde_json::json!({ "version": 1, "answer": { "members": ["slack:U-bob"] } }).to_string(),
+                ),
+            }
+        }),
+    );
+    let url = format!("{}/audience", serve(router).await);
+    let both = "[[policy.tool]]\nname = \"send_both\"\nrequires = { audience = { contains = [\"@slack:user-group/gone\", \"@slack:user-group/team\"] } }\ndelta = {}\n\n";
+    let policy = POLICY
+        .replace(SLACK_BINDING, LOOKUP_URL_BINDINGS)
+        .replace("[externals]", &format!("{both}[externals]"));
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+
+    let decision = propose(
+        &runtime,
+        ProposedCall {
+            tool: "send_both".to_string(),
+            arguments: raw(serde_json::json!({})),
+            cwd: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { outcomes, .. } = decision else {
+        panic!("the call is denied, got {decision:?}");
+    };
+    assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::AfterRepair)));
+}
+
+/// A call that names a reader whose lookup answers 404 beside a group whose member's lookup
+/// answers 503 a round later: the repair the first round already learned still decides.
+#[tokio::test]
+async fn a_lost_lookup_outranks_a_later_lookup_failure() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = asked.clone();
+    let router = Router::new().route(
+        "/audience",
+        post(move |body: String| {
+            let seen = seen.clone();
+            async move {
+                let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                match request["artifact"]["member"].as_str() {
+                    Some(member) => {
+                        seen.lock().expect("the log locks").push(member.to_string());
+                        match member {
+                            "slack:U-carol" => (axum::http::StatusCode::NOT_FOUND, "missing".to_string()),
+                            _ => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "busy".to_string()),
+                        }
+                    }
+                    None => (
+                        axum::http::StatusCode::OK,
+                        serde_json::json!({ "version": 1, "answer": { "members": ["slack:U-bob"] } }).to_string(),
+                    ),
+                }
+            }
+        }),
+    );
+    let url = format!("{}/audience", serve(router).await);
+    let both = "[[policy.tool]]\nname = \"send_both\"\nrequires = { audience = { contains = [\"slack:U-carol\", \"@slack:user-group/team\"] } }\ndelta = {}\n\n";
+    let policy = POLICY
+        .replace(SLACK_BINDING, LOOKUP_URL_BINDINGS)
+        .replace("[externals]", &format!("{both}[externals]"));
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+
+    let decision = propose(
+        &runtime,
+        ProposedCall {
+            tool: "send_both".to_string(),
+            arguments: raw(serde_json::json!({})),
+            cwd: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { outcomes, .. } = decision else {
+        panic!("the call is denied, got {decision:?}");
+    };
+    let mut lookups = asked.lock().expect("the log locks").clone();
+    lookups.sort();
+    lookups.dedup();
+    assert_eq!(lookups, ["slack:U-bob", "slack:U-carol"]);
+    assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::AfterRepair)));
+}
+
+/// A selector is the operator's to read: two calls whose recipients' sources fail alike are
+/// told the same, whichever group each named.
+#[tokio::test]
+async fn a_failed_selector_reads_alike_whatever_it_named() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let router = Router::new().route(
+        "/audience",
+        post(|| async { (axum::http::StatusCode::NOT_FOUND, "missing".to_string()) }),
+    );
+    let url = format!("{}/audience", serve(router).await);
+    let send_to = "[[policy.tool]]\nname = \"send_to\"\nparameters = { type = \"object\", properties = { to = { type = \"string\" } }, required = [\"to\"] }\nrequires = { audience = { contains = [\"$to\"] } }\ndelta = {}\n\n";
+    let policy = POLICY
+        .replace(SLACK_BINDING, LOOKUP_URL_BINDINGS)
+        .replace("[externals]", &format!("{send_to}[externals]"));
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+    let mut told = Vec::new();
+    for group in ["@slack:user-group/alpha", "@slack:user-group/beta"] {
+        let decision = propose(
+            &runtime,
+            ProposedCall {
+                tool: "send_to".to_string(),
+                arguments: raw(serde_json::json!({ "to": group })),
+                cwd: None,
+            },
+        )
+        .await;
+        let HookDecision::DenyCall { feedback, outcomes, .. } = decision else {
+            panic!("the call is denied, got {decision:?}");
+        };
+        assert_eq!(outcomes, Some(Outcomes::MissingFact(RetryHint::AfterRepair)));
+        told.push(feedback);
+    }
+    assert_eq!(told[0], told[1]);
+}
+
+/// A narrowed session sends to `@team`. Whether the directory resolves it to bob alone, whose
+/// lookup answers 503, or to bob and carol, whose lookup answers 404, the model reads the
+/// same bytes through the adapter; only the host's typed hint tells the two apart.
+#[tokio::test]
+async fn which_members_failed_and_how_never_reaches_the_model() {
+    let mut rendered = Vec::new();
+    for team in [vec!["slack:U-bob"], vec!["slack:U-bob", "slack:U-carol"]] {
+        let router = Router::new().route(
+            "/audience",
+            post(move |body: String| {
+                let team = team.clone();
+                async move {
+                    let request: serde_json::Value = serde_json::from_str(&body).expect("the request is JSON");
+                    match request["artifact"]["member"].as_str() {
+                        Some("slack:U-bob") => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "busy".to_string()),
+                        Some(_) => (axum::http::StatusCode::NOT_FOUND, "missing".to_string()),
+                        None => (
+                            axum::http::StatusCode::OK,
+                            serde_json::json!({ "version": 1, "answer": { "members": team } }).to_string(),
+                        ),
+                    }
+                }
+            }),
+        );
+        let url = format!("{}/audience", serve(router).await);
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let runtime = narrowed_under(&dir, &POLICY.replace(SLACK_BINDING, LOOKUP_URL_BINDINGS), &url).await;
+        let call = ProposedCall {
+            tool: "send".to_string(),
+            arguments: raw(serde_json::json!({ "to": "@team" })),
+            cwd: None,
+        };
+        let event = HookEvent::ToolCall {
+            actor: actor(),
+            call,
+            call_id: None,
+            spawn: None,
+            prompt: None,
+            ruling: None,
+            declares: None,
+        };
+        let decision = hooks::handle(&runtime, event.clone()).await;
+        let HookDecision::DenyCall { outcomes, .. } = &decision else {
+            panic!("the call is denied, got {decision:?}");
+        };
+        let rendered_for_model = (appa_adapter_claude_code::codec().render)(b"{}", &event, &decision);
+        rendered.push((rendered_for_model, *outcomes));
+    }
+    let [(bob, bob_hint), (both, both_hint)] = &rendered[..] else {
+        panic!("both directories were asked");
+    };
+    assert_eq!(
+        (bob_hint, both_hint),
+        (
+            &Some(Outcomes::MissingFact(RetryHint::Later)),
+            &Some(Outcomes::MissingFact(RetryHint::AfterRepair))
+        )
+    );
+    assert_eq!(
+        serde_json::to_vec(bob).expect("serializes"),
+        serde_json::to_vec(both).expect("serializes")
+    );
+}
+
+/// `send` with the reserved `blocked` mark beside its recipient check.
+const BLOCKED_SEND: &str = r#"
+[[policy.tool]]
+name = "send_blocked"
+parameters = { type = "object", properties = { to = { type = "string" } }, required = ["to"] }
+requires = { audience = { contains = ["$to"] }, attention = ["blocked"] }
+delta = {}
+
+"#;
+
+/// The recipient check needs `@team`'s members, which no answer pins yet. The `blocked` mark
+/// decides the call first: a hard block with no plan, and the source is never asked.
+#[tokio::test]
+async fn a_blocked_call_is_a_hard_block_before_membership_is_known() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let (url, source) = serve_source().await;
+    let policy = POLICY.replace("[externals]", &format!("{BLOCKED_SEND}[externals]"));
+    let runtime = narrowed_under(&dir, &policy, &url).await;
+
+    let decision = propose(
+        &runtime,
+        ProposedCall {
+            tool: "send_blocked".to_string(),
+            arguments: raw(serde_json::json!({ "to": "@team" })),
+            cwd: None,
+        },
+    )
+    .await;
+    let HookDecision::DenyCall { offers, outcomes, .. } = decision else {
+        panic!("the call is denied, got {decision:?}");
+    };
+    assert!(offers.is_empty());
+    assert_eq!(outcomes, Some(Outcomes::HardBlock));
+    assert!(source.requests().is_empty(), "no membership is read for a blocked call");
+}
+
+/// An authority whose mandate reads `@team`, and an input sanitizer that would widen the
+/// call to its recipient: remedies for the recipient gap a `blocked` mark leaves terminal.
+const BLOCKED_REMEDIES: [&str; 2] = [
+    r#"
+[[policy.authority]]
+name = "reviewer"
+[policy.authority.permits]
+audience_missing = ["@team"]
+
+"#,
+    r#"
+[[policy.sanitizer]]
+name = "widen"
+on = ["tool_input"]
+permits = { audience = { from = ["alice@corp.example", "bob@corp.example"], to = ["carol@corp.example"] } }
+
+"#,
+];
+
+const BLOCKED_REMEDY_BINDINGS: [&str; 2] = [
+    "[externals.authorities.reviewer]\nbuiltin = \"hitl\"\n\n",
+    "[externals.sanitizers.widen]\nbuiltin = \"redact-email\"\n\n",
+];
+
+/// A recipient outside the label is a gap decided without membership. Beside a `blocked`
+/// mark nothing remedies it: no mandate is read, no source asked, nothing offered.
+#[tokio::test]
+async fn a_blocked_call_gathers_and_offers_nothing_for_its_other_gaps() {
+    for (remedy, binding) in BLOCKED_REMEDIES.into_iter().zip(BLOCKED_REMEDY_BINDINGS) {
+        let dir = tempfile::tempdir().expect("a temp dir is creatable");
+        let (url, source) = serve_source().await;
+        source.members(None);
+        let policy = POLICY
+            .replace("[externals]", &format!("{BLOCKED_SEND}{remedy}[externals]"))
+            .replace(
+                "[externals.audience.slack]",
+                &format!("{binding}[externals.audience.slack]"),
+            );
+        let runtime = narrowed_under(&dir, &policy, &url).await;
+
+        let decision = propose(
+            &runtime,
+            ProposedCall {
+                tool: "send_blocked".to_string(),
+                arguments: raw(serde_json::json!({ "to": "carol@corp.example" })),
+                cwd: None,
+            },
+        )
+        .await;
+        let HookDecision::DenyCall { offers, outcomes, .. } = decision else {
+            panic!("the call is denied, got {decision:?}");
+        };
+        assert!(offers.is_empty(), "{remedy}");
+        assert_eq!(outcomes.map(|outcomes| outcomes.deciding()), Some(Outcome::HardBlock));
+        assert!(source.requests().is_empty(), "{remedy}");
+    }
+}
+
 #[tokio::test]
 async fn an_unconfigured_group_argument_fails_operationally() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
@@ -324,6 +641,7 @@ max_body_bytes = 4096
                 title: None,
                 launch: None,
                 start: None,
+                settings: Default::default(),
             }
         )
         .await,
@@ -354,12 +672,23 @@ max_body_bytes = 4096
     let before = audit_len(&runtime);
 
     for _ in 0..2 {
-        let HookDecision::DenyCall { feedback, offers, .. } = propose(&runtime, send_internal()).await else {
+        let HookDecision::DenyCall {
+            feedback,
+            offers,
+            outcomes,
+            ..
+        } = propose(&runtime, send_internal()).await
+        else {
             panic!("the call is denied");
         };
         // The feedback points at the key the operator must fill, not at a retry.
         assert!(feedback.contains("[policy.audience] internal"), "{feedback}");
         assert!(offers.is_empty());
+        assert_eq!(
+            outcomes,
+            Some(Outcomes::Integrity),
+            "a misconfigured policy, not a missing fact"
+        );
         assert_eq!(audit_len(&runtime), before);
     }
 }

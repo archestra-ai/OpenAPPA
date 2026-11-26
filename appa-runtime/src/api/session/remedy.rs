@@ -1,7 +1,9 @@
 use super::*;
+use appa_runtime_api::Initiator;
 
 pub(super) fn remedy_presentation(
     feedback: String,
+    outcomes: Option<appa_runtime_api::Outcomes>,
     offers: Vec<appa_runtime_api::OfferedRemedy>,
     pending: Vec<PendingReview>,
     display: Vec<crate::api::RemedyDisplay>,
@@ -9,6 +11,7 @@ pub(super) fn remedy_presentation(
 ) -> RemedyPresentation {
     RemedyPresentation {
         feedback,
+        outcomes,
         offers,
         review: reviews(&pending, externals),
         display,
@@ -19,20 +22,6 @@ pub(super) fn remedy_presentation(
 /// `hitl` authority, the texts of several such authorities joined. A joined review names no
 /// one authority, hint or scope, so those read as unknown and a host shows the whole text.
 /// Authorities of every other backend answer themselves and need no person here.
-pub(super) fn join_review(
-    feedback: &[Feedback],
-    externals: &crate::external::ExternalServices,
-) -> Vec<appa_runtime_api::Review> {
-    reviews(
-        &feedback
-            .iter()
-            .flat_map(|entry| entry.review.iter())
-            .cloned()
-            .collect::<Vec<_>>(),
-        externals,
-    )
-}
-
 pub(in crate::api) fn reviews(
     pending_reviews: &[PendingReview],
     externals: &crate::external::ExternalServices,
@@ -60,14 +49,6 @@ pub(in crate::api) fn reviews(
         }
     }
     reviews
-}
-
-pub(super) fn join_feedback(feedback: &[Feedback]) -> String {
-    feedback
-        .iter()
-        .map(|entry| entry.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// The return and the decision a reference names among the deferred returns one parent owns.
@@ -165,9 +146,25 @@ impl Session {
     ) -> Result<RemedyDecision, EventError> {
         self.on_remedy_at(
             &offer,
+            Initiator::Agent,
             DeclaredReturn::Arguments(arguments),
             elicitation,
             ruling,
+            Occasion::Remedy { offer: &offer },
+        )
+        .await
+    }
+
+    /// Execute an offer the runtime takes itself under the family's
+    /// [`appa_runtime_api::AutoApply`], through the execution an agent's takes, recorded as
+    /// the runtime's.
+    pub(super) async fn auto_apply(&self, offer: OfferId) -> Result<RemedyDecision, EventError> {
+        self.on_remedy_at(
+            &offer,
+            Initiator::AutoApply,
+            DeclaredReturn::Arguments(RemedyArguments::default()),
+            None,
+            None,
             Occasion::Remedy { offer: &offer },
         )
         .await
@@ -179,8 +176,15 @@ impl Session {
         offer: &OfferId,
         declared: DeclaredReturn,
     ) -> Result<RemedyDecision, EventError> {
-        self.on_remedy_at(offer, declared, None, None, Occasion::Remedy { offer })
-            .await
+        self.on_remedy_at(
+            offer,
+            Initiator::Agent,
+            declared,
+            None,
+            None,
+            Occasion::Remedy { offer },
+        )
+        .await
     }
 
     /// Apply the declaration a blocked spawn took through its block's offer. The application
@@ -194,6 +198,7 @@ impl Session {
     ) -> Result<RemedyDecision, EventError> {
         self.on_remedy_at(
             offer,
+            Initiator::Agent,
             DeclaredReturn::Arguments(arguments),
             None,
             None,
@@ -205,6 +210,7 @@ impl Session {
     async fn on_remedy_at(
         &self,
         offer: &OfferId,
+        initiator: Initiator,
         declared: DeclaredReturn,
         elicitation: Option<&Elicitation>,
         ruling: Option<appa_runtime_api::Ruling>,
@@ -231,6 +237,7 @@ impl Session {
                     Ok(EngineEvent::ExecuteOffer {
                         trajectory: trajectory.clone(),
                         offer: offer.clone(),
+                        initiator,
                         declared: declared.clone(),
                         evidence,
                         entropy: fresh_entropy(),
@@ -251,20 +258,25 @@ impl Session {
             Next::PresentToModel(Presentation::Declined { feedback }) => Ok(RemedyDecision::Declined {
                 presentation: RemedyPresentation {
                     feedback,
+                    outcomes: None,
                     offers: Vec::new(),
                     review: Vec::new(),
                     display: Vec::new(),
                 },
             }),
-            Next::PresentToModel(Presentation::NoAnswer { feedback }) => Ok(RemedyDecision::NoAnswer { feedback }),
+            Next::PresentToModel(Presentation::NoAnswer { feedback, retry }) => {
+                Ok(RemedyDecision::NoAnswer { feedback, retry })
+            }
             Next::PresentToModel(Presentation::Blocked {
                 feedback,
+                outcomes,
                 offers,
                 review,
                 display,
             }) => Ok(RemedyDecision::Declined {
                 presentation: remedy_presentation(
                     feedback,
+                    Some(outcomes),
                     offers,
                     review,
                     display.into_iter().collect(),

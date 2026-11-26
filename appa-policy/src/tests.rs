@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use appa_engine::audience::{AudienceConfig, DeclaredTemplate, NamedAudience, SelectorSpec, SourceRegistration};
 use appa_engine::authority::{Attends, DeclaredTransition, Hint};
 use appa_engine::contract::{AudienceRequirement, DeltaAudience, RecipientSpec, SelectorPlaceholder, ToolDeclaration};
+use appa_engine::fact::EffectKind;
 use appa_engine::label::{Audience, ChainAudience, Clause, DeclaredAudience, GroupRef, ReaderId, Trust};
 use appa_engine::names::{AnnotatorName, AuthorityName, GroupName, SanitizerName, TagName};
 use appa_engine::profile::{BindingMode, ExecutorClass, neutral_starting_label};
@@ -572,6 +573,31 @@ fn a_catch_all_attention_permit_loads_and_the_wildcard_never_mixes_with_names() 
 }
 
 #[test]
+fn a_prior_waiver_loads_apart_from_a_no_prior_waiver_and_alone_is_a_mandate() {
+    let config = load(
+        "version = 2\n[[authority]]\nname = \"desk\"\n[authority.permits]\n\
+         effects_containing = [\"deploy\"]\nprior_effects_containing = [\"reviewed\"]\n",
+    )
+    .expect("both waivers load");
+    let desk = config
+        .engine()
+        .registry()
+        .authority(&AuthorityName::new("desk"))
+        .expect("the authority registers");
+    assert_eq!(desk.mandate.waivers, [EffectKind::new("deploy")]);
+    assert_eq!(desk.mandate.prior_waivers, [EffectKind::new("reviewed")]);
+
+    let alone =
+        "version = 2\n[[authority]]\nname = \"desk\"\n[authority.permits]\nprior_effects_containing = [\"reviewed\"]\n";
+    assert!(load(alone).is_ok(), "a prior waiver alone is a non-empty mandate");
+    let empty = "version = 2\n[[authority]]\nname = \"desk\"\n[authority.permits]\nprior_effects_containing = []\n";
+    assert!(matches!(
+        load(empty),
+        Err(ConfigError::Registry(LoadError::EmptyMandate(name))) if name == "desk"
+    ));
+}
+
+#[test]
 fn an_annotator_mandate_resolves_omitted_bounds_to_the_whole_vocabulary() {
     let policy = r#"
 version = 2
@@ -1122,6 +1148,33 @@ fn the_policy_identity_names_the_compiled_policy() {
     );
 }
 
+/// The identity `IDENTITY_FIXTURE` loaded to before mandates could waive a prior. A policy that
+/// declares no prior waiver keeps it byte for byte; declaring one moves it.
+const IDENTITY_FIXTURE_DIGEST: &str = "ebef4dcf80cd5461661f8b74483147686279a42d20ead293660cedc21dfc4782";
+
+#[test]
+fn a_policy_without_a_prior_waiver_keeps_its_identity() {
+    let digest = |source: &str| -> String {
+        let identity = load(source).expect("the fixture loads").engine().identity();
+        identity.bytes().iter().map(|byte| format!("{byte:02x}")).collect()
+    };
+    assert_eq!(digest(IDENTITY_FIXTURE), IDENTITY_FIXTURE_DIGEST);
+    let empty = IDENTITY_FIXTURE.replace(
+        "attention = [\"legal-review\"]\n\n[[sanitizer]]",
+        "attention = [\"legal-review\"]\nprior_effects_containing = []\n\n[[sanitizer]]",
+    );
+    assert_ne!(
+        empty, IDENTITY_FIXTURE,
+        "the replacement lands in the officer's permits"
+    );
+    assert_eq!(digest(&empty), IDENTITY_FIXTURE_DIGEST);
+    let waiving = IDENTITY_FIXTURE.replace(
+        "attention = [\"legal-review\"]\n\n[[sanitizer]]",
+        "attention = [\"legal-review\"]\nprior_effects_containing = [\"reviewed\"]\n\n[[sanitizer]]",
+    );
+    assert_ne!(digest(&waiving), IDENTITY_FIXTURE_DIGEST);
+}
+
 #[test]
 fn compiled_tool_parameters_are_normalized_in_policy_identity() {
     let config = load(
@@ -1631,7 +1684,12 @@ fn forwards_loads_as_a_literal_and_its_sources_are_consulted() {
 
     let trajectory = appa_engine::value::TrajectoryId::new("t");
     let opening = engine
-        .open_trajectory(&trajectory, appa_engine::profile::PolicyFileKey::of(b"policy"), None)
+        .open_trajectory(
+            &trajectory,
+            appa_engine::profile::PolicyFileKey::of(b"policy"),
+            None,
+            Default::default(),
+        )
         .expect("the trajectory opens")
         .into_unsealed();
     let view = engine.view(&trajectory, opening, 1).expect("the opening replays");
@@ -1717,6 +1775,98 @@ delta = {}
         refused(serde_json::json!({ "trust": "vetted" })),
         Err(ConfigError::UnknownTrustRank { name, .. }) if name == "vetted"
     ));
+}
+
+#[test]
+fn an_annotated_route_can_declare_a_human_reviewed_no_answer_fallback() {
+    let policy = r#"
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[[annotator]]
+name = "classifier"
+
+[[authority]]
+name = "operator"
+permits = { attention = ["annotator-unavailable"] }
+
+[[tool]]
+name = "fetch"
+annotator = "classifier"
+on_no_answer = { delta = { trust = "suspicious" }, forwards = {}, requires = { attention = ["annotator-unavailable"] } }
+"#;
+    let config = load(policy).expect("a reviewed no-answer fallback loads");
+    let declaration = config
+        .engine()
+        .registry()
+        .declaration(
+            &config
+                .engine()
+                .resolve_call(ToolName::new("fetch"), b"{}")
+                .expect("the call resolves"),
+        )
+        .expect("fetch is declared");
+    let fallback = declaration.on_no_answer().expect("the route carries its fallback");
+    assert_eq!(fallback.delta.trust, Some(Trust::new(0)));
+    assert_eq!(
+        fallback
+            .requires
+            .attention_marks()
+            .iter()
+            .map(|mark| mark.as_str())
+            .collect::<Vec<_>>(),
+        ["annotator-unavailable"]
+    );
+}
+
+#[test]
+fn a_no_answer_fallback_requires_an_annotator_forwards_and_human_attention() {
+    assert!(matches!(
+        load("version = 2\n[[tool]]\nname = \"fetch\"\non_no_answer = { forwards = {}, requires = { attention = [\"review\"] } }\n"),
+        Err(ConfigError::FallbackWithoutAnnotator { tool }) if tool == "fetch"
+    ));
+    assert!(matches!(
+        load(
+            "version = 2\n[[annotator]]\nname = \"classifier\"\n[[tool]]\nname = \"fetch\"\nannotator = \"classifier\"\non_no_answer = { forwards = {}, requires = { attention = [] } }\n"
+        ),
+        Err(ConfigError::FallbackWithoutAttention { tool }) if tool == "fetch"
+    ));
+    assert!(load(
+        "version = 2\n[[annotator]]\nname = \"classifier\"\n[[tool]]\nname = \"fetch\"\nannotator = \"classifier\"\non_no_answer = { requires = { attention = [\"review\"] } }\n"
+    )
+    .is_err());
+}
+
+#[test]
+fn the_wildcard_route_can_declare_a_no_answer_fallback() {
+    let policy = r#"
+version = 2
+trust_chain = ["suspicious", "trusted"]
+
+[[annotator]]
+name = "classifier"
+
+[[authority]]
+name = "operator"
+permits = { attention = ["annotator-unavailable"] }
+
+[[tool]]
+name = "*"
+annotator = "classifier"
+on_no_answer = { forwards = {}, requires = { attention = ["annotator-unavailable"] } }
+"#;
+    let config = load(policy).expect("a wildcard fallback loads");
+    let declaration = config
+        .engine()
+        .registry()
+        .declaration(
+            &config
+                .engine()
+                .resolve_call(ToolName::new("anything_at_all"), b"{}")
+                .expect("the call resolves"),
+        )
+        .expect("the wildcard covers an undeclared tool");
+    assert!(declaration.on_no_answer().is_some());
 }
 
 /// A recorder binds to the declaration that names it: the first matching selector wins, a call

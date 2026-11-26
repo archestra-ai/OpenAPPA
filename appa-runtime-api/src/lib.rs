@@ -5,10 +5,12 @@
 pub mod inventory;
 mod launch;
 mod peer;
+mod settings;
 mod wire;
 
 pub use launch::{LaunchStart, LaunchToken, LaunchTokenError, StartKind};
 pub use peer::{PeerAddress, PeerDigest, PeerFrame, PeerValueError, SessionTitle};
+pub use settings::{AutoApply, Initiator, LineVariant, LineVariantError, SessionSettings};
 
 pub use wire::{
     Accepted, Adapter, DecisionName, EventName, IdentifiedTool, IdentifyToolFn, NamesChildrenFn, OutcomeStatus,
@@ -511,6 +513,7 @@ pub enum ReviewRequirement {
     PublicAudience,
     Audience { readers: Vec<String> },
     Effect { excludes: String },
+    Prior { contains: String },
 }
 
 /// What approving also does to the rest of the conversation.
@@ -567,6 +570,9 @@ pub enum HookEvent {
         start: Option<StartKind>,
         /// The protected launch this start belongs to, when a launcher started the host.
         launch: Option<LaunchStart>,
+        /// What the family pins if this start opens it. A family already open keeps its own,
+        /// and refuses a start naming a line variant other than the one it pinned.
+        settings: SessionSettings,
     },
     Prompt {
         actor: Actor,
@@ -690,6 +696,171 @@ pub enum RefusalClass {
     Spawn,
 }
 
+/// Why a call was refused, as a host branches on it: one kind of [`Outcomes`], as the wire
+/// spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// The event, the log or the deployment is at fault, or the call breaks its contract.
+    Integrity,
+    /// No remedy lifts the block: the reserved `blocked` mark, or a gap no plan clears.
+    HardBlock,
+    /// A fact the check reads was not obtained: an Annotator or an audience
+    /// source gave no answer. No plan is offered.
+    MissingFact,
+    /// A remedy the agent acts on itself: declaring a spawn's return, withholding or
+    /// sanitizing a result, or calling another tool first. Never applied on its own.
+    AgentChoice,
+    /// A gap an authority's ruling may clear.
+    WaivableGap,
+    /// The call narrows the trajectory, and the agent may accept the narrowing.
+    Consent,
+}
+
+impl Outcome {
+    pub(crate) fn remedy(self) -> Option<Remedy> {
+        match self {
+            Outcome::AgentChoice => Some(Remedy::AgentChoice),
+            Outcome::WaivableGap => Some(Remedy::WaivableGap),
+            Outcome::Consent => Some(Remedy::Consent),
+            Outcome::Integrity | Outcome::HardBlock | Outcome::MissingFact => None,
+        }
+    }
+}
+
+/// What a step of an offered remedy asks, ordered from the most to the least the agent
+/// must do itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Remedy {
+    AgentChoice,
+    WaivableGap,
+    Consent,
+}
+
+impl From<Remedy> for Outcome {
+    fn from(remedy: Remedy) -> Outcome {
+        match remedy {
+            Remedy::AgentChoice => Outcome::AgentChoice,
+            Remedy::WaivableGap => Outcome::WaivableGap,
+            Remedy::Consent => Outcome::Consent,
+        }
+    }
+}
+
+/// What asking again for a fact a refusal misses can do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryHint {
+    /// The fault may be transient: the same call proposed later may obtain it.
+    Later,
+    /// An operator must repair the deployment before the fact can be obtained.
+    AfterRepair,
+}
+
+/// Why one refusal stands. An integrity fault, a hard block and a missing fact are each
+/// the whole answer; a block its offers can lift is [`Remediable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcomes {
+    Integrity,
+    HardBlock,
+    MissingFact(RetryHint),
+    Remediable(Remediable),
+}
+
+impl Outcomes {
+    pub fn deciding(&self) -> Outcome {
+        match self {
+            Outcomes::Integrity => Outcome::Integrity,
+            Outcomes::HardBlock => Outcome::HardBlock,
+            Outcomes::MissingFact(_) => Outcome::MissingFact,
+            Outcomes::Remediable(remediable) => remediable.deciding.into(),
+        }
+    }
+
+    /// Every outcome held, the remedies from the most the agent must do itself.
+    pub fn held(&self) -> impl Iterator<Item = Outcome> + '_ {
+        let (alone, remedies) = match self {
+            Outcomes::Remediable(remediable) => (None, Some(remediable.held())),
+            alone => (Some(alone.deciding()), None),
+        };
+        alone
+            .into_iter()
+            .chain(remedies.into_iter().flatten().map(Outcome::from))
+    }
+
+    /// Set exactly when the refusal is a missing fact.
+    pub fn retry(&self) -> Option<RetryHint> {
+        match self {
+            Outcomes::MissingFact(retry) => Some(*retry),
+            Outcomes::Integrity | Outcomes::HardBlock | Outcomes::Remediable(_) => None,
+        }
+    }
+}
+
+/// A block its offers can lift: every remedy kind the offers ask for, and the one the
+/// cheapest offer asks for at most, which decides it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Remediable {
+    deciding: Remedy,
+    agent_choice: bool,
+    waivable_gap: bool,
+    consent: bool,
+}
+
+impl Remediable {
+    /// `deciding` is held whatever `others` names.
+    pub fn new(deciding: Remedy, others: impl IntoIterator<Item = Remedy>) -> Remediable {
+        let mut remediable = Remediable {
+            deciding,
+            agent_choice: false,
+            waivable_gap: false,
+            consent: false,
+        };
+        for remedy in std::iter::once(deciding).chain(others) {
+            *match remedy {
+                Remedy::AgentChoice => &mut remediable.agent_choice,
+                Remedy::WaivableGap => &mut remediable.waivable_gap,
+                Remedy::Consent => &mut remediable.consent,
+            } = true;
+        }
+        remediable
+    }
+
+    /// Every remedy kind held, from the most the agent must do itself.
+    pub fn held(&self) -> impl Iterator<Item = Remedy> {
+        [
+            (Remedy::AgentChoice, self.agent_choice),
+            (Remedy::WaivableGap, self.waivable_gap),
+            (Remedy::Consent, self.consent),
+        ]
+        .into_iter()
+        .filter_map(|(remedy, held)| held.then_some(remedy))
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::{Outcome, Outcomes, Remediable, Remedy, RetryHint};
+
+    #[test]
+    fn a_remediable_refusal_holds_its_deciding_remedy_and_lists_every_remedy_once() {
+        let remediable = Outcomes::Remediable(Remediable::new(
+            Remedy::Consent,
+            [Remedy::AgentChoice, Remedy::AgentChoice],
+        ));
+        assert_eq!(remediable.deciding(), Outcome::Consent);
+        assert_eq!(
+            remediable.held().collect::<Vec<_>>(),
+            vec![Outcome::AgentChoice, Outcome::Consent]
+        );
+        assert_eq!(remediable.retry(), None);
+
+        let missing = Outcomes::MissingFact(RetryHint::Later);
+        assert_eq!(missing.held().collect::<Vec<_>>(), vec![Outcome::MissingFact]);
+        assert_eq!(missing.retry(), Some(RetryHint::Later));
+    }
+}
+
 /// The runtime's answer to one hook event. The adapter renders each
 /// variant into its harness's wire; it interprets nothing.
 #[derive(Debug, Clone, PartialEq)]
@@ -711,9 +882,15 @@ pub enum HookDecision {
         /// The offers whose plans consult a human authority, for a
         /// harness that reviews through its own channel.
         review: Vec<Review>,
+        /// Why the call was refused, for a host that branches on it. The
+        /// runtime states it on every denial; `None` only for a decision
+        /// read from a wire that did not.
+        outcomes: Option<Outcomes>,
     },
     Block {
         reason: String,
+        /// Why the value was refused, as on [`HookDecision::DenyCall`].
+        outcomes: Option<Outcomes>,
     },
     /// The runtime's own words in place of the result: a notice that
     /// nothing was admitted, or the narrowing this result would cause
@@ -722,6 +899,8 @@ pub enum HookDecision {
     /// into names its model dispatches spells this text.
     ReplaceOutput {
         output: String,
+        /// Why the result was withheld, when a refusal withheld it.
+        outcomes: Option<Outcomes>,
     },
     /// The value the engine admitted in place of the raw result: a
     /// confined result the check let through, or a sanitizer's
@@ -754,9 +933,11 @@ pub enum HookDecision {
         text: String,
     },
     /// The runtime judged nothing for this event because of an
-    /// operational fault it classes in `class` and names in `detail`: an
-    /// annotator or store that did not answer, a policy that would not
-    /// load. A host routes on `class`, never on `detail`. Fail the one
+    /// operational fault it classes in `class` and names in `detail`: a
+    /// store that did not answer, a policy that would not load. Its
+    /// outcome is [`Outcome::Integrity`]. A call whose Annotator gave no
+    /// answer is a [`HookDecision::DenyCall`] instead, deciding on
+    /// [`Outcome::MissingFact`]. A host routes on `class`, never on `detail`. Fail the one
     /// event closed — the call does not run, the result is not admitted
     /// — and hand the model `detail` as the runtime's words, never as
     /// policy feedback: nothing was decided and no remedy is offered.
@@ -765,6 +946,8 @@ pub enum HookDecision {
     Refuse {
         class: RefusalClass,
         detail: String,
+        /// Set when the refusal is on a fact not obtained: what sending the hook again can do.
+        retry: Option<RetryHint>,
     },
     /// The stop is not taken: the calls `running` names are still running
     /// under [`OpenCalls::Hold`]. Nothing was recorded and nothing crossed.
