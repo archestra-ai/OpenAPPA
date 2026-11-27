@@ -26,7 +26,7 @@ from pathlib import Path
 
 PUBLIC = "ghcr.io/archestra-ai"
 IMAGES = ("appa-runtime", "appa-kagent-adk", "appa-kagent-adk-go", "golang-adk",
-          "appa-demo-tools", "appa-demo-mocks")
+          "appa-demo-tools", "appa-demo-mocks", "appa-extproc")
 CHARTS = ("appa-runtime", "appa-kagent-demo")
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?")
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")

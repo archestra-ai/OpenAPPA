@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenAPPA egress decisions</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --line:#30363d; --text:#e6edf3; --muted:#8b949e;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:19px; font-weight:650; }
+  header div { color:var(--muted); font-size:13.5px; margin-top:2px; }
+  main { padding:18px 24px; display:flex; flex-direction:column; gap:10px; }
+  .row { border:1px solid var(--line); border-radius:8px; padding:10px 14px; background:var(--panel); }
+  .top { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap; }
+  .verdict { font-weight:700; font-size:12.5px; letter-spacing:.05em; text-transform:uppercase; padding:1px 8px; border-radius:999px; border:1px solid currentColor; }
+  .allowed, .labeled { color:var(--ok); } .held { color:var(--warn); } .blocked, .refused, .withheld { color:var(--bad); }
+  .tool { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13.5px; }
+  .actor, .time { color:var(--muted); font-size:12.5px; }
+  .time { margin-left:auto; }
+  .reason { margin-top:6px; white-space:pre-wrap; color:var(--muted); font-size:13.5px; }
+  .label { margin-top:6px; font-size:13px; }
+  .label b { color:var(--warn); font-weight:600; }
+  .row.blocked-row { border-color:var(--bad); background:rgba(248,81,73,.08); }
+  .row.held-row { border-color:var(--warn); }
+  .empty { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenAPPA at the Substrate egress gateway</h1>
+  <div>Every MCP tool call any actor makes, as the gateway's ext_proc decided it</div>
+</header>
+<main id="log"><div class="empty">No MCP tool calls yet.</div></main>
+<script>
+let after = 0;
+const log = document.getElementById("log");
+const kind = (verdict) =>
+  verdict.startsWith("allowed") ? "allowed" : verdict === "result labeled" ? "labeled" :
+  verdict === "held" ? "held" : verdict.includes("withheld") ? "withheld" : verdict;
+const actorName = (id) => id.replace(/^spiffe:\/\/[^/]+\/worker-for-actor\//, "");
+
+function render(e) {
+  if (after === 0) log.innerHTML = "";
+  const row = document.createElement("div");
+  const k = kind(e.verdict);
+  row.className = "row" + (k === "blocked" || k === "refused" ? " blocked-row" : k === "held" ? " held-row" : "");
+  row.innerHTML = `<div class="top"><span class="verdict"></span><span class="tool"></span>
+    <span class="actor"></span><span class="time"></span></div>`;
+  const verdict = row.querySelector(".verdict");
+  verdict.textContent = e.verdict; verdict.classList.add(k);
+  row.querySelector(".tool").textContent = e.tool;
+  row.querySelector(".actor").textContent = "actor " + actorName(e.actor);
+  row.querySelector(".time").textContent = new Date(e.time).toLocaleTimeString();
+  if (e.reason) {
+    const reason = document.createElement("div");
+    reason.className = "reason"; reason.textContent = e.reason; row.append(reason);
+  }
+  if (e.status && e.status.audience) {
+    const label = document.createElement("div");
+    label.className = "label";
+    label.innerHTML = "Actor label: readers <b></b>";
+    label.querySelector("b").textContent = e.status.audience;
+    row.append(label);
+  }
+  log.append(row);
+  row.scrollIntoView({ behavior: "smooth", block: "end" });
+}
+
+async function poll() {
+  try {
+    const entries = await (await fetch(`events?after=${after}`)).json();
+    for (const e of entries) { render(e); after = e.seq; }
+  } catch {}
+  setTimeout(poll, 700);
+}
+poll();
+</script>
+</body>
+</html>
