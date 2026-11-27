@@ -8,12 +8,17 @@ use std::path::PathBuf;
 
 use appa_policy::Config;
 
-fn policy_reference() -> String {
+fn doc_page(file: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the crate sits one level under the repository root")
-        .join("website/content/docs/contracts.md");
-    std::fs::read_to_string(path).expect("the policy reference is readable")
+        .join("website/content/docs")
+        .join(file);
+    std::fs::read_to_string(path).expect("the documentation page is readable")
+}
+
+fn policy_reference() -> String {
+    doc_page("contracts.md")
 }
 
 /// Every fenced TOML block, in document order.
@@ -131,6 +136,37 @@ fn every_toml_fence_in_the_policy_reference_loads() {
         let Some(policy) = as_policy(table) else { continue };
         if let Err(error) = Config::from_toml_str_routed(&policy, std::collections::BTreeMap::new(), sources) {
             panic!("a policy example does not load: {error}\n{policy}");
+        }
+    }
+}
+
+#[test]
+fn every_toml_fence_in_the_cookbook_loads() {
+    let cookbook = doc_page("cookbook.md");
+    let fences = toml_fences(&cookbook);
+    assert!(!fences.is_empty(), "the cookbook shows TOML examples");
+
+    let shared = tempfile::tempdir().expect("a temp dir is creatable");
+    for fence in &fences {
+        if let Some(name) = fence
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("# "))
+            .filter(|name| name.ends_with(".toml") && !name.contains('/'))
+            && name != "appa.toml"
+        {
+            std::fs::write(shared.path().join(name), fence).expect("the fragment is written");
+        }
+    }
+
+    for fence in fences {
+        let _: toml::Table = fence
+            .parse()
+            .unwrap_or_else(|error| panic!("a cookbook fence is not valid TOML: {error}\n{fence}"));
+        let path = shared.path().join("appa.toml");
+        std::fs::write(&path, fence).expect("the cookbook example is written");
+        if let Err(error) = appa_runtime::config::Config::load_from(&path, &[shipped_batteries()]) {
+            panic!("a cookbook example does not load: {error}\n{fence}");
         }
     }
 }
