@@ -428,6 +428,8 @@ jobs:
           npm ci --prefix .github/tools/claude-code --no-audit --no-fund
           echo "$PWD/.github/tools/claude-code/node_modules/.bin" >> "$GITHUB_PATH"
 
+      # Each session installs a deployment in a home of its own and launches
+      # Claude Code through clappa, under the shipped policy for the shell one.
       - name: Exercise the real harness with deterministic inference
         run: python3 marketplace/plugins/claude-code/live-gate-check.py
 
