@@ -1607,7 +1607,11 @@ ${stdout}`);
 }
 
 // integrations/opencode/appencode.ts
-var UNMEDIATED = ["shell", "patch", "grep"];
+var UNMEDIATED = ["shell", "patch", "grep"], LINEAGE = "appa.appencode.root";
+function lineage(session) {
+  let root = session.metadata?.[LINEAGE];
+  return session.parentID ?? (root === void 0 ? void 0 : String(root));
+}
 function text(decision, field) {
   let value = decision[field];
   if (typeof value !== "string")
@@ -1654,9 +1658,9 @@ var appencode_default = Plugin.define({
       let session = await Effect4.runPromise(ctx.session.get({ sessionID }));
       if (session.fork)
         throw Error("[appencode] Forked sessions are not supported. Continue the protected root instead.");
-      if (session.parentID) {
-        let child = children.get(sessionID);
-        if (!child || child.root !== session.parentID)
+      let parent = lineage(session), child = children.get(sessionID);
+      if (parent !== void 0 || child) {
+        if (!child || session.parentID || child.root !== parent)
           throw Error("[appencode] Child has no live delegation. Resume and alternate launches are refused.");
         return await childHistory(sessionID), { actor: { root: child.root, child: sessionID }, context: child.context };
       }
@@ -1839,7 +1843,7 @@ ${task.state.value}`;
           output: Schema28.String,
           execute: (input, call) => Effect4.gen(function* () {
             let session = yield* ctx.session.get({ sessionID: call.sessionID });
-            if (session.parentID || session.fork)
+            if (lineage(session) !== void 0 || session.fork)
               return yield* Effect4.fail(new exports_tool.Error({ message: "Setup requires a fresh root operator session." }));
             if (input.operation !== "battery")
               yield* setupDiscovery;
@@ -1911,12 +1915,13 @@ ${task.state.value}`;
               if (!binding)
                 throw Error("[appencode] Spawn approval has no binding.");
               let child2 = yield* ctx.session.create({
-                parentID: call.sessionID,
                 agent: exports_agent.ID.make(agent.id),
                 model,
-                title: input.description
+                title: input.description,
+                location: parent.location,
+                metadata: { [LINEAGE]: call.sessionID }
               });
-              if (childID = child2.id, child2.parentID !== call.sessionID || child2.fork)
+              if (childID = child2.id, child2.parentID || child2.fork || child2.metadata?.[LINEAGE] !== call.sessionID)
                 throw Error("[appencode] Invalid child lineage.");
               let started = yield* runtime("child_start", { child_id: child2.id, spawn_binding: binding });
               if (started.decision !== "ack" && started.decision !== "context")
@@ -2043,9 +2048,9 @@ ${task.state.value}`;
         let session = await Effect4.runPromise(ctx.session.get({ sessionID: event.sessionID }));
         if (session.fork)
           throw Error("[appencode] Forked sessions are not supported.");
-        if (!session.parentID)
-          return;
         let child = children.get(event.sessionID);
+        if (lineage(session) === void 0 && !child)
+          return;
         if (!child || !initialPrompts.delete(event.sessionID) || event.messageID !== child.promptID || event.prompt.text !== child.prompt || event.prompt.files?.length || event.prompt.agents?.length || event.prompt.skills?.length)
           throw Error("[appencode] Child prompts require an exact live delegation; steering and alternate launches are refused.");
       },
@@ -2055,7 +2060,7 @@ ${task.state.value}`;
       yield* ctx.session.hook(kind, (event) => Effect4.tryPromise({
         try: async () => {
           let session = await Effect4.runPromise(ctx.session.get({ sessionID: event.sessionID }));
-          if (session.parentID || session.fork)
+          if (lineage(session) !== void 0 || children.has(event.sessionID) || session.fork)
             throw Error("[appencode] Auxiliary child and fork requests are not supported.");
         },
         catch: failure

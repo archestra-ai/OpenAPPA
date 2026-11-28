@@ -16,6 +16,19 @@ import { configuration } from './setup'
 // edit and write name one path per call.
 const UNMEDIATED = ['shell', 'patch', 'grep']
 
+// OpenCode reports every native child's final answer, or its raw error, to the parent
+// session unchecked. An APPA child is therefore created without a host parent, and this
+// durable session annotation names its root instead. It outlives the plugin's memory, so
+// a child from an earlier plugin instance is still recognized and refused.
+const LINEAGE = 'appa.appencode.root'
+
+// The session a child belongs to: the host's parent for a native child, the annotation for
+// an APPA child. Undefined for a root.
+function lineage(session: { parentID?: string; metadata?: Record<string, unknown> }): string | undefined {
+  const root = session.metadata?.[LINEAGE]
+  return session.parentID ?? (root === undefined ? undefined : String(root))
+}
+
 type Decision = Record<string, unknown> & { protocol: 1; decision: string }
 type Proposal = { tool: string; arguments: unknown; call_id: string }
 type Actor = { root: string; child?: string }
@@ -90,9 +103,11 @@ export default Plugin.define({
     async function open(sessionID: ToolHooks['execute.before']['sessionID']) {
       const session = await Effect.runPromise(ctx.session.get({ sessionID }))
       if (session.fork) throw new Error('[appencode] Forked sessions are not supported. Continue the protected root instead.')
-      if (session.parentID) {
-        const child = children.get(sessionID)
-        if (!child || child.root !== session.parentID) {
+      const parent = lineage(session)
+      const child = children.get(sessionID)
+      if (parent !== undefined || child) {
+        // A native child reports to its parent outside APPA, so it is never a live delegation.
+        if (!child || session.parentID || child.root !== parent) {
           throw new Error('[appencode] Child has no live delegation. Resume and alternate launches are refused.')
         }
         await childHistory(sessionID)
@@ -342,7 +357,7 @@ export default Plugin.define({
         output: Schema.String,
         execute: (input, call) => Effect.gen(function* () {
           const session = yield* ctx.session.get({ sessionID: call.sessionID })
-          if (session.parentID || session.fork) return yield* Effect.fail(new Tool.Error({ message: 'Setup requires a fresh root operator session.' }))
+          if (lineage(session) !== undefined || session.fork) return yield* Effect.fail(new Tool.Error({ message: 'Setup requires a fresh root operator session.' }))
           if (input.operation !== 'battery') yield* setupDiscovery
           const servers = yield* ctx.mcp.list()
           const tools = yield* ctx.tool.list()
@@ -438,11 +453,15 @@ export default Plugin.define({
               }
               const binding = text(decision, 'spawn_binding')
               if (!binding) throw new Error('[appencode] Spawn approval has no binding.')
+              // No parentID: the host would report this child's unchecked return to the root.
               const child = yield* ctx.session.create({
-                parentID: call.sessionID, agent: Agent.ID.make(agent.id), model, title: input.description,
+                agent: Agent.ID.make(agent.id), model, title: input.description, location: parent.location,
+                metadata: { [LINEAGE]: call.sessionID },
               })
               childID = child.id
-              if (child.parentID !== call.sessionID || child.fork) throw new Error('[appencode] Invalid child lineage.')
+              if (child.parentID || child.fork || child.metadata?.[LINEAGE] !== call.sessionID) {
+                throw new Error('[appencode] Invalid child lineage.')
+              }
               const started = yield* runtime('child_start', { child_id: child.id, spawn_binding: binding })
               if (started.decision !== 'ack' && started.decision !== 'context') throw new Error('[appencode] Unexpected child-start decision.')
               const owned = { id: child.id, root: call.sessionID, promptID: SessionMessage.ID.create(), prompt: input.prompt,
@@ -484,7 +503,7 @@ export default Plugin.define({
               outcome: { status: 'success_without_body' } })
             if (replay.decision !== 'ack') throw new Error('[appencode] Foreground return was not confirmed.')
             settled = true
-            // No native Job or synthetic observer exists. Every result channel starts clean.
+            // The child has no host parent, so no native Job or report observes it. Every result channel starts clean.
             return { output: value, content: value }
           }).pipe(Effect.ensuring(cleanup))
         }).pipe(Effect.catchCause(cause => {
@@ -588,8 +607,8 @@ export default Plugin.define({
         }
         const session = await Effect.runPromise(ctx.session.get({ sessionID: event.sessionID }))
         if (session.fork) throw new Error('[appencode] Forked sessions are not supported.')
-        if (!session.parentID) return
         const child = children.get(event.sessionID)
+        if (lineage(session) === undefined && !child) return
         if (!child || !initialPrompts.delete(event.sessionID) || event.messageID !== child.promptID ||
             event.prompt.text !== child.prompt || event.prompt.files?.length || event.prompt.agents?.length || event.prompt.skills?.length) {
           throw new Error('[appencode] Child prompts require an exact live delegation; steering and alternate launches are refused.')
@@ -602,7 +621,9 @@ export default Plugin.define({
       yield* ctx.session.hook(kind, event => Effect.tryPromise({
         try: async () => {
           const session = await Effect.runPromise(ctx.session.get({ sessionID: event.sessionID }))
-          if (session.parentID || session.fork) throw new Error('[appencode] Auxiliary child and fork requests are not supported.')
+          if (lineage(session) !== undefined || children.has(event.sessionID) || session.fork) {
+            throw new Error('[appencode] Auxiliary child and fork requests are not supported.')
+          }
         }, catch: failure,
       }).pipe(Effect.orDie))
     }
