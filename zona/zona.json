@@ -1,0 +1,47 @@
+{
+  "project": "openappa",
+  "env_file": ".env",
+  "main": { "repo": "archestra-ai/OpenAPPA", "branch": "main" },
+  "hooks": {
+    "provision": "$ZONA_DIR/provision.sh",
+    "start": "$ZONA_DIR/start.sh",
+    "commit-check": "cargo fmt --all --check"
+  },
+  "commands": {
+    "runtime": {
+      "run": "cargo build --locked --bin appa && PATH=$PWD/target/debug:$PATH target/debug/appa runtime --config appa.toml --db appa.db --listen 127.0.0.1:$ZONA_PORT_8788",
+      "background": true,
+      "description": "This worktree's appa runtime, with the Claude Code plugin's default policy (log in once with: zona run claude)"
+    },
+    "setup": {
+      "run": "mise run setup",
+      "description": "Install every locked dependency (cargo, uv, go, pnpm)"
+    },
+    "check": {
+      "run": "cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings",
+      "description": "rustfmt and clippy, as CI runs them"
+    }
+  },
+  "pull": [
+    "*.rs",
+    "*cargo.toml",
+    "*cargo.lock",
+    "*.ts",
+    "*.tsx",
+    "*.py",
+    "*.go",
+    "*go.mod",
+    "*go.sum",
+    "*package.json",
+    "*pnpm-lock.yaml",
+    "*pyproject.toml",
+    "*uv.lock",
+    "*.appa",
+    "!scripts/*",
+    "!*mise.toml",
+    "!*mise.lock",
+    "!.*",
+    "!*/.*",
+    "!zona/*"
+  ]
+}

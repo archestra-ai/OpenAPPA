@@ -39,3 +39,6 @@ __pycache__/
 
 # Local APPA credentials are never source artifacts.
 credentials.db*
+
+# A person's own zona settings (the VM name); never committed.
+zona/zona.local.json
