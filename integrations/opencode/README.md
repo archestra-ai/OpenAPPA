@@ -419,6 +419,11 @@ APPA admits that value, or its sanitizer replacement, before the parent sees
 it. The plugin constructs fresh output and text channels from the admitted
 value; it does not forward child attachments, metadata, or raw errors.
 
+OpenCode reports a native child's final answer to its parent session without
+a check. An APPA child is therefore a separate session with no OpenCode
+parent: it appears in the session list on its own, and the session annotation
+`appa.appencode.root` names the session that launched it.
+
 Launch binding is serialized within each parent. Bound children can run
 concurrently and finish in any order. Foreground interruption revokes child ownership,
 interrupts the child, and attempts to settle the launch without returning its

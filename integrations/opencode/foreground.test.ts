@@ -277,6 +277,21 @@ afterAll(async () => {
   if (setupDirectory) await rm(setupDirectory, { recursive: true, force: true })
 })
 
+// OpenCode reports a native child's unchecked final answer to its parent, so an APPA child
+// has no host parent: the plugin's session annotation names its root instead.
+async function delegated(sessionID: string) {
+  expect((await client.session.list({ parentID: sessionID as any })).data).toHaveLength(0)
+  const owned = []
+  let cursor: any
+  do {
+    const page = await client.session.list({ limit: 100, ...(cursor ? { cursor } : {}) })
+    owned.push(...page.data.filter(session => session.metadata?.['appa.appencode.root'] === sessionID))
+    cursor = page.cursor.next
+  } while (cursor)
+  for (const child of owned) expect(child.parentID).toBeUndefined()
+  return owned
+}
+
 async function begin(task: string) {
   const session = await client.session.create({ location: { directory } })
   await client.session.prompt({ sessionID: session.id, text: `delegate:${task}` })
@@ -338,7 +353,7 @@ test('cold prompts wait for the real remedy executor; unavailable discovery has 
 test('published CLI runs a checked foreground child and refuses later child prompting', async () => {
   const { session, history } = await delegate('hello')
   expect(JSON.stringify(history)).toContain('Parent received: child:hello')
-  const child = (await client.session.list({ parentID: session.id })).data[0]!
+  const child = (await delegated(session.id))[0]!
   expect(child).toBeDefined()
   const flow = hooks.filter(hook => hook.event.root_id === session.id)
   expect(flow.some(hook => hook.event.event === 'child_start' && hook.event.child_id === child.id && hook.event.spawn_binding)).toBe(true)
@@ -403,7 +418,7 @@ test('a failed child cannot return earlier prose or raw error details', async ()
   expect(parent).toContain('Child execution failed; its return is withheld')
   expect(parent).not.toContain('RAW-CHILD-ERROR')
   expect(parent).not.toContain('EARLIER-CHILD-ANSWER')
-  const child = (await client.session.list({ parentID: session.id })).data[0]!
+  const child = (await delegated(session.id))[0]!
   expect(JSON.stringify(await client.session.context({ sessionID: child.id }))).toContain('EARLIER-CHILD-ANSWER')
   expect(hooks.some(hook => hook.event.event === 'spawn_result' && hook.event.root_id === session.id && hook.event.value)).toBe(false)
 }, 45_000)
@@ -425,15 +440,15 @@ test('resume input, nested delegation and alternate commands are refused', async
   for (const task of ['resume-input']) {
     const { session, history } = await delegate(task)
     expect(JSON.stringify(history)).toContain('Only fresh, one-level delegation')
-    expect((await client.session.list({ parentID: session.id })).data.length).toBe(0)
+    expect((await delegated(session.id)).length).toBe(0)
   }
   const deliver = await delegate('deliver-input')
   expect(JSON.stringify(deliver.history)).toContain('deliver applies only to background delegation')
-  expect((await client.session.list({ parentID: deliver.session.id })).data.length).toBe(0)
+  expect((await delegated(deliver.session.id)).length).toBe(0)
   const nested = await delegate('nested')
   expect(JSON.stringify(nested.history)).toContain('Nested refused')
-  const child = (await client.session.list({ parentID: nested.session.id })).data[0]!
-  expect((await client.session.list({ parentID: child.id })).data.length).toBe(0)
+  const child = (await delegated(nested.session.id))[0]!
+  expect((await delegated(child.id)).length).toBe(0)
   await expect(client.session.generate({ sessionID: child.id, prompt: 'unmediated generation' })).rejects.toThrow()
   await expect(client.session.command({ sessionID: nested.session.id, name: 'alternate', text: '' })).rejects.toThrow()
   expect(requests.some(request => request.messages.some((message: any) => message.content === 'child:alternate-command'))).toBe(false)
@@ -449,7 +464,7 @@ async function slowChild(task: string) {
   await ready(async () => {
     if (!requests.some(request => request.messages.some((message: any) => message.content === `child:${task}`))) throw new Error('Child not running')
   }, server, `${directory}/opencode-error.log`)
-  const child = (await client.session.list({ parentID: session.id })).data[0]!
+  const child = (await delegated(session.id))[0]!
   return { session, child, resolve }
 }
 
@@ -487,7 +502,7 @@ async function background(task: string) {
   const session = await begin(`bg-${task}`)
   await client.session.wait({ sessionID: session.id })
   const handle = await taskHandle(session.id)
-  const child = (await client.session.list({ parentID: session.id })).data[0]!
+  const child = (await delegated(session.id))[0]!
   return { session, child, handle }
 }
 

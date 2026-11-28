@@ -27,7 +27,7 @@ __export(exports_agent, {
   Color: () => Color,
   Agent: () => exports_agent
 });
-import { Schema as Schema17 } from "effect";
+import { Schema as Schema18 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/event.js
 import { Schema as Schema5, SchemaTransformation } from "effect";
@@ -156,12 +156,13 @@ __export(exports_model, {
   Compatibility: () => Compatibility,
   Capabilities: () => Capabilities
 });
-import { Schema as Schema14, Struct as Struct3 } from "effect";
+import { Schema as Schema15, Struct as Struct3 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/provider.js
 var exports_provider = {};
 __export(exports_provider, {
   Transport: () => Transport,
+  Tls: () => Tls,
   Settings: () => Settings,
   Request: () => Request,
   Provider: () => exports_provider,
@@ -514,14 +515,19 @@ var ID5 = Schema12.String.pipe(Schema12.brand("Provider.ID"), Schema12.annotate(
 ]).annotate({ identifier: "Provider.CacheWarming" }), Cache = Schema12.Struct({
   ttl: CacheTTL.pipe(optional),
   warming: CacheWarming.pipe(optional)
-}).annotate({ identifier: "Provider.Cache" }), Encoding = Schema12.Literals(["zstd", "gzip", "none"]).annotate({ identifier: "Provider.Encoding" }), Timeout = Schema12.Union([Schema12.Finite, Schema12.Literal(!1)]).pipe(optional), Settings = Schema12.StructWithRest(Schema12.Struct({
+}).annotate({ identifier: "Provider.Cache" }), Encoding = Schema12.Literals(["zstd", "gzip", "none"]).annotate({ identifier: "Provider.Encoding" }), Timeout = Schema12.Union([Schema12.Finite, Schema12.Literal(!1)]).pipe(optional), Tls = Schema12.Struct({
+  cert: Schema12.String.annotate({ description: "PEM client certificate, usually `{file:/path/to/client.pem}`" }),
+  key: Schema12.String.annotate({ description: "PEM private key, usually `{file:/path/to/client.key}`" }),
+  passphrase: Schema12.String.pipe(optional).annotate({ description: "Passphrase for an encrypted private key" })
+}).annotate({ identifier: "Provider.Tls" }), Settings = Schema12.StructWithRest(Schema12.Struct({
   timeout: Timeout,
   headerTimeout: Timeout,
   chunkTimeout: Timeout,
   compaction: Compaction.pipe(optional),
   cache: Cache.pipe(optional),
   transport: Transport.pipe(optional),
-  encoding: Encoding.pipe(optional)
+  encoding: Encoding.pipe(optional),
+  tls: Tls.pipe(optional)
 }), [Schema12.Record(Schema12.String, Schema12.Any)]).annotate({ identifier: "Provider.Settings" }), Overlays = {
   settings: Settings.pipe(optional),
   headers: Schema12.Record(Schema12.String, Schema12.String).pipe(optional),
@@ -553,8 +559,45 @@ __export(exports_money, {
 import { Schema as Schema13 } from "effect";
 var USD = Schema13.Finite.pipe(Schema13.brand("Money.USD"), Schema13.annotate({ identifier: "Money.USD" }), statics((schema) => ({ zero: schema.make(0) }))), USDPerMillionTokens = Schema13.Finite.pipe(Schema13.brand("Money.USDPerMillionTokens"), Schema13.annotate({ identifier: "Money.USDPerMillionTokens" }), statics((schema) => ({ zero: schema.make(0) })));
 
+// integrations/opencode/node_modules/@opencode/schema/dist/tool.js
+var exports_tool = {};
+__export(exports_tool, {
+  Tool: () => exports_tool,
+  TextContent: () => TextContent,
+  FreeformFormat: () => FreeformFormat,
+  Freeform: () => Freeform,
+  FileContent: () => FileContent,
+  Error: () => Error2,
+  Content: () => Content,
+  CallID: () => CallID
+});
+import { Effect as Effect2, JsonSchema, Schema as Schema14 } from "effect";
+var Freeform = Schema14.Union([
+  Schema14.Struct({ type: Schema14.Literal("text") }),
+  Schema14.Struct({ type: Schema14.Literal("regex"), pattern: Schema14.String }),
+  Schema14.Struct({ type: Schema14.Literal("lark"), grammar: Schema14.String })
+]).annotate({ identifier: "Tool.Freeform" }), FreeformFormat = Schema14.Literals(Freeform.members.map((member) => member.fields.type.literal)).annotate({
+  identifier: "Tool.FreeformFormat"
+}), CallID = Schema14.String.pipe(Schema14.brand("Tool.CallID"));
+
+class Error2 extends Schema14.TaggedError()("Tool.Error", {
+  message: Schema14.String,
+  error: Schema14.optional(Schema14.Defect()),
+  metadata: Schema14.optional(Schema14.Record(Schema14.String, Schema14.Unknown))
+}) {
+}
+var TextContent = Schema14.Struct({
+  type: Schema14.Literal("text"),
+  text: Schema14.String
+}).annotate({ identifier: "Tool.TextContent" }), FileContent = Schema14.Struct({
+  type: Schema14.Literal("file"),
+  uri: Schema14.String,
+  mime: Schema14.String,
+  name: Schema14.optional(Schema14.String)
+}).annotate({ identifier: "Tool.FileContent" }), Content = Schema14.Union([TextContent, FileContent]).pipe(Schema14.toTaggedUnion("type")).annotate({ identifier: "Tool.Content" });
+
 // integrations/opencode/node_modules/@opencode/schema/dist/model.js
-var ID6 = Schema14.String.pipe(Schema14.brand("Model.ID")), Updated4 = ephemeral({ type: "model.updated", schema: {} }), Event5 = { Updated: Updated4, Definitions: inventory(Updated4) }, VariantID = Schema14.String.pipe(Schema14.brand("Model.VariantID")), Ref3 = Schema14.Struct({
+var ID6 = Schema15.String.pipe(Schema15.brand("Model.ID")), Updated4 = ephemeral({ type: "model.updated", schema: {} }), Event5 = { Updated: Updated4, Definitions: inventory(Updated4) }, VariantID = Schema15.String.pipe(Schema15.brand("Model.VariantID")), Ref3 = Schema15.Struct({
   id: ID6,
   providerID: exports_provider.ID,
   variant: VariantID.pipe(optional)
@@ -573,58 +616,59 @@ var ID6 = Schema14.String.pipe(Schema14.brand("Model.ID")), Updated4 = ephemeral
     });
   }
 })));
-var Family = Schema14.String.pipe(Schema14.brand("Model.Family")), Type = Schema14.Union([
-  Schema14.Literals(["chat", "decision", "image"]),
-  Schema14.String
-]).annotate({ identifier: "Model.Type" }), Settings2 = Schema14.StructWithRest(Schema14.Struct(Struct3.pick(exports_provider.Settings.schema.fields, ["compaction", "cache", "encoding"])), [Schema14.Record(Schema14.String, Schema14.Any)]).annotate({ identifier: "Model.Settings" }), VariantSettings = Schema14.StructWithRest(Schema14.Struct(Struct3.omit(Settings2.schema.fields, ["cache"])), Settings2.records).annotate({ identifier: "Model.VariantSettings" }), Overlays2 = {
+var Family = Schema15.String.pipe(Schema15.brand("Model.Family")), Type = Schema15.Union([
+  Schema15.Literals(["chat", "decision", "image"]),
+  Schema15.String
+]).annotate({ identifier: "Model.Type" }), Settings2 = Schema15.StructWithRest(Schema15.Struct(Struct3.pick(exports_provider.Settings.schema.fields, ["compaction", "cache", "encoding"])), [Schema15.Record(Schema15.String, Schema15.Any)]).annotate({ identifier: "Model.Settings" }), VariantSettings = Schema15.StructWithRest(Schema15.Struct(Struct3.omit(Settings2.schema.fields, ["cache"])), Settings2.records).annotate({ identifier: "Model.VariantSettings" }), Overlays2 = {
   settings: Settings2.pipe(optional),
-  headers: Schema14.Record(Schema14.String, Schema14.String).pipe(optional),
-  body: Schema14.Record(Schema14.String, Schema14.Any).pipe(optional)
-}, Capabilities = Schema14.Struct({
-  tools: Schema14.Boolean,
-  input: Schema14.Array(Schema14.String),
-  output: Schema14.Array(Schema14.String),
-  temperature: Schema14.Boolean.pipe(optional)
+  headers: Schema15.Record(Schema15.String, Schema15.String).pipe(optional),
+  body: Schema15.Record(Schema15.String, Schema15.Any).pipe(optional)
+}, Capabilities = Schema15.Struct({
+  tools: Schema15.Boolean,
+  freeform: Schema15.Array(FreeformFormat).pipe(optional),
+  input: Schema15.Array(Schema15.String),
+  output: Schema15.Array(Schema15.String),
+  temperature: Schema15.Boolean.pipe(optional)
 }).annotate({ identifier: "Model.Capabilities" }).pipe(statics(() => ({
   default: () => ({ tools: !0, input: ["text", "image"], output: ["text"] })
-}))), Cost = Schema14.Struct({
-  tier: Schema14.Struct({
-    type: Schema14.tag("context"),
-    size: Schema14.Int
+}))), Cost = Schema15.Struct({
+  tier: Schema15.Struct({
+    type: Schema15.tag("context"),
+    size: Schema15.Int
   }).pipe(optional),
   input: exports_money.USDPerMillionTokens,
   output: exports_money.USDPerMillionTokens,
-  cache: Schema14.Struct({
+  cache: Schema15.Struct({
     read: exports_money.USDPerMillionTokens,
     write: exports_money.USDPerMillionTokens
   })
-}).annotate({ identifier: "Model.Cost" }), Variant = Schema14.Struct({
+}).annotate({ identifier: "Model.Cost" }), Variant = Schema15.Struct({
   id: VariantID,
   ...Overlays2,
   settings: VariantSettings.pipe(optional)
-}).annotate({ identifier: "Model.Variant" }), Info6 = Schema14.Struct({
+}).annotate({ identifier: "Model.Variant" }), Info6 = Schema15.Struct({
   id: ID6,
   modelID: ID6,
   providerID: exports_provider.ID,
   canonical: exports_provider.ID.pipe(optional),
   type: Type.pipe(optional),
   family: Family.pipe(optional),
-  name: Schema14.String,
+  name: Schema15.String,
   compatibility: Compatibility.pipe(optional),
   package: exports_provider.Package.pipe(optional),
   ...Overlays2,
   capabilities: Capabilities,
-  variants: Schema14.Array(Variant),
-  time: Schema14.Struct({
-    released: Schema14.Finite
+  variants: Schema15.Array(Variant),
+  time: Schema15.Struct({
+    released: Schema15.Finite
   }),
-  cost: Schema14.Array(Cost),
-  status: Schema14.Literals(["alpha", "beta", "deprecated", "active"]),
-  enabled: Schema14.Boolean,
-  limit: Schema14.Struct({
-    context: Schema14.Int,
-    input: Schema14.Int.pipe(optional),
-    output: Schema14.Int
+  cost: Schema15.Array(Cost),
+  status: Schema15.Literals(["alpha", "beta", "deprecated", "active"]),
+  enabled: Schema15.Boolean,
+  limit: Schema15.Struct({
+    context: Schema15.Int,
+    input: Schema15.Int.pipe(optional),
+    output: Schema15.Int
   })
 }).annotate({ identifier: "Model.Info" }).pipe(statics(() => ({
   default: (providerID, id) => ({
@@ -653,57 +697,57 @@ __export(exports_permission, {
   Permission: () => exports_permission,
   ID: () => ID7,
   Event: () => Event6,
-  Effect: () => Effect2
+  Effect: () => Effect3
 });
-import { Schema as Schema16 } from "effect";
+import { Schema as Schema17 } from "effect";
 
 // integrations/opencode/node_modules/@opencode/schema/dist/session-id.js
-import { Schema as Schema15 } from "effect";
-var SessionID = Schema15.String.check(Schema15.isStartingWith("ses")).pipe(Schema15.brand("SessionID"), Schema15.annotate({ identifier: "Session.ID" }), statics((schema) => ({
+import { Schema as Schema16 } from "effect";
+var SessionID = Schema16.String.check(Schema16.isStartingWith("ses")).pipe(Schema16.brand("SessionID"), Schema16.annotate({ identifier: "Session.ID" }), statics((schema) => ({
   create: () => schema.make("ses_" + descending())
 })));
 
 // integrations/opencode/node_modules/@opencode/schema/dist/permission.js
-var ID7 = Schema16.String.check(Schema16.isStartingWith("per")).pipe(Schema16.brand("Permission.ID"), Schema16.annotate({ identifier: "Permission.ID" }), statics((schema) => ({ create: (id) => schema.make(id ?? "per_" + ascending()) }))), Source = Schema16.Union([
-  Schema16.Struct({
-    type: Schema16.Literal("tool"),
-    messageID: Schema16.String,
-    id: Schema16.String
+var ID7 = Schema17.String.check(Schema17.isStartingWith("per")).pipe(Schema17.brand("Permission.ID"), Schema17.annotate({ identifier: "Permission.ID" }), statics((schema) => ({ create: (id) => schema.make(id ?? "per_" + ascending()) }))), Source = Schema17.Union([
+  Schema17.Struct({
+    type: Schema17.Literal("tool"),
+    messageID: Schema17.String,
+    id: Schema17.String
   })
 ]).annotate({ identifier: "Permission.Source" }), RequestFields = {
   sessionID: SessionID,
-  action: Schema16.String,
-  resources: Schema16.Array(Schema16.String),
-  save: Schema16.Array(Schema16.String).pipe(optional),
-  metadata: Schema16.Record(Schema16.String, Schema16.Unknown).pipe(optional),
+  action: Schema17.String,
+  resources: Schema17.Array(Schema17.String),
+  save: Schema17.Array(Schema17.String).pipe(optional),
+  metadata: Schema17.Record(Schema17.String, Schema17.Unknown).pipe(optional),
   source: Source.pipe(optional),
-  message: Schema16.String.pipe(optional)
-}, Request2 = Schema16.Struct({
+  message: Schema17.String.pipe(optional)
+}, Request2 = Schema17.Struct({
   id: ID7,
   ...RequestFields
-}).annotate({ identifier: "Permission.Request" }), Reply2 = Schema16.Literals(["once", "always", "reject"]).annotate({ identifier: "Permission.Reply" }), Asked = ephemeral({ type: "permission.asked", schema: Request2.fields }), Replied2 = ephemeral({
+}).annotate({ identifier: "Permission.Request" }), Reply2 = Schema17.Literals(["once", "always", "reject"]).annotate({ identifier: "Permission.Reply" }), Asked = ephemeral({ type: "permission.asked", schema: Request2.fields }), Replied2 = ephemeral({
   type: "permission.replied",
   schema: {
     sessionID: SessionID,
     requestID: ID7,
     reply: Reply2
   }
-}), Event6 = { Asked, Replied: Replied2, Definitions: inventory(Asked, Replied2) }, Effect2 = Schema16.Literals(["allow", "deny", "ask"]).annotate({ identifier: "Permission.Effect" }), Rule = Schema16.Struct({
-  action: Schema16.String,
-  resource: Schema16.String,
-  effect: Effect2
-}).annotate({ identifier: "Permission.Rule" }), Ruleset = Schema16.Array(Rule).annotate({ identifier: "Permission.Ruleset" });
+}), Event6 = { Asked, Replied: Replied2, Definitions: inventory(Asked, Replied2) }, Effect3 = Schema17.Literals(["allow", "deny", "ask"]).annotate({ identifier: "Permission.Effect" }), Rule = Schema17.Struct({
+  action: Schema17.String,
+  resource: Schema17.String,
+  effect: Effect3
+}).annotate({ identifier: "Permission.Rule" }), Ruleset = Schema17.Array(Rule).annotate({ identifier: "Permission.Ruleset" });
 
 // integrations/opencode/node_modules/@opencode/schema/dist/agent.js
-var Updated5 = ephemeral({ type: "agent.updated", schema: {} }), ID8 = Schema17.String.pipe(Schema17.brand("Agent.ID"), Schema17.annotate({ identifier: "Agent.ID" })), Name = Schema17.String.pipe(Schema17.brand("Agent.Name")), Color = Schema17.String.annotate({ identifier: "Agent.Color" }), Info7 = Schema17.Struct({
+var Updated5 = ephemeral({ type: "agent.updated", schema: {} }), ID8 = Schema18.String.pipe(Schema18.brand("Agent.ID"), Schema18.annotate({ identifier: "Agent.ID" })), Name = Schema18.String.pipe(Schema18.brand("Agent.Name")), Color = Schema18.String.annotate({ identifier: "Agent.Color" }), Info7 = Schema18.Struct({
   id: ID8,
   name: Name,
   model: exports_model.Ref.pipe(optional),
   request: exports_provider.Request,
-  system: Schema17.String.pipe(optional),
-  description: Schema17.String.pipe(optional),
-  mode: Schema17.Literals(["subagent", "primary", "all"]),
-  hidden: Schema17.Boolean,
+  system: Schema18.String.pipe(optional),
+  description: Schema18.String.pipe(optional),
+  mode: Schema18.Literals(["subagent", "primary", "all"]),
+  hidden: Schema18.Boolean,
   color: Color.pipe(optional),
   steps: PositiveInt.pipe(optional),
   permissions: exports_permission.Ruleset
@@ -762,35 +806,6 @@ __export(exports_session_message, {
   AgentSelected: () => AgentSelected
 });
 import { Schema as Schema27 } from "effect";
-
-// integrations/opencode/node_modules/@opencode/schema/dist/tool.js
-var exports_tool = {};
-__export(exports_tool, {
-  Tool: () => exports_tool,
-  TextContent: () => TextContent,
-  FileContent: () => FileContent,
-  Error: () => Error2,
-  Content: () => Content,
-  CallID: () => CallID
-});
-import { Effect as Effect3, JsonSchema, Schema as Schema18 } from "effect";
-var CallID = Schema18.String.pipe(Schema18.brand("Tool.CallID"));
-
-class Error2 extends Schema18.TaggedError()("Tool.Error", {
-  message: Schema18.String,
-  error: Schema18.optional(Schema18.Defect()),
-  metadata: Schema18.optional(Schema18.Record(Schema18.String, Schema18.Unknown))
-}) {
-}
-var TextContent = Schema18.Struct({
-  type: Schema18.Literal("text"),
-  text: Schema18.String
-}).annotate({ identifier: "Tool.TextContent" }), FileContent = Schema18.Struct({
-  type: Schema18.Literal("file"),
-  uri: Schema18.String,
-  mime: Schema18.String,
-  name: Schema18.optional(Schema18.String)
-}).annotate({ identifier: "Tool.FileContent" }), Content = Schema18.Union([TextContent, FileContent]).pipe(Schema18.toTaggedUnion("type")).annotate({ identifier: "Tool.Content" });
 
 // integrations/opencode/node_modules/@opencode/schema/dist/project.js
 var exports_project = {};
@@ -1185,6 +1200,7 @@ var ID13 = Schema27.String.check(Schema27.isStartingWith("msg_")).pipe(Schema27.
   retry: AssistantRetry.pipe(optional),
   time: Schema27.Struct({
     created: DateTimeUtcFromMillis,
+    firstToken: DateTimeUtcFromMillis.pipe(optional),
     streamed: DateTimeUtcFromMillis.pipe(optional),
     completed: DateTimeUtcFromMillis.pipe(optional)
   })
@@ -1591,7 +1607,11 @@ ${stdout}`);
 }
 
 // integrations/opencode/appencode.ts
-var UNMEDIATED = ["shell", "patch", "grep"];
+var UNMEDIATED = ["shell", "patch", "grep"], LINEAGE = "appa.appencode.root";
+function lineage(session) {
+  let root = session.metadata?.[LINEAGE];
+  return session.parentID ?? (root === void 0 ? void 0 : String(root));
+}
 function text(decision, field) {
   let value = decision[field];
   if (typeof value !== "string")
@@ -1638,9 +1658,9 @@ var appencode_default = Plugin.define({
       let session = await Effect4.runPromise(ctx.session.get({ sessionID }));
       if (session.fork)
         throw Error("[appencode] Forked sessions are not supported. Continue the protected root instead.");
-      if (session.parentID) {
-        let child = children.get(sessionID);
-        if (!child || child.root !== session.parentID)
+      let parent = lineage(session), child = children.get(sessionID);
+      if (parent !== void 0 || child) {
+        if (!child || session.parentID || child.root !== parent)
           throw Error("[appencode] Child has no live delegation. Resume and alternate launches are refused.");
         return await childHistory(sessionID), { actor: { root: child.root, child: sessionID }, context: child.context };
       }
@@ -1823,7 +1843,7 @@ ${task.state.value}`;
           output: Schema28.String,
           execute: (input, call) => Effect4.gen(function* () {
             let session = yield* ctx.session.get({ sessionID: call.sessionID });
-            if (session.parentID || session.fork)
+            if (lineage(session) !== void 0 || session.fork)
               return yield* Effect4.fail(new exports_tool.Error({ message: "Setup requires a fresh root operator session." }));
             if (input.operation !== "battery")
               yield* setupDiscovery;
@@ -1895,12 +1915,13 @@ ${task.state.value}`;
               if (!binding)
                 throw Error("[appencode] Spawn approval has no binding.");
               let child2 = yield* ctx.session.create({
-                parentID: call.sessionID,
                 agent: exports_agent.ID.make(agent.id),
                 model,
-                title: input.description
+                title: input.description,
+                location: parent.location,
+                metadata: { [LINEAGE]: call.sessionID }
               });
-              if (childID = child2.id, child2.parentID !== call.sessionID || child2.fork)
+              if (childID = child2.id, child2.parentID || child2.fork || child2.metadata?.[LINEAGE] !== call.sessionID)
                 throw Error("[appencode] Invalid child lineage.");
               let started = yield* runtime("child_start", { child_id: child2.id, spawn_binding: binding });
               if (started.decision !== "ack" && started.decision !== "context")
@@ -2027,9 +2048,9 @@ ${task.state.value}`;
         let session = await Effect4.runPromise(ctx.session.get({ sessionID: event.sessionID }));
         if (session.fork)
           throw Error("[appencode] Forked sessions are not supported.");
-        if (!session.parentID)
-          return;
         let child = children.get(event.sessionID);
+        if (lineage(session) === void 0 && !child)
+          return;
         if (!child || !initialPrompts.delete(event.sessionID) || event.messageID !== child.promptID || event.prompt.text !== child.prompt || event.prompt.files?.length || event.prompt.agents?.length || event.prompt.skills?.length)
           throw Error("[appencode] Child prompts require an exact live delegation; steering and alternate launches are refused.");
       },
@@ -2039,7 +2060,7 @@ ${task.state.value}`;
       yield* ctx.session.hook(kind, (event) => Effect4.tryPromise({
         try: async () => {
           let session = await Effect4.runPromise(ctx.session.get({ sessionID: event.sessionID }));
-          if (session.parentID || session.fork)
+          if (lineage(session) !== void 0 || children.has(event.sessionID) || session.fork)
             throw Error("[appencode] Auxiliary child and fork requests are not supported.");
         },
         catch: failure
