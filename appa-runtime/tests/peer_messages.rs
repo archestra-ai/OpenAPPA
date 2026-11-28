@@ -4,7 +4,7 @@
 //! does not narrow the receiver, and is held otherwise, to be read with `read_peer_message`.
 
 use crate::common;
-use common::{claude_event, claude_hook, including_session_tool_rules, last_offer, repo_root};
+use common::{claude_event, claude_hook, including_session_tool_rules, last_offer, missing_fact, repo_root};
 
 use std::path::Path;
 
@@ -405,6 +405,60 @@ async fn a_send_by_name_is_an_internal_sink_and_points_at_the_peers_address() {
     assert!(reason.contains(B_ADDRESS), "the refusal names B's address: {reason}");
     let (decision, reason) = send(&runtime, "a", B_ADDRESS, "hi", "a6").await;
     assert_eq!(decision, "allow", "{reason}");
+}
+
+/// A Bash result narrows the session to one reader, and a send by name reaches a group
+/// whose source never answers: checking the send needs the group's members.
+const UNANSWERED_GROUP_SEND: &str = r#"
+[[policy.tool]]
+name = "host/claude-code/Bash"
+delta = { audience = ["alice@corp.example"] }
+
+[[policy.tool]]
+name = "host/claude-code/SendMessage"
+requires = { audience = { contains = ["@team:members"] } }
+delta = {}
+
+[externals.audience.team]
+url = "http://127.0.0.1:9/audience"
+selectors = [{ template = "members" }]
+"#;
+
+/// A send by name denied on a missing fact keeps the fixed missing-fact feedback: a name a
+/// live peer holds reads the same as one no session holds, so no address reaches the model.
+#[tokio::test]
+async fn a_send_by_name_denied_on_a_missing_fact_points_at_no_address() {
+    let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let runtime = Runtime::open(
+        config(dir.path(), UNANSWERED_GROUP_SEND),
+        dir.path().join("appa.db"),
+        None,
+    )
+    .expect("the deployment opens");
+    start(&runtime, "a", A_ADDRESS, None).await;
+    start(&runtime, "b", B_ADDRESS, None).await;
+    narrowed(&runtime, "a", "a1").await;
+
+    let denied = |to: &str, id: &str| {
+        let event = claude_event(&json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "a",
+            "tool_name": "SendMessage",
+            "tool_input": { "to": to, "message": "hi" },
+            "tool_use_id": id,
+        }))
+        .expect("a send is gated");
+        let runtime = &runtime;
+        async move {
+            let decision = hooks::handle(runtime, event).await;
+            assert!(missing_fact(&decision).is_some(), "{decision:?}");
+            let HookDecision::DenyCall { feedback, .. } = decision else {
+                unreachable!("a missing fact denies the call");
+            };
+            feedback
+        }
+    };
+    assert_eq!(denied("peer-b", "a2").await, denied("peer-nobody", "a3").await);
 }
 
 #[tokio::test]
