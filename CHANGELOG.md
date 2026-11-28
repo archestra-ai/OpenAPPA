@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.48.1](https://github.com/archestra-ai/OpenAPPA/compare/v0.48.0...v0.48.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **ci:** let the Archestra updater pin appa-engine and appa-policy ([#1031](https://github.com/archestra-ai/OpenAPPA/issues/1031)) ([2351f89](https://github.com/archestra-ai/OpenAPPA/commit/2351f897a0a457fc13a11b9b8c4f0dffdac269a8))
+* **engine:** read Annotator pins that earlier logs stored untagged ([#1033](https://github.com/archestra-ai/OpenAPPA/issues/1033)) ([061900a](https://github.com/archestra-ai/OpenAPPA/commit/061900a84cb3913419e703730f729199115f22c9))
+
+
+### Dependencies
+
+* bump docker/login-action from 4.7.0 to 4.8.0 ([#929](https://github.com/archestra-ai/OpenAPPA/issues/929)) ([855a593](https://github.com/archestra-ai/OpenAPPA/commit/855a59310d15a5e99d506ea244eaf9b61ba0d13d))
+* bump OpenCode to 2.3.0 ([#1023](https://github.com/archestra-ai/OpenAPPA/issues/1023)) ([ec3a3ed](https://github.com/archestra-ai/OpenAPPA/commit/ec3a3ed21616fa7c5fb584cce50a6cfbb4cd70f1))
+
+
+### Miscellaneous Chores
+
+* **vex:** triage vulnerabilities of v0.47.0 ([#1015](https://github.com/archestra-ai/OpenAPPA/issues/1015)) ([ba14177](https://github.com/archestra-ai/OpenAPPA/commit/ba1417723bd89447bbdff18066ef1587a336d69e))
+
 ## [0.48.0](https://github.com/archestra-ai/OpenAPPA/compare/v0.47.0...v0.48.0) (2026-11-26)
 
 
