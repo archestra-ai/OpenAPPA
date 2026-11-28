@@ -1,0 +1,12 @@
+# Settings for OpenAPPA in the zona VM. zona fills in the placeholders
+# ($ZONA_PORT_8788 is 18788 in block 0, 19788 in block 1) and these lines win
+# over the same keys in your own .env.
+
+# appa commands run in the VM talk to this worktree's runtime (zona runtime).
+APPA_RUNTIME_URL=http://127.0.0.1:$ZONA_PORT_8788
+
+# mise leaves these out even when a task asks for them: Rust comes from
+# rustup's stable channel, as in CI (the locked dependencies need a newer
+# rustc than mise.toml pins), and gcloud needs a cloud login the VM
+# shouldn't hold.
+MISE_DISABLE_TOOLS=rust,gcloud
