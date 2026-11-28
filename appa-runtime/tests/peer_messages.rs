@@ -4,7 +4,9 @@
 //! does not narrow the receiver, and is held otherwise, to be read with `read_peer_message`.
 
 use crate::common;
-use common::{claude_event, claude_hook, including_session_tool_rules, last_offer, missing_fact, repo_root};
+use common::{
+    RefusingPort, claude_event, claude_hook, including_session_tool_rules, last_offer, missing_fact, repo_root,
+};
 
 use std::path::Path;
 
@@ -408,11 +410,17 @@ async fn a_send_by_name_is_an_internal_sink_and_points_at_the_peers_address() {
 }
 
 /// A Bash result narrows the session to one reader, and a send by name reaches a group
-/// whose source never answers: checking the send needs the group's members.
+/// whose source never answers: checking the send needs the group's members. A send of the
+/// control message is hard-blocked before that check, so it is denied with the hint.
 const UNANSWERED_GROUP_SEND: &str = r#"
 [[policy.tool]]
 name = "host/claude-code/Bash"
 delta = { audience = ["alice@corp.example"] }
+
+[[policy.tool]]
+name = "host/claude-code/SendMessage(message:hint-control)"
+requires = { attention = ["blocked"] }
+delta = {}
 
 [[policy.tool]]
 name = "host/claude-code/SendMessage"
@@ -420,17 +428,22 @@ requires = { audience = { contains = ["@team:members"] } }
 delta = {}
 
 [externals.audience.team]
-url = "http://127.0.0.1:9/audience"
+url = "AUDIENCE_URL/audience"
 selectors = [{ template = "members" }]
 "#;
 
 /// A send by name denied on a missing fact keeps the fixed missing-fact feedback: a name a
 /// live peer holds reads the same as one no session holds, so no address reaches the model.
+/// The same name denied on a hard block does point at the peer's address.
 #[tokio::test]
 async fn a_send_by_name_denied_on_a_missing_fact_points_at_no_address() {
     let dir = tempfile::tempdir().expect("a temp dir is creatable");
+    let refusing = RefusingPort::new();
     let runtime = Runtime::open(
-        config(dir.path(), UNANSWERED_GROUP_SEND),
+        config(
+            dir.path(),
+            &UNANSWERED_GROUP_SEND.replace("AUDIENCE_URL", &refusing.url()),
+        ),
         dir.path().join("appa.db"),
         None,
     )
@@ -439,26 +452,36 @@ async fn a_send_by_name_denied_on_a_missing_fact_points_at_no_address() {
     start(&runtime, "b", B_ADDRESS, None).await;
     narrowed(&runtime, "a", "a1").await;
 
-    let denied = |to: &str, id: &str| {
+    let propose = |to: &str, message: &str, id: &str| {
         let event = claude_event(&json!({
             "hook_event_name": "PreToolUse",
             "session_id": "a",
             "tool_name": "SendMessage",
-            "tool_input": { "to": to, "message": "hi" },
+            "tool_input": { "to": to, "message": message },
             "tool_use_id": id,
         }))
         .expect("a send is gated");
-        let runtime = &runtime;
-        async move {
-            let decision = hooks::handle(runtime, event).await;
-            assert!(missing_fact(&decision).is_some(), "{decision:?}");
-            let HookDecision::DenyCall { feedback, .. } = decision else {
-                unreachable!("a missing fact denies the call");
-            };
-            feedback
-        }
+        hooks::handle(&runtime, event)
     };
-    assert_eq!(denied("peer-b", "a2").await, denied("peer-nobody", "a3").await);
+    let feedback = |decision: HookDecision| match decision {
+        HookDecision::DenyCall { feedback, .. } => feedback,
+        other => panic!("the send is denied, got {other:?}"),
+    };
+
+    let control = propose("peer-b", "hint-control", "a2").await;
+    assert_eq!(missing_fact(&control), None, "{control:?}");
+    assert!(
+        feedback(control).contains(B_ADDRESS),
+        "the control send is hint-eligible"
+    );
+
+    let live = propose("peer-b", "hi", "a3").await;
+    assert!(missing_fact(&live).is_some(), "{live:?}");
+    let nobody = propose("peer-nobody", "hi", "a4").await;
+    assert!(missing_fact(&nobody).is_some(), "{nobody:?}");
+    let live = feedback(live);
+    assert!(!live.contains(B_ADDRESS), "{live}");
+    assert_eq!(live, feedback(nobody));
 }
 
 #[tokio::test]
